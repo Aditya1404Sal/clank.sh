@@ -166,6 +166,32 @@ uu_builtin!(Wc, "wc", uu_wc::uumain);
 uu_builtin!(Head, "head", uu_head::uumain);
 uu_builtin!(Sort, "sort", uu_sort::uumain);
 
+pub(crate) struct Mkdir;
+
+impl SimpleCommand for Mkdir {
+    fn get_content(
+        name: &str,
+        _content_type: ContentType,
+        _options: &ContentOptions,
+    ) -> Result<String, Error> {
+        Ok(format!("{name}: uutils coreutils builtin\n"))
+    }
+
+    fn execute<SE, I, S>(
+        context: ExecutionContext<'_, SE>,
+        args: I,
+    ) -> Result<ExecutionResult, Error>
+    where
+        SE: ShellExtensions,
+        I: Iterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let argv = args.skip(1).map(|s| std::ffi::OsString::from(s.as_ref()));
+        let code = run_uu(&context, move || uu_mkdir::uumain(argv));
+        Ok(ExecutionResult::new(code.clamp(0, 255) as u8))
+    }
+}
+
 /// The coreutils builtins to register on the shell, in addition to brush's bash set.
 pub(crate) fn builtins<SE: ShellExtensions>() -> Vec<(String, Registration<SE>)> {
     use brush_core::builtins::simple_builtin;
@@ -175,5 +201,6 @@ pub(crate) fn builtins<SE: ShellExtensions>() -> Vec<(String, Registration<SE>)>
         ("wc".into(), simple_builtin::<Wc, SE>()),
         ("head".into(), simple_builtin::<Head, SE>()),
         ("sort".into(), simple_builtin::<Sort, SE>()),
+        ("mkdir".into(), simple_builtin::<Mkdir, SE>()),
     ]
 }

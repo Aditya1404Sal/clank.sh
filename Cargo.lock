@@ -483,6 +483,7 @@ dependencies = [
  "uu_cat",
  "uu_head",
  "uu_ls",
+ "uu_mkdir",
  "uu_sort",
  "uu_wc",
  "wasip3",
@@ -2733,6 +2734,18 @@ dependencies = [
  "thiserror",
  "uucore 0.9.0",
  "uutils_term_grid",
+]
+
+[[package]]
+name = "uu_mkdir"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "038c393054ee3931c7e241dedd6f60a7c82a32de2db8d3414a6691b1ed13a64b"
+dependencies = [
+ "clap",
+ "fluent",
+ "rustix",
+ "uucore 0.9.0",
 ]
 
 [[package]]

@@ -36,6 +36,7 @@ uu_ls = "0.9"
 uu_wc = "0.9"
 uu_head = "0.9"
 uu_sort = "0.9"
+uu_mkdir = "0.9"
 
 # Wasm-only: the p3 component bindings and stream I/O.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
