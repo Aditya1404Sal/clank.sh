@@ -2,16 +2,21 @@
 //!
 //! A long-running, terminal-like read/eval/print loop that runs on two targets:
 //!
-//! - **wasm32** — as a `wasi:cli/run` component (WASI 0.3, async p3 streams). See
-//!   [`wasm`].
-//! - **native** — as an ordinary executable over blocking `std::io`. See [`native`].
+//! - **wasm32** — a `wasi:cli/run` component (WASI 0.3, async p3 streams). Uses the simple
+//!   [`eval`] builtin set. See [`wasm`].
+//! - **native** — an ordinary executable over blocking `std::io`, with real command execution
+//!   via `brush-core` (external programs, pipes, variables, `$?`). See [`native`].
 //!
-//! Only the I/O mechanism differs between targets. Command evaluation ([`eval`]) is a
-//! pure, target-agnostic function shared by both — the seam where real command resolution
-//! (the process table, `$PATH`, Brush) will be introduced later.
+//! Two things are shared and target-agnostic:
 //!
-//! Designs: `dev-docs/designs/proposed/shell-entrypoint-and-io-realized.md` (wasm path)
-//! and `dev-docs/designs/proposed/target-abstraction-native-and-wasm.md` (target split).
+//! - [`Transcript`] — the shell-owned, in-memory record of the whole session (every command
+//!   typed and the output it produced). This is the value `ask` will later read as context.
+//! - [`dispatch_context`] — the clank-specific `context` builtin over that transcript.
+//!
+//! POC scope: the transcript is in-memory for the session (no compaction, no disk); Brush runs
+//! on native only.
+
+pub mod session;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm;
@@ -22,7 +27,7 @@ pub mod native;
 /// The interactive prompt written before each line is read.
 pub const PROMPT: &[u8] = b"clank$ ";
 
-const HELP: &[u8] = b"clank.sh builtins:\n  echo [args...]   write arguments to stdout\n  help             show this listing\n  exit             leave the shell\n";
+const HELP: &[u8] = b"clank.sh builtins:\n  echo [args...]   write arguments to stdout\n  help             show this listing\n  context show     print the session transcript\n  context clear    discard the session transcript\n  exit             leave the shell\n";
 
 /// What the loop should do after evaluating a line.
 pub enum Flow {
@@ -32,10 +37,82 @@ pub enum Flow {
     Exit,
 }
 
+/// A shell-owned, in-memory record of the session: each command typed and the output it
+/// produced. Owned by the shell (not the terminal), accumulated for the whole session.
+#[derive(Default)]
+pub struct Transcript {
+    entries: Vec<Entry>,
+}
+
+struct Entry {
+    command: String,
+    output: Vec<u8>,
+}
+
+impl Transcript {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a command line as typed (newline already stripped). Starts a new entry whose
+    /// output is filled in by later [`record_output`](Self::record_output) calls.
+    pub fn record_command(&mut self, command: &str) {
+        self.entries.push(Entry {
+            command: command.to_string(),
+            output: Vec::new(),
+        });
+    }
+
+    /// Append output bytes to the most recent command's entry.
+    pub fn record_output(&mut self, output: &[u8]) {
+        if let Some(last) = self.entries.last_mut() {
+            last.output.extend_from_slice(output);
+        }
+    }
+
+    /// Render the whole session as bytes: each command behind a prompt marker, followed by its
+    /// captured output.
+    pub fn render(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        for e in &self.entries {
+            out.extend_from_slice(PROMPT);
+            out.extend_from_slice(e.command.as_bytes());
+            out.push(b'\n');
+            out.extend_from_slice(&e.output);
+        }
+        out
+    }
+
+    /// Discard the whole session (the AI starts fresh on the next `context show`).
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+}
+
+/// Handle the clank-specific `context` builtin against the transcript. Returns
+/// `Some(output_bytes)` if the line was a `context` command, else `None` so the caller falls
+/// through to normal command execution (the pure [`eval`] on wasm, or Brush on native).
+///
+/// `context show` output is intentionally NOT recorded back into the transcript, so the
+/// session does not duplicate itself on inspection.
+pub fn dispatch_context(transcript: &mut Transcript, line: &str) -> Option<Vec<u8>> {
+    let mut words = line.split_whitespace();
+    if words.next()? != "context" {
+        return None;
+    }
+    match words.next() {
+        Some("show") | None => Some(transcript.render()),
+        Some("clear") => {
+            transcript.clear();
+            Some(Vec::new())
+        }
+        Some(other) => Some(format!("context: unknown subcommand: {other}\n").into_bytes()),
+    }
+}
+
 /// Resolve and run a single command line, returning the bytes to write to stdout and the
-/// control flow. Pure: no I/O, no async — both the wasm and native drivers call this and
-/// handle writing the returned bytes themselves. This is the dispatch seam for future
-/// command resolution; today it handles a fixed builtin set.
+/// control flow. Pure: no I/O, no async. This is the wasm path's toy builtin set; the native
+/// path routes non-`context` lines through Brush instead.
 pub fn eval(line: &[u8]) -> (Vec<u8>, Flow) {
     let text = String::from_utf8_lossy(line);
     let mut words = text.split_whitespace();
@@ -111,10 +188,7 @@ mod tests {
 
     #[test]
     fn unknown_command_reports_not_found() {
-        assert_eq!(
-            out_of(b"nosuchcmd"),
-            "clank: command not found: nosuchcmd\n"
-        );
+        assert_eq!(out_of(b"nosuchcmd"), "clank: command not found: nosuchcmd\n");
     }
 
     #[test]
@@ -123,5 +197,44 @@ mod tests {
         assert_eq!(trim_eol(b"a\r\n"), b"a");
         assert_eq!(trim_eol(b"a"), b"a");
         assert_eq!(trim_eol(b""), b"");
+    }
+
+    #[test]
+    fn transcript_records_and_renders_commands_and_output() {
+        let mut t = Transcript::new();
+        t.record_command("echo hi");
+        t.record_output(b"hi\n");
+        let rendered = String::from_utf8(t.render()).unwrap();
+        assert_eq!(rendered, "clank$ echo hi\nhi\n");
+    }
+
+    #[test]
+    fn transcript_clear_empties_the_session() {
+        let mut t = Transcript::new();
+        t.record_command("echo hi");
+        t.record_output(b"hi\n");
+        t.clear();
+        assert!(t.render().is_empty());
+    }
+
+    #[test]
+    fn dispatch_context_show_returns_render_and_clear_empties() {
+        let mut t = Transcript::new();
+        t.record_command("pwd");
+        t.record_output(b"/tmp\n");
+
+        let shown = dispatch_context(&mut t, "context show").unwrap();
+        assert_eq!(String::from_utf8(shown).unwrap(), "clank$ pwd\n/tmp\n");
+
+        let cleared = dispatch_context(&mut t, "context clear").unwrap();
+        assert!(cleared.is_empty());
+        assert!(t.render().is_empty());
+    }
+
+    #[test]
+    fn dispatch_context_ignores_non_context_lines() {
+        let mut t = Transcript::new();
+        assert!(dispatch_context(&mut t, "echo hi").is_none());
+        assert!(dispatch_context(&mut t, "").is_none());
     }
 }

@@ -14,9 +14,21 @@ crate-type = ["cdylib", "rlib"]
 name = "clank"
 path = "src/main.rs"
 
-# Wasm-only dependencies. The shared core and the native path use only `std`, so native
-# builds pull none of the wasm toolchain crates.
+# All-target deps: Brush (the shell interpreter) now runs on both native and wasm. `nix` is
+# gated under cfg(unix) inside brush-core, so the wasm32-wasip2 build still pulls zero nix.
+# tokio provides the runtime brush requires for its internal async (current-thread on wasm).
+[dependencies]
+brush-core = "0.5"
+brush-builtins = "0.2"
+tokio = { version = "1", features = ["rt"] }
+
+# Wasm-only: the p3 component bindings and stream I/O.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasip3.workspace = true
 wit-bindgen.workspace = true
 futures.workspace = true
+
+# Native-only: a multi-thread tokio runtime (Runtime::new) and temp-file output capture.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1", features = ["rt-multi-thread"] }
+tempfile = "3"
