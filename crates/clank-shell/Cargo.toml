@@ -21,6 +21,14 @@ path = "src/main.rs"
 brush-core = "0.5"
 brush-builtins = "0.2"
 tokio = { version = "1", features = ["rt"] }
+diffy = { version = "0.5", features = ["std"] }
+grep = "0.4"
+infer = "0.19"
+jaq-core = "3.1"
+jaq-json = "2.0"
+jaq-std = "3.0"
+regex = "1"
+similar = "2.7"
 # Internal coreutils (uutils), registered as clank builtins. uucore is patched for wasm32-wasip2
 # via [patch.crates-io] in the workspace root.
 uu_cat = "0.9"

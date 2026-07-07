@@ -18,6 +18,7 @@
 
 mod coreutils;
 pub mod session;
+mod texttools;
 
 #[cfg(target_arch = "wasm32")]
 mod wasm;
@@ -189,7 +190,10 @@ mod tests {
 
     #[test]
     fn unknown_command_reports_not_found() {
-        assert_eq!(out_of(b"nosuchcmd"), "clank: command not found: nosuchcmd\n");
+        assert_eq!(
+            out_of(b"nosuchcmd"),
+            "clank: command not found: nosuchcmd\n"
+        );
     }
 
     #[test]

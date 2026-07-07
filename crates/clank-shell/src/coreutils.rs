@@ -18,7 +18,7 @@ use brush_core::{Error, ExecutionResult};
 /// Run a uutils `uumain` closure with the process's stdout/stderr pointed at the `OpenFile`s
 /// brush assigned for this command, so its output lands wherever brush wants it.
 #[cfg(not(target_arch = "wasm32"))]
-fn run_uu<SE: ShellExtensions>(
+pub(crate) fn run_uu<SE: ShellExtensions>(
     context: &ExecutionContext<'_, SE>,
     uumain: impl FnOnce() -> i32,
 ) -> i32 {
@@ -74,7 +74,7 @@ fn run_uu<SE: ShellExtensions>(
 /// restore fd 1. Requires a writable preopen (`wasmtime --dir`); without one we fall back to the
 /// real stdout (visible, uncaptured).
 #[cfg(target_arch = "wasm32")]
-fn run_uu<SE: ShellExtensions>(
+pub(crate) fn run_uu<SE: ShellExtensions>(
     context: &ExecutionContext<'_, SE>,
     uumain: impl FnOnce() -> i32,
 ) -> i32 {
