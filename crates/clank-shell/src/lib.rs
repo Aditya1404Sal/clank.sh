@@ -16,6 +16,7 @@
 //! POC scope: the transcript is in-memory for the session (no compaction, no disk); Brush runs
 //! on native only.
 
+mod coreutils;
 pub mod session;
 
 #[cfg(target_arch = "wasm32")]

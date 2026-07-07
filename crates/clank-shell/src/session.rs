@@ -135,6 +135,7 @@ impl Session {
 async fn build_shell() -> Result<Shell, brush_core::Error> {
     Shell::builder()
         .default_builtins(BuiltinSet::BashMode)
+        .builtins(crate::coreutils::builtins())
         .build()
         .await
 }

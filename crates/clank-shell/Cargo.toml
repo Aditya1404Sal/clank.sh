@@ -21,6 +21,13 @@ path = "src/main.rs"
 brush-core = "0.5"
 brush-builtins = "0.2"
 tokio = { version = "1", features = ["rt"] }
+# Internal coreutils (uutils), registered as clank builtins. uucore is patched for wasm32-wasip2
+# via [patch.crates-io] in the workspace root.
+uu_cat = "0.9"
+uu_ls = "0.9"
+uu_wc = "0.9"
+uu_head = "0.9"
+uu_sort = "0.9"
 
 # Wasm-only: the p3 component bindings and stream I/O.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -32,3 +39,6 @@ futures.workspace = true
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1", features = ["rt-multi-thread"] }
 tempfile = "3"
+# For redirecting fd 1/2 around uutils' uumain (which writes to std stdout) so its output is
+# captured by brush's fd table (pipes, redirects, the transcript capture).
+libc = "0.2"
