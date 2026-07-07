@@ -1,0 +1,22 @@
+[package]
+name = "clank-shell"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+# cdylib → the wasm component; rlib → linked by the native `clank` binary.
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "clank"
+path = "src/main.rs"
+
+# Wasm-only dependencies. The shared core and the native path use only `std`, so native
+# builds pull none of the wasm toolchain crates.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasip3.workspace = true
+wit-bindgen.workspace = true
+futures.workspace = true

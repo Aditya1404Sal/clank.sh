@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["crates/clank-shell"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/clank-sh/clank.sh"
+
+[workspace.dependencies]
+wasip3 = "0.7"
+wit-bindgen = { version = "0.57", default-features = false, features = ["async"] }
+futures = "0.3"
