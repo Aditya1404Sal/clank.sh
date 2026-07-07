@@ -5,15 +5,15 @@
 //! Each `uu_*::uumain(args) -> i32` writes to `std::io::stdout()` directly, so to make its
 //! output compose with brush's fd table (pipes, redirections, the transcript capture) we
 //! redirect the real fd 1/2 onto the `OpenFile`s brush assigned for the command, run `uumain`,
-//! then restore them. On wasm there is no `dup2`, so `uumain` writes to the component's real
-//! stdout (visible, but not captured) — a documented wasm limitation.
+//! then restore them. On wasm there is no `dup2`, so stdout is captured by reopening fd 1 as a
+//! temporary read/write file, then replaying those bytes into Brush's stdout.
 //!
 //! `uucore` is patched for `wasm32-wasip2` via `[patch.crates-io]` in the workspace root.
 
 use brush_core::builtins::{ContentOptions, ContentType, Registration, SimpleCommand};
 use brush_core::commands::ExecutionContext;
 use brush_core::extensions::ShellExtensions;
-use brush_core::{ExecutionResult, Error};
+use brush_core::{Error, ExecutionResult};
 
 /// Run a uutils `uumain` closure with the process's stdout/stderr pointed at the `OpenFile`s
 /// brush assigned for this command, so its output lands wherever brush wants it.
@@ -67,14 +67,63 @@ fn run_uu<SE: ShellExtensions>(
     code
 }
 
-/// wasm: no `dup2`. `uumain` writes to the component's real stdout (visible, not captured by
-/// the transcript). Pipes/redirections aren't available in the sandbox anyway.
+/// wasm: there is no `dup2`, but `close(1)` frees fd 1 and the next `open()` claims it (lowest
+/// free fd), so opening a capture file *becomes* stdout. `uumain` then writes into that file; we
+/// read it back and hand it to brush's stdout (`context.stdout()`), which the Session drains to
+/// the p3 stream + transcript. clank displays via the p3 stream (not fd 1), so we never need to
+/// restore fd 1. Requires a writable preopen (`wasmtime --dir`); without one we fall back to the
+/// real stdout (visible, uncaptured).
 #[cfg(target_arch = "wasm32")]
 fn run_uu<SE: ShellExtensions>(
-    _context: &ExecutionContext<'_, SE>,
+    context: &ExecutionContext<'_, SE>,
     uumain: impl FnOnce() -> i32,
 ) -> i32 {
-    uumain()
+    use std::fs::OpenOptions;
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    extern "C" {
+        fn close(fd: i32) -> i32;
+    }
+
+    const CAPTURE_PATH: &str = ".clank-uu-capture";
+
+    let _ = std::io::stdout().flush();
+
+    let open_capture = || {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(CAPTURE_PATH)
+    };
+
+    // Probe for a writable/readable preopen without disturbing fd 1.
+    if open_capture().is_err() {
+        return uumain(); // no writable fs: run to real stdout, uncaptured
+    }
+    let _ = std::fs::remove_file(CAPTURE_PATH);
+
+    // Redirect fd 1 to a fresh capture file.
+    unsafe { close(1) };
+    let mut cap = match open_capture() {
+        Ok(f) => f, // claims fd 1
+        Err(_) => return 1,
+    };
+
+    let code = uumain();
+    let _ = std::io::stdout().flush();
+
+    let mut captured = Vec::new();
+    let _ = cap
+        .seek(SeekFrom::Start(0))
+        .and_then(|_| cap.read_to_end(&mut captured));
+    drop(cap); // closes fd 1
+    let _ = std::fs::remove_file(CAPTURE_PATH);
+
+    // Feed the captured output into brush's stdout so it reaches the transcript + p3 stream.
+    let _ = context.stdout().write_all(&captured);
+    code
 }
 
 /// Define a brush `SimpleCommand` that dispatches to a uutils `uumain`, prepending `argv[0]`.
