@@ -78,19 +78,23 @@ isolated (each gets its own `Session`/transcript/filesystem).
 
 ## Filesystem: what the Golem model actually gives us (verified)
 
-- **Golem mounts `/` read-only** by default (`ls -la /` → `dr-xr-xr-x`, owner `somebody:somegroup`);
-  `/tmp` does not exist. Writable storage is provisioned per path via `golem.yaml`
-  `files: [{ sourcePath, targetPath, permissions: read-write }]` (`sourcePath` is relative to
-  `golem.yaml`). A provisioned file reads back correctly through coreutils `cat`.
-- **coreutils builtins that read work** (after the uucore fix below). Reading a provisioned file via
-  `cat` returns its contents.
-- **Brush file redirects (`>`, `<`, `>>`) do NOT work on wasip2.** `echo x > file` fails with
-  `I/O write error: failed to duplicate open file`. Root cause is Brush-internal, not Golem: a
-  redirect stores an `OpenFile::File(std::fs::File)` and Brush **clones** it during fd setup
-  (`brush-core openfiles.rs:100/122-127`), calling `File::try_clone()`, which fails on wasip2 and
-  falls back to a discarding sink. This is the same class of limitation as pipes/subshells. So
-  file *writing through the shell* is deferred until Brush's openfiles clone is patched for wasm
-  (e.g. reopen-by-path instead of `File::try_clone`).
+- **The agent filesystem is fully read-write, recursively.** Golem preopens `/` with
+  `DirPerms::all()` + `FilePerms::all()` (`golem-worker-executor/src/wasi_host/mod.rs:257`), and WASI
+  preopens are hierarchical, so the whole tree under `/` is writable. Confirmed by a raw `std::fs`
+  probe from inside the agent (bypassing Brush/coreutils): `create_dir_all("/…")` and
+  `write("/…/f.txt")` at both `/` and `/tmp` return `Ok` and read back correctly (`create_dir_all`
+  even creates `/tmp` on the fly). No provisioning is needed to get a writable filesystem.
+- **coreutils builtins that read work** (after the uucore fix below): `cat` returns file contents.
+- **Brush file redirects (`>`, `<`, `>>`) do NOT work on wasip2** — and this, not the filesystem, is
+  the real blocker for shell-driven writing. `echo x > file` fails with
+  `I/O write error: failed to duplicate open file`. Root cause is Brush-internal: a redirect stores
+  an `OpenFile::File(std::fs::File)` and Brush **clones** it during fd setup
+  (`brush-core openfiles.rs:100/122-127`) via `File::try_clone()`, which fails on wasip2 and falls
+  back to a discarding sink. Same class as pipes/subshells. Fix belongs in Brush's openfiles: on
+  wasm, clone `OpenFile::File` by reopening the path instead of `File::try_clone`.
+- Earlier symptoms that *looked* like a read-only `/` were misleading: `mkdir` (coreutils) exit 1 is
+  a uu_mkdir-on-wasip2 bug (raw `create_dir_all` works fine), and `ls` showing mode `555` is
+  cosmetic (wasip2 does not expose real Unix mode bits).
 
 ## uucore empty-argv panic (fixed in the fork)
 
@@ -112,7 +116,8 @@ is empty on wasi, and clamp `UTIL_NAME`'s indices. `Cargo.lock` bumped to the ne
 
 ## Not built (future work)
 
-Shell-driven file **writing** (needs a Brush openfiles wasm patch for `>`/`<`/`>>`); a clean
-writable working directory (Golem `/` is read-only; the coreutils `close(1)` capture also leaves a
-`.clank-uu-capture` file to clean up); HTTP mount/endpoints; snapshotting; pipelines/subshells on the
-agent; deterministic-recovery wrappers for clock/random; MCP; Golem cloud deploy.
+Shell-driven file **writing** (the filesystem is writable, but Brush's `>`/`<`/`>>` redirects need a
+wasm openfiles patch; `uu_mkdir` and other coreutils *write* commands also misbehave on wasip2 while
+raw `std::fs` works); cleaning up the `.clank-uu-capture` file the coreutils `close(1)` capture
+leaves behind; HTTP mount/endpoints; snapshotting; pipelines/subshells on the agent;
+deterministic-recovery wrappers for clock/random; MCP; Golem cloud deploy.
