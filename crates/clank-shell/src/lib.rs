@@ -20,7 +20,10 @@ mod coreutils;
 pub mod session;
 mod texttools;
 
-#[cfg(target_arch = "wasm32")]
+// The `wasi:cli/run` REPL driver. Gated behind the `repl-driver` feature so that dependents which
+// only want the shared `Session` core (e.g. the Golem agent crate, which exports its own
+// `golem:agent` world) can link this crate without re-emitting a clashing `wasi:cli/run` export.
+#[cfg(all(target_arch = "wasm32", feature = "repl-driver"))]
 mod wasm;
 
 #[cfg(not(target_arch = "wasm32"))]

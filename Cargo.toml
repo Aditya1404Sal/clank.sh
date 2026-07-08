@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/clank-shell"]
+members = ["crates/clank-shell", "crates/clank-agent"]
 
 [workspace.package]
 edition = "2021"

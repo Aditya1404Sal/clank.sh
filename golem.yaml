@@ -1,0 +1,21 @@
+# yaml-language-server: $schema=https://schema.golem.cloud/app/golem/1.5.0/golem.schema.json
+# clank.sh Golem application: the `clank:agent` component (crates/clank-agent) wraps the shell
+# Session as a durable agent instance. Build/deploy with `golem build` / `golem deploy`.
+
+manifestVersion: 1.5.0
+
+app: clank
+
+environments:
+  local:
+    server: local
+    componentPresets: debug
+  cloud:
+    server: cloud
+    componentPresets: release
+
+components:
+  clank:agent:
+    dir: crates/clank-agent
+    templates: rust
+    env:

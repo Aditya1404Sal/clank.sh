@@ -38,11 +38,19 @@ uu_head = "0.9"
 uu_sort = "0.9"
 uu_mkdir = "0.9"
 
-# Wasm-only: the p3 component bindings and stream I/O.
+[features]
+# The `wasi:cli/run` REPL driver (`mod wasm` + its p3 bindings). On by default so the native
+# binary and the standalone wasm REPL component build unchanged. Dependents that only need the
+# `Session` core (the Golem agent) turn it off with `default-features = false`, so this crate links
+# as a plain rlib without exporting `wasi:cli/run`.
+default = ["repl-driver"]
+repl-driver = ["dep:wasip3", "dep:wit-bindgen", "dep:futures"]
+
+# Wasm-only: the p3 component bindings and stream I/O. Optional — only pulled in by `repl-driver`.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasip3.workspace = true
-wit-bindgen.workspace = true
-futures.workspace = true
+wasip3 = { workspace = true, optional = true }
+wit-bindgen = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
 
 # Native-only: a multi-thread tokio runtime (Runtime::new) and temp-file output capture.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
