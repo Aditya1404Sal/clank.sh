@@ -250,7 +250,7 @@ dependencies = [
 [[package]]
 name = "brush-builtins"
 version = "0.2.0"
-source = "git+https://github.com/Aditya1404Sal/brush?branch=wasip2-reopen#0300a84da5ce7135478c1831e5deacc2d5e7ec13"
+source = "git+https://github.com/Aditya1404Sal/brush?rev=0300a84#0300a84da5ce7135478c1831e5deacc2d5e7ec13"
 dependencies = [
  "brush-core",
  "brush-parser",
@@ -272,7 +272,7 @@ dependencies = [
 [[package]]
 name = "brush-core"
 version = "0.5.0"
-source = "git+https://github.com/Aditya1404Sal/brush?branch=wasip2-reopen#0300a84da5ce7135478c1831e5deacc2d5e7ec13"
+source = "git+https://github.com/Aditya1404Sal/brush?rev=0300a84#0300a84da5ce7135478c1831e5deacc2d5e7ec13"
 dependencies = [
  "async-recursion",
  "async-trait",
@@ -310,7 +310,7 @@ dependencies = [
 [[package]]
 name = "brush-parser"
 version = "0.4.0"
-source = "git+https://github.com/Aditya1404Sal/brush?branch=wasip2-reopen#0300a84da5ce7135478c1831e5deacc2d5e7ec13"
+source = "git+https://github.com/Aditya1404Sal/brush?rev=0300a84#0300a84da5ce7135478c1831e5deacc2d5e7ec13"
 dependencies = [
  "bon",
  "cached",

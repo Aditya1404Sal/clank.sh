@@ -33,8 +33,11 @@ uu_cp = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-o
 # Published brush-core 0.5.0 stores redirect targets as `OpenFile::File(std::fs::File)` and clones
 # them via `File::try_clone()`, which is Unsupported on wasm32-wasip2 — so `echo > file` silently
 # discards the write. Upstream `main` has since refactored `OpenFile::File` to `Arc<File>` (clone =
-# `Arc::clone`, no syscall), which fixes file redirects on wasip2. Patch all three brush crates to
-# the fork (one monorepo; they must move in lockstep) to pick that up.
-brush-core = { git = "https://github.com/Aditya1404Sal/brush", branch = "wasip2-reopen" }
-brush-builtins = { git = "https://github.com/Aditya1404Sal/brush", branch = "wasip2-reopen" }
-brush-parser = { git = "https://github.com/Aditya1404Sal/brush", branch = "wasip2-reopen" }
+# `Arc::clone`, no syscall), which fixes file redirects on wasip2, but that fix isn't on crates.io
+# yet (published 0.5.0 is the broken one). Pin all three brush crates (one monorepo; they must move
+# in lockstep) to the exact commit that carries the fix, so the build is reproducible and can't
+# shift under an upstream force-push. The fork's `wasip2-reopen` branch == this commit == upstream
+# `reubeno/brush` main; any of them resolves identically — the SHA is what matters.
+brush-core = { git = "https://github.com/Aditya1404Sal/brush", rev = "0300a84" }
+brush-builtins = { git = "https://github.com/Aditya1404Sal/brush", rev = "0300a84" }
+brush-parser = { git = "https://github.com/Aditya1404Sal/brush", rev = "0300a84" }
