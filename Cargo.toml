@@ -16,4 +16,25 @@ futures = "0.3"
 # feature). Our fork adds a stable encoded-bytes shim. This redirects every transitive uucore
 # (via the uu_* coreutils crates) to the patched fork on both targets.
 [patch.crates-io]
+# The coreutils fork carries wasip2 fixes: a stable OsStr encoded-bytes shim + empty-argv guard in
+# uucore, and a wasi `set_permissions` skip in uu_cp. Patch uucore AND every uu_* command crate
+# clank registers — the published uu_* crates only share the patched `uucore`, so a fix inside a
+# command crate (e.g. cp) is only picked up when that command crate itself comes from the fork.
 uucore = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
+uu_cat = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
+uu_ls = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
+uu_wc = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
+uu_head = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
+uu_sort = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
+uu_mkdir = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
+uu_rm = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
+uu_mv = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
+uu_cp = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
+# Published brush-core 0.5.0 stores redirect targets as `OpenFile::File(std::fs::File)` and clones
+# them via `File::try_clone()`, which is Unsupported on wasm32-wasip2 — so `echo > file` silently
+# discards the write. Upstream `main` has since refactored `OpenFile::File` to `Arc<File>` (clone =
+# `Arc::clone`, no syscall), which fixes file redirects on wasip2. Patch all three brush crates to
+# the fork (one monorepo; they must move in lockstep) to pick that up.
+brush-core = { git = "https://github.com/Aditya1404Sal/brush", branch = "wasip2-reopen" }
+brush-builtins = { git = "https://github.com/Aditya1404Sal/brush", branch = "wasip2-reopen" }
+brush-parser = { git = "https://github.com/Aditya1404Sal/brush", branch = "wasip2-reopen" }

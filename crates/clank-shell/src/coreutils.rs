@@ -85,44 +85,48 @@ pub(crate) fn run_uu<SE: ShellExtensions>(
         fn close(fd: i32) -> i32;
     }
 
-    const CAPTURE_PATH: &str = ".clank-uu-capture";
+    // A single capture file under /tmp (a writable preopen on Golem/wasi) receives BOTH fd 1 and
+    // fd 2, so stdout and stderr are captured together in write order and neither is dropped. Kept
+    // out of the working directory so it doesn't pollute it.
+    const CAPTURE_PATH: &str = "/tmp/.clank-uu-capture";
 
     let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
 
-    let open_capture = || {
-        OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(CAPTURE_PATH)
-    };
-
-    // Probe for a writable/readable preopen without disturbing fd 1.
-    if open_capture().is_err() {
-        return uumain(); // no writable fs: run to real stdout, uncaptured
-    }
-    let _ = std::fs::remove_file(CAPTURE_PATH);
-
-    // Redirect fd 1 to a fresh capture file.
+    // Point fd 1 at a fresh capture file: `close(1)` frees the descriptor and the next `open`
+    // claims the lowest free fd (1). Then `close(2)` + open the SAME path in append mode so fd 2
+    // also writes into the capture, after fd 1's content. uutils writes to std stdout/stderr land
+    // in the file; we read it back and feed it to brush's stdout (→ transcript + p3 stream).
     unsafe { close(1) };
-    let mut cap = match open_capture() {
+    let mut cap = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(CAPTURE_PATH)
+    {
         Ok(f) => f, // claims fd 1
-        Err(_) => return 1,
+        Err(_) => return uumain(), // no writable fs: run uncaptured
     };
+    unsafe { close(2) };
+    // fd 2 → same file, append so it doesn't truncate fd 1's writes. Best-effort.
+    let err_fd = OpenOptions::new().append(true).open(CAPTURE_PATH);
 
     let code = uumain();
     let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    drop(err_fd); // closes fd 2
 
-    let mut captured = Vec::new();
+    let mut out_bytes = Vec::new();
     let _ = cap
         .seek(SeekFrom::Start(0))
-        .and_then(|_| cap.read_to_end(&mut captured));
+        .and_then(|_| cap.read_to_end(&mut out_bytes));
     drop(cap); // closes fd 1
     let _ = std::fs::remove_file(CAPTURE_PATH);
 
-    // Feed the captured output into brush's stdout so it reaches the transcript + p3 stream.
-    let _ = context.stdout().write_all(&captured);
+    // Feed captured output (stdout + stderr, interleaved) into brush's stdout so it reaches the
+    // transcript + p3 stream.
+    let _ = context.stdout().write_all(&out_bytes);
     code
 }
 
@@ -165,32 +169,13 @@ uu_builtin!(Ls, "ls", uu_ls::uumain);
 uu_builtin!(Wc, "wc", uu_wc::uumain);
 uu_builtin!(Head, "head", uu_head::uumain);
 uu_builtin!(Sort, "sort", uu_sort::uumain);
-
-pub(crate) struct Mkdir;
-
-impl SimpleCommand for Mkdir {
-    fn get_content(
-        name: &str,
-        _content_type: ContentType,
-        _options: &ContentOptions,
-    ) -> Result<String, Error> {
-        Ok(format!("{name}: uutils coreutils builtin\n"))
-    }
-
-    fn execute<SE, I, S>(
-        context: ExecutionContext<'_, SE>,
-        args: I,
-    ) -> Result<ExecutionResult, Error>
-    where
-        SE: ShellExtensions,
-        I: Iterator<Item = S>,
-        S: AsRef<str>,
-    {
-        let argv = args.skip(1).map(|s| std::ffi::OsString::from(s.as_ref()));
-        let code = run_uu(&context, move || uu_mkdir::uumain(argv));
-        Ok(ExecutionResult::new(code.clamp(0, 255) as u8))
-    }
-}
+uu_builtin!(Rm, "rm", uu_rm::uumain);
+uu_builtin!(Mv, "mv", uu_mv::uumain);
+uu_builtin!(Cp, "cp", uu_cp::uumain);
+// mkdir uses the same convention as the others: brush passes the command name as argv[0], which is
+// what uumain expects — do NOT skip it, or flags like `-p` get dropped (dropping `-p` turned
+// `mkdir -p /tmp/a/b` into a non-recursive mkdir that fails when an intermediate dir is missing).
+uu_builtin!(Mkdir, "mkdir", uu_mkdir::uumain);
 
 /// The coreutils builtins to register on the shell, in addition to brush's bash set.
 pub(crate) fn builtins<SE: ShellExtensions>() -> Vec<(String, Registration<SE>)> {
@@ -202,5 +187,8 @@ pub(crate) fn builtins<SE: ShellExtensions>() -> Vec<(String, Registration<SE>)>
         ("head".into(), simple_builtin::<Head, SE>()),
         ("sort".into(), simple_builtin::<Sort, SE>()),
         ("mkdir".into(), simple_builtin::<Mkdir, SE>()),
+        ("rm".into(), simple_builtin::<Rm, SE>()),
+        ("mv".into(), simple_builtin::<Mv, SE>()),
+        ("cp".into(), simple_builtin::<Cp, SE>()),
     ]
 }

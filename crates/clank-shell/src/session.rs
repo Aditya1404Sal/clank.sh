@@ -86,8 +86,8 @@ impl Session {
         };
 
         let mut params = self.shell.default_exec_params();
-        params.set_fd(OpenFiles::STDOUT_FD, OpenFile::File(out_fd));
-        params.set_fd(OpenFiles::STDERR_FD, OpenFile::File(err_fd));
+        params.set_fd(OpenFiles::STDOUT_FD, OpenFile::File(out_fd.into()));
+        params.set_fd(OpenFiles::STDERR_FD, OpenFile::File(err_fd.into()));
 
         let result = self
             .shell
