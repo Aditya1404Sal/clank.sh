@@ -176,6 +176,14 @@ uu_builtin!(Cp, "cp", uu_cp::uumain);
 // what uumain expects — do NOT skip it, or flags like `-p` get dropped (dropping `-p` turned
 // `mkdir -p /tmp/a/b` into a non-recursive mkdir that fails when an intermediate dir is missing).
 uu_builtin!(Mkdir, "mkdir", uu_mkdir::uumain);
+uu_builtin!(Env, "env", uu_env::uumain);
+uu_builtin!(Cut, "cut", uu_cut::uumain);
+uu_builtin!(Tr, "tr", uu_tr::uumain);
+uu_builtin!(Uniq, "uniq", uu_uniq::uumain);
+uu_builtin!(Tail, "tail", uu_tail::uumain);
+uu_builtin!(Tee, "tee", uu_tee::uumain);
+uu_builtin!(Touch, "touch", uu_touch::uumain);
+uu_builtin!(Sleep, "sleep", uu_sleep::uumain);
 
 /// The coreutils builtins to register on the shell, in addition to brush's bash set.
 pub(crate) fn builtins<SE: ShellExtensions>() -> Vec<(String, Registration<SE>)> {
@@ -190,5 +198,13 @@ pub(crate) fn builtins<SE: ShellExtensions>() -> Vec<(String, Registration<SE>)>
         ("rm".into(), simple_builtin::<Rm, SE>()),
         ("mv".into(), simple_builtin::<Mv, SE>()),
         ("cp".into(), simple_builtin::<Cp, SE>()),
+        ("env".into(), simple_builtin::<Env, SE>()),
+        ("cut".into(), simple_builtin::<Cut, SE>()),
+        ("tr".into(), simple_builtin::<Tr, SE>()),
+        ("uniq".into(), simple_builtin::<Uniq, SE>()),
+        ("tail".into(), simple_builtin::<Tail, SE>()),
+        ("tee".into(), simple_builtin::<Tee, SE>()),
+        ("touch".into(), simple_builtin::<Touch, SE>()),
+        ("sleep".into(), simple_builtin::<Sleep, SE>()),
     ]
 }

@@ -40,6 +40,14 @@ uu_mkdir = "0.9"
 uu_rm = "0.9"
 uu_mv = "0.9"
 uu_cp = "0.9"
+uu_env = "0.9"
+uu_cut = "0.9"
+uu_tr = "0.9"
+uu_uniq = "0.9"
+uu_tail = "0.9"
+uu_tee = "0.9"
+uu_touch = "0.9"
+uu_sleep = "0.9"
 
 [features]
 # The `wasi:cli/run` REPL driver (`mod wasm` + its p3 bindings). On by default so the native

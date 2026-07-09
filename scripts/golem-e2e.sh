@@ -234,6 +234,54 @@ expect "head -1 prints first line"           'head -1 /tmp/work/a'              
 # combined redirect &>
 expect "&> redirects stdout+stderr"          'echo both &> /tmp/work/d; cat /tmp/work/d'          $'both'
 
+# ----------------------------------------------------------------------------
+# 2b. Newly-added core commands (uutils-backed, file-argument forms)
+# ----------------------------------------------------------------------------
+step "Newly-added core commands"
+# Seed the fixture files ONE redirect per invocation. Two constraints, both pre-existing Brush gaps
+# on wasip2 unrelated to these commands: (1) `printf` errors outright, so seed with `echo`; (2) more
+# than one file redirect in a single command line fails, so each write is its own invocation.
+run_line 'echo one   > /tmp/work/lines' >/dev/null
+run_line 'echo one  >> /tmp/work/lines' >/dev/null
+run_line 'echo two  >> /tmp/work/lines' >/dev/null
+run_line 'echo three >> /tmp/work/lines' >/dev/null
+run_line 'echo a,b,c > /tmp/work/csv' >/dev/null
+# uniq collapses adjacent duplicates
+expect "uniq collapses duplicate lines"      'uniq /tmp/work/lines'                               $'one\ntwo\nthree'
+# tail -n
+expect "tail -1 prints last line"            'tail -1 /tmp/work/lines'                            $'three'
+# cut a delimited field
+expect "cut -d, -f2 selects a field"         'cut -d, -f2 /tmp/work/csv'                          $'b'
+# NOTE: `tr` and `tee` are stdin-only filters (no file-argument mode). Under the current wasm
+# capture harness fd 0 isn't redirected, so feeding them input hangs the single-threaded worker.
+# They're registered (and will compose once the process model handles stdin) but are deliberately
+# NOT exercised here — asserting them wedges the agent instance.
+# touch creates an empty file
+expect "touch creates a file"                'touch /tmp/work/touched; if [ -e /tmp/work/touched ]; then echo yes; else echo no; fi' $'yes'
+# sleep returns promptly for 0
+expect "sleep 0 returns success"             'sleep 0; echo slept'                                $'slept'
+# env lists variables — on the Golem agent the environment is the GOLEM_* set; assert a stable one
+expect_contains "env lists variables"        'env'                                                'GOLEM_AGENT_TYPE='
+
+# ============================================================================
+# 2c. Transcript sliding window — force eviction with a tiny budget, see the marker
+# ============================================================================
+# Start from a clean transcript so this check is independent of the commands run above, then set a
+# tiny token budget and run several commands. The oldest entries must be dropped behind a marker
+# while the newest survives. (`context show`/`context clear`/`context budget` are themselves
+# recorded as command entries, so the budget is kept small-but-nonzero and we assert on substrings
+# rather than exact counts.)
+run_line 'context clear' >/dev/null
+run_line 'context budget 6' >/dev/null
+run_line 'echo alpha' >/dev/null
+run_line 'echo bravo' >/dev/null
+run_line 'echo charlie' >/dev/null
+run_line 'echo delta' >/dev/null
+expect_contains "window inserts a drop marker"   'context show'  'earlier entries dropped'
+expect_contains "window keeps the newest entry"  'context show'  'echo delta'
+# restore a roomy budget so it doesn't interfere with anything after
+run_line 'context budget 24000' >/dev/null
+
 # ============================================================================
 # 3. Durability — write in one invocation, read in a SEPARATE invocation
 # ============================================================================
