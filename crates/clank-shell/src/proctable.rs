@@ -58,14 +58,25 @@ pub enum ProcState {
 }
 
 impl ProcState {
-    /// The single-letter code shown in `ps`'s STAT column.
-    fn code(self) -> char {
+    /// The single-letter code shown in `ps`'s STAT column and `/proc/<pid>/status`.
+    pub fn code(self) -> char {
         match self {
             ProcState::R => 'R',
             ProcState::S => 'S',
             ProcState::T => 'T',
             ProcState::Z => 'Z',
             ProcState::P => 'P',
+        }
+    }
+
+    /// The long name shown alongside the code in `/proc/<pid>/status` (`R (running)`).
+    pub fn long_name(self) -> &'static str {
+        match self {
+            ProcState::R => "running",
+            ProcState::S => "sleeping",
+            ProcState::T => "stopped",
+            ProcState::Z => "zombie",
+            ProcState::P => "paused",
         }
     }
 }
@@ -86,8 +97,21 @@ pub struct ProcRow {
 
 impl ProcRow {
     /// The command as a display string (argv joined by spaces).
-    fn command(&self) -> String {
+    pub fn command(&self) -> String {
         self.argv.join(" ")
+    }
+}
+
+/// The canonical synthetic shell-root row (PID 1). It is not stored in the table — both `ps` (via
+/// the renderers) and `/proc` (via [`ProcessTable::find`]) source it here so they can't drift.
+pub fn root_row() -> ProcRow {
+    ProcRow {
+        pid: SHELL_ROOT_PID,
+        ppid: 0,
+        kind: ProcessKind::Builtin,
+        argv: vec!["clank".to_string()],
+        state: ProcState::S,
+        start: 0,
     }
 }
 
@@ -158,6 +182,15 @@ impl ProcessTable {
         &self.rows
     }
 
+    /// Look up a process by PID, including the synthetic root (PID 1), which is not a stored row.
+    /// This is the single place PID-1 handling lives, so `ps` and `/proc` can't disagree about it.
+    pub fn find(&self, pid: u32) -> Option<ProcRow> {
+        if pid == SHELL_ROOT_PID {
+            return Some(root_row());
+        }
+        self.rows.iter().find(|r| r.pid == pid).cloned()
+    }
+
     /// Render the table in the given `ps` mode, including the synthetic root row.
     pub fn render_ps(&self, mode: PsMode) -> String {
         match mode {
@@ -170,9 +203,8 @@ impl ProcessTable {
     fn render_default(&self) -> String {
         let mut out = String::new();
         out.push_str(&format!("{:>5} {:<4} {}\n", "PID", "STAT", "COMMAND"));
-        // Synthetic root.
-        out.push_str(&format!("{:>5} {:<4} {}\n", SHELL_ROOT_PID, "S", "clank"));
-        for r in &self.rows {
+        // The synthetic root, then the real rows — sourced uniformly from `root_row()`.
+        for r in std::iter::once(root_row()).chain(self.rows.iter().cloned()) {
             out.push_str(&format!(
                 "{:>5} {:<4} {}\n",
                 r.pid,
@@ -190,11 +222,7 @@ impl ProcessTable {
             "{:<6} {:>5} {:>4} {:>4} {:>6} {:>6} {:<4} {:<4} {:<5} {:<5} {}\n",
             "USER", "PID", "%CPU", "%MEM", "VSZ", "RSS", "TTY", "STAT", "START", "TIME", "COMMAND"
         ));
-        out.push_str(&format!(
-            "{:<6} {:>5} {:>4} {:>4} {:>6} {:>6} {:<4} {:<4} {:<5} {:<5} {}\n",
-            "clank", SHELL_ROOT_PID, "-", "-", "-", "-", "-", "S", "0", "-", "clank"
-        ));
-        for r in &self.rows {
+        for r in std::iter::once(root_row()).chain(self.rows.iter().cloned()) {
             out.push_str(&format!(
                 "{:<6} {:>5} {:>4} {:>4} {:>6} {:>6} {:<4} {:<4} {:<5} {:<5} {}\n",
                 "clank",
@@ -219,11 +247,7 @@ impl ProcessTable {
             "{:<6} {:>5} {:>5} {:>2} {:<6} {:<4} {:<5} {}\n",
             "UID", "PID", "PPID", "C", "STIME", "TTY", "TIME", "CMD"
         ));
-        out.push_str(&format!(
-            "{:<6} {:>5} {:>5} {:>2} {:<6} {:<4} {:<5} {}\n",
-            "clank", SHELL_ROOT_PID, 0, "-", "0", "-", "-", "clank"
-        ));
-        for r in &self.rows {
+        for r in std::iter::once(root_row()).chain(self.rows.iter().cloned()) {
             out.push_str(&format!(
                 "{:<6} {:>5} {:>5} {:>2} {:<6} {:<4} {:<5} {}\n",
                 "clank",

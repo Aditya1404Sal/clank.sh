@@ -310,6 +310,31 @@ expect_contains "ps aux header renders"            'ps aux'  '%CPU'
 expect_contains "ps -ef shows PPID column"         'ps -ef'  'PPID'
 
 # ============================================================================
+# 2f. Virtual /proc — process files computed on read, cat/ls-able
+# ============================================================================
+# /proc is a virtual (not file-backed) namespace served from the process table. clank's own cat/ls
+# resolve /proc paths and delegate real paths to uutils. All assertions are STANDALONE (no pipe):
+# clank pipelines wedge on the single-threaded wasm worker, so `cat /proc/.. | grep` is native-only.
+# (grep on /proc works natively too, but grep's output isn't captured on wasm — a separate
+# pre-existing grep-on-wasm limitation — so grep is asserted in native tests, not here.)
+step "Virtual /proc"
+expect_contains "cat /proc/1/status shows root Pid"  'cat /proc/1/status'   'Pid:'
+expect_contains "proc status shows State"            'cat /proc/1/status'   'State:'
+expect_contains "proc status root is sleeping"       'cat /proc/1/status'   'S (sleeping)'
+# pid 2 is the first line this session executed (`mkdir -p /tmp/work`, at the top of the run) — its
+# cmdline is still readable here, proving /proc reflects prior lines durably across invocations.
+expect_contains "cat /proc/2/cmdline (durable)"      'cat /proc/2/cmdline'  'mkdir'
+# environ reflects the shell env (the GOLEM_* set on the agent).
+expect_contains "cat /proc/<pid>/environ"            'cat /proc/2/environ'  'GOLEM_'
+# system-prompt placeholder is readable.
+expect_contains "cat /proc/clank/system-prompt"      'cat /proc/clank/system-prompt'  'system prompt'
+# ls lists the fixed child names.
+expect_contains "ls /proc/1 lists status"            'ls /proc/1'           'status'
+expect_contains "ls /proc/clank lists system-prompt" 'ls /proc/clank'       'system-prompt'
+# Unknown /proc path errors cleanly.
+expect_contains "unknown /proc path errors"          'cat /proc/99999/status'  'No such file'
+
+# ============================================================================
 # 3. Durability — write in one invocation, read in a SEPARATE invocation
 # ============================================================================
 step "Durability check (state persists across invocations)"

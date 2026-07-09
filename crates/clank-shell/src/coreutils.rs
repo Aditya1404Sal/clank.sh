@@ -10,6 +10,8 @@
 //!
 //! `uucore` is patched for `wasm32-wasip2` via `[patch.crates-io]` in the workspace root.
 
+use std::io::Write;
+
 use brush_core::builtins::{ContentOptions, ContentType, Registration, SimpleCommand};
 use brush_core::commands::ExecutionContext;
 use brush_core::extensions::ShellExtensions;
@@ -130,6 +132,19 @@ pub(crate) fn run_uu<SE: ShellExtensions>(
     code
 }
 
+/// Shared `get_content` body: derive real help content from a synopsis rather than a stub. Used by
+/// every coreutils builtin (macro-generated and the hand-written `/proc`-shimming `cat`/`ls`).
+fn uu_get_content(name: &str, synopsis: &str, content_type: ContentType) -> Result<String, Error> {
+    match content_type {
+        ContentType::ShortDescription => Ok(format!("{name} - {synopsis}\n")),
+        ContentType::ShortUsage => Ok(format!("{name}: {name} [args...]\n")),
+        ContentType::DetailedHelp => {
+            Ok(format!("{name} - {synopsis}\n\n(uutils coreutils builtin)\n"))
+        }
+        ContentType::ManPage => brush_core::error::unimp("man page not yet implemented"),
+    }
+}
+
 /// Define a brush `SimpleCommand` that dispatches to a uutils `uumain`, prepending `argv[0]`.
 ///
 /// The `$synopsis` is the command's one-line description: it feeds both `get_content` (so Brush's
@@ -150,17 +165,7 @@ macro_rules! uu_builtin {
                 content_type: ContentType,
                 _options: &ContentOptions,
             ) -> Result<String, Error> {
-                // Derive real help content from the synopsis rather than a fixed placeholder.
-                match content_type {
-                    ContentType::ShortDescription => {
-                        Ok(format!("{name} - {}\n", $ty::SYNOPSIS))
-                    }
-                    ContentType::ShortUsage => Ok(format!("{name}: {name} [args...]\n")),
-                    ContentType::DetailedHelp => {
-                        Ok(format!("{name} - {}\n\n(uutils coreutils builtin)\n", $ty::SYNOPSIS))
-                    }
-                    ContentType::ManPage => brush_core::error::unimp("man page not yet implemented"),
-                }
+                uu_get_content(name, $ty::SYNOPSIS, content_type)
             }
 
             fn execute<SE, I, S>(
@@ -183,8 +188,9 @@ macro_rules! uu_builtin {
     };
 }
 
-uu_builtin!(Cat, "cat", "concatenate files and print to stdout", uu_cat::uumain);
-uu_builtin!(Ls, "ls", "list directory contents", uu_ls::uumain);
+// `cat` and `ls` are hand-written (not `uu_builtin!`) so they can serve the virtual `/proc`
+// namespace: `/proc` operands are resolved from the process table and written to stdout, while any
+// real path is delegated to the uutils `uumain` unchanged. See `Cat`/`Ls` below.
 uu_builtin!(Wc, "wc", "count lines, words, and bytes", uu_wc::uumain);
 uu_builtin!(Head, "head", "print the first lines of a file", uu_head::uumain);
 uu_builtin!(Sort, "sort", "sort lines of text", uu_sort::uumain);
@@ -203,6 +209,133 @@ uu_builtin!(Tail, "tail", "print the last lines of a file", uu_tail::uumain);
 uu_builtin!(Tee, "tee", "copy stdin to stdout and files", uu_tee::uumain);
 uu_builtin!(Touch, "touch", "create files or update timestamps", uu_touch::uumain);
 uu_builtin!(Sleep, "sleep", "pause for a duration", uu_sleep::uumain);
+
+/// An operand is a path (not a flag) if it doesn't start with `-`. (Flags always pass through to
+/// uutils.) Used to detect whether an invocation touches the virtual `/proc` namespace.
+fn is_flag(arg: &str) -> bool {
+    arg.starts_with('-')
+}
+
+/// `cat`, hand-written to serve the virtual `/proc` namespace. If no operand is a `/proc` path, the
+/// whole argv is delegated to `uu_cat::uumain` unchanged (real-file behavior + all flags preserved).
+/// Otherwise each operand is served in order: `/proc` paths from the process-table resolver, real
+/// paths delegated per-file to `uu_cat`.
+pub(crate) struct Cat;
+
+impl Cat {
+    const NAME: &'static str = "cat";
+    const SYNOPSIS: &'static str = "concatenate files and print to stdout";
+}
+
+impl SimpleCommand for Cat {
+    fn get_content(
+        name: &str,
+        content_type: ContentType,
+        _options: &ContentOptions,
+    ) -> Result<String, Error> {
+        uu_get_content(name, Cat::SYNOPSIS, content_type)
+    }
+
+    fn execute<SE, I, S>(context: ExecutionContext<'_, SE>, args: I) -> Result<ExecutionResult, Error>
+    where
+        SE: ShellExtensions,
+        I: Iterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let argv: Vec<String> = args.map(|s| s.as_ref().to_string()).collect();
+        let touches_proc = argv
+            .iter()
+            .skip(1)
+            .any(|a| !is_flag(a) && crate::procfs::is_proc_path(a));
+
+        // Fast path: nothing virtual → delegate the whole argv to uutils unchanged.
+        if !touches_proc {
+            let os_argv = argv.iter().map(std::ffi::OsString::from);
+            let code = run_uu(&context, move || uu_cat::uumain(os_argv));
+            return Ok(ExecutionResult::new(code.clamp(0, 255) as u8));
+        }
+
+        // Mixed/virtual path: serve each operand in order.
+        let environ = crate::procfs::current_environ();
+        let table = crate::proctable::active();
+        let mut out = context.stdout();
+        let mut had_error = false;
+        for op in argv.iter().skip(1).filter(|a| !is_flag(a)) {
+            if crate::procfs::is_proc_path(op) {
+                let resolved = table
+                    .as_ref()
+                    .map(|t| crate::procfs::resolve(op, &t.lock().unwrap(), &environ));
+                match resolved {
+                    Some(Ok(content)) => {
+                        let _ = out.write_all(content.as_bytes());
+                    }
+                    _ => {
+                        let _ = writeln!(context.stderr(), "cat: {op}: No such file or directory");
+                        had_error = true;
+                    }
+                }
+            } else {
+                // A real path in a mixed invocation: delegate just this operand to uutils.
+                let one = [std::ffi::OsString::from("cat"), std::ffi::OsString::from(op)];
+                let code = run_uu(&context, move || uu_cat::uumain(one.into_iter()));
+                if code != 0 {
+                    had_error = true;
+                }
+            }
+        }
+        Ok(ExecutionResult::new(if had_error { 1 } else { 0 }))
+    }
+}
+
+/// `ls`, hand-written to serve the virtual `/proc` namespace. `ls /proc/<pid>` and `ls /proc/clank`
+/// list the fixed child names; real paths are delegated to `uu_ls::uumain` unchanged. Top-level
+/// `ls /proc` (enumerating every pid) is deferred to a later increment.
+pub(crate) struct Ls;
+
+impl Ls {
+    const NAME: &'static str = "ls";
+    const SYNOPSIS: &'static str = "list directory contents";
+}
+
+impl SimpleCommand for Ls {
+    fn get_content(
+        name: &str,
+        content_type: ContentType,
+        _options: &ContentOptions,
+    ) -> Result<String, Error> {
+        uu_get_content(name, Ls::SYNOPSIS, content_type)
+    }
+
+    fn execute<SE, I, S>(context: ExecutionContext<'_, SE>, args: I) -> Result<ExecutionResult, Error>
+    where
+        SE: ShellExtensions,
+        I: Iterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let argv: Vec<String> = args.map(|s| s.as_ref().to_string()).collect();
+        let proc_operand = argv
+            .iter()
+            .skip(1)
+            .find(|a| !is_flag(a) && crate::procfs::is_proc_path(a))
+            .cloned();
+
+        // Only the fixed-child-name listing of `/proc/<pid>` and `/proc/clank` is served here.
+        if let Some(op) = proc_operand {
+            if let Some(children) = crate::procfs::list_children(&op) {
+                let mut out = context.stdout();
+                let _ = writeln!(out, "{}", children.join("\n"));
+                return Ok(ExecutionResult::new(0));
+            }
+            let _ = writeln!(context.stderr(), "ls: {op}: No such file or directory");
+            return Ok(ExecutionResult::new(1));
+        }
+
+        // No /proc operand → delegate unchanged.
+        let os_argv = argv.iter().map(std::ffi::OsString::from);
+        let code = run_uu(&context, move || uu_ls::uumain(os_argv));
+        Ok(ExecutionResult::new(code.clamp(0, 255) as u8))
+    }
+}
 
 /// The coreutils builtins to register on the shell, in addition to brush's bash set.
 pub(crate) fn builtins<SE: ShellExtensions>() -> Vec<(String, Registration<SE>)> {

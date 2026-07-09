@@ -19,6 +19,7 @@
 mod coreutils;
 pub mod manifest;
 pub mod process;
+pub mod procfs;
 pub mod proctable;
 mod ps;
 pub mod registry;

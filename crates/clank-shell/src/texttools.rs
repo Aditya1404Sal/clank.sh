@@ -228,28 +228,42 @@ fn run_grep(argv: &[String]) -> ToolResult<i32> {
     let stdout = io::stdout();
     let mut printer = printer_builder.build_no_color(stdout.lock());
 
+    // A `/proc` path is virtual (not on disk); resolve its bytes from the process table. Any other
+    // path is read from the real filesystem. Both are then searched as an in-memory slice so the two
+    // sources go through identical matching/printing.
+    let environ = crate::procfs::current_environ();
     let mut matched = false;
     let mut failed = false;
     for file in files {
-        match std::fs::read(file) {
-            Ok(bytes) => {
-                if matcher.is_match(&bytes)? {
-                    matched = true;
+        let bytes = if crate::procfs::is_proc_path(file) {
+            match crate::proctable::active()
+                .map(|t| crate::procfs::resolve(file, &t.lock().unwrap(), &environ))
+            {
+                Some(Ok(content)) => content.into_bytes(),
+                _ => {
+                    eprintln!("grep: {file}: No such file or directory");
+                    failed = true;
+                    continue;
                 }
             }
-            Err(e) => {
-                eprintln!("grep: {file}: {e}");
-                failed = true;
-                continue;
+        } else {
+            match std::fs::read(file) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("grep: {file}: {e}");
+                    failed = true;
+                    continue;
+                }
             }
+        };
+
+        if matcher.is_match(&bytes)? {
+            matched = true;
         }
-        let result = searcher.search_path(&matcher, file, printer.sink_with_path(&matcher, file));
-        match result {
-            Ok(()) => {}
-            Err(e) => {
-                eprintln!("grep: {file}: {e}");
-                failed = true;
-            }
+        let result = searcher.search_slice(&matcher, &bytes, printer.sink_with_path(&matcher, file));
+        if let Err(e) = result {
+            eprintln!("grep: {file}: {e}");
+            failed = true;
         }
     }
 

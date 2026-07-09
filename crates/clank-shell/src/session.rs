@@ -291,6 +291,41 @@ mod tests {
         });
     }
 
+    /// `cat /proc/<pid>/status` reads the virtual process file through the real command path.
+    #[test]
+    fn cat_reads_virtual_proc_status() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let (out, _) = session.run_line("cat /proc/1/status").await;
+            let out = String::from_utf8(out).unwrap();
+            assert!(out.contains("Pid:"), "got: {out}");
+            assert!(out.contains("State:"));
+            assert!(out.contains("clank"));
+        });
+    }
+
+    // NOTE: `grep`'s output goes through the `run_uu` fd-swap harness (process-global fd 1), which
+    // is not parallel-safe across tests — so grep's `/proc` behavior is covered by the procfs unit
+    // tests (resolver) and the golem-e2e.sh agent assertions (real execution), not a native test
+    // here. `cat` uses `context.stdout()` directly, so its tests below are parallel-safe.
+
+    /// A real-file `cat` still works after `cat` became a `/proc`-aware shim (delegation intact).
+    #[test]
+    fn cat_still_reads_real_files() {
+        on_rt(async {
+            let dir = std::env::temp_dir();
+            let path = dir.join(format!("clank_cat_test_{}", std::process::id()));
+            std::fs::write(&path, b"real-file-contents\n").unwrap();
+            let mut session = Session::new().await.unwrap();
+            let (out, _) = session
+                .run_line(&format!("cat {}", path.display()))
+                .await;
+            let _ = std::fs::remove_file(&path);
+            let out = String::from_utf8(out).unwrap();
+            assert!(out.contains("real-file-contents"), "got: {out}");
+        });
+    }
+
     /// PIDs persist and keep climbing across `run_line` calls (the durable-agent property, tested
     /// locally): the second command gets a higher PID than the first.
     #[test]
