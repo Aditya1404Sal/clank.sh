@@ -304,10 +304,36 @@ mod tests {
         });
     }
 
-    // NOTE: `grep`'s output goes through the `run_uu` fd-swap harness (process-global fd 1), which
-    // is not parallel-safe across tests — so grep's `/proc` behavior is covered by the procfs unit
-    // tests (resolver) and the golem-e2e.sh agent assertions (real execution), not a native test
-    // here. `cat` uses `context.stdout()` directly, so its tests below are parallel-safe.
+    /// `grep` output is captured via `context.stdout()` (the `run_tool` path) — this is
+    /// parallel-safe (no process-global fd swap) and verifies the wasm output-capture fix on the
+    /// native side too.
+    #[test]
+    fn grep_captures_output() {
+        on_rt(async {
+            let dir = std::env::temp_dir();
+            let path = dir.join(format!("clank_grep_test_{}", std::process::id()));
+            std::fs::write(&path, b"alpha\nbeta\ngamma\n").unwrap();
+            let mut session = Session::new().await.unwrap();
+            let (out, _) = session
+                .run_line(&format!("grep beta {}", path.display()))
+                .await;
+            let _ = std::fs::remove_file(&path);
+            let out = String::from_utf8(out).unwrap();
+            assert!(out.contains("beta"), "grep output should contain the match, got: {out}");
+            assert!(!out.contains("alpha"), "grep should not emit non-matching lines: {out}");
+        });
+    }
+
+    /// `grep` over a virtual `/proc` file works and its output is captured.
+    #[test]
+    fn grep_matches_virtual_proc_file() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let (out, _) = session.run_line("grep State /proc/1/status").await;
+            let out = String::from_utf8(out).unwrap();
+            assert!(out.contains("State"), "got: {out}");
+        });
+    }
 
     /// A real-file `cat` still works after `cat` became a `/proc`-aware shim (delegation intact).
     #[test]

@@ -132,6 +132,24 @@ pub(crate) fn run_uu<SE: ShellExtensions>(
     code
 }
 
+/// Run a tool closure that writes directly to a `Write` sink — used by the text/data builtins
+/// (grep/jq/sed/…) whose Rust-library implementations we control. Unlike [`run_uu`], this does NOT
+/// swap process fds: it hands the closure `context.stdout()` (and `context.stderr()`), which are
+/// Brush's assigned `OpenFile`s. On wasm those are the in-memory capture stream, so output is
+/// captured correctly (writing to the process-global `io::stdout()` is NOT captured on wasm — the
+/// bug this fixes). Target-agnostic; no `/tmp` capture file, no fd games.
+pub(crate) fn run_tool<SE: ShellExtensions>(
+    context: &ExecutionContext<'_, SE>,
+    run: impl FnOnce(&mut dyn std::io::Write, &mut dyn std::io::Write) -> i32,
+) -> i32 {
+    let mut out = context.stdout();
+    let mut err = context.stderr();
+    let code = run(&mut out, &mut err);
+    let _ = out.flush();
+    let _ = err.flush();
+    code
+}
+
 /// Shared `get_content` body: derive real help content from a synopsis rather than a stub. Used by
 /// every coreutils builtin (macro-generated and the hand-written `/proc`-shimming `cat`/`ls`).
 fn uu_get_content(name: &str, synopsis: &str, content_type: ContentType) -> Result<String, Error> {

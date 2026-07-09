@@ -8,7 +8,7 @@ use brush_core::builtins::{ContentOptions, ContentType, Registration, SimpleComm
 use brush_core::commands::ExecutionContext;
 use brush_core::extensions::ShellExtensions;
 use brush_core::{Error, ExecutionResult};
-use std::io::{self, Write};
+use std::io::Write;
 use std::path::Path;
 
 type ToolResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -50,11 +50,14 @@ macro_rules! text_builtin {
                 S: AsRef<str>,
             {
                 let argv: Vec<String> = args.map(|s| s.as_ref().to_string()).collect();
-                let code = crate::coreutils::run_uu(&context, move || match $run(&argv) {
-                    Ok(code) => code,
-                    Err(e) => {
-                        eprintln!("{}: {e}", $name);
-                        1
+                // Write through Brush's stdout/stderr sinks (captured on wasm), not io::stdout().
+                let code = crate::coreutils::run_tool(&context, move |out, err| {
+                    match $run(&argv, out) {
+                        Ok(code) => code,
+                        Err(e) => {
+                            let _ = writeln!(err, "{}: {e}", $name);
+                            1
+                        }
                     }
                 });
                 Ok(ExecutionResult::new(code.clamp(0, 255) as u8))
@@ -96,7 +99,7 @@ pub(crate) fn manifests() -> Vec<crate::manifest::Manifest> {
     ]
 }
 
-fn run_jq(argv: &[String]) -> ToolResult<i32> {
+fn run_jq(argv: &[String], out: &mut dyn Write) -> ToolResult<i32> {
     use jaq_core::data::JustLut;
     use jaq_core::load::{import, Arena, File, Loader};
     use jaq_core::{compile::Compiler, unwrap_valr, Ctx, Vars};
@@ -148,7 +151,6 @@ fn run_jq(argv: &[String]) -> ToolResult<i32> {
         .map_err(|errs| format!("failed to compile filter: {errs:?}"))?;
     let ctx = Ctx::<JustLut<Val>>::new(&filter.lut, Vars::new([]));
     let pp = write::Pp::default();
-    let mut out = io::stdout().lock();
 
     let inputs: Box<dyn Iterator<Item = Result<Val, String>>> = if null_input {
         Box::new(std::iter::once(Ok(Val::Null)))
@@ -176,7 +178,7 @@ fn run_jq(argv: &[String]) -> ToolResult<i32> {
         for value in filter.id.run((ctx.clone(), input)) {
             match unwrap_valr(value) {
                 Ok(v) => {
-                    write::write(&mut out, &pp, 0, &v)?;
+                    write::write(&mut *out, &pp, 0, &v)?;
                     writeln!(out)?;
                 }
                 Err(e) => {
@@ -190,7 +192,7 @@ fn run_jq(argv: &[String]) -> ToolResult<i32> {
     Ok(if failed { 1 } else { 0 })
 }
 
-fn run_grep(argv: &[String]) -> ToolResult<i32> {
+fn run_grep(argv: &[String], out: &mut dyn Write) -> ToolResult<i32> {
     use grep::matcher::Matcher;
     use grep::regex::RegexMatcherBuilder;
     use grep::searcher::{BinaryDetection, SearcherBuilder};
@@ -225,8 +227,7 @@ fn run_grep(argv: &[String]) -> ToolResult<i32> {
         .build();
     let mut printer_builder = grep::printer::StandardBuilder::new();
     printer_builder.path(files.len() > 1);
-    let stdout = io::stdout();
-    let mut printer = printer_builder.build_no_color(stdout.lock());
+    let mut printer = printer_builder.build_no_color(&mut *out);
 
     // A `/proc` path is virtual (not on disk); resolve its bytes from the process table. Any other
     // path is read from the real filesystem. Both are then searched as an in-memory slice so the two
@@ -276,7 +277,7 @@ fn run_grep(argv: &[String]) -> ToolResult<i32> {
     })
 }
 
-fn run_sed(argv: &[String]) -> ToolResult<i32> {
+fn run_sed(argv: &[String], out: &mut dyn Write) -> ToolResult<i32> {
     let args = &argv[1..];
     let Some(script) = args.first() else {
         return usage("sed 's/PATTERN/REPLACEMENT/[g]' FILE...");
@@ -287,7 +288,6 @@ fn run_sed(argv: &[String]) -> ToolResult<i32> {
     }
     let substitution = Substitution::parse(script)?;
     let regex = regex::Regex::new(&substitution.pattern)?;
-    let mut out = io::stdout().lock();
 
     for file in files {
         let text = std::fs::read_to_string(file)?;
@@ -301,7 +301,7 @@ fn run_sed(argv: &[String]) -> ToolResult<i32> {
     Ok(0)
 }
 
-fn run_diff(argv: &[String]) -> ToolResult<i32> {
+fn run_diff(argv: &[String], out: &mut dyn Write) -> ToolResult<i32> {
     let args = &argv[1..];
     if args.len() != 2 {
         return usage("diff OLD NEW");
@@ -314,11 +314,11 @@ fn run_diff(argv: &[String]) -> ToolResult<i32> {
         .context_radius(3)
         .header(&args[0], &args[1])
         .to_string();
-    print!("{rendered}");
+    write!(out, "{rendered}")?;
     Ok(if rendered.is_empty() { 0 } else { 1 })
 }
 
-fn run_patch(argv: &[String]) -> ToolResult<i32> {
+fn run_patch(argv: &[String], _out: &mut dyn Write) -> ToolResult<i32> {
     let args = &argv[1..];
     if args.len() != 2 {
         return usage("patch FILE PATCHFILE");
@@ -331,7 +331,7 @@ fn run_patch(argv: &[String]) -> ToolResult<i32> {
     Ok(0)
 }
 
-fn run_file(argv: &[String]) -> ToolResult<i32> {
+fn run_file(argv: &[String], out: &mut dyn Write) -> ToolResult<i32> {
     let args = &argv[1..];
     if args.is_empty() {
         return usage("file FILE...");
@@ -340,17 +340,17 @@ fn run_file(argv: &[String]) -> ToolResult<i32> {
     for file in args {
         let path = Path::new(file);
         if path.is_dir() {
-            println!("{file}: directory");
+            writeln!(out, "{file}: directory")?;
             continue;
         }
         match infer::get_from_path(path)? {
-            Some(kind) => println!("{file}: {} ({})", kind.mime_type(), kind.extension()),
+            Some(kind) => writeln!(out, "{file}: {} ({})", kind.mime_type(), kind.extension())?,
             None => {
                 let bytes = std::fs::read(path)?;
                 if std::str::from_utf8(&bytes).is_ok() {
-                    println!("{file}: text/plain");
+                    writeln!(out, "{file}: text/plain")?;
                 } else {
-                    println!("{file}: data");
+                    writeln!(out, "{file}: data")?;
                 }
             }
         }

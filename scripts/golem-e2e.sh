@@ -314,13 +314,15 @@ expect_contains "ps -ef shows PPID column"         'ps -ef'  'PPID'
 # ============================================================================
 # /proc is a virtual (not file-backed) namespace served from the process table. clank's own cat/ls
 # resolve /proc paths and delegate real paths to uutils. All assertions are STANDALONE (no pipe):
-# clank pipelines wedge on the single-threaded wasm worker, so `cat /proc/.. | grep` is native-only.
-# (grep on /proc works natively too, but grep's output isn't captured on wasm — a separate
-# pre-existing grep-on-wasm limitation — so grep is asserted in native tests, not here.)
+# clank pipelines still wedge on the single-threaded wasm worker (Wall C — see the memory note), so
+# `cat /proc/.. | grep` is native-only. But grep's OUTPUT is now captured on wasm (the run_tool fix),
+# so `grep <pat> /proc/..` works standalone on the agent and is asserted below.
 step "Virtual /proc"
 expect_contains "cat /proc/1/status shows root Pid"  'cat /proc/1/status'   'Pid:'
 expect_contains "proc status shows State"            'cat /proc/1/status'   'State:'
 expect_contains "proc status root is sleeping"       'cat /proc/1/status'   'S (sleeping)'
+# grep output is captured on wasm now (run_tool → context.stdout()); grep on /proc works standalone.
+expect_contains "grep State /proc/1/status (captured)" 'grep State /proc/1/status'  'State'
 # pid 2 is the first line this session executed (`mkdir -p /tmp/work`, at the top of the run) — its
 # cmdline is still readable here, proving /proc reflects prior lines durably across invocations.
 expect_contains "cat /proc/2/cmdline (durable)"      'cat /proc/2/cmdline'  'mkdir'

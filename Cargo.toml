@@ -46,6 +46,9 @@ uu_sleep = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip
 # in lockstep) to the exact commit that carries the fix, so the build is reproducible and can't
 # shift under an upstream force-push. The fork's `wasip2-reopen` branch == this commit == upstream
 # `reubeno/brush` main; any of them resolves identically — the SHA is what matters.
+# NB: the fork also has a `wasm-pipes` branch (rev 5184ff6) with WIP wasm pipeline support
+# (in-memory pipes + inline stages) — NOT used here: it doesn't fully work yet (a hang remains,
+# "Wall C"). See memory clank-wasm-pipeline-followups. Do not bump to it until pipelines work end to end.
 brush-core = { git = "https://github.com/Aditya1404Sal/brush", rev = "0300a84" }
 brush-builtins = { git = "https://github.com/Aditya1404Sal/brush", rev = "0300a84" }
 brush-parser = { git = "https://github.com/Aditya1404Sal/brush", rev = "0300a84" }
