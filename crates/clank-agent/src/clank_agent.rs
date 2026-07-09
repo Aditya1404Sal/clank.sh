@@ -76,7 +76,12 @@ impl ClankAgent for ClankAgentImpl {
         if let Err(result) = self.ensure_session().await {
             return result;
         }
-        let result = self.session.as_mut().unwrap().answer_prompt(Some(response));
+        let result = self
+            .session
+            .as_mut()
+            .unwrap()
+            .answer_prompt(Some(response))
+            .await;
         eval_result(result)
     }
 
@@ -84,7 +89,7 @@ impl ClankAgent for ClankAgentImpl {
         if let Err(result) = self.ensure_session().await {
             return result;
         }
-        let result = self.session.as_mut().unwrap().answer_prompt(None);
+        let result = self.session.as_mut().unwrap().answer_prompt(None).await;
         eval_result(result)
     }
 

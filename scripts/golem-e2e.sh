@@ -254,8 +254,9 @@ expect "cp -r copies a directory"            'cp -r /tmp/work/sub /tmp/work/sub2
 # mv
 expect "mv renames a file"                   'mv /tmp/work/b /tmp/work/c; cat /tmp/work/c'        $'hello\nworld'
 # rm — delete, then confirm it's gone by testing for the file's existence (the agent fs has no
-# /dev/null, so don't redirect there; use a `test -e` guard instead).
-expect "rm deletes a file"                   'rm /tmp/work/c; if [ -e /tmp/work/c ]; then echo present; else echo gone; fi' $'gone'
+# /dev/null, so don't redirect there; use a `test -e` guard instead). `rm` is now sudo-only
+# (authorization enforcement), so it needs the `sudo` prefix to run without a confirmation pause.
+expect "sudo rm deletes a file"              'sudo rm /tmp/work/c; if [ -e /tmp/work/c ]; then echo present; else echo gone; fi' $'gone'
 # wc — uutils right-pads the columns, so assert the counts+name as a substring, not exact spacing
 expect_contains "wc counts lines/words/bytes" 'wc /tmp/work/a'                                    '2 12 /tmp/work/a'
 # head
@@ -400,6 +401,39 @@ expect_eval "valid choice then resolves"                   "$PU_GOOD"  '.stdout'
 eval_json eval '"prompt-user \"Proceed?\" --confirm"' >/dev/null
 PU_ABORT="$(eval_json abort_prompt)"
 expect_eval "abort_prompt exits 130"                       "$PU_ABORT"  '.exit_code'  '130'
+
+# ============================================================================
+# 2h. Authorization enforcement — sudo-only `rm` gates on approval (README policy model)
+# ============================================================================
+# `rm` is sudo-only (destructive op). Without `sudo` it surfaces a confirmation pause instead of
+# deleting; a human answer runs or denies it. `sudo rm` pre-authorizes and runs immediately. The
+# gate composes on the SAME pending-prompt pause as prompt-user — all sequential, no hang.
+step "Authorization (sudo-only rm gates on approval)"
+
+# Seed a file to attempt to delete under the gate.
+run_line 'echo target > /tmp/work/gated' >/dev/null
+
+# 1. `rm` without sudo surfaces a confirmation (pending_prompt set — NOTE: while a prompt is
+#    pending, ordinary commands are rejected, so we must resolve it before any run_line check).
+AZ_SURFACE="$(eval_json eval '"rm /tmp/work/gated"')"
+expect_eval "rm without sudo surfaces a confirmation"      "$AZ_SURFACE"  '.pending_prompt.question | contains("sudo")'  'true'
+
+# 2. Deny → exit 5. Now the prompt is resolved; check the file survived.
+AZ_DENY="$(eval_json answer_prompt '"no"')"
+expect_eval "denied rm exits 5"                            "$AZ_DENY"  '.exit_code'  '5'
+expect "gated file survives an unapproved+denied rm"       'if [ -e /tmp/work/gated ]; then echo present; else echo gone; fi'  $'present'
+
+# 3. Approve → the deferred rm runs. Resolve first, then check the file is gone.
+eval_json eval '"rm /tmp/work/gated"' >/dev/null
+AZ_APPROVE="$(eval_json answer_prompt '"yes"')"
+expect_eval "approved rm exits 0"                          "$AZ_APPROVE"  '.exit_code'  '0'
+expect "approved rm deletes the file"                      'if [ -e /tmp/work/gated ]; then echo present; else echo gone; fi'  $'gone'
+
+# 4. `sudo rm` pre-authorizes: runs immediately, no prompt.
+run_line 'echo target2 > /tmp/work/gated2' >/dev/null
+AZ_SUDO="$(eval_json eval '"sudo rm /tmp/work/gated2"')"
+expect_eval "sudo rm does not prompt"                      "$AZ_SUDO"  '.pending_prompt'  'null'
+expect "sudo rm deletes immediately"                       'if [ -e /tmp/work/gated2 ]; then echo present; else echo gone; fi'  $'gone'
 
 # ============================================================================
 # 3. Durability — write in one invocation, read in a SEPARATE invocation

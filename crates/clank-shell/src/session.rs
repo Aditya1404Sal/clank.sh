@@ -21,12 +21,29 @@ use brush_core::{ExecutionControlFlow, Shell, SourceInfo};
 
 use std::sync::{Arc, Mutex};
 
+use crate::authz::{self, AuthzState, Decision};
 use crate::process::ProcessKind;
 use crate::promptuser::{AnswerInput, PendingPrompt, Resolution};
 use crate::proctable::ProcessTable;
 use crate::registry::CommandRegistry;
 
 type BoxError = Box<dyn std::error::Error>;
+
+/// Why the shell is paused awaiting a response — set alongside the [`PendingPrompt`].
+enum PendingKind {
+    /// A `prompt-user` invocation: the answer is returned to the caller verbatim.
+    UserPrompt,
+    /// An authorization confirmation gating a command: on approval the stashed `command` runs; on
+    /// denial the caller gets exit `5`. `all` (when offered) also sets the session `allow_all` grant.
+    AuthConfirm { command: String, sudo_grant: bool },
+}
+
+/// The shell's paused state: the surfaced prompt, the process-table row it belongs to, and why.
+struct Pending {
+    prompt: PendingPrompt,
+    pid: Option<u32>,
+    kind: PendingKind,
+}
 
 /// The result of evaluating one shell line.
 pub struct LineResult {
@@ -67,6 +84,17 @@ impl LineResult {
             pending_prompt: None,
         }
     }
+
+    /// An authorization failure: exit `5` (README) with a stderr message.
+    fn denied() -> Self {
+        Self {
+            stdout: Vec::new(),
+            stderr: b"clank: authorization denied\n".to_vec(),
+            exit_code: 5,
+            flow: Flow::Continue,
+            pending_prompt: None,
+        }
+    }
 }
 
 /// A live shell session: the Brush interpreter plus the session transcript and the command
@@ -81,11 +109,13 @@ pub struct Session {
     /// install it into the process-global slot the `ps` builtin reads (Brush builtins can't reach
     /// `Session` directly).
     proc_table: Arc<Mutex<ProcessTable>>,
-    /// A `prompt-user` question the shell has surfaced and is awaiting a response to, plus the
-    /// process-table PID of the paused (`P`) row. Durable `Session` state (persisted on the Golem
-    /// oplog), so a pending prompt survives across invocations — the caller answers it via
-    /// [`Session::answer_prompt`]. `None` when no prompt is outstanding.
-    pending: Option<(PendingPrompt, Option<u32>)>,
+    /// A question the shell has surfaced and is awaiting a response to (a `prompt-user` invocation
+    /// or an authorization confirmation), plus its process row and kind. Durable `Session` state
+    /// (persisted on the Golem oplog), so it survives across invocations — the caller answers via
+    /// [`Session::answer_prompt`]. `None` when nothing is outstanding.
+    pending: Option<Pending>,
+    /// Session-scoped authorization state (the "all" grant). See [`crate::authz`].
+    authz: AuthzState,
     source: SourceInfo,
     #[cfg(target_arch = "wasm32")]
     rt: tokio::runtime::Runtime,
@@ -105,6 +135,7 @@ impl Session {
                 registry: crate::registry::build(),
                 proc_table: Arc::new(Mutex::new(ProcessTable::new())),
                 pending: None,
+                authz: AuthzState::default(),
                 source: SourceInfo::default(),
                 rt,
             })
@@ -118,6 +149,7 @@ impl Session {
                 registry: crate::registry::build(),
                 proc_table: Arc::new(Mutex::new(ProcessTable::new())),
                 pending: None,
+                authz: AuthzState::default(),
                 source: SourceInfo::default(),
             })
         }
@@ -177,7 +209,43 @@ impl Session {
             return self.surface_prompt(line, pid);
         }
 
+        // Authorization gate: enforce the leading command's `authorization-policy` (README). A
+        // `confirm`/`sudo-only` command that isn't pre-authorized surfaces a confirmation pause
+        // (reusing the `prompt-user` mechanism) and defers the command until approved. In every
+        // path the command actually run is the line with any leading `sudo` token stripped — `sudo`
+        // is a clank authorization marker, not a real executable to dispatch to Brush.
+        let (policy, elevated, command) = authz::resolve(&self.registry, line);
+        let effective = strip_sudo_prefix(line);
+        match authz::decide(policy, elevated, self.authz.allow_all) {
+            Decision::Allow => {}
+            Decision::Deny => {
+                return self.finish_intercepted(pid, LineResult::denied());
+            }
+            Decision::Confirm { sudo_grant } => {
+                return self.surface_auth_confirm(command.as_deref(), effective, pid, sudo_grant);
+            }
+        }
+
+        let result = self.run_command(&effective, pid).await;
+        self.transcript.record_output(&result.terminal_output());
+        result
+    }
+
+    /// Execute `line` through Brush and reap its process row (`R → Z`). The shared command path used
+    /// both by `eval_line` (for an allowed command) and by `answer_prompt` (for an approved gated
+    /// command). Does not record the transcript — the caller decides (an approved command records;
+    /// `eval_line` records after).
+    async fn run_command(&mut self, line: &str, pid: Option<u32>) -> LineResult {
         let result = self.execute(line).await;
+        if let Some(pid) = pid {
+            self.proc_table.lock().unwrap().complete(pid);
+        }
+        result
+    }
+
+    /// Complete an intercepted line's row and record its output (for intercepted paths that don't go
+    /// through `run_command`, e.g. an authorization denial).
+    fn finish_intercepted(&mut self, pid: Option<u32>, result: LineResult) -> LineResult {
         if let Some(pid) = pid {
             self.proc_table.lock().unwrap().complete(pid);
         }
@@ -202,49 +270,85 @@ impl Session {
     fn surface_prompt(&mut self, line: &str, pid: Option<u32>) -> LineResult {
         let args = match promptuser::parse(line) {
             Ok(args) => args,
-            Err(e) => {
-                if let Some(pid) = pid {
-                    self.proc_table.lock().unwrap().complete(pid);
-                }
-                let result = LineResult::stderr(format!("{e}\n"));
-                self.transcript.record_output(&result.terminal_output());
-                return result;
-            }
+            Err(e) => return self.finish_intercepted(pid, LineResult::stderr(format!("{e}\n"))),
         };
         // Piping into `prompt-user` (`X | prompt-user ...`) is a later increment; for now stdin is
         // never wired, so no markdown is prepended.
         let pending = args.into_pending(None);
+        self.surface_pending(pending, pid, PendingKind::UserPrompt)
+    }
 
-        // Leave the row paused (`P`) until the answer arrives; record the question as this line's
-        // output (unless `--secret`, though the question itself isn't the secret — the response is).
+    /// Surface an authorization confirmation for a gated command: pause, record the pending
+    /// confirmation (with the command to run on approval), and return `pending_prompt` immediately.
+    fn surface_auth_confirm(
+        &mut self,
+        command_name: Option<&str>,
+        gated_command: String,
+        pid: Option<u32>,
+        sudo_grant: bool,
+    ) -> LineResult {
+        let name = command_name.unwrap_or("command");
+        let synopsis = self
+            .registry
+            .get(name)
+            .map(|m| m.synopsis.clone())
+            .unwrap_or_else(|| "run this command".to_string());
+        let prompt = PendingPrompt {
+            question: authz::confirm_question(name, &synopsis, sudo_grant),
+            choices: Some(authz::confirm_choices(sudo_grant)),
+            secret: false,
+        };
+        self.surface_pending(
+            prompt,
+            pid,
+            PendingKind::AuthConfirm {
+                command: gated_command,
+                sudo_grant,
+            },
+        )
+    }
+
+    /// Shared tail of the surface paths: pause the row, record the question, stash the pending
+    /// state, and return a `pending_prompt` result.
+    fn surface_pending(
+        &mut self,
+        prompt: PendingPrompt,
+        pid: Option<u32>,
+        kind: PendingKind,
+    ) -> LineResult {
         if let Some(pid) = pid {
             self.proc_table.lock().unwrap().pause(pid);
         }
-        let mut stdout = pending.question.clone().into_bytes();
+        let mut stdout = prompt.question.clone().into_bytes();
         stdout.push(b'\n');
         self.transcript.record_output(&stdout);
 
-        self.pending = Some((pending.clone(), pid));
+        self.pending = Some(Pending {
+            prompt: prompt.clone(),
+            pid,
+            kind,
+        });
         LineResult {
             stdout,
             stderr: Vec::new(),
             exit_code: 0,
             flow: Flow::Continue,
-            pending_prompt: Some(pending),
+            pending_prompt: Some(prompt),
         }
     }
 
-    /// Deliver a response to the outstanding `prompt-user` question. `response` is `Some(text)` for
-    /// an answer or `None` for an abort (README: exit `130`). Resumes and reaps the paused row.
+    /// Deliver a response to the outstanding question (a `prompt-user` prompt or an authorization
+    /// confirmation). `response` is `Some(text)` for an answer or `None` for an abort. Resumes the
+    /// paused row.
     ///
-    /// - A valid answer → the response on stdout, exit `0` (recorded in the transcript unless the
-    ///   prompt was `--secret`).
-    /// - Abort → no stdout, exit `130`.
-    /// - A response outside the prompt's `--choices` → an error on stderr, exit `1`, and the prompt
-    ///   **stays pending** so the caller can re-ask.
-    /// - No prompt outstanding → an error, exit `1`.
-    pub fn answer_prompt(&mut self, response: Option<String>) -> LineResult {
-        let Some((pending, pid)) = self.pending.clone() else {
+    /// For a `prompt-user` prompt: a valid answer → the response on stdout, exit `0`; abort → exit
+    /// `130`; an answer outside `--choices` → exit `1` with the prompt left pending to re-ask.
+    ///
+    /// For an authorization confirmation: `yes` (or `all`) → runs the gated command; `all` also
+    /// grants blanket `confirm` approval for the session; `no`/abort → exit `5` (denied).
+    pub async fn answer_prompt(&mut self, response: Option<String>) -> LineResult {
+        let Some(pending) = self.pending.take() else {
+            self.pending = None;
             return LineResult::stderr("clank: no prompt-user question is awaiting a response\n");
         };
 
@@ -253,38 +357,85 @@ impl Session {
             None => AnswerInput::Abort,
         };
 
-        match promptuser::resolve(&pending, answer) {
-            Resolution::InvalidChoice { message } => {
-                // Prompt stays pending — re-ask. Don't touch the row (still `P`).
-                LineResult::stderr(message)
-            }
-            resolution => {
-                // Resolved (answered or aborted): resume and reap the paused row, clear pending.
-                if let Some(pid) = pid {
-                    let mut table = self.proc_table.lock().unwrap();
-                    table.resume(pid);
-                    table.complete(pid);
-                }
-                self.pending = None;
+        let resolution = promptuser::resolve(&pending.prompt, answer);
+        if let Resolution::InvalidChoice { message } = resolution {
+            // Prompt stays pending — re-ask. Don't touch the row (still `P`).
+            self.pending = Some(pending);
+            return LineResult::stderr(message);
+        }
 
-                let (stdout, exit_code, secret) = match resolution {
-                    Resolution::Answered { stdout, secret } => (stdout, 0, secret),
-                    Resolution::Aborted => (Vec::new(), 130, false),
-                    Resolution::InvalidChoice { .. } => unreachable!("handled above"),
-                };
-                // `--secret` responses are never entered into the transcript (README).
-                if !secret {
-                    self.transcript.record_output(&stdout);
-                }
-                LineResult {
-                    stdout,
-                    stderr: Vec::new(),
-                    exit_code,
-                    flow: Flow::Continue,
-                    pending_prompt: None,
-                }
+        // Resolved: resume the row (it will be reaped by the specific path below).
+        if let Some(pid) = pending.pid {
+            self.proc_table.lock().unwrap().resume(pid);
+        }
+
+        match pending.kind {
+            PendingKind::UserPrompt => self.resolve_user_prompt(resolution, pending.pid),
+            PendingKind::AuthConfirm {
+                command,
+                sudo_grant,
+            } => {
+                self.resolve_auth_confirm(resolution, &command, sudo_grant, pending.pid)
+                    .await
             }
         }
+    }
+
+    /// Resolve a `prompt-user` response: the answer to stdout (exit 0) or an abort (exit 130), reap
+    /// the row, and record the transcript (unless `--secret`).
+    fn resolve_user_prompt(&mut self, resolution: Resolution, pid: Option<u32>) -> LineResult {
+        if let Some(pid) = pid {
+            self.proc_table.lock().unwrap().complete(pid);
+        }
+        let (stdout, exit_code, secret) = match resolution {
+            Resolution::Answered { stdout, secret } => (stdout, 0, secret),
+            Resolution::Aborted => (Vec::new(), 130, false),
+            Resolution::InvalidChoice { .. } => unreachable!("handled by caller"),
+        };
+        if !secret {
+            self.transcript.record_output(&stdout);
+        }
+        LineResult {
+            stdout,
+            stderr: Vec::new(),
+            exit_code,
+            flow: Flow::Continue,
+            pending_prompt: None,
+        }
+    }
+
+    /// Resolve an authorization confirmation: on approval run the gated command (recording it), on
+    /// denial reap the row and return exit `5`. A response of "all" also sets the session grant.
+    async fn resolve_auth_confirm(
+        &mut self,
+        resolution: Resolution,
+        command: &str,
+        _sudo_grant: bool,
+        pid: Option<u32>,
+    ) -> LineResult {
+        let approved = matches!(&resolution, Resolution::Answered { stdout, .. }
+            if matches!(String::from_utf8_lossy(stdout).trim(), "yes" | "all"));
+        let grant_all = matches!(&resolution, Resolution::Answered { stdout, .. }
+            if String::from_utf8_lossy(stdout).trim() == "all");
+
+        if !approved {
+            // "no" or abort → denied (exit 5). Reap the row.
+            if let Some(pid) = pid {
+                self.proc_table.lock().unwrap().complete(pid);
+            }
+            let result = LineResult::denied();
+            self.transcript.record_output(&result.terminal_output());
+            return result;
+        }
+
+        if grant_all {
+            self.authz.allow_all = true;
+        }
+
+        // Approved: run the gated command, reusing the row (still `R` after resume) and reaping it.
+        let result = self.run_command(command, pid).await;
+        self.transcript.record_output(&result.terminal_output());
+        result
     }
 
     /// Native execution: capture Brush's stdout and stderr into anonymous temp files.
@@ -363,6 +514,18 @@ impl Session {
 /// command kinds exist (they'll be resolved from `$PATH` / the registry).
 fn classify(_line: &str) -> ProcessKind {
     ProcessKind::Builtin
+}
+
+/// Strip a leading `sudo ` token from a line (the command to actually run once `sudo`-elevated
+/// authorization is satisfied). Whitespace-based — sufficient for the leading-word scope of this
+/// increment. If the line isn't `sudo`-prefixed, it's returned unchanged.
+fn strip_sudo_prefix(line: &str) -> String {
+    let trimmed = line.trim_start();
+    match trimmed.strip_prefix("sudo") {
+        // Only a `sudo` token followed by whitespace (not `sudoedit`, etc.).
+        Some(rest) if rest.starts_with(char::is_whitespace) => rest.trim_start().to_string(),
+        _ => line.to_string(),
+    }
 }
 
 async fn build_shell() -> Result<Shell, brush_core::Error> {
@@ -584,7 +747,7 @@ mod tests {
             assert!(session.has_pending_prompt());
 
             // Step 2: answer. The response flows to stdout, pending clears.
-            let answered = session.answer_prompt(Some("production".to_string()));
+            let answered = session.answer_prompt(Some("production".to_string())).await;
             assert_eq!(String::from_utf8(answered.stdout).unwrap(), "production\n");
             assert_eq!(answered.exit_code, 0);
             assert!(answered.pending_prompt.is_none());
@@ -602,7 +765,7 @@ mod tests {
         on_rt(async {
             let mut session = Session::new().await.unwrap();
             session.eval_line(r#"prompt-user "q?""#).await;
-            let result = session.answer_prompt(None);
+            let result = session.answer_prompt(None).await;
             assert!(result.stdout.is_empty());
             assert_eq!(result.exit_code, 130);
             assert!(!session.has_pending_prompt());
@@ -617,12 +780,12 @@ mod tests {
             session
                 .eval_line(r#"prompt-user "Approve?" --confirm"#)
                 .await;
-            let bad = session.answer_prompt(Some("maybe".to_string()));
+            let bad = session.answer_prompt(Some("maybe".to_string())).await;
             assert_eq!(bad.exit_code, 1);
             assert!(session.has_pending_prompt(), "prompt should stay pending");
 
             // A valid choice then resolves it.
-            let ok = session.answer_prompt(Some("yes".to_string()));
+            let ok = session.answer_prompt(Some("yes".to_string())).await;
             assert_eq!(String::from_utf8(ok.stdout).unwrap(), "yes\n");
             assert!(!session.has_pending_prompt());
         });
@@ -637,7 +800,7 @@ mod tests {
             session
                 .eval_line(r#"prompt-user "Enter the API key:" --secret"#)
                 .await;
-            let result = session.answer_prompt(Some("s3cr3t-key".to_string()));
+            let result = session.answer_prompt(Some("s3cr3t-key".to_string())).await;
             // The caller still gets the response on stdout...
             assert_eq!(String::from_utf8(result.stdout).unwrap(), "s3cr3t-key\n");
 
@@ -677,8 +840,90 @@ mod tests {
     fn answer_prompt_with_no_pending_is_an_error() {
         on_rt(async {
             let mut session = Session::new().await.unwrap();
-            let result = session.answer_prompt(Some("x".to_string()));
+            let result = session.answer_prompt(Some("x".to_string())).await;
             assert_ne!(result.exit_code, 0);
+        });
+    }
+
+    /// A seeded temp file for `rm` tests: returns its path. Uses a unique name per test.
+    fn seed_file(tag: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("clank_authz_{tag}_{}", std::process::id()));
+        std::fs::write(&path, b"x").unwrap();
+        path
+    }
+
+    /// `rm` is `sudo-only`: without elevation it surfaces a confirmation instead of deleting, and
+    /// the file survives. (The gate composes on the same pending-prompt pause as `prompt-user`.)
+    #[test]
+    fn sudo_only_rm_without_sudo_surfaces_confirmation() {
+        on_rt(async {
+            let path = seed_file("gate");
+            let mut session = Session::new().await.unwrap();
+            let result = session
+                .eval_line(&format!("rm {}", path.display()))
+                .await;
+            // A confirmation was surfaced, not a deletion.
+            assert!(result.pending_prompt.is_some(), "rm should surface a sudo confirmation");
+            assert!(session.has_pending_prompt());
+            assert!(path.exists(), "file must survive an unapproved sudo-only rm");
+            let _ = std::fs::remove_file(&path);
+        });
+    }
+
+    /// Denying (`no`) a `sudo-only` `rm` confirmation → exit 5, file survives, pending clears.
+    #[test]
+    fn sudo_only_rm_denied_returns_exit_5() {
+        on_rt(async {
+            let path = seed_file("deny");
+            let mut session = Session::new().await.unwrap();
+            session.eval_line(&format!("rm {}", path.display())).await;
+            let denied = session.answer_prompt(Some("no".to_string())).await;
+            assert_eq!(denied.exit_code, 5, "denial is exit 5");
+            assert!(path.exists(), "denied rm must not delete");
+            assert!(!session.has_pending_prompt());
+            let _ = std::fs::remove_file(&path);
+        });
+    }
+
+    /// Approving (`yes`) a `sudo-only` `rm` confirmation runs the deferred command — the file is
+    /// deleted, exit 0.
+    #[test]
+    fn sudo_only_rm_approved_runs_the_command() {
+        on_rt(async {
+            let path = seed_file("approve");
+            let mut session = Session::new().await.unwrap();
+            session.eval_line(&format!("rm {}", path.display())).await;
+            let approved = session.answer_prompt(Some("yes".to_string())).await;
+            assert_eq!(approved.exit_code, 0, "approved rm succeeds");
+            assert!(!path.exists(), "approved rm must delete the file");
+            assert!(!session.has_pending_prompt());
+        });
+    }
+
+    /// A `sudo rm` prefix pre-authorizes the sudo-only command — it runs immediately, no prompt.
+    #[test]
+    fn sudo_prefix_bypasses_the_gate() {
+        on_rt(async {
+            let path = seed_file("sudo");
+            let mut session = Session::new().await.unwrap();
+            let result = session
+                .eval_line(&format!("sudo rm {}", path.display()))
+                .await;
+            assert!(result.pending_prompt.is_none(), "sudo rm should not prompt");
+            assert_eq!(result.exit_code, 0);
+            assert!(!path.exists(), "sudo rm deletes immediately");
+        });
+    }
+
+    /// An `allow`-policy command (e.g. `echo`) is completely unaffected by the gate.
+    #[test]
+    fn allow_policy_command_is_ungated() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let result = session.eval_line("echo hi").await;
+            assert!(result.pending_prompt.is_none());
+            assert_eq!(String::from_utf8(result.stdout).unwrap(), "hi\n");
+            assert_eq!(result.exit_code, 0);
         });
     }
 

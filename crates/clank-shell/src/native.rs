@@ -33,10 +33,10 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             while session.has_pending_prompt() {
                 line.clear();
                 let answer = if io::stdin().read_line(&mut line)? == 0 {
-                    session.answer_prompt(None) // EOF → abort
+                    session.answer_prompt(None).await // EOF → abort
                 } else {
                     let answer_str = String::from_utf8_lossy(trim_eol(line.as_bytes())).into_owned();
-                    session.answer_prompt(Some(answer_str))
+                    session.answer_prompt(Some(answer_str)).await
                 };
                 write_stdout(&answer.terminal_output())?;
             }

@@ -383,11 +383,12 @@ pub(crate) fn builtins<SE: ShellExtensions>() -> Vec<(String, Registration<SE>)>
 /// commands expose — so a builtin and its manifest can't describe themselves differently. The
 /// registry drift-guard test asserts this list's names match [`builtins`]'s.
 ///
-/// All are `Subprocess` scope, `Allow` policy (uutils file/text tools); the constructor defaults
-/// cover that, so each entry is a one-liner. Richer per-command input schemas come in a later
-/// increment.
+/// Mostly `Subprocess` scope, `Allow` policy (uutils file/text tools); the constructor defaults
+/// cover that, so each entry is a one-liner. The exception is `rm`, a destructive op the README
+/// classifies `sudo-only` — the first policy actually enforced (see [`crate::authz`]). Richer
+/// per-command input schemas and the write-to-`~`=`confirm` file-path policies come later.
 pub(crate) fn manifests() -> Vec<crate::manifest::Manifest> {
-    use crate::manifest::Manifest;
+    use crate::manifest::{AuthorizationPolicy, Manifest};
     vec![
         Manifest::builtin(Cat::NAME, Cat::SYNOPSIS),
         Manifest::builtin(Ls::NAME, Ls::SYNOPSIS),
@@ -395,7 +396,8 @@ pub(crate) fn manifests() -> Vec<crate::manifest::Manifest> {
         Manifest::builtin(Head::NAME, Head::SYNOPSIS),
         Manifest::builtin(Sort::NAME, Sort::SYNOPSIS),
         Manifest::builtin(Mkdir::NAME, Mkdir::SYNOPSIS),
-        Manifest::builtin(Rm::NAME, Rm::SYNOPSIS),
+        // Destructive: sudo-only (README's authorization example table).
+        Manifest::builtin(Rm::NAME, Rm::SYNOPSIS).with_policy(AuthorizationPolicy::SudoOnly),
         Manifest::builtin(Mv::NAME, Mv::SYNOPSIS),
         Manifest::builtin(Cp::NAME, Cp::SYNOPSIS),
         Manifest::builtin(Env::NAME, Env::SYNOPSIS),
