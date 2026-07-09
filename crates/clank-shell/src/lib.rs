@@ -19,6 +19,8 @@
 mod coreutils;
 pub mod manifest;
 pub mod process;
+pub mod proctable;
+mod ps;
 pub mod registry;
 pub mod session;
 mod texttools;

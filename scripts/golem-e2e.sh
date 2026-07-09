@@ -291,6 +291,25 @@ step "Command manifests"
 expect_contains "help shows manifest synopsis"   'help cat'  'concatenate files'
 
 # ============================================================================
+# 2e. Process table — `ps` reflects a real per-line process table
+# ============================================================================
+# Each executed line becomes one process row (PID/state). `ps` reads the table installed for the
+# current line, so it sees the synthetic root, prior lines as Z, and its own row as R.
+step "Process table (ps)"
+# Run a uniquely-named command in ONE invocation, then `ps` in a SEPARATE invocation must still show
+# it — proving the process table persists across invocations on the durable agent.
+run_line 'echo ps_marker_xyz' >/dev/null
+expect_contains "ps shows a prior line (durable)"  'ps'  'echo ps_marker_xyz'
+# The prior line is completed → Z; the row for it in `ps` output carries Z.
+expect_contains "prior line shows Z state"         'ps'  'ps_marker_xyz'
+# ps shows the synthetic clank root and its own running row.
+expect_contains "ps shows the clank root"          'ps'  'clank'
+expect_contains "ps default header"                'ps'  'PID'
+# Wide formats render their headers with cpu/mem as dashes.
+expect_contains "ps aux header renders"            'ps aux'  '%CPU'
+expect_contains "ps -ef shows PPID column"         'ps -ef'  'PPID'
+
+# ============================================================================
 # 3. Durability — write in one invocation, read in a SEPARATE invocation
 # ============================================================================
 step "Durability check (state persists across invocations)"

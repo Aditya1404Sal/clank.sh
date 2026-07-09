@@ -76,6 +76,9 @@ pub fn build() -> CommandRegistry {
     for manifest in crate::texttools::manifests() {
         registry.insert(manifest);
     }
+    for manifest in crate::ps::manifests() {
+        registry.insert(manifest);
+    }
     registry
 }
 
@@ -105,6 +108,7 @@ mod tests {
         let builtin_names: BTreeSet<String> = crate::coreutils::builtins::<SE>()
             .into_iter()
             .chain(crate::texttools::builtins::<SE>())
+            .chain(crate::ps::builtins::<SE>())
             .map(|(name, _reg)| name)
             .collect();
 

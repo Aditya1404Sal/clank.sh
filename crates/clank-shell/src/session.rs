@@ -19,6 +19,10 @@ use brush_builtins::{BuiltinSet, ShellBuilderExt};
 use brush_core::openfiles::{OpenFile, OpenFiles};
 use brush_core::{ExecutionControlFlow, Shell, SourceInfo};
 
+use std::sync::{Arc, Mutex};
+
+use crate::process::ProcessKind;
+use crate::proctable::ProcessTable;
 use crate::registry::CommandRegistry;
 
 type BoxError = Box<dyn std::error::Error>;
@@ -31,6 +35,10 @@ pub struct Session {
     /// The clank-owned inventory of command manifests (sits beside `transcript` as a shell-owned
     /// state object). Drives command metadata surfaces; not yet consulted on the execution path.
     registry: CommandRegistry,
+    /// The process table: one row per executed line. Shared behind `Arc<Mutex>` so `run_line` can
+    /// install it into the process-global slot the `ps` builtin reads (Brush builtins can't reach
+    /// `Session` directly).
+    proc_table: Arc<Mutex<ProcessTable>>,
     source: SourceInfo,
     #[cfg(target_arch = "wasm32")]
     rt: tokio::runtime::Runtime,
@@ -48,6 +56,7 @@ impl Session {
                 shell,
                 transcript: Transcript::new(),
                 registry: crate::registry::build(),
+                proc_table: Arc::new(Mutex::new(ProcessTable::new())),
                 source: SourceInfo::default(),
                 rt,
             })
@@ -59,6 +68,7 @@ impl Session {
                 shell,
                 transcript: Transcript::new(),
                 registry: crate::registry::build(),
+                proc_table: Arc::new(Mutex::new(ProcessTable::new())),
                 source: SourceInfo::default(),
             })
         }
@@ -74,12 +84,37 @@ impl Session {
     pub async fn run_line(&mut self, line: &str) -> (Vec<u8>, Flow) {
         self.transcript.record_command(line);
 
+        // Install this session's process table as the active one for the duration of the line, so
+        // the `ps` builtin (a Brush builtin, which can't reach `Session` directly) can read it.
+        // The guard clears the slot on drop.
+        let _install = crate::proctable::install(self.proc_table.clone());
+
+        // Record this line as a process (one PID per executed line). Blank lines get no row, matching
+        // the "empty line re-prompts" behavior. `context` lines DO get a row — they're real typed
+        // work, and `ps` omitting them would mislead. The row is born `R` and marked `Z` only after
+        // execution returns, so a `ps` in this same line sees its own row as `R`, like real Unix.
+        let pid = {
+            let argv: Vec<String> = line.split_whitespace().map(String::from).collect();
+            if argv.is_empty() {
+                None
+            } else {
+                let kind = classify(line);
+                Some(self.proc_table.lock().unwrap().spawn(kind, argv))
+            }
+        };
+
         // `context show` output is intentionally not recorded back into the transcript.
         if let Some(bytes) = dispatch_context(&mut self.transcript, line) {
+            if let Some(pid) = pid {
+                self.proc_table.lock().unwrap().complete(pid);
+            }
             return (bytes, Flow::Continue);
         }
 
         let (output, exit) = self.execute(line).await;
+        if let Some(pid) = pid {
+            self.proc_table.lock().unwrap().complete(pid);
+        }
         self.transcript.record_output(&output);
         (output, if exit { Flow::Exit } else { Flow::Continue })
     }
@@ -121,8 +156,6 @@ impl Session {
     /// async on the owned current-thread runtime.
     #[cfg(target_arch = "wasm32")]
     async fn execute(&mut self, line: &str) -> (Vec<u8>, bool) {
-        use std::sync::{Arc, Mutex};
-
         let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
         let mut params = self.shell.default_exec_params();
         params.set_fd(
@@ -145,11 +178,22 @@ impl Session {
     }
 }
 
+/// Classify a command line into a process kind for the process table. Everything is a `Builtin`
+/// this increment; this is where Script/Prompt/AgentInvocation classification lands once those
+/// command kinds exist (they'll be resolved from `$PATH` / the registry).
+fn classify(_line: &str) -> ProcessKind {
+    ProcessKind::Builtin
+}
+
 async fn build_shell() -> Result<Shell, brush_core::Error> {
+    // NB: clank's builtins are registered here AND their manifests in `registry::build()`; the two
+    // must stay in lockstep (the registry drift-guard test enforces it). Adding a builtin via
+    // `Shell::register_builtin` directly would bypass the manifest — don't.
     Shell::builder()
         .default_builtins(BuiltinSet::BashMode)
         .builtins(crate::coreutils::builtins())
         .builtins(crate::texttools::builtins())
+        .builtins(crate::ps::builtins())
         .build()
         .await
 }
@@ -199,5 +243,74 @@ impl std::io::Write for BufSink {
 impl brush_core::openfiles::Stream for BufSink {
     fn clone_box(&self) -> Box<dyn brush_core::openfiles::Stream> {
         Box::new(self.clone())
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+
+    /// Drive a closure on a fresh current-thread runtime (mirrors how `Session` is used natively).
+    fn on_rt<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(f)
+    }
+
+    /// End-to-end through the public API: a completed command shows `Z` in `ps`, and `ps` sees its
+    /// own row as `R` (spawned before execution, completed only after) — like real Unix.
+    #[test]
+    fn ps_reflects_completed_and_running_rows() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let (_out, _flow) = session.run_line("echo hi").await;
+            let (ps_out, _flow) = session.run_line("ps").await;
+            let ps_out = String::from_utf8(ps_out).unwrap();
+
+            // The prior `echo hi` line completed → its row is Z.
+            let echo_row = ps_out
+                .lines()
+                .find(|l| l.contains("echo hi"))
+                .expect("ps should list the completed `echo hi` line");
+            assert!(
+                echo_row.contains('Z'),
+                "completed line should be Z, got: {echo_row}"
+            );
+
+            // The `ps` invocation itself is still running while it renders → its row is R.
+            let ps_row = ps_out
+                .lines()
+                .find(|l| l.trim_end().ends_with("ps"))
+                .expect("ps should list itself");
+            assert!(ps_row.contains('R'), "ps's own row should be R, got: {ps_row}");
+
+            // The synthetic root is present.
+            assert!(ps_out.contains("clank"));
+        });
+    }
+
+    /// PIDs persist and keep climbing across `run_line` calls (the durable-agent property, tested
+    /// locally): the second command gets a higher PID than the first.
+    #[test]
+    fn pids_are_monotonic_across_lines() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            session.run_line("echo one").await;
+            session.run_line("echo two").await;
+            let (ps_out, _) = session.run_line("ps").await;
+            let ps_out = String::from_utf8(ps_out).unwrap();
+
+            let pid_of = |needle: &str| -> u32 {
+                ps_out
+                    .lines()
+                    .find(|l| l.contains(needle))
+                    .and_then(|l| l.split_whitespace().next())
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or_else(|| panic!("no pid for {needle} in:\n{ps_out}"))
+            };
+            assert!(pid_of("echo two") > pid_of("echo one"));
+        });
     }
 }
