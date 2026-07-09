@@ -5,4 +5,25 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# Both a library (embedded by clank-shell and any other wasm component) and a standalone CLI binary.
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "waget"
+path = "src/main.rs"
+
 [dependencies]
+# The `http` crate's shared types (Method) are used by both HTTP backends below.
+http = "1"
+
+# wasm: wstd's WASI-HTTP client (the only HTTP that works inside a Golem/wasip2 component). Pinned
+# to the exact version clank-agent uses so the whole app resolves one wstd.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wstd = { version = "=0.6.5", features = ["default", "json"] }
+
+# native: reqwest with pure-Rust rustls TLS (no system libcurl/OpenSSL dependency); tokio also gives
+# the standalone bin a runtime.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
