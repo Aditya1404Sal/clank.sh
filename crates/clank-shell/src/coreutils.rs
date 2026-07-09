@@ -17,6 +17,14 @@ use brush_core::commands::ExecutionContext;
 use brush_core::extensions::ShellExtensions;
 use brush_core::{Error, ExecutionResult};
 
+/// Serializes the native fd-1/2 swap below. The `dup2` redirect targets the **process-global**
+/// stdout/stderr, so two threads running uu_* builtins at once would clobber each other's capture.
+/// clank executes one line at a time in production, but parallel tests (many `Session`s on the
+/// multi-thread runtime) do run uu_* concurrently — this guard makes that safe. Held only around
+/// the swap+uumain+restore, never across an `.await`.
+#[cfg(not(target_arch = "wasm32"))]
+static FD_SWAP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Run a uutils `uumain` closure with the process's stdout/stderr pointed at the `OpenFile`s
 /// brush assigned for this command, so its output lands wherever brush wants it.
 #[cfg(not(target_arch = "wasm32"))]
@@ -27,6 +35,10 @@ pub(crate) fn run_uu<SE: ShellExtensions>(
     use brush_core::openfiles::OpenFiles;
     use std::io::Write;
     use std::os::fd::AsRawFd;
+
+    // Serialize the process-global fd swap (see `FD_SWAP_LOCK`). Poisoning is harmless here — the
+    // guarded region restores fds even on panic paths — so recover the guard either way.
+    let _fd_guard = FD_SWAP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     // A broken pipe (e.g. `cat | head`) must not kill the whole clank process; make writes to
     // a closed pipe return EPIPE instead of raising SIGPIPE.

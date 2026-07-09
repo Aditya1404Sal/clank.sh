@@ -25,6 +25,7 @@ mod ps;
 pub mod registry;
 pub mod session;
 mod texttools;
+mod which;
 
 // The `wasi:cli/run` REPL driver. Gated behind the `repl-driver` feature so that dependents which
 // only want the shared `Session` core (e.g. the Golem agent crate, which exports its own

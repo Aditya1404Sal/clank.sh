@@ -528,17 +528,35 @@ fn strip_sudo_prefix(line: &str) -> String {
     }
 }
 
+/// The README's default `$PATH` — the resolution namespace clank's package layout installs into.
+/// Nothing populates `/usr/lib/{mcp,agents,prompts}/bin` or the skills glob yet (that's `grease`,
+/// future); these entries currently resolve to nothing, which is correct — `type`/`which` degrade
+/// to "not found" rather than erroring on a missing directory.
+const DEFAULT_PATH: &str =
+    "/usr/local/bin:/usr/bin:/usr/lib/mcp/bin:/usr/lib/agents/bin:/usr/lib/prompts/bin:/usr/share/skills/*/bin";
+
 async fn build_shell() -> Result<Shell, brush_core::Error> {
     // NB: clank's builtins are registered here AND their manifests in `registry::build()`; the two
     // must stay in lockstep (the registry drift-guard test enforces it). Adding a builtin via
     // `Shell::register_builtin` directly would bypass the manifest — don't.
-    Shell::builder()
+    let mut shell = Shell::builder()
         .default_builtins(BuiltinSet::BashMode)
         .builtins(crate::coreutils::builtins())
         .builtins(crate::texttools::builtins())
         .builtins(crate::ps::builtins())
+        .builtins(crate::which::builtins())
         .build()
-        .await
+        .await?;
+
+    // Set clank's `$PATH` explicitly, overriding whatever Brush's init seeded (empty on the wasm
+    // stub, the host's real PATH on native — both wrong for clank's virtual namespace). Read by
+    // `$PATH` expansion and by `type`/`which` path resolution alike.
+    shell.env_mut().set_global(
+        "PATH",
+        brush_core::variables::ShellVariable::new(DEFAULT_PATH),
+    )?;
+
+    Ok(shell)
 }
 
 /// Map a Brush result to line output, appending any shell error message to stderr.
@@ -924,6 +942,88 @@ mod tests {
             assert!(result.pending_prompt.is_none());
             assert_eq!(String::from_utf8(result.stdout).unwrap(), "hi\n");
             assert_eq!(result.exit_code, 0);
+        });
+    }
+
+    /// `$PATH` is set to clank's README default (the virtual package-resolution namespace).
+    #[test]
+    fn path_is_the_readme_default() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let (out, _) = session.run_line("echo $PATH").await;
+            assert_eq!(String::from_utf8(out).unwrap(), format!("{DEFAULT_PATH}\n"));
+        });
+    }
+
+    /// `which` finds nothing for a clank builtin — builtins aren't file-backed (`which` reports only
+    /// real `$PATH` files; `type` is the authority for builtins). Chained with a marker so we also
+    /// prove `which` doesn't wedge or error on the (mostly nonexistent) default `$PATH` dirs.
+    #[test]
+    fn which_finds_nothing_for_a_builtin() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let (out, _) = session.run_line("which ls; echo done").await;
+            let out = String::from_utf8(out).unwrap();
+            // `ls` is a clank builtin, not a $PATH file → no path printed, but the chain completes.
+            assert!(out.trim_end().ends_with("done"), "got: {out}");
+            assert!(!out.contains("/ls"), "which should not resolve a builtin: {out}");
+        });
+    }
+
+    /// `which` finds a real executable file placed on `$PATH`.
+    #[test]
+    fn which_finds_a_real_path_file() {
+        on_rt(async {
+            let dir = std::env::temp_dir().join(format!("clank_which_bin_{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let exe = dir.join("clank-which-probe");
+            std::fs::write(&exe, b"#!/bin/sh\ntrue\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+
+            let mut session = Session::new().await.unwrap();
+            // Prepend our dir to $PATH, then `which` should find the probe file.
+            session
+                .run_line(&format!("export PATH={}:$PATH", dir.display()))
+                .await;
+            let (out, _) = session.run_line("which clank-which-probe").await;
+            let out = String::from_utf8(out).unwrap();
+            let _ = std::fs::remove_dir_all(&dir);
+            assert!(
+                out.contains("clank-which-probe"),
+                "which should find a real $PATH file, got: {out}"
+            );
+        });
+    }
+
+    /// Brush's own `type` still works (now with a clank manifest, but unchanged behavior) — it
+    /// reports a clank builtin as a builtin. Guards the manifest-registration change against
+    /// accidentally breaking Brush's builtin dispatch.
+    #[test]
+    fn type_reports_a_builtin() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let (out, _) = session.run_line("type ls").await;
+            let out = String::from_utf8(out).unwrap();
+            assert!(out.contains("ls"), "got: {out}");
+            assert!(out.contains("builtin"), "type should call ls a builtin, got: {out}");
+        });
+    }
+
+    /// `type`/`command`/`which` have registry manifests (the resolution surface sees them).
+    #[test]
+    fn resolution_commands_have_manifests() {
+        on_rt(async {
+            let session = Session::new().await.unwrap();
+            for name in ["type", "command", "which"] {
+                assert!(
+                    session.registry().get(name).is_some(),
+                    "{name} should have a manifest"
+                );
+            }
         });
     }
 

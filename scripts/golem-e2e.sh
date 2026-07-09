@@ -436,6 +436,20 @@ expect_eval "sudo rm does not prompt"                      "$AZ_SUDO"  '.pending
 expect "sudo rm deletes immediately"                       'if [ -e /tmp/work/gated2 ]; then echo present; else echo gone; fi'  $'gone'
 
 # ============================================================================
+# 2i. $PATH resolution backbone — default $PATH set, type/which resolve
+# ============================================================================
+# clank sets a virtual $PATH (the package-layout namespace grease installs into later). `type` is
+# the authoritative resolver for all commands; `which` finds file-backed commands only (nothing for
+# builtins, since none are real files yet). The dirs mostly don't exist — resolution degrades to
+# "not found" rather than erroring.
+step "\$PATH resolution (default PATH, type, which)"
+expect "PATH is the README default"          'echo $PATH'  '/usr/local/bin:/usr/bin:/usr/lib/mcp/bin:/usr/lib/agents/bin:/usr/lib/prompts/bin:/usr/share/skills/*/bin'
+expect_contains "type resolves a builtin"    'type ls'     'builtin'
+# `which` on a builtin finds nothing (not file-backed) but must not wedge/error — the chained echo
+# proves the line completed cleanly.
+expect "which on a builtin finds nothing"    'which ls; echo done'  $'done'
+
+# ============================================================================
 # 3. Durability — write in one invocation, read in a SEPARATE invocation
 # ============================================================================
 step "Durability check (state persists across invocations)"

@@ -24,22 +24,32 @@ use crate::manifest::{AuthorizationPolicy, ExecutionScope, Manifest};
 /// - `prompt-user` — intercepted in `Session::eval_line` *before* Brush dispatch (its suspend
 ///   logic can't run inside a synchronous Brush builtin); it never reaches `shell.run_string`, so
 ///   it has no `SimpleCommand`/`.builtins()` registration to match against. See `promptuser`.
-pub const MANUAL_MANIFESTS: &[&str] = &["prompt-user"];
+/// - `type`, `command` — Brush's own `BashMode` builtins (registered by `.default_builtins`, not by
+///   clank). They work as-is (pure, wasm-safe path/builtin lookup); clank just adds their manifests
+///   so the resolution/tool surfaces see them. This is the "later increment" the module doc predicted.
+pub const MANUAL_MANIFESTS: &[&str] = &["prompt-user", "type", "command"];
 
 /// Hand-authored manifests for commands not backed by a clank `SimpleCommand` registration (see
 /// [`MANUAL_MANIFESTS`]).
 fn manual_manifests() -> Vec<Manifest> {
-    vec![Manifest::builtin(
-        "prompt-user",
-        "pause and collect input from the human user",
-    )
-    .with_scope(ExecutionScope::ShellInternal)
-    .with_policy(AuthorizationPolicy::Allow)
-    .with_help(
-        "prompt-user <question> [--choices a,b,...] [--confirm] [--secret] — pause the current \
-         process, present <question> to the human user, and return the response. Accepts \
-         markdown on stdin, rendered before the question. Exits 0 on response, 130 on abort.",
-    )]
+    vec![
+        Manifest::builtin("prompt-user", "pause and collect input from the human user")
+            .with_scope(ExecutionScope::ShellInternal)
+            .with_policy(AuthorizationPolicy::Allow)
+            .with_help(
+                "prompt-user <question> [--choices a,b,...] [--confirm] [--secret] — pause the \
+                 current process, present <question> to the human user, and return the response. \
+                 Accepts markdown on stdin, rendered before the question. Exits 0 on response, \
+                 130 on abort.",
+            ),
+        // Brush-native BashMode builtins — manifest only (they already dispatch through Brush). The
+        // README makes `type` the authoritative resolver for all commands and groups it with the
+        // shell-internal builtins.
+        Manifest::builtin("type", "describe how a command name would be resolved")
+            .with_scope(ExecutionScope::ShellInternal),
+        Manifest::builtin("command", "run a command, bypassing functions/aliases; or look it up")
+            .with_scope(ExecutionScope::ShellInternal),
+    ]
 }
 
 /// clank's inventory of manifests, keyed by command name.
@@ -105,6 +115,9 @@ pub fn build() -> CommandRegistry {
     for manifest in crate::ps::manifests() {
         registry.insert(manifest);
     }
+    for manifest in crate::which::manifests() {
+        registry.insert(manifest);
+    }
     for manifest in manual_manifests() {
         registry.insert(manifest);
     }
@@ -138,6 +151,7 @@ mod tests {
             .into_iter()
             .chain(crate::texttools::builtins::<SE>())
             .chain(crate::ps::builtins::<SE>())
+            .chain(crate::which::builtins::<SE>())
             .map(|(name, _reg)| name)
             // MANUAL_MANIFESTS covers commands with a manifest but no `.builtins()` registration
             // (see its doc comment for why each entry is legitimate) — union them into the
