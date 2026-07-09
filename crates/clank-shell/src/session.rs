@@ -955,18 +955,22 @@ mod tests {
         });
     }
 
-    /// `which` finds nothing for a clank builtin — builtins aren't file-backed (`which` reports only
-    /// real `$PATH` files; `type` is the authority for builtins). Chained with a marker so we also
-    /// prove `which` doesn't wedge or error on the (mostly nonexistent) default `$PATH` dirs.
+    /// `which` finds nothing for a name with no file-backed form, and does NOT report a phantom
+    /// path (the bug caught on the agent: Brush's wasm `executable()` returns true unconditionally,
+    /// so `which` must verify existence itself). Chained with a marker to prove no wedge/error.
     #[test]
-    fn which_finds_nothing_for_a_builtin() {
+    fn which_finds_nothing_for_a_nonexistent_command() {
         on_rt(async {
             let mut session = Session::new().await.unwrap();
-            let (out, _) = session.run_line("which ls; echo done").await;
+            let (out, _) = session
+                .run_line("which clank-no-such-cmd-xyz; echo done")
+                .await;
             let out = String::from_utf8(out).unwrap();
-            // `ls` is a clank builtin, not a $PATH file → no path printed, but the chain completes.
             assert!(out.trim_end().ends_with("done"), "got: {out}");
-            assert!(!out.contains("/ls"), "which should not resolve a builtin: {out}");
+            assert!(
+                !out.contains("clank-no-such-cmd-xyz"),
+                "which must not report a phantom path for a missing command: {out}"
+            );
         });
     }
 

@@ -378,14 +378,16 @@ expect_contains "unknown /proc path errors"          'cat /proc/99999/status'  '
 step "prompt-user (pause surfaces, no hang, follow-up answer resolves)"
 
 # 1. Surface: the invoke RETURNS (doesn't hang) with the question + a pending_prompt payload.
+# NOTE: `.stdout` values carry a trailing "\n" on the wire (see the JSON), but `jq -r` inside `$(...)`
+# strips it, so the expected values here omit it — the newline's presence is not what we're testing.
 PU_SURFACE="$(eval_json eval '"prompt-user \"Which environment?\""')"
-expect_eval "prompt-user surfaces the question on stdout"  "$PU_SURFACE"  '.stdout'  $'Which environment?\n'
+expect_eval "prompt-user surfaces the question on stdout"  "$PU_SURFACE"  '.stdout'  'Which environment?'
 expect_eval "prompt-user exits 0 on surface"               "$PU_SURFACE"  '.exit_code'  '0'
 expect_eval "pending_prompt carries the question"          "$PU_SURFACE"  '.pending_prompt.question'  'Which environment?'
 
 # 2. Answer: a SEPARATE invocation delivers the response, which comes back on stdout, exit 0.
 PU_ANSWER="$(eval_json answer_prompt '"production"')"
-expect_eval "answer_prompt returns the response"           "$PU_ANSWER"  '.stdout'  $'production\n'
+expect_eval "answer_prompt returns the response"           "$PU_ANSWER"  '.stdout'  'production'
 expect_eval "answer_prompt exits 0"                        "$PU_ANSWER"  '.exit_code'  '0'
 expect_eval "pending_prompt clears after answering"        "$PU_ANSWER"  '.pending_prompt'  'null'
 
@@ -395,7 +397,7 @@ eval_json eval '"prompt-user \"Deploy?\" --choices staging,production"' >/dev/nu
 PU_BAD="$(eval_json answer_prompt '"maybe"')"
 expect_eval "invalid choice is rejected (exit 1)"          "$PU_BAD"  '.exit_code'  '1'
 PU_GOOD="$(eval_json answer_prompt '"staging"')"
-expect_eval "valid choice then resolves"                   "$PU_GOOD"  '.stdout'  $'staging\n'
+expect_eval "valid choice then resolves"                   "$PU_GOOD"  '.stdout'  'staging'
 
 # 4. abort: --confirm prompt, aborted → exit 130, no stdout.
 eval_json eval '"prompt-user \"Proceed?\" --confirm"' >/dev/null
@@ -445,9 +447,13 @@ expect "sudo rm deletes immediately"                       'if [ -e /tmp/work/ga
 step "\$PATH resolution (default PATH, type, which)"
 expect "PATH is the README default"          'echo $PATH'  '/usr/local/bin:/usr/bin:/usr/lib/mcp/bin:/usr/lib/agents/bin:/usr/lib/prompts/bin:/usr/share/skills/*/bin'
 expect_contains "type resolves a builtin"    'type ls'     'builtin'
-# `which` on a builtin finds nothing (not file-backed) but must not wedge/error — the chained echo
-# proves the line completed cleanly.
-expect "which on a builtin finds nothing"    'which ls; echo done'  $'done'
+# `which` finds file-backed commands only. On the agent NONE of the $PATH dirs exist/are populated
+# yet (grease installs into them later), so `which` finds nothing for every name — including `ls`
+# (a clank builtin, which `which` correctly does NOT report — that's `type`'s job) and an unknown
+# name. Critically it must NOT report a phantom path for a missing file (the bug the earlier run
+# caught: Brush's wasm executable()/is_file() lie). The chained marker proves no wedge.
+expect "which on a builtin finds no file"    'which ls; echo done'                     $'done'
+expect "which on an unknown cmd finds nothing" 'which clank-no-such-cmd-xyz; echo done'  $'done'
 
 # ============================================================================
 # 3. Durability — write in one invocation, read in a SEPARATE invocation
