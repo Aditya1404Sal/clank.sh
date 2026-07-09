@@ -19,12 +19,18 @@ use brush_builtins::{BuiltinSet, ShellBuilderExt};
 use brush_core::openfiles::{OpenFile, OpenFiles};
 use brush_core::{ExecutionControlFlow, Shell, SourceInfo};
 
+use crate::registry::CommandRegistry;
+
 type BoxError = Box<dyn std::error::Error>;
 
-/// A live shell session: the Brush interpreter plus the session transcript.
+/// A live shell session: the Brush interpreter plus the session transcript and the command
+/// registry.
 pub struct Session {
     shell: Shell,
     transcript: Transcript,
+    /// The clank-owned inventory of command manifests (sits beside `transcript` as a shell-owned
+    /// state object). Drives command metadata surfaces; not yet consulted on the execution path.
+    registry: CommandRegistry,
     source: SourceInfo,
     #[cfg(target_arch = "wasm32")]
     rt: tokio::runtime::Runtime,
@@ -41,6 +47,7 @@ impl Session {
             Ok(Self {
                 shell,
                 transcript: Transcript::new(),
+                registry: crate::registry::build(),
                 source: SourceInfo::default(),
                 rt,
             })
@@ -51,9 +58,15 @@ impl Session {
             Ok(Self {
                 shell,
                 transcript: Transcript::new(),
+                registry: crate::registry::build(),
                 source: SourceInfo::default(),
             })
         }
+    }
+
+    /// The command registry — clank's inventory of command manifests.
+    pub fn registry(&self) -> &CommandRegistry {
+        &self.registry
     }
 
     /// Run one input line: record it, serve the clank-specific `context` builtin, otherwise

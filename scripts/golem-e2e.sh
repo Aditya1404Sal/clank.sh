@@ -283,6 +283,14 @@ expect_contains "window keeps the newest entry"  'context show'  'echo delta'
 run_line 'context budget 24000' >/dev/null
 
 # ============================================================================
+# 2d. Command manifests — `help <cmd>` surfaces the manifest synopsis, not the old stub
+# ============================================================================
+# Each clank builtin now carries a real Manifest; its synopsis feeds get_content, which Brush's
+# `help` reads. Assert the enriched content is live in the durable agent (proves the registry built).
+step "Command manifests"
+expect_contains "help shows manifest synopsis"   'help cat'  'concatenate files'
+
+# ============================================================================
 # 3. Durability — write in one invocation, read in a SEPARATE invocation
 # ============================================================================
 step "Durability check (state persists across invocations)"

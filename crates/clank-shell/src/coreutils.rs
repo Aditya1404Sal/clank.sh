@@ -131,17 +131,36 @@ pub(crate) fn run_uu<SE: ShellExtensions>(
 }
 
 /// Define a brush `SimpleCommand` that dispatches to a uutils `uumain`, prepending `argv[0]`.
+///
+/// The `$synopsis` is the command's one-line description: it feeds both `get_content` (so Brush's
+/// `help`/`type` surface real content instead of a stub) and the command [`Manifest`] built in
+/// [`manifests`] — defined once, so the two can't drift.
 macro_rules! uu_builtin {
-    ($ty:ident, $name:literal, $uumain:path) => {
+    ($ty:ident, $name:literal, $synopsis:literal, $uumain:path) => {
         pub(crate) struct $ty;
+
+        impl $ty {
+            const NAME: &'static str = $name;
+            const SYNOPSIS: &'static str = $synopsis;
+        }
 
         impl SimpleCommand for $ty {
             fn get_content(
                 name: &str,
-                _content_type: ContentType,
+                content_type: ContentType,
                 _options: &ContentOptions,
             ) -> Result<String, Error> {
-                Ok(format!("{name}: uutils coreutils builtin\n"))
+                // Derive real help content from the synopsis rather than a fixed placeholder.
+                match content_type {
+                    ContentType::ShortDescription => {
+                        Ok(format!("{name} - {}\n", $ty::SYNOPSIS))
+                    }
+                    ContentType::ShortUsage => Ok(format!("{name}: {name} [args...]\n")),
+                    ContentType::DetailedHelp => {
+                        Ok(format!("{name} - {}\n\n(uutils coreutils builtin)\n", $ty::SYNOPSIS))
+                    }
+                    ContentType::ManPage => brush_core::error::unimp("man page not yet implemented"),
+                }
             }
 
             fn execute<SE, I, S>(
@@ -164,26 +183,26 @@ macro_rules! uu_builtin {
     };
 }
 
-uu_builtin!(Cat, "cat", uu_cat::uumain);
-uu_builtin!(Ls, "ls", uu_ls::uumain);
-uu_builtin!(Wc, "wc", uu_wc::uumain);
-uu_builtin!(Head, "head", uu_head::uumain);
-uu_builtin!(Sort, "sort", uu_sort::uumain);
-uu_builtin!(Rm, "rm", uu_rm::uumain);
-uu_builtin!(Mv, "mv", uu_mv::uumain);
-uu_builtin!(Cp, "cp", uu_cp::uumain);
+uu_builtin!(Cat, "cat", "concatenate files and print to stdout", uu_cat::uumain);
+uu_builtin!(Ls, "ls", "list directory contents", uu_ls::uumain);
+uu_builtin!(Wc, "wc", "count lines, words, and bytes", uu_wc::uumain);
+uu_builtin!(Head, "head", "print the first lines of a file", uu_head::uumain);
+uu_builtin!(Sort, "sort", "sort lines of text", uu_sort::uumain);
+uu_builtin!(Rm, "rm", "remove files and directories", uu_rm::uumain);
+uu_builtin!(Mv, "mv", "move or rename files", uu_mv::uumain);
+uu_builtin!(Cp, "cp", "copy files and directories", uu_cp::uumain);
 // mkdir uses the same convention as the others: brush passes the command name as argv[0], which is
 // what uumain expects — do NOT skip it, or flags like `-p` get dropped (dropping `-p` turned
 // `mkdir -p /tmp/a/b` into a non-recursive mkdir that fails when an intermediate dir is missing).
-uu_builtin!(Mkdir, "mkdir", uu_mkdir::uumain);
-uu_builtin!(Env, "env", uu_env::uumain);
-uu_builtin!(Cut, "cut", uu_cut::uumain);
-uu_builtin!(Tr, "tr", uu_tr::uumain);
-uu_builtin!(Uniq, "uniq", uu_uniq::uumain);
-uu_builtin!(Tail, "tail", uu_tail::uumain);
-uu_builtin!(Tee, "tee", uu_tee::uumain);
-uu_builtin!(Touch, "touch", uu_touch::uumain);
-uu_builtin!(Sleep, "sleep", uu_sleep::uumain);
+uu_builtin!(Mkdir, "mkdir", "create directories", uu_mkdir::uumain);
+uu_builtin!(Env, "env", "print the environment", uu_env::uumain);
+uu_builtin!(Cut, "cut", "select fields from each line", uu_cut::uumain);
+uu_builtin!(Tr, "tr", "translate or delete characters", uu_tr::uumain);
+uu_builtin!(Uniq, "uniq", "report or omit repeated lines", uu_uniq::uumain);
+uu_builtin!(Tail, "tail", "print the last lines of a file", uu_tail::uumain);
+uu_builtin!(Tee, "tee", "copy stdin to stdout and files", uu_tee::uumain);
+uu_builtin!(Touch, "touch", "create files or update timestamps", uu_touch::uumain);
+uu_builtin!(Sleep, "sleep", "pause for a duration", uu_sleep::uumain);
 
 /// The coreutils builtins to register on the shell, in addition to brush's bash set.
 pub(crate) fn builtins<SE: ShellExtensions>() -> Vec<(String, Registration<SE>)> {
@@ -206,5 +225,35 @@ pub(crate) fn builtins<SE: ShellExtensions>() -> Vec<(String, Registration<SE>)>
         ("tee".into(), simple_builtin::<Tee, SE>()),
         ("touch".into(), simple_builtin::<Touch, SE>()),
         ("sleep".into(), simple_builtin::<Sleep, SE>()),
+    ]
+}
+
+/// The [`Manifest`] for each coreutils builtin, built from the same `NAME`/`SYNOPSIS` constants the
+/// commands expose — so a builtin and its manifest can't describe themselves differently. The
+/// registry drift-guard test asserts this list's names match [`builtins`]'s.
+///
+/// All are `Subprocess` scope, `Allow` policy (uutils file/text tools); the constructor defaults
+/// cover that, so each entry is a one-liner. Richer per-command input schemas come in a later
+/// increment.
+pub(crate) fn manifests() -> Vec<crate::manifest::Manifest> {
+    use crate::manifest::Manifest;
+    vec![
+        Manifest::builtin(Cat::NAME, Cat::SYNOPSIS),
+        Manifest::builtin(Ls::NAME, Ls::SYNOPSIS),
+        Manifest::builtin(Wc::NAME, Wc::SYNOPSIS),
+        Manifest::builtin(Head::NAME, Head::SYNOPSIS),
+        Manifest::builtin(Sort::NAME, Sort::SYNOPSIS),
+        Manifest::builtin(Mkdir::NAME, Mkdir::SYNOPSIS),
+        Manifest::builtin(Rm::NAME, Rm::SYNOPSIS),
+        Manifest::builtin(Mv::NAME, Mv::SYNOPSIS),
+        Manifest::builtin(Cp::NAME, Cp::SYNOPSIS),
+        Manifest::builtin(Env::NAME, Env::SYNOPSIS),
+        Manifest::builtin(Cut::NAME, Cut::SYNOPSIS),
+        Manifest::builtin(Tr::NAME, Tr::SYNOPSIS),
+        Manifest::builtin(Uniq::NAME, Uniq::SYNOPSIS),
+        Manifest::builtin(Tail::NAME, Tail::SYNOPSIS),
+        Manifest::builtin(Tee::NAME, Tee::SYNOPSIS),
+        Manifest::builtin(Touch::NAME, Touch::SYNOPSIS),
+        Manifest::builtin(Sleep::NAME, Sleep::SYNOPSIS),
     ]
 }

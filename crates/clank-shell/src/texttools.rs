@@ -13,17 +13,31 @@ use std::path::Path;
 
 type ToolResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+/// The `$synopsis` feeds both `get_content` and the command [`Manifest`](crate::manifest::Manifest)
+/// in [`manifests`], defined once so they can't drift.
 macro_rules! text_builtin {
-    ($ty:ident, $name:literal, $run:path) => {
+    ($ty:ident, $name:literal, $synopsis:literal, $run:path) => {
         pub(crate) struct $ty;
+
+        impl $ty {
+            const NAME: &'static str = $name;
+            const SYNOPSIS: &'static str = $synopsis;
+        }
 
         impl SimpleCommand for $ty {
             fn get_content(
                 name: &str,
-                _content_type: ContentType,
+                content_type: ContentType,
                 _options: &ContentOptions,
             ) -> Result<String, Error> {
-                Ok(format!("{name}: clank text/data builtin\n"))
+                match content_type {
+                    ContentType::ShortDescription => Ok(format!("{name} - {}\n", $ty::SYNOPSIS)),
+                    ContentType::ShortUsage => Ok(format!("{name}: {name} [args...]\n")),
+                    ContentType::DetailedHelp => {
+                        Ok(format!("{name} - {}\n\n(clank text/data builtin)\n", $ty::SYNOPSIS))
+                    }
+                    ContentType::ManPage => brush_core::error::unimp("man page not yet implemented"),
+                }
             }
 
             fn execute<SE, I, S>(
@@ -49,12 +63,12 @@ macro_rules! text_builtin {
     };
 }
 
-text_builtin!(Jq, "jq", run_jq);
-text_builtin!(Grep, "grep", run_grep);
-text_builtin!(Sed, "sed", run_sed);
-text_builtin!(Diff, "diff", run_diff);
-text_builtin!(Patch, "patch", run_patch);
-text_builtin!(File, "file", run_file);
+text_builtin!(Jq, "jq", "filter and transform JSON", run_jq);
+text_builtin!(Grep, "grep", "search files for a pattern", run_grep);
+text_builtin!(Sed, "sed", "stream-edit text (s/// substitution)", run_sed);
+text_builtin!(Diff, "diff", "compare files line by line", run_diff);
+text_builtin!(Patch, "patch", "apply a diff to a file", run_patch);
+text_builtin!(File, "file", "identify file type", run_file);
 
 pub(crate) fn builtins<SE: ShellExtensions>() -> Vec<(String, Registration<SE>)> {
     use brush_core::builtins::simple_builtin;
@@ -65,6 +79,20 @@ pub(crate) fn builtins<SE: ShellExtensions>() -> Vec<(String, Registration<SE>)>
         ("diff".into(), simple_builtin::<Diff, SE>()),
         ("patch".into(), simple_builtin::<Patch, SE>()),
         ("file".into(), simple_builtin::<File, SE>()),
+    ]
+}
+
+/// The [`Manifest`](crate::manifest::Manifest) for each text/data builtin, from the same
+/// `NAME`/`SYNOPSIS` the commands expose. Names must match [`builtins`] (registry drift-guard test).
+pub(crate) fn manifests() -> Vec<crate::manifest::Manifest> {
+    use crate::manifest::Manifest;
+    vec![
+        Manifest::builtin(Jq::NAME, Jq::SYNOPSIS),
+        Manifest::builtin(Grep::NAME, Grep::SYNOPSIS),
+        Manifest::builtin(Sed::NAME, Sed::SYNOPSIS),
+        Manifest::builtin(Diff::NAME, Diff::SYNOPSIS),
+        Manifest::builtin(Patch::NAME, Patch::SYNOPSIS),
+        Manifest::builtin(File::NAME, File::SYNOPSIS),
     ]
 }
 

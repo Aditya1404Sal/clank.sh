@@ -17,6 +17,9 @@
 //! on native only.
 
 mod coreutils;
+pub mod manifest;
+pub mod process;
+pub mod registry;
 pub mod session;
 mod texttools;
 
