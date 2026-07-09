@@ -95,6 +95,17 @@ impl LineResult {
             pending_prompt: None,
         }
     }
+
+    /// Build a result from an HTTP command's outcome (`wcurl`/`waget` return the same shape).
+    fn from_outcome(stdout: Vec<u8>, stderr: Vec<u8>, exit_code: u8) -> Self {
+        Self {
+            stdout,
+            stderr,
+            exit_code,
+            flow: Flow::Continue,
+            pending_prompt: None,
+        }
+    }
 }
 
 /// A live shell session: the Brush interpreter plus the session transcript and the command
@@ -231,12 +242,28 @@ impl Session {
         result
     }
 
-    /// Execute `line` through Brush and reap its process row (`R → Z`). The shared command path used
-    /// both by `eval_line` (for an allowed command) and by `answer_prompt` (for an approved gated
-    /// command). Does not record the transcript — the caller decides (an approved command records;
-    /// `eval_line` records after).
+    /// Run an authorized command line and reap its process row (`R → Z`). The shared execution choke
+    /// point, reached both by `eval_line` (a directly-allowed command) and by `answer_prompt` (an
+    /// approved gated command). Does not record the transcript — the caller decides.
+    ///
+    /// `curl`/`wget` are dispatched here to their async HTTP crates, NOT through `execute`. This is
+    /// load-bearing: `execute` runs Brush on clank's nested `rt.block_on`, where the wstd WASI-HTTP
+    /// reactor is not the running executor (the "Wall C" shape). Awaiting `wcurl::run`/`waget::run`
+    /// directly here keeps the HTTP one level under the Golem SDK's `wstd::block_on`, where the
+    /// reactor is live. Both call paths funnel through here, so the direct-allow and
+    /// post-approval-deferred routes both reach the HTTP correctly. See `httpcmd`.
     async fn run_command(&mut self, line: &str, pid: Option<u32>) -> LineResult {
-        let result = self.execute(line).await;
+        let result = match crate::httpcmd::classify(line) {
+            Some((crate::httpcmd::HttpCommand::Curl, args)) => {
+                let o = wcurl::run(&args).await;
+                LineResult::from_outcome(o.stdout, o.stderr, o.exit_code)
+            }
+            Some((crate::httpcmd::HttpCommand::Wget, args)) => {
+                let o = waget::run(&args).await;
+                LineResult::from_outcome(o.stdout, o.stderr, o.exit_code)
+            }
+            None => self.execute(line).await,
+        };
         if let Some(pid) = pid {
             self.proc_table.lock().unwrap().complete(pid);
         }
@@ -942,6 +969,126 @@ mod tests {
             assert!(result.pending_prompt.is_none());
             assert_eq!(String::from_utf8(result.stdout).unwrap(), "hi\n");
             assert_eq!(result.exit_code, 0);
+        });
+    }
+
+    /// A one-shot localhost HTTP server (raw `std::net`, no dep) that replies `200 <body>` once.
+    /// Hermetic — the `curl`/`wget` interception is exercised end-to-end without real internet.
+    fn http_mock(body: &'static str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// `curl` is `confirm`-policy (outbound HTTP): it surfaces a confirmation before the request runs.
+    #[test]
+    fn curl_surfaces_a_confirmation() {
+        on_rt(async {
+            let url = http_mock("body");
+            let mut session = Session::new().await.unwrap();
+            let result = session.eval_line(&format!("curl {url}")).await;
+            assert!(result.pending_prompt.is_some(), "curl should surface a confirm");
+            assert!(session.has_pending_prompt());
+            // No request ran yet: resolve the prompt so the mock thread can exit cleanly.
+            session.answer_prompt(Some("no".to_string())).await;
+        });
+    }
+
+    /// Approving a `curl` confirmation runs the request — the body comes back on stdout, exit 0.
+    /// Proves the post-approval deferred path routes through the HTTP dispatch in `run_command`.
+    #[test]
+    fn curl_approved_runs_the_request() {
+        on_rt(async {
+            let url = http_mock("approved-body");
+            let mut session = Session::new().await.unwrap();
+            session.eval_line(&format!("curl {url}")).await;
+            let out = session.answer_prompt(Some("yes".to_string())).await;
+            assert_eq!(out.exit_code, 0);
+            assert_eq!(String::from_utf8(out.stdout).unwrap(), "approved-body");
+        });
+    }
+
+    /// Denying a `curl` confirmation → exit 5, no request.
+    #[test]
+    fn curl_denied_returns_exit_5() {
+        on_rt(async {
+            let url = http_mock("never");
+            let mut session = Session::new().await.unwrap();
+            session.eval_line(&format!("curl {url}")).await;
+            let out = session.answer_prompt(Some("no".to_string())).await;
+            assert_eq!(out.exit_code, 5);
+        });
+    }
+
+    /// `sudo curl` pre-authorizes: the request runs immediately, no prompt. Proves the direct-allow
+    /// path also routes through the HTTP dispatch (not Brush's `execute`).
+    #[test]
+    fn sudo_curl_bypasses_gate_and_fetches() {
+        on_rt(async {
+            let url = http_mock("sudo-body");
+            let mut session = Session::new().await.unwrap();
+            let out = session.eval_line(&format!("sudo curl {url}")).await;
+            assert!(out.pending_prompt.is_none(), "sudo curl should not prompt");
+            assert_eq!(out.exit_code, 0);
+            assert_eq!(String::from_utf8(out.stdout).unwrap(), "sudo-body");
+        });
+    }
+
+    /// `curl -o <file>` (approved) writes the body to a file, stdout empty.
+    #[test]
+    fn curl_o_writes_a_file() {
+        on_rt(async {
+            let url = http_mock("file-body");
+            let path = std::env::temp_dir().join(format!("clank_curl_o_{}", std::process::id()));
+            let mut session = Session::new().await.unwrap();
+            session
+                .eval_line(&format!("sudo curl -o {} {url}", path.display()))
+                .await;
+            // (sudo → no prompt; runs immediately)
+            let out = std::fs::read_to_string(&path).unwrap();
+            let _ = std::fs::remove_file(&path);
+            assert_eq!(out, "file-body");
+        });
+    }
+
+    /// `wget -O -` (approved) streams the body to stdout.
+    #[test]
+    fn wget_dash_o_to_stdout() {
+        on_rt(async {
+            let url = http_mock("wget-body");
+            let mut session = Session::new().await.unwrap();
+            let out = session.eval_line(&format!("sudo wget -O - {url}")).await;
+            assert_eq!(out.exit_code, 0);
+            assert_eq!(String::from_utf8(out.stdout).unwrap(), "wget-body");
+        });
+    }
+
+    /// `curl`/`wget` carry `Subprocess`/`Confirm` manifests in the registry.
+    #[test]
+    fn http_commands_have_confirm_manifests() {
+        on_rt(async {
+            let session = Session::new().await.unwrap();
+            for name in ["curl", "wget"] {
+                let m = session.registry().get(name).expect("manifest");
+                assert_eq!(m.execution_scope, crate::manifest::ExecutionScope::Subprocess);
+                assert_eq!(
+                    m.authorization_policy,
+                    crate::manifest::AuthorizationPolicy::Confirm
+                );
+            }
         });
     }
 

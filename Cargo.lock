@@ -521,7 +521,9 @@ dependencies = [
  "uu_tr",
  "uu_uniq",
  "uu_wc",
+ "waget",
  "wasip3",
+ "wcurl",
  "wit-bindgen 0.57.1",
 ]
 

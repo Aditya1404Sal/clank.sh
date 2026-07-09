@@ -21,6 +21,10 @@ path = "src/main.rs"
 brush-core = "0.5"
 brush-builtins = "0.2"
 brush-parser = "0.4"
+# The curl/wget HTTP commands (wasm/native HTTP seam lives in these crates). clank intercepts
+# curl/wget in Session::run_command and awaits their async `run` under the live reactor.
+wcurl = { path = "../wcurl" }
+waget = { path = "../waget" }
 tokio = { version = "1", features = ["rt"] }
 diffy = { version = "0.5", features = ["std"] }
 grep = "0.4"

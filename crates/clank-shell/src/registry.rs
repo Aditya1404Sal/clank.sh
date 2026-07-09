@@ -27,7 +27,10 @@ use crate::manifest::{AuthorizationPolicy, ExecutionScope, Manifest};
 /// - `type`, `command` — Brush's own `BashMode` builtins (registered by `.default_builtins`, not by
 ///   clank). They work as-is (pure, wasm-safe path/builtin lookup); clank just adds their manifests
 ///   so the resolution/tool surfaces see them. This is the "later increment" the module doc predicted.
-pub const MANUAL_MANIFESTS: &[&str] = &["prompt-user", "type", "command"];
+/// - `curl`, `wget` — HTTP commands intercepted in `Session::run_command` (their async HTTP can't run
+///   inside a synchronous Brush builtin under the nested runtime); not `.builtins()`-registered. See
+///   `httpcmd`.
+pub const MANUAL_MANIFESTS: &[&str] = &["prompt-user", "type", "command", "curl", "wget"];
 
 /// Hand-authored manifests for commands not backed by a clank `SimpleCommand` registration (see
 /// [`MANUAL_MANIFESTS`]).
@@ -116,6 +119,9 @@ pub fn build() -> CommandRegistry {
         registry.insert(manifest);
     }
     for manifest in crate::which::manifests() {
+        registry.insert(manifest);
+    }
+    for manifest in crate::httpcmd::manifests() {
         registry.insert(manifest);
     }
     for manifest in manual_manifests() {

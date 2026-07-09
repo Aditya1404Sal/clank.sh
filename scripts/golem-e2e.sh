@@ -456,6 +456,43 @@ expect "which on a builtin finds no file"    'which ls; echo done'              
 expect "which on an unknown cmd finds nothing" 'which clank-no-such-cmd-xyz; echo done'  $'done'
 
 # ============================================================================
+# 2j. Network — outbound HTTP (curl/wget) from the deployed agent
+# ============================================================================
+# THE POINT OF THIS BLOCK: prove wstd WASI-HTTP works when awaited from eval_line (one level under
+# the Golem SDK's wstd::block_on) on a real deployed agent — the transport ask/grease will need.
+# curl/wget are Confirm-gated (outbound HTTP), so each is a surface→approve two-invocation dance,
+# exactly like the authz rm block above. Uses https://example.com (stable, tiny, TLS). Resolve each
+# prompt before any other run_line (a pending prompt rejects ordinary commands).
+step "Network (curl/wget outbound HTTP from the agent)"
+
+# 1. curl surfaces the outbound-HTTP confirmation (no request yet).
+NET_SURFACE="$(eval_json eval '"curl https://example.com"')"
+expect_eval "curl surfaces outbound-HTTP confirm"  "$NET_SURFACE"  '.pending_prompt != null'  'true'
+# 2. Approve → the request runs on the agent; body comes back on stdout, exit 0.
+NET_OK="$(eval_json answer_prompt '"yes"')"
+expect_eval "approved curl exits 0"                "$NET_OK"  '.exit_code'  '0'
+expect_eval "curl body contains Example Domain"    "$NET_OK"  '.stdout | contains("Example Domain")'  'true'
+
+# 3. Denied path → exit 5.
+eval_json eval '"curl https://example.com"' >/dev/null
+NET_DENY="$(eval_json answer_prompt '"no"')"
+expect_eval "denied curl exits 5"                  "$NET_DENY"  '.exit_code'  '5'
+
+# 4. sudo curl pre-authorizes: no prompt, body fetched (direct-allow path also routes through HTTP).
+NET_SUDO="$(eval_json eval '"sudo curl https://example.com"')"
+expect_eval "sudo curl does not prompt"            "$NET_SUDO"  '.pending_prompt'  'null'
+expect_eval "sudo curl body contains Example Domain" "$NET_SUDO"  '.stdout | contains("Example Domain")'  'true'
+
+# 5. wget -O - streams to stdout (sudo to skip the prompt).
+NET_WGET="$(eval_json eval '"sudo wget -O - https://example.com"')"
+expect_eval "sudo wget -O - fetches to stdout"     "$NET_WGET"  '.stdout | contains("Example Domain")'  'true'
+
+# 6. curl -o <file> writes the body to the agent fs, then cat reads it back (proves -o + wasm file
+#    write compose). sudo to skip the prompt; then a normal run_line cat.
+eval_json eval '"sudo curl -o /tmp/work/page https://example.com"' >/dev/null
+expect_contains "curl -o wrote a file"             'cat /tmp/work/page'  'Example Domain'
+
+# ============================================================================
 # 3. Durability — write in one invocation, read in a SEPARATE invocation
 # ============================================================================
 step "Durability check (state persists across invocations)"

@@ -16,6 +16,7 @@
 
 pub mod authz;
 mod coreutils;
+mod httpcmd;
 pub mod manifest;
 pub mod process;
 pub mod procfs;
