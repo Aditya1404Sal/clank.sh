@@ -14,7 +14,7 @@
 //! cannot substitute for that. On wasm, pipelines/subshells that reach `spawn_blocking` are a
 //! known limitation (no threads); simple builtins and shell language work.
 
-use crate::{dispatch_context, Flow, Transcript};
+use crate::{dispatch_context, promptuser, Flow, Transcript};
 use brush_builtins::{BuiltinSet, ShellBuilderExt};
 use brush_core::openfiles::{OpenFile, OpenFiles};
 use brush_core::{ExecutionControlFlow, Shell, SourceInfo};
@@ -52,7 +52,17 @@ impl LineResult {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    /// Build a result from a [`promptuser::PromptUserOutcome`]: its stdout and exit code
+    /// (`0`/`130`), no stderr.
+    fn from_prompt_outcome(outcome: promptuser::PromptUserOutcome) -> Self {
+        Self {
+            exit_code: outcome.exit_code(),
+            stdout: outcome.stdout(),
+            stderr: Vec::new(),
+            flow: Flow::Continue,
+        }
+    }
+
     fn stderr(message: impl Into<Vec<u8>>) -> Self {
         Self {
             stdout: Vec::new(),
@@ -147,6 +157,22 @@ impl Session {
             return LineResult::continue_with_stdout(bytes);
         }
 
+        // `prompt-user` is intercepted before Brush dispatch (like `context` above): its suspend
+        // logic (a real blocking read on native; a Golem promise await on wasm, added in a later
+        // increment) cannot run inside Brush's synchronous `SimpleCommand::execute`, and must not
+        // nest inside Brush's own dispatch loop. See `promptuser` module docs.
+        if promptuser::is_prompt_user(line) {
+            let (result, secret) = self.run_prompt_user(line).await;
+            if let Some(pid) = pid {
+                self.proc_table.lock().unwrap().complete(pid);
+            }
+            // `--secret` responses are never entered into the transcript (README).
+            if !secret {
+                self.transcript.record_output(&result.terminal_output());
+            }
+            return result;
+        }
+
         let result = self.execute(line).await;
         if let Some(pid) = pid {
             self.proc_table.lock().unwrap().complete(pid);
@@ -159,6 +185,41 @@ impl Session {
     pub async fn run_line(&mut self, line: &str) -> (Vec<u8>, Flow) {
         let result = self.eval_line(line).await;
         (result.terminal_output(), result.flow)
+    }
+
+    /// Handle a `prompt-user` line: parse it, run the target-specific pause/collect backend, and
+    /// return the resulting [`LineResult`] plus whether `--secret` was set (so the caller can
+    /// skip transcript recording).
+    async fn run_prompt_user(&mut self, line: &str) -> (LineResult, bool) {
+        let args = match promptuser::parse(line) {
+            Ok(args) => args,
+            Err(e) => return (LineResult::stderr(format!("{e}\n")), false),
+        };
+        let secret = args.secret;
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut out = Vec::new();
+            let stdin = std::io::stdin();
+            let mut input = stdin.lock();
+            let outcome = promptuser::run_native(&args, None, &mut out, &mut input);
+            let mut result = LineResult::from_prompt_outcome(outcome);
+            // The rendered question/markdown (not the response) is ordinary terminal output.
+            let mut combined = out;
+            combined.extend_from_slice(&result.stdout);
+            result.stdout = combined;
+            (result, secret)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            // Wasm backend (Golem promise-based suspend) lands in a later increment of this
+            // phase; until then, `prompt-user` reports a clean, honest failure rather than
+            // hanging or silently doing nothing.
+            (
+                LineResult::stderr("prompt-user: not yet supported on this target\n".to_string()),
+                secret,
+            )
+        }
     }
 
     /// Native execution: capture Brush's stdout and stderr into anonymous temp files.
@@ -382,6 +443,65 @@ mod tests {
     }
 
     /// `cat /proc/<pid>/status` reads the virtual process file through the real command path.
+    /// `prompt-user` is intercepted before Brush dispatch: an invocation Brush would reject
+    /// differently (unknown command) instead surfaces `promptuser::parse`'s own error, proving
+    /// the interception — not Brush — handled the line. Also proves the line still shows `Z` in
+    /// `ps` (the process-table row completes normally for intercepted lines, same as `context`).
+    #[test]
+    fn prompt_user_is_intercepted_before_brush_dispatch() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let (out, flow) = session.run_line("prompt-user --confirm").await;
+            let out = String::from_utf8(out).unwrap();
+            assert!(
+                out.contains("missing question"),
+                "expected promptuser's own parse error, got: {out}"
+            );
+            assert_eq!(flow, Flow::Continue);
+
+            let (ps_out, _) = session.run_line("ps").await;
+            let ps_out = String::from_utf8(ps_out).unwrap();
+            let row = ps_out
+                .lines()
+                .find(|l| l.contains("prompt-user"))
+                .expect("ps should list the prompt-user line");
+            assert!(row.contains('Z'), "completed line should be Z, got: {row}");
+        });
+    }
+
+    /// A non-`--secret` `prompt-user` error is recorded in the transcript like any other command
+    /// (only `--secret` *responses* are redacted, per the README — this line never reached the
+    /// point of collecting a response).
+    #[test]
+    fn prompt_user_error_is_recorded_in_transcript() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            session.run_line("prompt-user --bogus").await;
+            let (transcript, _) = session.run_line("context show").await;
+            let transcript = String::from_utf8(transcript).unwrap();
+            assert!(transcript.contains("prompt-user --bogus"));
+            assert!(transcript.contains("unknown flag"));
+        });
+    }
+
+    /// The registry carries a manifest for `prompt-user` even though it's never registered as a
+    /// Brush `SimpleCommand` (it's intercepted before dispatch) — `type`/tool-surface consumers
+    /// should still see it.
+    #[test]
+    fn prompt_user_has_a_registry_manifest() {
+        on_rt(async {
+            let session = Session::new().await.unwrap();
+            let manifest = session
+                .registry()
+                .get("prompt-user")
+                .expect("prompt-user should have a manifest");
+            assert_eq!(
+                manifest.execution_scope,
+                crate::manifest::ExecutionScope::ShellInternal
+            );
+        });
+    }
+
     #[test]
     fn cat_reads_virtual_proc_status() {
         on_rt(async {

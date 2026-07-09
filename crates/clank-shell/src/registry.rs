@@ -14,7 +14,33 @@
 
 use std::collections::HashMap;
 
-use crate::manifest::Manifest;
+use crate::manifest::{AuthorizationPolicy, ExecutionScope, Manifest};
+
+/// Manifest names present in the registry that are **not** registered via clank's
+/// `.builtins(...)` calls in `session::build_shell` — the drift-guard test below allowlists these
+/// explicitly rather than requiring every manifest to map to a clank-authored `SimpleCommand`.
+/// Each entry's reason:
+///
+/// - `prompt-user` — intercepted in `Session::eval_line` *before* Brush dispatch (its suspend
+///   logic can't run inside a synchronous Brush builtin); it never reaches `shell.run_string`, so
+///   it has no `SimpleCommand`/`.builtins()` registration to match against. See `promptuser`.
+pub const MANUAL_MANIFESTS: &[&str] = &["prompt-user"];
+
+/// Hand-authored manifests for commands not backed by a clank `SimpleCommand` registration (see
+/// [`MANUAL_MANIFESTS`]).
+fn manual_manifests() -> Vec<Manifest> {
+    vec![Manifest::builtin(
+        "prompt-user",
+        "pause and collect input from the human user",
+    )
+    .with_scope(ExecutionScope::ShellInternal)
+    .with_policy(AuthorizationPolicy::Allow)
+    .with_help(
+        "prompt-user <question> [--choices a,b,...] [--confirm] [--secret] — pause the current \
+         process, present <question> to the human user, and return the response. Accepts \
+         markdown on stdin, rendered before the question. Exits 0 on response, 130 on abort.",
+    )]
+}
 
 /// clank's inventory of manifests, keyed by command name.
 #[derive(Clone, Debug, Default)]
@@ -79,6 +105,9 @@ pub fn build() -> CommandRegistry {
     for manifest in crate::ps::manifests() {
         registry.insert(manifest);
     }
+    for manifest in manual_manifests() {
+        registry.insert(manifest);
+    }
     registry
 }
 
@@ -110,6 +139,10 @@ mod tests {
             .chain(crate::texttools::builtins::<SE>())
             .chain(crate::ps::builtins::<SE>())
             .map(|(name, _reg)| name)
+            // MANUAL_MANIFESTS covers commands with a manifest but no `.builtins()` registration
+            // (see its doc comment for why each entry is legitimate) — union them into the
+            // expected set rather than requiring a `SimpleCommand` for every manifest.
+            .chain(MANUAL_MANIFESTS.iter().map(|s| s.to_string()))
             .collect();
 
         let registry = build();

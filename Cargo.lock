@@ -485,6 +485,7 @@ version = "0.0.0"
 dependencies = [
  "brush-builtins",
  "brush-core",
+ "brush-parser",
  "diffy",
  "futures",
  "grep",

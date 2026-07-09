@@ -20,6 +20,7 @@ path = "src/main.rs"
 [dependencies]
 brush-core = "0.5"
 brush-builtins = "0.2"
+brush-parser = "0.4"
 tokio = { version = "1", features = ["rt"] }
 diffy = { version = "0.5", features = ["std"] }
 grep = "0.4"
