@@ -2,10 +2,8 @@
 //!
 //! A long-running, terminal-like read/eval/print loop that runs on two targets:
 //!
-//! - **wasm32** — a `wasi:cli/run` component (WASI 0.3, async p3 streams). Uses the simple
-//!   [`eval`] builtin set. See [`wasm`].
-//! - **native** — an ordinary executable over blocking `std::io`, with real command execution
-//!   via `brush-core` (external programs, pipes, variables, `$?`). See [`native`].
+//! - **wasm32** — a `wasi:cli/run` component (WASI 0.3, async p3 streams). See [`wasm`].
+//! - **native** — an ordinary executable over blocking `std::io`. See [`native`].
 //!
 //! Two things are shared and target-agnostic:
 //!
@@ -14,7 +12,7 @@
 //! - [`dispatch_context`] — the clank-specific `context` builtin over that transcript.
 //!
 //! POC scope: the transcript is in-memory for the session (no compaction, no disk); Brush runs
-//! on native only.
+//! on both targets through [`session::Session`].
 
 mod coreutils;
 pub mod manifest;
@@ -41,6 +39,7 @@ pub const PROMPT: &[u8] = b"clank$ ";
 const HELP: &[u8] = b"clank.sh builtins:\n  echo [args...]     write arguments to stdout\n  help               show this listing\n  context show       print the session transcript\n  context clear      discard the session transcript\n  context budget [n] show or set the transcript token budget\n  exit               leave the shell\n";
 
 /// What the loop should do after evaluating a line.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Flow {
     /// Keep looping.
     Continue,
@@ -204,7 +203,7 @@ impl Transcript {
 
 /// Handle the clank-specific `context` builtin against the transcript. Returns
 /// `Some(output_bytes)` if the line was a `context` command, else `None` so the caller falls
-/// through to normal command execution (the pure [`eval`] on wasm, or Brush on native).
+/// through to normal command execution.
 ///
 /// `context show` output is intentionally NOT recorded back into the transcript, so the
 /// session does not duplicate itself on inspection.
@@ -236,9 +235,10 @@ pub fn dispatch_context(transcript: &mut Transcript, line: &str) -> Option<Vec<u
     }
 }
 
-/// Resolve and run a single command line, returning the bytes to write to stdout and the
-/// control flow. Pure: no I/O, no async. This is the wasm path's toy builtin set; the native
-/// path routes non-`context` lines through Brush instead.
+/// Resolve and run a single command line with a tiny pure builtin set.
+///
+/// This is retained for core unit tests. Real native, wasm REPL, and Golem-agent execution goes
+/// through [`session::Session`].
 pub fn eval(line: &[u8]) -> (Vec<u8>, Flow) {
     let text = String::from_utf8_lossy(line);
     let mut words = text.split_whitespace();

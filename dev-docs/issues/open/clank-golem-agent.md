@@ -29,10 +29,10 @@ line up with what the executor runs.
 
 ## What "resolved" looks like
 
-- A Golem agent (`crates/clank-agent`) wraps `Session` and exposes a line-at-a-time method
-  (`run_line(cmd) -> String`); each command is one invocation.
+- A Golem agent (`crates/clank-agent`) wraps `Session` and exposes a line-at-a-time `eval` method
+  returning structured stdout, stderr, and exit status; each command is one invocation.
 - It builds with `golem build`, deploys to a local `golem server`, and is invocable via
-  `golem agent invoke 'ClankAgent("name")' run_line '"echo hi"'`.
+  `golem agent invoke 'ClankAgent("name")' eval '"echo hi"'`.
 - The shell + transcript are **durable across invocations** for a given agent identity: a second
   invocation sees the first's transcript (`context show`), and per-identity instances are isolated.
 - The per-agent `std::fs` (Golem maps `/` to a per-instance host dir) backs file commands durably.

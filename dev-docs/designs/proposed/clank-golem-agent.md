@@ -14,10 +14,11 @@ executor as a durable instance. Written as intent; the empirical verdict on the 
 
 A new crate `crates/clank-agent` exports the `golem:agent` world via the `golem-rust` SDK. It holds
 the existing `clank_shell::session::Session` (Brush `Shell` + `Transcript`) as **durable agent
-state** and exposes one method:
+state** and exposes a structured evaluation method plus a compatibility terminal-text method:
 
 ```rust
-async fn run_line(&mut self, cmd: String) -> String   // one command = one invocation
+async fn eval(&mut self, cmd: String) -> EvalResult   // stdout, stderr, exit_code
+async fn run_line(&mut self, cmd: String) -> String   // compatibility terminal text
 ```
 
 The `Session` core is reused verbatim; only the *driver* changes — from a stdin REPL
@@ -48,7 +49,7 @@ never awaits a wasip2 pollable, so nesting completes; pipelines/subshells hit
 `tokio::spawn`/`spawn_blocking` (no threads on the agent) and stay out of scope.
 
 **Verdict (verified on a local `golem server`):** the nested block_on **works**. `golem agent invoke
-'ClankAgent("demo")' run_line '"echo hi"'` returns `"hi\n"`. We keep the tokio `block_on` Session
+'ClankAgent("demo")' eval '"echo hi"'` returns stdout `"hi\n"` and exit code `0`. We keep the tokio `block_on` Session
 **verbatim** — no driver pivot. Deviating from the SDK's "no block_on" guideline is safe here because
 a current-thread runtime driving a pure-CPU future that completes synchronously never yields to (or
 starves) the outer wstd scheduler.
@@ -58,7 +59,7 @@ starves) the outer wstd scheduler.
 Golem durability is **oplog-based, not serde-based** by default: the live agent struct (holding the
 non-serde `Session`) stays in worker memory across invocations, so no serialization is needed on the
 happy path — the transcript and Brush shell state persist for free. On recovery Golem replays the
-oplog (re-runs `new` + past `run_line`s); deterministic commands reconstruct correctly.
+oplog (re-runs `new` + past `eval`/`run_line` calls); deterministic commands reconstruct correctly.
 Non-deterministic commands (clock/random) and snapshotting (oplog compaction, which *would* need
 serde) are out of scope for this milestone.
 
@@ -108,7 +109,8 @@ is empty on wasi, and clamp `UTIL_NAME`'s indices. `Cargo.lock` bumped to the ne
 ## Verification (as-built)
 
 `golem build` → `golem server run` → `golem deploy` → `golem agent invoke`:
-- `run_line '"echo hi"'` → `"hi\n"`.
+- `eval '"echo hi"'` → stdout `"hi\n"`, stderr `""`, exit code `0`.
+- `run_line '"echo hi"'` → `"hi\n"` for compatibility with earlier terminal-style invocations.
 - Durability: `Y=hi` then (separate invocation) `echo $Y` → `hi`; `context show` shows all prior
   commands from earlier invocations on the same identity.
 - Isolation: a different identity (`ClankAgent("other")`) has an empty transcript.

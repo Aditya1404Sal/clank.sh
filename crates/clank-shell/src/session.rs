@@ -27,6 +27,42 @@ use crate::registry::CommandRegistry;
 
 type BoxError = Box<dyn std::error::Error>;
 
+/// The result of evaluating one shell line.
+pub struct LineResult {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub exit_code: u8,
+    pub flow: Flow,
+}
+
+impl LineResult {
+    /// Bytes as a terminal would display them through the legacy `run_line` API.
+    pub fn terminal_output(&self) -> Vec<u8> {
+        let mut output = self.stdout.clone();
+        output.extend_from_slice(&self.stderr);
+        output
+    }
+
+    fn continue_with_stdout(stdout: Vec<u8>) -> Self {
+        Self {
+            stdout,
+            stderr: Vec::new(),
+            exit_code: 0,
+            flow: Flow::Continue,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn stderr(message: impl Into<Vec<u8>>) -> Self {
+        Self {
+            stdout: Vec::new(),
+            stderr: message.into(),
+            exit_code: 1,
+            flow: Flow::Continue,
+        }
+    }
+}
+
 /// A live shell session: the Brush interpreter plus the session transcript and the command
 /// registry.
 pub struct Session {
@@ -79,9 +115,9 @@ impl Session {
         &self.registry
     }
 
-    /// Run one input line: record it, serve the clank-specific `context` builtin, otherwise
-    /// execute it through Brush. Returns the bytes to write to the terminal and the control flow.
-    pub async fn run_line(&mut self, line: &str) -> (Vec<u8>, Flow) {
+    /// Evaluate one input line: record it, serve the clank-specific `context` builtin, otherwise
+    /// execute it through Brush.
+    pub async fn eval_line(&mut self, line: &str) -> LineResult {
         self.transcript.record_command(line);
 
         // Install this session's process table as the active one for the duration of the line, so
@@ -108,29 +144,39 @@ impl Session {
             if let Some(pid) = pid {
                 self.proc_table.lock().unwrap().complete(pid);
             }
-            return (bytes, Flow::Continue);
+            return LineResult::continue_with_stdout(bytes);
         }
 
-        let (output, exit) = self.execute(line).await;
+        let result = self.execute(line).await;
         if let Some(pid) = pid {
             self.proc_table.lock().unwrap().complete(pid);
         }
-        self.transcript.record_output(&output);
-        (output, if exit { Flow::Exit } else { Flow::Continue })
+        self.transcript.record_output(&result.terminal_output());
+        result
     }
 
-    /// Native execution: capture Brush's stdout+stderr into an anonymous temp file.
+    /// Run one input line for terminal-style callers. This keeps the original API used by the REPLs.
+    pub async fn run_line(&mut self, line: &str) -> (Vec<u8>, Flow) {
+        let result = self.eval_line(line).await;
+        (result.terminal_output(), result.flow)
+    }
+
+    /// Native execution: capture Brush's stdout and stderr into anonymous temp files.
     #[cfg(not(target_arch = "wasm32"))]
-    async fn execute(&mut self, line: &str) -> (Vec<u8>, bool) {
+    async fn execute(&mut self, line: &str) -> LineResult {
         use std::io::{Read, Seek, SeekFrom};
 
-        let capture = match tempfile::tempfile() {
+        let stdout_capture = match tempfile::tempfile() {
             Ok(f) => f,
-            Err(e) => return (format!("clank: {e}\n").into_bytes(), false),
+            Err(e) => return LineResult::stderr(format!("clank: {e}\n")),
         };
-        let (out_fd, err_fd) = match (capture.try_clone(), capture.try_clone()) {
+        let stderr_capture = match tempfile::tempfile() {
+            Ok(f) => f,
+            Err(e) => return LineResult::stderr(format!("clank: {e}\n")),
+        };
+        let (out_fd, err_fd) = match (stdout_capture.try_clone(), stderr_capture.try_clone()) {
             (Ok(o), Ok(e)) => (o, e),
-            _ => return (b"clank: failed to set up output capture\n".to_vec(), false),
+            _ => return LineResult::stderr(b"clank: failed to set up output capture\n".to_vec()),
         };
 
         let mut params = self.shell.default_exec_params();
@@ -143,28 +189,35 @@ impl Session {
             .await;
         drop(params);
 
-        let mut output = Vec::new();
-        let mut reader = capture;
-        let _ = reader
+        let mut stdout = Vec::new();
+        let mut stdout_reader = stdout_capture;
+        let _ = stdout_reader
             .seek(SeekFrom::Start(0))
-            .and_then(|_| reader.read_to_end(&mut output));
+            .and_then(|_| stdout_reader.read_to_end(&mut stdout));
 
-        finish(result, output)
+        let mut stderr = Vec::new();
+        let mut stderr_reader = stderr_capture;
+        let _ = stderr_reader
+            .seek(SeekFrom::Start(0))
+            .and_then(|_| stderr_reader.read_to_end(&mut stderr));
+
+        finish(result, stdout, stderr)
     }
 
-    /// Wasm execution: capture Brush's stdout+stderr into an in-memory buffer and drive the
+    /// Wasm execution: capture Brush's stdout and stderr into in-memory buffers and drive the
     /// async on the owned current-thread runtime.
     #[cfg(target_arch = "wasm32")]
-    async fn execute(&mut self, line: &str) -> (Vec<u8>, bool) {
-        let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    async fn execute(&mut self, line: &str) -> LineResult {
+        let stdout_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let stderr_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
         let mut params = self.shell.default_exec_params();
         params.set_fd(
             OpenFiles::STDOUT_FD,
-            OpenFile::Stream(Box::new(BufSink(buf.clone()))),
+            OpenFile::Stream(Box::new(BufSink(stdout_buf.clone()))),
         );
         params.set_fd(
             OpenFiles::STDERR_FD,
-            OpenFile::Stream(Box::new(BufSink(buf.clone()))),
+            OpenFile::Stream(Box::new(BufSink(stderr_buf.clone()))),
         );
 
         let fut = self
@@ -173,8 +226,9 @@ impl Session {
         let result = self.rt.block_on(fut);
         drop(params);
 
-        let output = std::mem::take(&mut *buf.lock().unwrap());
-        finish(result, output)
+        let stdout = std::mem::take(&mut *stdout_buf.lock().unwrap());
+        let stderr = std::mem::take(&mut *stderr_buf.lock().unwrap());
+        finish(result, stdout, stderr)
     }
 }
 
@@ -198,19 +252,32 @@ async fn build_shell() -> Result<Shell, brush_core::Error> {
         .await
 }
 
-/// Map a Brush result to (output, should-exit), appending any error message to the output.
+/// Map a Brush result to line output, appending any shell error message to stderr.
 fn finish(
     result: Result<brush_core::ExecutionResult, brush_core::Error>,
-    mut output: Vec<u8>,
-) -> (Vec<u8>, bool) {
+    stdout: Vec<u8>,
+    mut stderr: Vec<u8>,
+) -> LineResult {
     match result {
-        Ok(r) => (
-            output,
-            matches!(r.next_control_flow, ExecutionControlFlow::ExitShell),
-        ),
+        Ok(r) => LineResult {
+            stdout,
+            stderr,
+            exit_code: r.exit_code.into(),
+            flow: if matches!(r.next_control_flow, ExecutionControlFlow::ExitShell) {
+                Flow::Exit
+            } else {
+                Flow::Continue
+            },
+        },
         Err(e) => {
-            output.extend_from_slice(format!("clank: {e}\n").as_bytes());
-            (output, false)
+            let exit_code: u8 = brush_core::ExecutionExitCode::from(&e).into();
+            stderr.extend_from_slice(format!("clank: {e}\n").as_bytes());
+            LineResult {
+                stdout,
+                stderr,
+                exit_code,
+                flow: Flow::Continue,
+            }
         }
     }
 }
@@ -259,6 +326,26 @@ mod tests {
             .block_on(f)
     }
 
+    /// Structured evaluation exposes stdout, stderr, and exit code for agent callers.
+    #[test]
+    fn eval_line_reports_streams_and_exit_status() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+
+            let result = session.eval_line("echo hi").await;
+            assert_eq!(String::from_utf8(result.stdout).unwrap(), "hi\n");
+            assert!(result.stderr.is_empty());
+            assert_eq!(result.exit_code, 0);
+            assert_eq!(result.flow, Flow::Continue);
+
+            let result = session.eval_line("false").await;
+            assert!(result.stdout.is_empty());
+            assert!(result.stderr.is_empty());
+            assert_eq!(result.exit_code, 1);
+            assert_eq!(result.flow, Flow::Continue);
+        });
+    }
+
     /// End-to-end through the public API: a completed command shows `Z` in `ps`, and `ps` sees its
     /// own row as `R` (spawned before execution, completed only after) — like real Unix.
     #[test]
@@ -284,7 +371,10 @@ mod tests {
                 .lines()
                 .find(|l| l.trim_end().ends_with("ps"))
                 .expect("ps should list itself");
-            assert!(ps_row.contains('R'), "ps's own row should be R, got: {ps_row}");
+            assert!(
+                ps_row.contains('R'),
+                "ps's own row should be R, got: {ps_row}"
+            );
 
             // The synthetic root is present.
             assert!(ps_out.contains("clank"));
@@ -319,8 +409,14 @@ mod tests {
                 .await;
             let _ = std::fs::remove_file(&path);
             let out = String::from_utf8(out).unwrap();
-            assert!(out.contains("beta"), "grep output should contain the match, got: {out}");
-            assert!(!out.contains("alpha"), "grep should not emit non-matching lines: {out}");
+            assert!(
+                out.contains("beta"),
+                "grep output should contain the match, got: {out}"
+            );
+            assert!(
+                !out.contains("alpha"),
+                "grep should not emit non-matching lines: {out}"
+            );
         });
     }
 
@@ -343,9 +439,7 @@ mod tests {
             let path = dir.join(format!("clank_cat_test_{}", std::process::id()));
             std::fs::write(&path, b"real-file-contents\n").unwrap();
             let mut session = Session::new().await.unwrap();
-            let (out, _) = session
-                .run_line(&format!("cat {}", path.display()))
-                .await;
+            let (out, _) = session.run_line(&format!("cat {}", path.display())).await;
             let _ = std::fs::remove_file(&path);
             let out = String::from_utf8(out).unwrap();
             assert!(out.contains("real-file-contents"), "got: {out}");

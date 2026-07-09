@@ -16,7 +16,7 @@ open questions:
   command = one invocation (the user-chosen "line-at-a-time agent method" model).
 
 Today clank's reusable core already exists: `clank_shell::session::Session` with
-`async fn new()` and `async fn run_line(&mut self, &str) -> (Vec<u8>, Flow)`, target-agnostic, with a
+`async fn new()`, structured `eval_line`, and terminal-style `run_line`, target-agnostic, with a
 `Transcript` and the `context` builtin already wired in. The existing `wasi:cli/run` REPL driver
 (`wasm.rs`) and native driver stay as-is. This plan adds a **new workspace crate** `crates/clank-agent`
 that wraps `Session` in a Golem agent, deployable to a local `golem server` and invocable via
@@ -40,7 +40,7 @@ agent invocation with `wstd::runtime::block_on`** (`sdks/rust/golem-rust/src/age
 Agent methods are genuinely `async` and `.await`ed under that outer `wstd::block_on`. The
 "never use `block_on`" guidance means: the SDK owns the outermost `block_on`; don't nest your own.
 
-So clank's `Session::run_line` doing `tokio_rt.block_on(brush.run_string())` becomes a **tokio
+So clank's `Session` doing `tokio_rt.block_on(brush.run_string())` becomes a **tokio
 current-thread block_on nested inside the SDK's wstd block_on** — two single-threaded executors nested.
 This either works (Brush's future for a simple command completes as pure-CPU without awaiting a
 wstd/wasip2 pollable — true for in-process builtins) or panics on re-entrancy. **This is decided
@@ -50,12 +50,13 @@ empirically, not by more reading.**
 
 **Step 0 — de-risking spike (throwaway, before wiring the real crate).** Build the smallest agent that
 links the *real* `Session` and calls it, then invoke on the local server:
-- one agent method `async fn run_line(&mut self, cmd: String) -> String` that lazily builds
-  `clank_shell::session::Session::new().await` into durable state and calls `session.run_line(&cmd).await`,
-  returning `String::from_utf8_lossy(&out)`;
+- one primary agent method `async fn eval(&mut self, cmd: String) -> EvalResult` that lazily builds
+  `clank_shell::session::Session::new().await` into durable state and calls
+  `session.eval_line(&cmd).await`, returning stdout, stderr, and exit code;
+- keep `run_line(cmd) -> String` as a compatibility shim over `eval`;
 - with clank-shell's `mod wasm` feature-gated off (Step 2) so it links as a plain rlib with the
   existing tokio `block_on` Session intact;
-- `golem server run`, then `golem agent invoke 'ClankAgent("demo")' run_line '"echo hi"'`.
+- `golem server run`, then `golem agent invoke 'ClankAgent("demo")' eval '"echo hi"'`.
 
 Decision gate:
 - **prints `hi`** → keep the existing tokio-current-thread + `block_on` Session **verbatim** (lowest
@@ -87,13 +88,22 @@ already-documented wasm limitation.
 
 ### `crates/clank-agent/src/clank_agent.rs` — the agent
 ```rust
-use golem_rust::{agent_definition, agent_implementation};
 use clank_shell::session::Session;
+use golem_rust::{Schema, agent_definition, agent_implementation};
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Schema, Serialize, Deserialize)]
+pub struct EvalResult {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: u8,
+}
 
 #[agent_definition]                     // mount optional; omit for milestone 1 (invoke, not HTTP)
 pub trait ClankAgent {
     fn new(name: String) -> Self;       // constructor params = agent identity
-    async fn run_line(&mut self, cmd: String) -> String;  // one command = one invocation
+    async fn eval(&mut self, cmd: String) -> EvalResult;  // one command = one invocation
+    async fn run_line(&mut self, cmd: String) -> String;  // compatibility terminal text
 }
 
 pub struct ClankAgentImpl { name: String, session: Option<Session> }  // Session = live durable state
@@ -101,28 +111,40 @@ pub struct ClankAgentImpl { name: String, session: Option<Session> }  // Session
 #[agent_implementation]
 impl ClankAgent for ClankAgentImpl {
     fn new(name: String) -> Self { Self { name, session: None } }
-    async fn run_line(&mut self, cmd: String) -> String {
+    async fn eval(&mut self, cmd: String) -> EvalResult {
         if self.session.is_none() {
             match Session::new().await { Ok(s) => self.session = Some(s),
-                Err(e) => return format!("clank: failed to start shell: {e}\n") }
+                Err(e) => return EvalResult {
+                    stdout: String::new(),
+                    stderr: format!("clank: failed to start shell: {e}\n"),
+                    exit_code: 1,
+                } }
         }
-        let (out, _flow) = self.session.as_mut().unwrap().run_line(&cmd).await;  // Flow ignored: no REPL to exit
-        String::from_utf8_lossy(&out).into_owned()
+        let result = self.session.as_mut().unwrap().eval_line(&cmd).await;
+        EvalResult {
+            stdout: String::from_utf8_lossy(&result.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&result.stderr).into_owned(),
+            exit_code: result.exit_code,
+        }
+    }
+    async fn run_line(&mut self, cmd: String) -> String {
+        let result = self.eval(cmd).await;
+        format!("{}{}", result.stdout, result.stderr)
     }
 }
 ```
 Design notes:
-- **Durable transcript for free:** the `Session` lives in agent durable state, so `run_line` records
+- **Durable transcript for free:** the `Session` lives in agent durable state, so `eval` records
   into the same `Transcript` across invocations; `context show`/`clear` already work via the existing
-  `dispatch_context` inside `Session::run_line`. Two invocations → second sees the first's transcript.
+  `dispatch_context` inside `Session::eval_line`. Two invocations → second sees the first's transcript.
 - **Durability model (verified from SDK):** Golem durability is **oplog-based, not serde-based** by
   default — the live agent struct stays in worker memory between invocations (no serialization of
   `Session`/`Shell`/tokio `Runtime` needed on the happy path); on recovery Golem **replays the oplog**
-  (re-runs `new` + past `run_line`s). Deterministic commands replay correctly; non-deterministic ones
+  (re-runs `new` + past `eval`/`run_line` calls). Deterministic commands replay correctly; non-deterministic ones
   (clock/random) would need Golem's durability wrappers — out of scope. Snapshotting (oplog compaction)
   requires `Serialize`/`Deserialize` and is **out of scope** for milestone 1.
-- `String` is the only type crossing the boundary (implements `Schema`). A structured
-  `#[derive(Schema)] RunResult { output, exit_code }` is a later nicety.
+- `eval` is the primary boundary and returns `EvalResult { stdout, stderr, exit_code }`, deriving
+  `Schema`; `run_line` remains as a compatibility shim that returns terminal text.
 
 ### `golem.yaml` (repo root, NEW)
 - `manifestVersion: 1.5.0`; `components: { clank:agent: { template: rust, dir: crates/clank-agent } }`;
@@ -164,20 +186,21 @@ stay unconditional.
      `wasm-tools component wit target/wasm32-wasip2/debug/clank_shell.wasm` shows **no `wasi:cli/run`**.
    - Native unchanged: `printf 'echo hi\nexit\n' | cargo run -q --bin clank` prints `hi`.
    - Existing REPL wasm still builds with default features and runs under wasmtime.
-2. **Spike (Step 0) is green** — `run_line('"echo hi"')` returns `hi` on the local server. (Gates the
+2. **Spike (Step 0) is green** — `eval('"echo hi"')` returns stdout `hi` and exit code 0 on the local server. (Gates the
    whole approach; do this before full wiring.)
 3. **Agent build/deploy:** `golem build --yes` → `cargo build --target wasm32-wasip2` for clank-agent,
    emits `golem-temp/agents/clank_agent_debug.wasm` whose exported world is the **agent** world (not
    `wasi:cli/run`). `golem server run`; `golem deploy --yes`.
-4. **Invoke:** `golem agent invoke 'ClankAgent("demo")' run_line '"echo hi"'` → `"hi\n"`.
+4. **Invoke:** `golem agent invoke 'ClankAgent("demo")' eval '"echo hi"'` → stdout `"hi\n"`,
+   stderr `""`, exit code `0`. `run_line '"echo hi"'` still returns `"hi\n"`.
 5. **Durability (the payoff):**
-   - `... run_line '"echo first"'` → `"first\n"`; then `... run_line '"context show"'` on the same
+   - `... eval '"echo first"'` → stdout `"first\n"`; then `... eval '"context show"'` on the same
      `"demo"` → output contains `clank$ echo first` + `first` (second invocation sees the first's
      transcript).
    - Isolation: `ClankAgent("other")` `context show` → empty (fresh Session per identity).
-   - Shell-state carry (bonus, only if spike shows live struct persists): `run_line '"X=42"'` then
-     `run_line '"echo $X"'` → `42` (the live Brush `Shell`, not just the transcript, is durable).
-6. **Filesystem (Golem model):** `run_line '"mkdir -p /tmp/clank"'`, `... '"echo hi > /tmp/clank/a.txt"'`,
+   - Shell-state carry (bonus, only if spike shows live struct persists): `eval '"X=42"'` then
+     `eval '"echo $X"'` → `42` (the live Brush `Shell`, not just the transcript, is durable).
+6. **Filesystem (Golem model):** `eval '"mkdir -p /tmp/clank"'`, `... '"echo hi > /tmp/clank/a.txt"'`,
    `... '"cat /tmp/clank/a.txt"'` → `hi`, operating on the per-agent durable `std::fs` (the workflow the
    VFS issue said *should* work; it fails under `wasmtime --dir` semantics but should work under Golem).
 
@@ -185,7 +208,7 @@ stay unconditional.
 
 1. **[HIGHEST] Nested `block_on` under Golem's wstd executor** — the spike (Step 0) decides Option 1 vs
    the wstd-driver fallback. Everything gates on it; run it first.
-2. **Recovery replay of non-deterministic commands** — oplog replay re-runs past `run_line`s; a command
+2. **Recovery replay of non-deterministic commands** — oplog replay re-runs past `eval`/`run_line` calls; a command
    that read a clock/random reconstructs differently. Acceptable milestone-1 limitation; note in the
    design doc. Snapshotting (needs serde on `Session`) is the eventual fix, out of scope.
 3. **`golem.yaml` template-key drift / `golem new` clobbering the workspace** — capture the real
