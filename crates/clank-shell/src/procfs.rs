@@ -207,6 +207,18 @@ mod tests {
     }
 
     #[test]
+    fn paused_row_status_shows_p_state() {
+        let mut t = ProcessTable::new();
+        let pid = t.spawn(
+            ProcessKind::Builtin,
+            "prompt-user q".split_whitespace().map(String::from).collect(),
+        );
+        t.pause(pid);
+        let out = resolve(&format!("/proc/{pid}/status"), &t, &env()).unwrap();
+        assert!(out.contains("State:\tP (paused)"), "got: {out}");
+    }
+
+    #[test]
     fn pid_one_resolves_to_synthetic_root() {
         let (t, _pid) = table_with_one("echo x");
         let out = resolve("/proc/1/status", &t, &env()).unwrap();

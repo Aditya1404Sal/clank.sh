@@ -22,8 +22,26 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let line_str = String::from_utf8_lossy(trim_eol(line.as_bytes())).into_owned();
-        let (output, flow) = session.run_line(&line_str).await;
-        write_stdout(&output)?;
+        let result = session.eval_line(&line_str).await;
+        write_stdout(&result.terminal_output())?;
+        let flow = result.flow;
+
+        // If the line surfaced a `prompt-user` question, collect the human's answer inline (the
+        // native REPL owns the terminal) and deliver it. An answer outside `--choices` leaves the
+        // prompt pending, so keep reading until it resolves. EOF is an abort.
+        if result.pending_prompt.is_some() {
+            while session.has_pending_prompt() {
+                line.clear();
+                let answer = if io::stdin().read_line(&mut line)? == 0 {
+                    session.answer_prompt(None) // EOF → abort
+                } else {
+                    let answer_str = String::from_utf8_lossy(trim_eol(line.as_bytes())).into_owned();
+                    session.answer_prompt(Some(answer_str))
+                };
+                write_stdout(&answer.terminal_output())?;
+            }
+        }
+
         if let Flow::Exit = flow {
             break;
         }

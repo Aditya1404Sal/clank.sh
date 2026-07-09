@@ -1,15 +1,22 @@
 //! `prompt-user`: the shell-internal builtin that pauses the current process, presents a prompt
 //! to the human user, and returns the response to the caller (README "Human-in-the-Loop
 //! Workflows"). Intercepted in [`crate::session::Session::eval_line`] before Brush dispatch —
-//! the same precedent slot as `context` — rather than registered as a Brush builtin, because its
-//! suspend logic (a real blocking read on native, a Golem promise await on wasm) cannot run
-//! synchronously inside `SimpleCommand::execute` and must not nest inside Brush's own dispatch
-//! loop (see the module-level risk notes in the phase plan: nested `.await`s inside Brush
-//! dispatch reproduce the unresolved wasm pipeline hang).
+//! the same precedent slot as `context`.
 //!
-//! Only the detection + argument parsing is shared between native and wasm; the actual pause
-//! mechanism is entirely different per target (native: a real blocking read; wasm: a Golem
-//! promise, added in a later increment of this phase).
+//! **The pause never hangs the shell.** `prompt-user` does not block waiting for a human: it
+//! records a [`PendingPrompt`] as durable [`Session`](crate::session::Session) state, flips the
+//! process row to `P`, and returns immediately — surfacing the question *to whoever invoked the
+//! session* (the interactive REPL, the AI via `ask`, a future UI). That caller owns the human
+//! channel and delivers the answer on the **next** `eval` call as [structured input](AnswerInput).
+//! This is the honest fit for both deployments: the native REPL loop reads the next stdin line and
+//! feeds it back inline; the Golem agent returns the pending prompt in its result and the external
+//! caller answers on a follow-up invocation. (An earlier design suspended the whole invocation on a
+//! Golem promise — abandoned once a spike found Golem serializes per-agent invocations, so a parked
+//! agent is unreachable; the README's model is interactive terminal I/O, not an out-of-band
+//! completer.)
+//!
+//! This module owns detection, argument parsing, the [`PendingPrompt`] shape, and resolving a
+//! pending prompt against a delivered answer.
 
 use brush_parser::{tokenize_str, unquote_str, Token};
 
@@ -108,93 +115,127 @@ pub fn parse(line: &str) -> Result<PromptUserArgs, ParseError> {
     })
 }
 
-/// The result of a `prompt-user` invocation.
+/// A pending `prompt-user`: the durable state recorded when the shell surfaces a question and
+/// awaits a response on a follow-up call. Held on the [`Session`](crate::session::Session) (so it
+/// persists across Golem invocations via the oplog) and returned to the caller in the eval result.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PromptUserOutcome {
-    /// The human answered; the response text (never includes the trailing newline).
-    Answered(String),
-    /// The human aborted (Ctrl-C or, on wasm, an explicit abort signal in the promise response).
+pub struct PendingPrompt {
+    pub question: String,
+    pub choices: Option<Vec<String>>,
+    pub secret: bool,
+}
+
+impl PromptUserArgs {
+    /// Convert parsed args into a [`PendingPrompt`]. `stdin_md`, if present, is prepended to the
+    /// question verbatim (README: piped stdin is rendered as markdown before the question; real
+    /// markdown rendering is deferred — clank has no rich terminal yet).
+    pub fn into_pending(self, stdin_md: Option<&str>) -> PendingPrompt {
+        let question = match stdin_md {
+            Some(md) => format!("{md}\n{}", self.question),
+            None => self.question,
+        };
+        PendingPrompt {
+            question,
+            choices: self.choices,
+            secret: self.secret,
+        }
+    }
+}
+
+/// A structured answer delivered to a pending prompt on the follow-up call. The caller is explicit
+/// about whether the human answered or aborted, rather than overloading a sentinel line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AnswerInput {
+    /// The human's response text.
+    Response(String),
+    /// The human aborted / gave no answer (README: exit `130`, the Ctrl-C convention).
+    Abort,
+}
+
+/// The result of resolving a pending prompt against a delivered [`AnswerInput`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Resolution {
+    /// A valid response: stdout bytes (the response + newline) and exit `0`.
+    Answered { stdout: Vec<u8>, secret: bool },
+    /// Aborted: no stdout, exit `130`.
     Aborted,
+    /// The response wasn't one of the prompt's `--choices`: an error message for stderr, and the
+    /// prompt stays pending (the caller re-asks). Exit `1`.
+    InvalidChoice { message: String },
 }
 
-impl PromptUserOutcome {
-    /// The exit code this outcome maps to (README: `0` on response, `130` on abort).
-    pub fn exit_code(&self) -> u8 {
-        match self {
-            PromptUserOutcome::Answered(_) => 0,
-            PromptUserOutcome::Aborted => 130,
-        }
-    }
-
-    /// The stdout bytes this outcome produces: the response text plus a trailing newline, or
-    /// nothing on abort.
-    pub fn stdout(&self) -> Vec<u8> {
-        match self {
-            PromptUserOutcome::Answered(s) => {
-                let mut out = s.clone().into_bytes();
-                out.push(b'\n');
-                out
+/// Resolve a [`PendingPrompt`] against a delivered answer. A response is validated against the
+/// prompt's `choices`; a non-matching response leaves the prompt pending (the caller can re-ask).
+pub fn resolve(pending: &PendingPrompt, answer: AnswerInput) -> Resolution {
+    match answer {
+        AnswerInput::Abort => Resolution::Aborted,
+        AnswerInput::Response(text) => {
+            if let Some(choices) = &pending.choices {
+                if !choices.iter().any(|c| c == &text) {
+                    return Resolution::InvalidChoice {
+                        message: format!(
+                            "prompt-user: '{text}' is not one of [{}]\n",
+                            choices.join("/")
+                        ),
+                    };
+                }
             }
-            PromptUserOutcome::Aborted => Vec::new(),
+            let mut stdout = text.into_bytes();
+            stdout.push(b'\n');
+            Resolution::Answered {
+                stdout,
+                secret: pending.secret,
+            }
         }
     }
-}
-
-/// Native backend: a real, synchronous blocking read. Takes an injectable reader (rather than
-/// hardcoding `io::stdin()`) so tests can supply an in-memory buffer.
-///
-/// `stdin_md`, if `Some`, is markdown content to render before the question (README: piped stdin
-/// is rendered as markdown before the question text). Real markdown rendering is deferred — clank
-/// has no rich terminal yet — so it is written verbatim.
-///
-/// EOF (no more input) is treated as an abort, matching the Ctrl-C convention: the human is gone,
-/// there is no answer to give.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn run_native(
-    args: &PromptUserArgs,
-    stdin_md: Option<&str>,
-    out: &mut dyn std::io::Write,
-    input: &mut dyn std::io::BufRead,
-) -> PromptUserOutcome {
-    if let Some(md) = stdin_md {
-        let _ = writeln!(out, "{md}");
-    }
-    let _ = write!(out, "{}", args.question);
-    if let Some(choices) = &args.choices {
-        let _ = write!(out, " [{}]", choices.join("/"));
-    }
-    let _ = writeln!(out);
-
-    let mut line = String::new();
-    let Ok(n) = input.read_line(&mut line) else {
-        return PromptUserOutcome::Aborted;
-    };
-    if n == 0 {
-        // EOF: no answer was or will be given.
-        return PromptUserOutcome::Aborted;
-    }
-    let answer = line.trim_end_matches(['\n', '\r']).to_string();
-
-    if let Some(choices) = &args.choices {
-        if !choices.iter().any(|c| c == &answer) {
-            // Not one of the offered choices: re-prompt is out of scope for this phase (no loop
-            // driver here) — treat an invalid choice as the human declining to answer cleanly.
-            let _ = writeln!(
-                out,
-                "prompt-user: '{answer}' is not one of [{}]",
-                choices.join("/")
-            );
-            return PromptUserOutcome::Aborted;
-        }
-    }
-
-    PromptUserOutcome::Answered(answer)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+
+    #[test]
+    fn into_pending_prepends_stdin_markdown() {
+        let args = parse(r#"prompt-user "Any concerns?""#).unwrap();
+        let pending = args.into_pending(Some("# report\n\nall good"));
+        assert_eq!(pending.question, "# report\n\nall good\nAny concerns?");
+    }
+
+    #[test]
+    fn resolve_answer_produces_stdout_and_carries_secret() {
+        let pending = parse(r#"prompt-user "q?" --secret"#).unwrap().into_pending(None);
+        match resolve(&pending, AnswerInput::Response("prod".to_string())) {
+            Resolution::Answered { stdout, secret } => {
+                assert_eq!(stdout, b"prod\n");
+                assert!(secret);
+            }
+            other => panic!("expected Answered, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_abort_is_aborted() {
+        let pending = parse(r#"prompt-user "q?""#).unwrap().into_pending(None);
+        assert_eq!(resolve(&pending, AnswerInput::Abort), Resolution::Aborted);
+    }
+
+    #[test]
+    fn resolve_rejects_answer_outside_choices() {
+        let pending = parse(r#"prompt-user "Approve?" --confirm"#).unwrap().into_pending(None);
+        match resolve(&pending, AnswerInput::Response("maybe".to_string())) {
+            Resolution::InvalidChoice { message } => assert!(message.contains("yes/no")),
+            other => panic!("expected InvalidChoice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_accepts_a_valid_choice() {
+        let pending = parse(r#"prompt-user "Approve?" --confirm"#).unwrap().into_pending(None);
+        match resolve(&pending, AnswerInput::Response("yes".to_string())) {
+            Resolution::Answered { stdout, .. } => assert_eq!(stdout, b"yes\n"),
+            other => panic!("expected Answered, got {other:?}"),
+        }
+    }
 
     #[test]
     fn detects_leading_prompt_user_word() {
@@ -262,50 +303,5 @@ mod tests {
             parse("prompt-user \"q\" --bogus"),
             Err(ParseError::UnknownFlag("--bogus".to_string()))
         );
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn native_run_returns_the_typed_answer() {
-        let args = parse(r#"prompt-user "Which environment?""#).unwrap();
-        let mut out = Vec::new();
-        let mut input = Cursor::new(b"production\n".to_vec());
-        let outcome = run_native(&args, None, &mut out, &mut input);
-        assert_eq!(outcome, PromptUserOutcome::Answered("production".to_string()));
-        assert_eq!(outcome.exit_code(), 0);
-        assert_eq!(outcome.stdout(), b"production\n");
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn native_run_renders_piped_markdown_before_the_question() {
-        let args = parse(r#"prompt-user "Any concerns?""#).unwrap();
-        let mut out = Vec::new();
-        let mut input = Cursor::new(b"no\n".to_vec());
-        run_native(&args, Some("# report\n\nall good"), &mut out, &mut input);
-        let rendered = String::from_utf8(out).unwrap();
-        assert!(rendered.starts_with("# report\n\nall good\n"));
-        assert!(rendered.contains("Any concerns?"));
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn native_run_eof_is_aborted() {
-        let args = parse(r#"prompt-user "q?""#).unwrap();
-        let mut out = Vec::new();
-        let mut input = Cursor::new(Vec::new());
-        let outcome = run_native(&args, None, &mut out, &mut input);
-        assert_eq!(outcome, PromptUserOutcome::Aborted);
-        assert_eq!(outcome.exit_code(), 130);
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn native_run_rejects_answers_outside_choices() {
-        let args = parse(r#"prompt-user "Approve?" --confirm"#).unwrap();
-        let mut out = Vec::new();
-        let mut input = Cursor::new(b"maybe\n".to_vec());
-        let outcome = run_native(&args, None, &mut out, &mut input);
-        assert_eq!(outcome, PromptUserOutcome::Aborted);
     }
 }

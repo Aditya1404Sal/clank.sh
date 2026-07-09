@@ -167,11 +167,34 @@ impl ProcessTable {
         pid
     }
 
-    /// Mark a process complete (`R → Z`). No-op if the PID is unknown or already terminal. Z rows
-    /// are not reaped in this increment — they accumulate (reaping arrives with `wait`/`/proc`).
-    pub fn complete(&mut self, pid: u32) {
+    /// Mark a process paused (`R → P`) — awaiting a `prompt-user` response. No-op if the PID is
+    /// unknown or not currently `R`. The row returns to `R` via [`resume`](Self::resume) when the
+    /// answer arrives, then to `Z` via [`complete`](Self::complete).
+    pub fn pause(&mut self, pid: u32) {
         if let Some(row) = self.rows.iter_mut().find(|r| r.pid == pid) {
             if row.state == ProcState::R {
+                row.state = ProcState::P;
+            }
+        }
+    }
+
+    /// Mark a paused process running again (`P → R`). No-op unless the PID is currently `P`. Called
+    /// when a pause's response arrives, before the line finishes and [`complete`](Self::complete)
+    /// flips it to `Z`.
+    pub fn resume(&mut self, pid: u32) {
+        if let Some(row) = self.rows.iter_mut().find(|r| r.pid == pid) {
+            if row.state == ProcState::P {
+                row.state = ProcState::R;
+            }
+        }
+    }
+
+    /// Mark a process complete (`R → Z`, or `P → Z` for a still-paused row). No-op if the PID is
+    /// unknown or already terminal. Z rows are not reaped in this increment — they accumulate
+    /// (reaping arrives with `wait`/`/proc`).
+    pub fn complete(&mut self, pid: u32) {
+        if let Some(row) = self.rows.iter_mut().find(|r| r.pid == pid) {
+            if matches!(row.state, ProcState::R | ProcState::P) {
                 row.state = ProcState::Z;
             }
         }
@@ -329,6 +352,39 @@ mod tests {
         // Idempotent / harmless on unknown pids.
         t.complete(pid);
         t.complete(9999);
+        assert_eq!(t.rows()[0].state, ProcState::Z);
+    }
+
+    #[test]
+    fn pause_resume_cycle_tracks_state() {
+        let mut t = ProcessTable::new();
+        let pid = t.spawn(ProcessKind::Builtin, argv("prompt-user q"));
+
+        // R → P.
+        t.pause(pid);
+        assert_eq!(t.rows()[0].state, ProcState::P);
+
+        // Pausing again (not R) is a no-op; unknown pids are harmless.
+        t.pause(pid);
+        t.pause(9999);
+        assert_eq!(t.rows()[0].state, ProcState::P);
+
+        // P → R.
+        t.resume(pid);
+        assert_eq!(t.rows()[0].state, ProcState::R);
+
+        // Then R → Z as usual.
+        t.complete(pid);
+        assert_eq!(t.rows()[0].state, ProcState::Z);
+    }
+
+    #[test]
+    fn complete_reaps_a_still_paused_row() {
+        let mut t = ProcessTable::new();
+        let pid = t.spawn(ProcessKind::Builtin, argv("prompt-user q"));
+        t.pause(pid);
+        // Completing directly from P (defensive: normally `resume` runs first) still reaps it.
+        t.complete(pid);
         assert_eq!(t.rows()[0].state, ProcState::Z);
     }
 

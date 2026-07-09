@@ -22,6 +22,7 @@ use brush_core::{ExecutionControlFlow, Shell, SourceInfo};
 use std::sync::{Arc, Mutex};
 
 use crate::process::ProcessKind;
+use crate::promptuser::{AnswerInput, PendingPrompt, Resolution};
 use crate::proctable::ProcessTable;
 use crate::registry::CommandRegistry;
 
@@ -33,6 +34,10 @@ pub struct LineResult {
     pub stderr: Vec<u8>,
     pub exit_code: u8,
     pub flow: Flow,
+    /// Set when this line surfaced a `prompt-user` question the shell is now awaiting a response
+    /// to. The caller must collect a human answer and deliver it via [`Session::answer_prompt`]
+    /// (the shell does not block). `None` for every ordinary line.
+    pub pending_prompt: Option<PendingPrompt>,
 }
 
 impl LineResult {
@@ -49,17 +54,7 @@ impl LineResult {
             stderr: Vec::new(),
             exit_code: 0,
             flow: Flow::Continue,
-        }
-    }
-
-    /// Build a result from a [`promptuser::PromptUserOutcome`]: its stdout and exit code
-    /// (`0`/`130`), no stderr.
-    fn from_prompt_outcome(outcome: promptuser::PromptUserOutcome) -> Self {
-        Self {
-            exit_code: outcome.exit_code(),
-            stdout: outcome.stdout(),
-            stderr: Vec::new(),
-            flow: Flow::Continue,
+            pending_prompt: None,
         }
     }
 
@@ -69,6 +64,7 @@ impl LineResult {
             stderr: message.into(),
             exit_code: 1,
             flow: Flow::Continue,
+            pending_prompt: None,
         }
     }
 }
@@ -85,6 +81,11 @@ pub struct Session {
     /// install it into the process-global slot the `ps` builtin reads (Brush builtins can't reach
     /// `Session` directly).
     proc_table: Arc<Mutex<ProcessTable>>,
+    /// A `prompt-user` question the shell has surfaced and is awaiting a response to, plus the
+    /// process-table PID of the paused (`P`) row. Durable `Session` state (persisted on the Golem
+    /// oplog), so a pending prompt survives across invocations — the caller answers it via
+    /// [`Session::answer_prompt`]. `None` when no prompt is outstanding.
+    pending: Option<(PendingPrompt, Option<u32>)>,
     source: SourceInfo,
     #[cfg(target_arch = "wasm32")]
     rt: tokio::runtime::Runtime,
@@ -103,6 +104,7 @@ impl Session {
                 transcript: Transcript::new(),
                 registry: crate::registry::build(),
                 proc_table: Arc::new(Mutex::new(ProcessTable::new())),
+                pending: None,
                 source: SourceInfo::default(),
                 rt,
             })
@@ -115,6 +117,7 @@ impl Session {
                 transcript: Transcript::new(),
                 registry: crate::registry::build(),
                 proc_table: Arc::new(Mutex::new(ProcessTable::new())),
+                pending: None,
                 source: SourceInfo::default(),
             })
         }
@@ -128,6 +131,15 @@ impl Session {
     /// Evaluate one input line: record it, serve the clank-specific `context` builtin, otherwise
     /// execute it through Brush.
     pub async fn eval_line(&mut self, line: &str) -> LineResult {
+        // A prompt is already outstanding: the caller must answer it (via `answer_prompt`), not run
+        // a new command. The shell never blocks, so it's the caller's job to notice `pending_prompt`
+        // and respond. Reject the command with a clear message rather than silently interleaving.
+        if self.pending.is_some() {
+            return LineResult::stderr(
+                "clank: a prompt-user question is awaiting a response; answer it first\n",
+            );
+        }
+
         self.transcript.record_command(line);
 
         // Install this session's process table as the active one for the duration of the line, so
@@ -157,20 +169,12 @@ impl Session {
             return LineResult::continue_with_stdout(bytes);
         }
 
-        // `prompt-user` is intercepted before Brush dispatch (like `context` above): its suspend
-        // logic (a real blocking read on native; a Golem promise await on wasm, added in a later
-        // increment) cannot run inside Brush's synchronous `SimpleCommand::execute`, and must not
-        // nest inside Brush's own dispatch loop. See `promptuser` module docs.
+        // `prompt-user` is intercepted before Brush dispatch (like `context` above). It does NOT
+        // block: it records a durable pending prompt, leaves the row in `P`, and returns
+        // immediately — surfacing the question to the caller, who answers via `answer_prompt`. See
+        // the `promptuser` module docs.
         if promptuser::is_prompt_user(line) {
-            let (result, secret) = self.run_prompt_user(line).await;
-            if let Some(pid) = pid {
-                self.proc_table.lock().unwrap().complete(pid);
-            }
-            // `--secret` responses are never entered into the transcript (README).
-            if !secret {
-                self.transcript.record_output(&result.terminal_output());
-            }
-            return result;
+            return self.surface_prompt(line, pid);
         }
 
         let result = self.execute(line).await;
@@ -187,38 +191,99 @@ impl Session {
         (result.terminal_output(), result.flow)
     }
 
-    /// Handle a `prompt-user` line: parse it, run the target-specific pause/collect backend, and
-    /// return the resulting [`LineResult`] plus whether `--secret` was set (so the caller can
-    /// skip transcript recording).
-    async fn run_prompt_user(&mut self, line: &str) -> (LineResult, bool) {
+    /// Whether a `prompt-user` question is currently awaiting a response.
+    pub fn has_pending_prompt(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Handle a `prompt-user` line: parse it, record the pending prompt (durable state), leave the
+    /// process row paused (`P`), and return immediately with `pending_prompt` set. The shell does
+    /// not block — the caller collects a human answer and delivers it via [`answer_prompt`].
+    fn surface_prompt(&mut self, line: &str, pid: Option<u32>) -> LineResult {
         let args = match promptuser::parse(line) {
             Ok(args) => args,
-            Err(e) => return (LineResult::stderr(format!("{e}\n")), false),
+            Err(e) => {
+                if let Some(pid) = pid {
+                    self.proc_table.lock().unwrap().complete(pid);
+                }
+                let result = LineResult::stderr(format!("{e}\n"));
+                self.transcript.record_output(&result.terminal_output());
+                return result;
+            }
         };
-        let secret = args.secret;
+        // Piping into `prompt-user` (`X | prompt-user ...`) is a later increment; for now stdin is
+        // never wired, so no markdown is prepended.
+        let pending = args.into_pending(None);
 
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let mut out = Vec::new();
-            let stdin = std::io::stdin();
-            let mut input = stdin.lock();
-            let outcome = promptuser::run_native(&args, None, &mut out, &mut input);
-            let mut result = LineResult::from_prompt_outcome(outcome);
-            // The rendered question/markdown (not the response) is ordinary terminal output.
-            let mut combined = out;
-            combined.extend_from_slice(&result.stdout);
-            result.stdout = combined;
-            (result, secret)
+        // Leave the row paused (`P`) until the answer arrives; record the question as this line's
+        // output (unless `--secret`, though the question itself isn't the secret — the response is).
+        if let Some(pid) = pid {
+            self.proc_table.lock().unwrap().pause(pid);
         }
-        #[cfg(target_arch = "wasm32")]
-        {
-            // Wasm backend (Golem promise-based suspend) lands in a later increment of this
-            // phase; until then, `prompt-user` reports a clean, honest failure rather than
-            // hanging or silently doing nothing.
-            (
-                LineResult::stderr("prompt-user: not yet supported on this target\n".to_string()),
-                secret,
-            )
+        let mut stdout = pending.question.clone().into_bytes();
+        stdout.push(b'\n');
+        self.transcript.record_output(&stdout);
+
+        self.pending = Some((pending.clone(), pid));
+        LineResult {
+            stdout,
+            stderr: Vec::new(),
+            exit_code: 0,
+            flow: Flow::Continue,
+            pending_prompt: Some(pending),
+        }
+    }
+
+    /// Deliver a response to the outstanding `prompt-user` question. `response` is `Some(text)` for
+    /// an answer or `None` for an abort (README: exit `130`). Resumes and reaps the paused row.
+    ///
+    /// - A valid answer → the response on stdout, exit `0` (recorded in the transcript unless the
+    ///   prompt was `--secret`).
+    /// - Abort → no stdout, exit `130`.
+    /// - A response outside the prompt's `--choices` → an error on stderr, exit `1`, and the prompt
+    ///   **stays pending** so the caller can re-ask.
+    /// - No prompt outstanding → an error, exit `1`.
+    pub fn answer_prompt(&mut self, response: Option<String>) -> LineResult {
+        let Some((pending, pid)) = self.pending.clone() else {
+            return LineResult::stderr("clank: no prompt-user question is awaiting a response\n");
+        };
+
+        let answer = match response {
+            Some(text) => AnswerInput::Response(text),
+            None => AnswerInput::Abort,
+        };
+
+        match promptuser::resolve(&pending, answer) {
+            Resolution::InvalidChoice { message } => {
+                // Prompt stays pending — re-ask. Don't touch the row (still `P`).
+                LineResult::stderr(message)
+            }
+            resolution => {
+                // Resolved (answered or aborted): resume and reap the paused row, clear pending.
+                if let Some(pid) = pid {
+                    let mut table = self.proc_table.lock().unwrap();
+                    table.resume(pid);
+                    table.complete(pid);
+                }
+                self.pending = None;
+
+                let (stdout, exit_code, secret) = match resolution {
+                    Resolution::Answered { stdout, secret } => (stdout, 0, secret),
+                    Resolution::Aborted => (Vec::new(), 130, false),
+                    Resolution::InvalidChoice { .. } => unreachable!("handled above"),
+                };
+                // `--secret` responses are never entered into the transcript (README).
+                if !secret {
+                    self.transcript.record_output(&stdout);
+                }
+                LineResult {
+                    stdout,
+                    stderr: Vec::new(),
+                    exit_code,
+                    flow: Flow::Continue,
+                    pending_prompt: None,
+                }
+            }
         }
     }
 
@@ -329,6 +394,7 @@ fn finish(
             } else {
                 Flow::Continue
             },
+            pending_prompt: None,
         },
         Err(e) => {
             let exit_code: u8 = brush_core::ExecutionExitCode::from(&e).into();
@@ -338,6 +404,7 @@ fn finish(
                 stderr,
                 exit_code,
                 flow: Flow::Continue,
+                pending_prompt: None,
             }
         }
     }
@@ -442,7 +509,6 @@ mod tests {
         });
     }
 
-    /// `cat /proc/<pid>/status` reads the virtual process file through the real command path.
     /// `prompt-user` is intercepted before Brush dispatch: an invocation Brush would reject
     /// differently (unknown command) instead surfaces `promptuser::parse`'s own error, proving
     /// the interception — not Brush — handled the line. Also proves the line still shows `Z` in
@@ -499,6 +565,120 @@ mod tests {
                 manifest.execution_scope,
                 crate::manifest::ExecutionScope::ShellInternal
             );
+        });
+    }
+
+    /// The full two-step path: `prompt-user` surfaces the question (returns immediately with
+    /// `pending_prompt` set, does NOT hang), then `answer_prompt` delivers the response to stdout
+    /// with exit 0, recorded in the transcript (not `--secret`), and clears the pending state.
+    #[test]
+    fn prompt_user_surfaces_then_answer_resolves() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+
+            // Step 1: surface. The question comes back and the prompt is pending — no hang.
+            let surfaced = session.eval_line(r#"prompt-user "Which environment?""#).await;
+            assert_eq!(surfaced.exit_code, 0);
+            let pending = surfaced.pending_prompt.expect("should surface a pending prompt");
+            assert_eq!(pending.question, "Which environment?");
+            assert!(session.has_pending_prompt());
+
+            // Step 2: answer. The response flows to stdout, pending clears.
+            let answered = session.answer_prompt(Some("production".to_string()));
+            assert_eq!(String::from_utf8(answered.stdout).unwrap(), "production\n");
+            assert_eq!(answered.exit_code, 0);
+            assert!(answered.pending_prompt.is_none());
+            assert!(!session.has_pending_prompt());
+
+            let (transcript, _) = session.run_line("context show").await;
+            let transcript = String::from_utf8(transcript).unwrap();
+            assert!(transcript.contains("production"), "got: {transcript}");
+        });
+    }
+
+    /// An aborted answer (`None`) exits 130 with no stdout (README) and clears the pending prompt.
+    #[test]
+    fn prompt_user_abort_exits_130() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            session.eval_line(r#"prompt-user "q?""#).await;
+            let result = session.answer_prompt(None);
+            assert!(result.stdout.is_empty());
+            assert_eq!(result.exit_code, 130);
+            assert!(!session.has_pending_prompt());
+        });
+    }
+
+    /// An answer outside the prompt's `--choices` errors and leaves the prompt pending to re-ask.
+    #[test]
+    fn prompt_user_invalid_choice_keeps_prompt_pending() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            session
+                .eval_line(r#"prompt-user "Approve?" --confirm"#)
+                .await;
+            let bad = session.answer_prompt(Some("maybe".to_string()));
+            assert_eq!(bad.exit_code, 1);
+            assert!(session.has_pending_prompt(), "prompt should stay pending");
+
+            // A valid choice then resolves it.
+            let ok = session.answer_prompt(Some("yes".to_string()));
+            assert_eq!(String::from_utf8(ok.stdout).unwrap(), "yes\n");
+            assert!(!session.has_pending_prompt());
+        });
+    }
+
+    /// A `--secret` response is never entered into the transcript (README), though the command
+    /// line itself is still recorded.
+    #[test]
+    fn prompt_user_secret_response_is_redacted_from_transcript() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            session
+                .eval_line(r#"prompt-user "Enter the API key:" --secret"#)
+                .await;
+            let result = session.answer_prompt(Some("s3cr3t-key".to_string()));
+            // The caller still gets the response on stdout...
+            assert_eq!(String::from_utf8(result.stdout).unwrap(), "s3cr3t-key\n");
+
+            // ...but it must not appear in the transcript.
+            let (transcript, _) = session.run_line("context show").await;
+            let transcript = String::from_utf8(transcript).unwrap();
+            assert!(
+                !transcript.contains("s3cr3t-key"),
+                "secret response leaked into transcript: {transcript}"
+            );
+            // The command line itself is still recorded.
+            assert!(transcript.contains("prompt-user"));
+        });
+    }
+
+    /// While a prompt is pending, an ordinary command is rejected — the caller must answer first.
+    #[test]
+    fn command_while_prompt_pending_is_rejected() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            session.eval_line(r#"prompt-user "q?""#).await;
+            let blocked = session.eval_line("echo hi").await;
+            assert_ne!(blocked.exit_code, 0);
+            assert!(
+                String::from_utf8(blocked.terminal_output())
+                    .unwrap()
+                    .contains("awaiting a response"),
+                "expected a 'answer the prompt first' error"
+            );
+            // The prompt is still pending and still answerable.
+            assert!(session.has_pending_prompt());
+        });
+    }
+
+    /// `answer_prompt` with no prompt outstanding is a clean error, not a panic.
+    #[test]
+    fn answer_prompt_with_no_pending_is_an_error() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let result = session.answer_prompt(Some("x".to_string()));
+            assert_ne!(result.exit_code, 0);
         });
     }
 

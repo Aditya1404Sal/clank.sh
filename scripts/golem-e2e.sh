@@ -126,6 +126,35 @@ expect() {
   fi
 }
 
+# Invoke a method that returns the structured `EvalResult` record (`eval`, `answer_prompt`,
+# `abort_prompt`) and print the raw `.result_json.value` JSON object (so callers can pull
+# .stdout / .exit-code / .pending-prompt with jq). `$1` = method, remaining args = WIT arg literals.
+eval_json() {
+  local method="$1"; shift
+  golem agent invoke -q --format json "$AGENT_ID" "$method" "$@" 2>>"$SERVER_LOG" \
+    | grep '"result_json"' \
+    | tail -1 \
+    | jq -c '.result_json.value // empty' 2>/dev/null
+}
+
+# Assert a jq filter over an EvalResult JSON object yields the expected value.
+#   expect_eval <desc> <result-json> <jq-filter> <want>
+expect_eval() {
+  local desc="$1" json="$2" filter="$3" want="$4"
+  local got; got="$(printf '%s' "$json" | jq -r "$filter" 2>/dev/null)"
+  if [[ "$got" == "$want" ]]; then
+    echo "  ${c_grn}✓${c_rst} $desc"
+    PASS=$((PASS+1))
+  else
+    echo "  ${c_red}✗${c_rst} $desc"
+    echo "      filter:   $filter"
+    echo "      expected: $(printf '%q' "$want")"
+    echo "      got:      $(printf '%q' "$got")"
+    echo "      json:     $json"
+    FAIL=$((FAIL+1))
+  fi
+}
+
 # Like `expect`, but asserts the output CONTAINS a substring — for commands whose exact
 # formatting (e.g. uutils `wc` column padding) is an implementation detail not worth pinning.
 expect_contains() {
@@ -335,6 +364,42 @@ expect_contains "ls /proc/1 lists status"            'ls /proc/1'           'sta
 expect_contains "ls /proc/clank lists system-prompt" 'ls /proc/clank'       'system-prompt'
 # Unknown /proc path errors cleanly.
 expect_contains "unknown /proc path errors"          'cat /proc/99999/status'  'No such file'
+
+# ============================================================================
+# 2g. prompt-user — pause surfaces to the caller (no hang) + follow-up answer resolves
+# ============================================================================
+# The agent NEVER blocks on prompt-user: it records the pending question as durable state and
+# returns immediately with `pending-prompt` set. The caller (here, this script) delivers the answer
+# on a SEPARATE invocation via `answer_prompt`. This is the honest fit for the one-shot RPC transport
+# (there is no live human terminal on the agent) and, critically, it means a `prompt-user` invoke
+# returns instead of wedging the agent — the whole point of the redesign. All assertions are strictly
+# sequential; no concurrent invocation is needed.
+step "prompt-user (pause surfaces, no hang, follow-up answer resolves)"
+
+# 1. Surface: the invoke RETURNS (doesn't hang) with the question + a pending_prompt payload.
+PU_SURFACE="$(eval_json eval '"prompt-user \"Which environment?\""')"
+expect_eval "prompt-user surfaces the question on stdout"  "$PU_SURFACE"  '.stdout'  $'Which environment?\n'
+expect_eval "prompt-user exits 0 on surface"               "$PU_SURFACE"  '.exit_code'  '0'
+expect_eval "pending_prompt carries the question"          "$PU_SURFACE"  '.pending_prompt.question'  'Which environment?'
+
+# 2. Answer: a SEPARATE invocation delivers the response, which comes back on stdout, exit 0.
+PU_ANSWER="$(eval_json answer_prompt '"production"')"
+expect_eval "answer_prompt returns the response"           "$PU_ANSWER"  '.stdout'  $'production\n'
+expect_eval "answer_prompt exits 0"                        "$PU_ANSWER"  '.exit_code'  '0'
+expect_eval "pending_prompt clears after answering"        "$PU_ANSWER"  '.pending_prompt'  'null'
+
+# 3. --choices: an answer outside the allowed set leaves the prompt pending (exit 1), then a valid
+#    choice resolves it.
+eval_json eval '"prompt-user \"Deploy?\" --choices staging,production"' >/dev/null
+PU_BAD="$(eval_json answer_prompt '"maybe"')"
+expect_eval "invalid choice is rejected (exit 1)"          "$PU_BAD"  '.exit_code'  '1'
+PU_GOOD="$(eval_json answer_prompt '"staging"')"
+expect_eval "valid choice then resolves"                   "$PU_GOOD"  '.stdout'  $'staging\n'
+
+# 4. abort: --confirm prompt, aborted → exit 130, no stdout.
+eval_json eval '"prompt-user \"Proceed?\" --confirm"' >/dev/null
+PU_ABORT="$(eval_json abort_prompt)"
+expect_eval "abort_prompt exits 130"                       "$PU_ABORT"  '.exit_code'  '130'
 
 # ============================================================================
 # 3. Durability — write in one invocation, read in a SEPARATE invocation
