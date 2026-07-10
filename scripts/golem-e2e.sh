@@ -39,6 +39,17 @@ done
 # server already running there is a hard conflict we must resolve before starting.
 ROUTER_PORT=9881
 
+# `ask` needs ANTHROPIC_API_KEY in the agent env (golem.yaml passes it through via Jinja
+# substitution, which is STRICT — a missing host var fails the deploy). So export an empty default
+# when it's unset, and remember whether a real key is present: the `ask` network assertions run only
+# when a real key is set; otherwise `ask` reports "not configured" (exit 4) and that block is skipped.
+if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+  HAS_ANTHROPIC_KEY=1
+else
+  HAS_ANTHROPIC_KEY=0
+  export ANTHROPIC_API_KEY=""
+fi
+
 # The agent is addressed by type + a constructor arg (its identity). One name for
 # the whole run so state persists across invocations (durability check relies on it).
 AGENT_TYPE="ClankAgent"
@@ -520,6 +531,45 @@ expect_contains "curl --help prints help (no confirm)" 'curl --help'      'fetch
 expect_contains "prompt-user --help prints help"      'prompt-user --help'  'pause the'
 expect_contains "wget --help prints help"             'wget --help'       'download a URL'
 expect_contains "context --help prints help"          'context --help'    'session transcript'
+
+# ============================================================================
+# 2l. ask — the AI-native LLM command (transcript-as-context)
+# ============================================================================
+# `ask` sends the shell transcript as the model's context to Claude and prints the reply. The
+# resolution asserts (type/--help/ls /bin) need no API key and always run. The real network asserts
+# run only when ANTHROPIC_API_KEY is set — they prove the durable Anthropic provider works on the live
+# agent and that the transcript feeds the model. `ask` is Confirm-gated (outbound HTTP), so `sudo ask`
+# skips the pause; a bare `ask` surfaces the confirmation.
+step "ask (AI-native LLM command)"
+# Always-run (no key): ask is resolvable and self-documenting.
+expect_contains "type ask resolves as builtin"        'type ask'          'ask is a shell builtin'
+expect_contains "ls /bin lists ask"                   'ls /bin'           'ask'
+expect_contains "ask --help prints help (no confirm)" 'ask --help'        'send the current shell transcript'
+
+if [[ $HAS_ANTHROPIC_KEY -eq 1 ]]; then
+  note "ANTHROPIC_API_KEY present — running ask network assertions against the live model"
+  # 1. sudo ask pre-authorizes (no confirm); the model replies. Ask for an exact token so we can
+  #    assert on it deterministically.
+  ASK_PONG="$(eval_json eval '"sudo ask --fresh \"Reply with exactly the single word: pong . No punctuation, nothing else.\""')"
+  expect_eval "sudo ask exits 0"                       "$ASK_PONG"  '.exit_code'  '0'
+  expect_eval "sudo ask returns the model reply"       "$ASK_PONG"  '.stdout | ascii_downcase | contains("pong")'  'true'
+  # 2. Transcript-as-context: echo a unique marker, then ask about it WITHOUT --fresh. The model can
+  #    only answer correctly if the transcript (carrying the echo) reached it.
+  run_line 'echo the_secret_word_is_kumquat' >/dev/null
+  ASK_CTX="$(eval_json eval '"sudo ask \"What is the secret word I just echoed? Reply with just the word.\""')"
+  expect_eval "ask sees the transcript as context"     "$ASK_CTX"  '.stdout | ascii_downcase | contains("kumquat")'  'true'
+  # 3. Bare ask (no sudo) surfaces the outbound-HTTP confirmation.
+  ASK_CONFIRM="$(eval_json eval '"ask \"hello\""')"
+  expect_eval "bare ask surfaces a confirmation"       "$ASK_CONFIRM"  '.pending_prompt != null'  'true'
+  # Resolve the pending prompt (deny) so it doesn't block later lines; denial exits 5.
+  ASK_DENY="$(eval_json answer_prompt '"no"')"
+  expect_eval "denied ask exits 5"                     "$ASK_DENY"  '.exit_code'  '5'
+else
+  note "ANTHROPIC_API_KEY not set — skipping ask network assertions (set it to exercise the live model)"
+  # Sanity: with no key, sudo ask fails cleanly (exit 4 from the provider), never hangs or panics.
+  ASK_NOKEY="$(eval_json eval '"sudo ask --fresh \"hi\""')"
+  expect_eval "sudo ask without a key exits nonzero"   "$ASK_NOKEY"  '.exit_code != 0'  'true'
+fi
 
 # ============================================================================
 # 3. Durability — write in one invocation, read in a SEPARATE invocation
