@@ -608,6 +608,47 @@ expect "loop producer | wc -l counts all lines"       'for i in {1..200}; do ech
 expect "standalone wc -l reads empty stdin (no trap)" 'wc -l'  $'0'
 
 # ============================================================================
+# 2n. Standard utilities — phase 1 (printf, man, stat, grep flags)
+# ============================================================================
+step "Standard utilities (printf, man, stat, grep flags)"
+
+# printf — clank-registered uu_printf. Brush's own printf builtin is gated `any(unix, windows)`
+# upstream, so before this the agent had NO printf (the word fell through to unsupported external
+# exec). These two asserts are the direct fix for that long-standing gap.
+expect "printf %s/%d with \\n"            'printf "%s-%d\n" a 1'                     $'a-1'
+expect "printf reuses format per batch"   'printf "%s\n" one two'                    $'one\ntwo'
+
+# man — manifest-rendered pages (same source as cat /bin/<name>), Brush-builtin fallback, honest
+# not-found on unknown names.
+expect_contains "man grep renders NAME section"  'man grep'   'grep - search files for a pattern'
+expect_contains "man cd falls back to Brush help" 'man cd'    'cd'
+MAN_MISSING="$(eval_json eval '"man no-such-command-xyz"')"
+expect_eval "man unknown name exits 1"    "$MAN_MISSING" '.exit_code' '1'
+expect_eval "man unknown name says so"    "$MAN_MISSING" '.stderr | contains("No manual entry")' 'true'
+
+# stat — honest wasm subset (size/type/timestamps real; inode/uid/mode print '-'), virtual
+# namespaces served, -c format directives.
+expect "stat -c %s reports size"          'echo -n abc > /tmp/work/stat-f; stat -c %s /tmp/work/stat-f'  $'3'
+expect_contains "stat default block: type"   'stat /tmp/work/stat-f'   'regular file'
+expect_contains "stat default block: honest dashes" 'stat /tmp/work/stat-f'  'Inode: -'
+expect_contains "stat /bin/curl is virtual"  'stat /bin/curl'          'virtual read-only file'
+expect_contains "stat directory type"        'stat -c %F /tmp/work'    'directory'
+STAT_MISSING="$(eval_json eval '"stat /tmp/work/definitely-absent"')"
+expect_eval "stat missing file exits 1"   "$STAT_MISSING" '.exit_code' '1'
+
+# grep flags — the extended wrapper (previously only -n/-i were parsed).
+expect "grep -v inverts the match"        'echo -e "a\nb\nc" | grep -v b'            $'a\nc'
+expect "grep -c counts matching lines"    'echo -e "x\ny\nx" | grep -c x'            $'2'
+expect "grep -in clusters short flags"    'echo -e "Hay\nno" | grep -in hay'         $'1:Hay'
+expect "grep -w respects word boundaries" 'echo -e "cat\ncatalog" | grep -w cat'     $'cat'
+expect "grep -F treats pattern literally" 'echo -e "a.b\naxb" | grep -F a.b'         $'a.b'
+expect "grep -q is silent with exit 0"    'echo hay | grep -q hay; echo $?'          $'0'
+expect "grep -q miss exits 1"             'echo hay | grep -q needle; echo $?'       $'1'
+expect "grep -l lists matching files"     'echo needle > /tmp/work/g1; echo hay > /tmp/work/g2; grep -l needle /tmp/work/g1 /tmp/work/g2'  $'/tmp/work/g1'
+expect "grep -r searches directories"     'mkdir -p /tmp/work/rd; echo needle > /tmp/work/rd/f; grep -r needle /tmp/work/rd'  $'/tmp/work/rd/f:needle'
+expect_contains "grep pattern in /bin virtual file"  'grep -h "fetch a URL" /bin/curl'  'fetch a URL'
+
+# ============================================================================
 # 3. Durability — write in one invocation, read in a SEPARATE invocation
 # ============================================================================
 step "Durability check (state persists across invocations)"

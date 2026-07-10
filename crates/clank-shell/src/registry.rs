@@ -138,6 +138,12 @@ pub fn build() -> CommandRegistry {
     for manifest in crate::which::manifests() {
         registry.insert(manifest);
     }
+    for manifest in crate::mancmd::manifests() {
+        registry.insert(manifest);
+    }
+    for manifest in crate::statcmd::manifests() {
+        registry.insert(manifest);
+    }
     for manifest in crate::httpcmd::manifests() {
         registry.insert(manifest);
     }
@@ -178,6 +184,8 @@ mod tests {
             .chain(crate::texttools::builtins::<SE>())
             .chain(crate::ps::builtins::<SE>())
             .chain(crate::which::builtins::<SE>())
+            .chain(crate::mancmd::builtins::<SE>())
+            .chain(crate::statcmd::builtins::<SE>())
             .map(|(name, _reg)| name)
             // MANUAL_MANIFESTS covers commands with a manifest but no `.builtins()` registration
             // (see its doc comment for why each entry is legitimate) — union them into the

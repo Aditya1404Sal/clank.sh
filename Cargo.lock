@@ -496,6 +496,7 @@ dependencies = [
  "brush-builtins",
  "brush-core",
  "brush-parser",
+ "chrono",
  "diffy",
  "futures",
  "grep",
@@ -516,6 +517,7 @@ dependencies = [
  "uu_ls",
  "uu_mkdir",
  "uu_mv",
+ "uu_printf",
  "uu_rm",
  "uu_sleep",
  "uu_sort",
@@ -3722,6 +3724,16 @@ dependencies = [
  "thiserror",
  "uucore 0.9.0",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "uu_printf"
+version = "0.9.0"
+source = "git+https://github.com/Aditya1404Sal/coreutils?branch=wasip2-oscompat#35ecf24d7caa2202940a18ef61be5037776ecd36"
+dependencies = [
+ "clap",
+ "fluent",
+ "uucore 0.9.0",
 ]
 
 [[package]]

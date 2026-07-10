@@ -294,6 +294,11 @@ uu_builtin!(Tail, "tail", "print the last lines of a file", uu_tail::uumain);
 uu_builtin!(Tee, "tee", "copy stdin to stdout and files", uu_tee::uumain);
 uu_builtin!(Touch, "touch", "create files or update timestamps", uu_touch::uumain);
 uu_builtin!(Sleep, "sleep", "pause for a duration", uu_sleep::uumain);
+// printf shadows Brush's builtin (registered after `default_builtins`; last write wins). Brush's
+// printf is gated to `any(unix, windows)` upstream, so without this the wasm agent has no printf
+// at all and the word falls through to (unsupported) external exec. Trade-off: bash's `printf -v
+// VAR` (assign to a shell variable) is not supported by uu_printf on either target.
+uu_builtin!(Printf, "printf", "format and print data", uu_printf::uumain);
 
 /// An operand is a path (not a flag) if it doesn't start with `-`. (Flags always pass through to
 /// uutils.) Used to detect whether an invocation touches the virtual `/proc` namespace.
@@ -477,6 +482,7 @@ pub(crate) fn builtins<SE: ShellExtensions>() -> Vec<(String, Registration<SE>)>
         ("tee".into(), simple_builtin::<Tee, SE>()),
         ("touch".into(), simple_builtin::<Touch, SE>()),
         ("sleep".into(), simple_builtin::<Sleep, SE>()),
+        ("printf".into(), simple_builtin::<Printf, SE>()),
     ]
 }
 
@@ -509,5 +515,10 @@ pub(crate) fn manifests() -> Vec<crate::manifest::Manifest> {
         Manifest::builtin(Tee::NAME, Tee::SYNOPSIS),
         Manifest::builtin(Touch::NAME, Touch::SYNOPSIS),
         Manifest::builtin(Sleep::NAME, Sleep::SYNOPSIS),
+        Manifest::builtin(Printf::NAME, Printf::SYNOPSIS).with_help(
+            "printf FORMAT [ARG...] — format and print data (uutils printf). Supports %s %d %x \
+             %f etc. and \\n escapes. bash's `printf -v VAR` (assign to a shell variable) is not \
+             supported.",
+        ),
     ]
 }

@@ -200,93 +200,269 @@ fn run_jq(argv: &[String], stdin: &mut dyn std::io::Read, out: &mut dyn Write) -
     Ok(if failed { 1 } else { 0 })
 }
 
+/// Parsed `grep` invocation. Flags may appear anywhere (GNU permutes); short flags cluster
+/// (`-in`); `--` ends flag parsing; `-e PATTERN` may repeat.
+#[derive(Default)]
+struct GrepOpts {
+    patterns: Vec<String>,
+    files: Vec<String>,
+    line_number: bool,
+    ignore_case: bool,
+    invert: bool,             // -v
+    word: bool,               // -w
+    line_match: bool,         // -x
+    fixed: bool,              // -F
+    quiet: bool,              // -q
+    count: bool,              // -c
+    files_with_matches: bool, // -l
+    recursive: bool,          // -r / -R
+    /// `-H` forces the filename prefix on, `-h` off; `None` = default (multiple inputs).
+    filename: Option<bool>,
+}
+
+fn parse_grep_args(args: &[String]) -> ToolResult<GrepOpts> {
+    let mut o = GrepOpts::default();
+    let mut positional: Vec<String> = Vec::new();
+    let mut no_more_flags = false;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if no_more_flags || !arg.starts_with('-') || arg == "-" {
+            positional.push(arg.clone());
+        } else if arg == "--" {
+            no_more_flags = true;
+        } else if arg == "-e" || arg == "--regexp" {
+            let p = iter
+                .next()
+                .ok_or("option requires an argument -- 'e'")?;
+            o.patterns.push(p.clone());
+        } else if let Some(long) = arg.strip_prefix("--") {
+            match long {
+                "line-number" => o.line_number = true,
+                "ignore-case" => o.ignore_case = true,
+                "invert-match" => o.invert = true,
+                "word-regexp" => o.word = true,
+                "line-regexp" => o.line_match = true,
+                "fixed-strings" => o.fixed = true,
+                "extended-regexp" => {} // patterns are already ERE-ish (Rust regex)
+                "quiet" | "silent" => o.quiet = true,
+                "count" => o.count = true,
+                "files-with-matches" => o.files_with_matches = true,
+                "recursive" => o.recursive = true,
+                "with-filename" => o.filename = Some(true),
+                "no-filename" => o.filename = Some(false),
+                other => return Err(format!("unrecognized option '--{other}'").into()),
+            }
+        } else {
+            for c in arg[1..].chars() {
+                match c {
+                    'n' => o.line_number = true,
+                    'i' => o.ignore_case = true,
+                    'v' => o.invert = true,
+                    'w' => o.word = true,
+                    'x' => o.line_match = true,
+                    'F' => o.fixed = true,
+                    'E' => {} // patterns are already ERE-ish (Rust regex)
+                    'q' => o.quiet = true,
+                    'c' => o.count = true,
+                    'l' => o.files_with_matches = true,
+                    'r' | 'R' => o.recursive = true,
+                    'H' => o.filename = Some(true),
+                    'h' => o.filename = Some(false),
+                    other => return Err(format!("invalid option -- '{other}'").into()),
+                }
+            }
+        }
+    }
+    if o.patterns.is_empty() {
+        if positional.is_empty() {
+            return usage("grep [-invwxqclrEFhH] [-e PATTERN]... PATTERN [FILE...]");
+        }
+        o.patterns.push(positional.remove(0));
+    }
+    o.files = positional;
+    Ok(o)
+}
+
+/// A [`grep::searcher::Sink`] that only counts selected lines — the engine for `-c`, `-l`, and
+/// `-q`, where the standard printer's output isn't wanted. The searcher already applies
+/// `invert_match`, so "selected" is correct for `-v` too.
+struct CountSink {
+    count: u64,
+}
+
+impl grep::searcher::Sink for CountSink {
+    type Error = std::io::Error;
+
+    fn matched(
+        &mut self,
+        _searcher: &grep::searcher::Searcher,
+        _mat: &grep::searcher::SinkMatch<'_>,
+    ) -> Result<bool, Self::Error> {
+        self.count += 1;
+        Ok(true)
+    }
+}
+
+/// Resolve one named grep input to bytes: virtual `/bin` and `/proc` paths from their resolvers
+/// (so `grep x /bin/curl` and `grep State /proc/1/status` both work), anything else from disk.
+fn read_named_input(file: &str, environ: &[(String, String)]) -> Result<Vec<u8>, String> {
+    if crate::binfs::is_bin_path(file) {
+        crate::binfs::resolve(file)
+            .map(String::into_bytes)
+            .map_err(|_| format!("{file}: No such file or directory"))
+    } else if crate::procfs::is_proc_path(file) {
+        crate::proctable::active()
+            .and_then(|t| {
+                crate::procfs::resolve(file, &t.lock().unwrap(), environ).ok()
+            })
+            .map(String::into_bytes)
+            .ok_or_else(|| format!("{file}: No such file or directory"))
+    } else {
+        std::fs::read(file).map_err(|e| format!("{file}: {e}"))
+    }
+}
+
+/// Depth-first, sorted recursion over the real filesystem for `-r`. Virtual namespaces are not
+/// walked (their entries aren't files on disk); errors are reported per path, not fatal.
+fn collect_files_recursive(root: &str, acc: &mut Vec<String>, errs: &mut Vec<String>) {
+    match std::fs::metadata(root) {
+        Ok(md) if md.is_dir() => match std::fs::read_dir(root) {
+            Ok(rd) => {
+                let mut children: Vec<String> = rd
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.path().to_string_lossy().into_owned())
+                    .collect();
+                children.sort();
+                for child in children {
+                    collect_files_recursive(&child, acc, errs);
+                }
+            }
+            Err(e) => errs.push(format!("{root}: {e}")),
+        },
+        Ok(_) => acc.push(root.to_string()),
+        Err(e) => errs.push(format!("{root}: {e}")),
+    }
+}
+
 fn run_grep(argv: &[String], stdin: &mut dyn std::io::Read, out: &mut dyn Write) -> ToolResult<i32> {
-    use grep::matcher::Matcher;
     use grep::regex::RegexMatcherBuilder;
     use grep::searcher::{BinaryDetection, SearcherBuilder};
 
-    let mut args = argv[1..].iter();
-    let mut line_number = false;
-    let mut ignore_case = false;
-    let mut next = args.next();
-    while let Some(arg) = next {
-        match arg.as_str() {
-            "-n" => line_number = true,
-            "-i" => ignore_case = true,
-            _ => break,
-        }
-        next = args.next();
-    }
+    let opts = parse_grep_args(&argv[1..])?;
 
-    let Some(pattern) = next else {
-        return usage("grep [-n] [-i] PATTERN FILE...");
+    let mut failed = false;
+
+    // Expand `-r` directory operands into their files (default operand: the current directory).
+    let files: Vec<String> = if opts.recursive {
+        let roots = if opts.files.is_empty() {
+            vec![".".to_string()]
+        } else {
+            opts.files.clone()
+        };
+        let mut collected = Vec::new();
+        let mut errs = Vec::new();
+        for root in &roots {
+            collect_files_recursive(root, &mut collected, &mut errs);
+        }
+        for e in errs {
+            eprintln!("grep: {e}");
+            failed = true;
+        }
+        collected
+    } else {
+        opts.files.clone()
     };
-    let files: Vec<&String> = args.collect();
+
     // With no file operands, grep reads standard input — the upstream stage of a pipeline. This is
     // the `cmd | grep PATTERN` path; the label "(standard input)" mirrors GNU grep's stdin naming.
     let read_stdin = files.is_empty();
+    let with_filename = opts.filename.unwrap_or(files.len() > 1 || opts.recursive);
 
+    // `build_many` treats each pattern per the builder config (alternation of regexes, or literal
+    // strings under `-F` — joining with `|` by hand would corrupt fixed strings).
     let matcher = RegexMatcherBuilder::new()
-        .case_insensitive(ignore_case)
-        .build(pattern)?;
+        .case_insensitive(opts.ignore_case)
+        .word(opts.word)
+        .whole_line(opts.line_match)
+        .fixed_strings(opts.fixed)
+        .build_many(&opts.patterns)?;
     let mut searcher = SearcherBuilder::new()
         .binary_detection(BinaryDetection::quit(b'\x00'))
-        .line_number(line_number)
+        .line_number(opts.line_number)
+        .invert_match(opts.invert)
         .build();
-    let mut printer_builder = grep::printer::StandardBuilder::new();
-    printer_builder.path(files.len() > 1);
-    let mut printer = printer_builder.build_no_color(&mut *out);
 
-    // A `/proc` path is virtual (not on disk); resolve its bytes from the process table. Any other
-    // path is read from the real filesystem. Both are then searched as an in-memory slice so the two
-    // sources go through identical matching/printing.
     let environ = crate::procfs::current_environ();
     let mut matched = false;
-    let mut failed = false;
 
-    // Build the list of (label, bytes) inputs to search: either stdin as one unnamed input, or each
-    // named file operand resolved from /proc or the real fs.
-    if read_stdin {
+    // The (label, bytes) inputs: stdin as one unnamed input, or each named operand.
+    let inputs: Vec<(Option<String>, Vec<u8>)> = if read_stdin {
         let mut bytes = Vec::new();
         stdin.read_to_end(&mut bytes)?;
-        if matcher.is_match(&bytes)? {
-            matched = true;
-        }
-        if let Err(e) = searcher.search_slice(&matcher, &bytes, printer.sink(&matcher)) {
-            eprintln!("grep: (standard input): {e}");
-            failed = true;
-        }
+        vec![(None, bytes)]
     } else {
-        for file in files {
-            let bytes = if crate::procfs::is_proc_path(file) {
-                match crate::proctable::active()
-                    .map(|t| crate::procfs::resolve(file, &t.lock().unwrap(), &environ))
-                {
-                    Some(Ok(content)) => content.into_bytes(),
-                    _ => {
-                        eprintln!("grep: {file}: No such file or directory");
-                        failed = true;
-                        continue;
-                    }
+        let mut inputs = Vec::new();
+        for file in &files {
+            match read_named_input(file, &environ) {
+                Ok(bytes) => inputs.push((Some(file.clone()), bytes)),
+                Err(e) => {
+                    eprintln!("grep: {e}");
+                    failed = true;
                 }
-            } else {
-                match std::fs::read(file) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        eprintln!("grep: {file}: {e}");
-                        failed = true;
-                        continue;
-                    }
-                }
-            };
+            }
+        }
+        inputs
+    };
 
-            if matcher.is_match(&bytes)? {
+    if opts.quiet || opts.count || opts.files_with_matches {
+        // Count-only modes: no printed match lines, so no printer (which would hold `out`).
+        for (label, bytes) in &inputs {
+            let display = label.as_deref().unwrap_or("(standard input)");
+            let mut sink = CountSink { count: 0 };
+            if let Err(e) = searcher.search_slice(&matcher, bytes, &mut sink) {
+                eprintln!("grep: {display}: {e}");
+                failed = true;
+                continue;
+            }
+            if sink.count > 0 {
                 matched = true;
             }
-            let result =
-                searcher.search_slice(&matcher, &bytes, printer.sink_with_path(&matcher, file));
+            if opts.count {
+                if with_filename {
+                    writeln!(out, "{display}:{}", sink.count)?;
+                } else {
+                    writeln!(out, "{}", sink.count)?;
+                }
+            } else if opts.files_with_matches && sink.count > 0 {
+                writeln!(out, "{display}")?;
+            }
+        }
+    } else {
+        let mut printer_builder = grep::printer::StandardBuilder::new();
+        printer_builder.path(with_filename);
+        let mut printer = printer_builder.build_no_color(&mut *out);
+        for (label, bytes) in &inputs {
+            let display = label.as_deref().unwrap_or("(standard input)");
+            let result = match label {
+                Some(file) => {
+                    let mut sink = printer.sink_with_path(&matcher, file);
+                    let r = searcher.search_slice(&matcher, bytes, &mut sink);
+                    if sink.has_match() {
+                        matched = true;
+                    }
+                    r
+                }
+                None => {
+                    let mut sink = printer.sink(&matcher);
+                    let r = searcher.search_slice(&matcher, bytes, &mut sink);
+                    if sink.has_match() {
+                        matched = true;
+                    }
+                    r
+                }
+            };
             if let Err(e) = result {
-                eprintln!("grep: {file}: {e}");
+                eprintln!("grep: {display}: {e}");
                 failed = true;
             }
         }

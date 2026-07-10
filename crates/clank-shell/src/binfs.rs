@@ -34,8 +34,9 @@ pub enum BinError {
 const BIN_ROOT: &str = "/bin/";
 
 /// The lazily-built static registry snapshot. Built once from [`crate::registry::build`], which is
-/// pure (no host/native-only calls) and therefore sound on wasm.
-fn registry() -> &'static CommandRegistry {
+/// pure (no host/native-only calls) and therefore sound on wasm. Shared with `man` (same content
+/// as `cat /bin/<name>`) and `stat` (virtual-file sizes).
+pub(crate) fn registry() -> &'static CommandRegistry {
     static REGISTRY: OnceLock<CommandRegistry> = OnceLock::new();
     REGISTRY.get_or_init(crate::registry::build)
 }

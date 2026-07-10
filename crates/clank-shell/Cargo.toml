@@ -53,7 +53,13 @@ uu_tail = "0.9"
 uu_tee = "0.9"
 uu_touch = "0.9"
 uu_sleep = "0.9"
+# printf is clank-registered (uu_printf) rather than Brush's builtin: Brush gates its printf to
+# `any(unix, windows)` (its uucore dep isn't linked on wasm), so the agent had no printf at all.
+# Registering uu_printf fills wasm and shadows Brush's on native for uniform behavior.
+uu_printf = "0.9"
 async-trait = "0.1"
+# Timestamp rendering for `stat` (already in the tree via brush-core; compiles on wasm32-wasip2).
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [features]
 # The `wasi:cli/run` REPL driver (`mod wasm` + its p3 bindings). On by default so the native

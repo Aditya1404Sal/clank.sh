@@ -38,6 +38,7 @@ uu_tail = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2
 uu_tee = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
 uu_touch = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
 uu_sleep = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
+uu_printf = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
 # Published brush-core 0.5.0 stores redirect targets as `OpenFile::File(std::fs::File)` and clones
 # them via `File::try_clone()`, which is Unsupported on wasm32-wasip2 — so `echo > file` silently
 # discards the write. Upstream `main` refactored `OpenFile::File` to `Arc<File>` (clone = `Arc::clone`,
