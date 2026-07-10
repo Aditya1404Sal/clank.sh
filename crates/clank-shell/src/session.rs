@@ -204,6 +204,18 @@ impl Session {
             }
         };
 
+        // `<cmd> --help` for a clank-intercepted command: print its manifest help text (exit 0).
+        // These commands never reach Brush's dispatch, so they'd otherwise ignore `--help`. Handled
+        // FIRST among all interceptions (before `context`/`prompt-user`/curl and the authz gate) so
+        // each intercepted command's own handling doesn't swallow `--help`: `context --help` would
+        // otherwise be an "unknown subcommand", `prompt-user --help` would be parsed as a prompt, and
+        // `curl --help` would surface an outbound-HTTP confirmation instead of just printing help.
+        // Brush's own builtins (cat/grep) answer `--help` through their `get_content`; not here.
+        if let Some(help) = typecmd::help_for(line, &self.registry) {
+            let result = LineResult::from_outcome(help.into_bytes(), Vec::new(), 0);
+            return self.finish_intercepted(pid, result);
+        }
+
         // `context show` output is intentionally not recorded back into the transcript.
         if let Some(bytes) = dispatch_context(&mut self.transcript, line) {
             if let Some(pid) = pid {
@@ -790,6 +802,38 @@ mod tests {
                 out.contains("cat") && out.contains("builtin"),
                 "Brush's type should resolve cat as a builtin, got: {out}"
             );
+        });
+    }
+
+    /// `<cmd> --help` for an intercepted command prints its manifest help text and exits 0, through
+    /// `eval_line`. These commands never reach Brush's dispatch, so this is the only place they get
+    /// `--help`. Crucially, `curl --help` does NOT surface the outbound-HTTP confirmation — it's a
+    /// help query, handled before the authz gate.
+    #[test]
+    fn help_flag_prints_help_for_intercepted_commands() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+
+            let result = session.eval_line("curl --help").await;
+            assert_eq!(result.exit_code, 0);
+            assert!(result.pending_prompt.is_none(), "curl --help must not confirm");
+            let out = String::from_utf8(result.stdout).unwrap();
+            assert!(out.contains("fetch a URL over"), "got: {out}");
+
+            let result = session.eval_line("prompt-user --help").await;
+            assert_eq!(result.exit_code, 0);
+            assert!(result.pending_prompt.is_none(), "help must not surface a prompt");
+            assert!(String::from_utf8(result.stdout).unwrap().contains("pause the"));
+
+            let result = session.eval_line("wget --help").await;
+            assert_eq!(result.exit_code, 0);
+            assert!(String::from_utf8(result.stdout).unwrap().contains("download a URL"));
+
+            let result = session.eval_line("context --help").await;
+            assert_eq!(result.exit_code, 0);
+            assert!(String::from_utf8(result.stdout)
+                .unwrap()
+                .contains("session transcript"));
         });
     }
 
