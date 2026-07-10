@@ -40,15 +40,15 @@ uu_touch = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip
 uu_sleep = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
 # Published brush-core 0.5.0 stores redirect targets as `OpenFile::File(std::fs::File)` and clones
 # them via `File::try_clone()`, which is Unsupported on wasm32-wasip2 — so `echo > file` silently
-# discards the write. Upstream `main` has since refactored `OpenFile::File` to `Arc<File>` (clone =
-# `Arc::clone`, no syscall), which fixes file redirects on wasip2, but that fix isn't on crates.io
-# yet (published 0.5.0 is the broken one). Pin all three brush crates (one monorepo; they must move
-# in lockstep) to the exact commit that carries the fix, so the build is reproducible and can't
-# shift under an upstream force-push. The fork's `wasip2-reopen` branch == this commit == upstream
-# `reubeno/brush` main; any of them resolves identically — the SHA is what matters.
-# NB: the fork also has a `wasm-pipes` branch (rev 5184ff6) with WIP wasm pipeline support
-# (in-memory pipes + inline stages) — NOT used here: it doesn't fully work yet (a hang remains,
-# "Wall C"). See memory clank-wasm-pipeline-followups. Do not bump to it until pipelines work end to end.
-brush-core = { git = "https://github.com/Aditya1404Sal/brush", rev = "0300a84" }
-brush-builtins = { git = "https://github.com/Aditya1404Sal/brush", rev = "0300a84" }
-brush-parser = { git = "https://github.com/Aditya1404Sal/brush", rev = "0300a84" }
+# discards the write. Upstream `main` refactored `OpenFile::File` to `Arc<File>` (clone = `Arc::clone`,
+# no syscall), which fixes file redirects on wasip2, but that fix isn't on crates.io yet.
+#
+# The `wall-c-wasm-pipes` branch builds on that fix (branched from 0300a84) and adds wasm32 pipeline
+# support ("Wall C"): std::io::pipe() is unsupported on wasip2 and there's no blocking thread pool, so
+# on wasm we use an in-memory `OpenFile::Stream`-backed pipe and run owned-shell builtin stages inline
+# to completion in pipeline order (each upstream stage drops its writer → clean EOF for the next),
+# instead of OS pipes + tokio::spawn_blocking. Native behavior is unchanged. See memory
+# wall-c-pipe-concurrency-path. Pin all three brush crates (one monorepo; lockstep) to the exact commit.
+brush-core = { git = "https://github.com/Aditya1404Sal/brush", rev = "a235544" }
+brush-builtins = { git = "https://github.com/Aditya1404Sal/brush", rev = "a235544" }
+brush-parser = { git = "https://github.com/Aditya1404Sal/brush", rev = "a235544" }

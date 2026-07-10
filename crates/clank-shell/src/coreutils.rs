@@ -81,82 +81,137 @@ pub(crate) fn run_uu<SE: ShellExtensions>(
     code
 }
 
-/// wasm: there is no `dup2`, but `close(1)` frees fd 1 and the next `open()` claims it (lowest
-/// free fd), so opening a capture file *becomes* stdout. `uumain` then writes into that file; we
-/// read it back and hand it to brush's stdout (`context.stdout()`), which the Session drains to
-/// the p3 stream + transcript. clank displays via the p3 stream (not fd 1), so we never need to
-/// restore fd 1. Requires a writable preopen (`wasmtime --dir`); without one we fall back to the
-/// real stdout (visible, uncaptured).
+/// wasm: rebind the process stdio with `dup2` (wasi-libc implements it over wasip2), pointing each
+/// standard fd at a real file so uutils' process-global I/O composes with Brush's fd table:
+/// - fd 0 ← a staging file holding this command's piped stdin (or empty) — uutils tools that read
+///   stdin get the pipe bytes, and NEVER the real wasip2 stdin resource, whose blocking read TRAPS
+///   the component (a durable agent has no interactive stdin).
+/// - fd 1/2 ← a capture file; `uumain`'s output is read back and handed to brush's stdout
+///   (`context.stdout()`), which the Session drains to the p3 stream + transcript.
+///
+/// `dup2` (not close-then-reopen) is essential: "the next open claims the lowest free fd" is NOT a
+/// dependable invariant mid-session — once fds 0-2 have been recycled, unrelated opens land on them
+/// and the reopen trick assigns the wrong numbers (observed live: stdin at 1, stderr at 0). After
+/// the call, fds 0-2 intentionally STAY bound to the staging/capture files as stable anchors for
+/// the next call. Requires a writable /tmp (created on demand); without one we run uncaptured.
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn run_uu<SE: ShellExtensions>(
     context: &ExecutionContext<'_, SE>,
     uumain: impl FnOnce() -> i32,
 ) -> i32 {
     use std::fs::OpenOptions;
-    use std::io::{Read, Seek, SeekFrom, Write};
+    use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
 
     extern "C" {
-        fn close(fd: i32) -> i32;
+        /// wasi-libc's descriptor renumber: atomically MOVES `fd` onto `newfd`, closing whatever
+        /// `newfd` previously was and freeing the source number. (There is no `dup2` symbol in the
+        /// wasm32-wasip2 libc; this is the primitive behind it.)
+        fn __wasilibc_fd_renumber(fd: i32, newfd: i32) -> i32;
     }
 
-    // A single capture file under /tmp (a writable preopen on Golem/wasi) receives BOTH fd 1 and
-    // fd 2, so stdout and stderr are captured together in write order and neither is dropped. Kept
-    // out of the working directory so it doesn't pollute it.
+    /// Move `file`'s descriptor onto `target_fd`. The `File` is forgotten first so its `Drop` can
+    /// never close the (freed, possibly recycled) source number afterwards.
+    fn bind_to_fd(file: std::fs::File, target_fd: i32) {
+        let raw = file.as_raw_fd();
+        std::mem::forget(file);
+        unsafe { __wasilibc_fd_renumber(raw, target_fd) };
+    }
+
+    // A single capture file under /tmp receives BOTH fd 1 and fd 2, so stdout and stderr are
+    // captured together in write order and neither is dropped. Kept out of the working directory
+    // so it doesn't pollute it.
     const CAPTURE_PATH: &str = "/tmp/.clank-uu-capture";
+
+    // The stdin staging file — the piped bytes a uutils tool will see as fd 0.
+    const STDIN_PATH: &str = "/tmp/.clank-uu-stdin";
 
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
 
-    // Point fd 1 at a fresh capture file: `close(1)` frees the descriptor and the next `open`
-    // claims the lowest free fd (1). Then `close(2)` + open the SAME path in append mode so fd 2
-    // also writes into the capture, after fd 1's content. uutils writes to std stdout/stderr land
-    // in the file; we read it back and feed it to brush's stdout (→ transcript + p3 stream).
-    unsafe { close(1) };
-    let mut cap = match OpenOptions::new()
-        .read(true)
+    // A fresh agent has no /tmp until something creates it.
+    let _ = std::fs::create_dir_all("/tmp");
+
+    // fd 0 ← staged stdin. The bytes are complete before this stage runs (wasm pipeline stages
+    // execute inline in order), so the whole pipe payload is staged in one go.
+    let mut stdin_bytes = Vec::new();
+    let _ = effective_stdin(context).read_to_end(&mut stdin_bytes);
+    if std::fs::write(STDIN_PATH, &stdin_bytes).is_ok() {
+        if let Ok(f) = OpenOptions::new().read(true).open(STDIN_PATH) {
+            bind_to_fd(f, 0);
+        }
+    }
+
+    // fd 1 ← fresh capture (truncating); fd 2 ← the same file in append mode so stderr interleaves
+    // after stdout instead of clobbering it.
+    let captured = match OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .open(CAPTURE_PATH)
     {
-        Ok(f) => f, // claims fd 1
-        Err(_) => return uumain(), // no writable fs: run uncaptured
+        Ok(f) => {
+            bind_to_fd(f, 1);
+            true
+        }
+        Err(_) => false, // no writable fs: run uncaptured
     };
-    unsafe { close(2) };
-    // fd 2 → same file, append so it doesn't truncate fd 1's writes. Best-effort.
-    let err_fd = OpenOptions::new().append(true).open(CAPTURE_PATH);
+    if captured {
+        if let Ok(f) = OpenOptions::new().append(true).open(CAPTURE_PATH) {
+            bind_to_fd(f, 2);
+        }
+    }
 
     let code = uumain();
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
-    drop(err_fd); // closes fd 2
 
-    let mut out_bytes = Vec::new();
-    let _ = cap
-        .seek(SeekFrom::Start(0))
-        .and_then(|_| cap.read_to_end(&mut out_bytes));
-    drop(cap); // closes fd 1
-    let _ = std::fs::remove_file(CAPTURE_PATH);
-
-    // Feed captured output (stdout + stderr, interleaved) into brush's stdout so it reaches the
-    // transcript + p3 stream.
-    let _ = context.stdout().write_all(&out_bytes);
+    // Read back whatever landed in the capture (stdout + stderr, interleaved in write order) and
+    // feed it into brush's stdout so it reaches the transcript + p3 stream.
+    if captured {
+        if let Ok(out_bytes) = std::fs::read(CAPTURE_PATH) {
+            let _ = context.stdout().write_all(&out_bytes);
+        }
+    }
     code
 }
 
-/// Run a tool closure that writes directly to a `Write` sink — used by the text/data builtins
+/// This command's *effective* stdin on the wasm agent: the source Brush assigned when it is a pipe
+/// stage (`OpenFile::Stream`, the in-memory pipe reader) or a redirect (`OpenFile::File`) — and
+/// **empty input** when it is the default `OpenFile::Stdin`. The real wasip2 stdin resource must
+/// never be read: a durable agent has no interactive stdin and `input-stream.blocking-read` on it
+/// TRAPS the whole component (wedging the agent instance).
+#[cfg(target_arch = "wasm32")]
+fn effective_stdin<SE: ShellExtensions>(
+    context: &ExecutionContext<'_, SE>,
+) -> Box<dyn std::io::Read> {
+    use brush_core::openfiles::{OpenFile, OpenFiles};
+    match context.try_fd(OpenFiles::STDIN_FD) {
+        Some(f @ (OpenFile::File(_) | OpenFile::PipeReader(_) | OpenFile::Stream(_))) => Box::new(f),
+        _ => Box::new(std::io::empty()),
+    }
+}
+
+/// Run a tool closure over Brush's assigned streams — used by the text/data builtins
 /// (grep/jq/sed/…) whose Rust-library implementations we control. Unlike [`run_uu`], this does NOT
-/// swap process fds: it hands the closure `context.stdout()` (and `context.stderr()`), which are
-/// Brush's assigned `OpenFile`s. On wasm those are the in-memory capture stream, so output is
-/// captured correctly (writing to the process-global `io::stdout()` is NOT captured on wasm — the
-/// bug this fixes). Target-agnostic; no `/tmp` capture file, no fd games.
+/// swap process fds: it hands the closure `context.stdin()`, `context.stdout()`, and
+/// `context.stderr()`, which are Brush's `OpenFile`s. On wasm those are the in-memory capture/pipe
+/// streams, so output is captured and piped input (`cmd | grep …`) reaches the tool — writing to the
+/// process-global `io::stdout()` / reading process-global `io::stdin()` do neither on wasm. The
+/// `stdin` reader lets a tool consume an upstream pipeline stage's output when given no file operands.
+/// No `/tmp` capture file, no fd games; on wasm the stdin handed over is [`effective_stdin`] (never
+/// the trapping real stdin resource).
 pub(crate) fn run_tool<SE: ShellExtensions>(
     context: &ExecutionContext<'_, SE>,
-    run: impl FnOnce(&mut dyn std::io::Write, &mut dyn std::io::Write) -> i32,
+    run: impl FnOnce(&mut dyn std::io::Read, &mut dyn std::io::Write, &mut dyn std::io::Write) -> i32,
 ) -> i32 {
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut stdin = context.stdin();
+    #[cfg(target_arch = "wasm32")]
+    let mut stdin = effective_stdin(context);
     let mut out = context.stdout();
     let mut err = context.stderr();
-    let code = run(&mut out, &mut err);
+    let code = run(&mut stdin, &mut out, &mut err);
     let _ = out.flush();
     let _ = err.flush();
     code

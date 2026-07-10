@@ -88,7 +88,9 @@ cleanup() {
     note "--keep: leaving server (pid ${SERVER_PID:-?}) and data dir $DATA_DIR"
     note "AGENTS.md restored; stop the server later with:  kill ${SERVER_PID:-<pid>}"
     # copy the backup somewhere it survives, since we're not wiping DATA_DIR
-    return $ec
+    # `exit` (not `return`) inside an EXIT trap is what actually sets the script's final status;
+    # `return` leaves the status as whatever the last trap command produced, masking a real failure.
+    exit $ec
   fi
   step "Tearing down"
   if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
@@ -103,7 +105,9 @@ cleanup() {
   fi
   rm -rf "$DATA_DIR"
   note "data dir removed"
-  return $ec
+  # `exit` (not `return`) inside an EXIT trap is what actually sets the script's final status;
+  # `return` leaves the status as whatever the last trap command produced, masking a real failure.
+  exit $ec
 }
 trap cleanup EXIT INT TERM
 
@@ -354,10 +358,8 @@ expect_contains "ps -ef shows PPID column"         'ps -ef'  'PPID'
 # 2f. Virtual /proc — process files computed on read, cat/ls-able
 # ============================================================================
 # /proc is a virtual (not file-backed) namespace served from the process table. clank's own cat/ls
-# resolve /proc paths and delegate real paths to uutils. All assertions are STANDALONE (no pipe):
-# clank pipelines still wedge on the single-threaded wasm worker (Wall C — see the memory note), so
-# `cat /proc/.. | grep` is native-only. But grep's OUTPUT is now captured on wasm (the run_tool fix),
-# so `grep <pat> /proc/..` works standalone on the agent and is asserted below.
+# resolve /proc paths and delegate real paths to uutils. These assertions are standalone; the piped
+# form `cat /proc/.. | grep` now works on the wasm agent too (see the Pipelines block, 2m).
 step "Virtual /proc"
 expect_contains "cat /proc/1/status shows root Pid"  'cat /proc/1/status'   'Pid:'
 expect_contains "proc status shows State"            'cat /proc/1/status'   'State:'
@@ -509,8 +511,8 @@ expect_contains "curl -o wrote a file"             'cat /tmp/work/page'  'Exampl
 # The README makes every capability discoverable on the PATH: `type` resolves ALL commands, `/bin`
 # is a virtual namespace listing the builtins, and each has `--help`. clank's intercepted commands
 # (prompt-user/curl/wget/context) are handled before Brush dispatch and are invisible to Brush's own
-# `type`/`--help` — this block proves clank now closes that gap on the live agent. All standalone
-# (no pipe): `ls /bin | grep` is native-only (Wall C), so we assert `ls /bin` output contains names.
+# `type`/`--help` — this block proves clank now closes that gap on the live agent. These use standalone
+# `ls /bin` (contains-name asserts); the piped `ls /bin | grep` form is covered in the Pipelines block.
 step "Resolution surface (type authoritative, virtual /bin, --help)"
 # `type` for an intercepted command Brush can't see — clank answers "is a shell builtin".
 expect_contains "type curl resolves as builtin"       'type curl'         'curl is a shell builtin'
@@ -570,6 +572,40 @@ else
   ASK_NOKEY="$(eval_json eval '"sudo ask --fresh \"hi\""')"
   expect_eval "sudo ask without a key exits nonzero"   "$ASK_NOKEY"  '.exit_code != 0'  'true'
 fi
+
+# ============================================================================
+# 2m. Pipelines — internal `cmd | cmd` on the single-threaded wasm agent (Wall C)
+# ============================================================================
+# Internal pipelines used to WEDGE the agent: std::io::pipe() is unsupported on wasip2 and there is
+# no blocking thread pool, so the OS-pipe + tokio::spawn_blocking pipeline path never made progress.
+# The brush fork now runs owned-shell builtin stages inline in pipeline order, connected by an
+# in-memory OpenFile::Stream pipe (each upstream stage drops its writer → clean EOF for the next).
+# These assertions PROVE pipelines work end-to-end on the live agent — the whole point of the fix.
+step "Pipelines (internal cmd | cmd on the wasm agent)"
+# NB: producers use `echo -e` / `for` loops — NOT `printf`, which is a Brush builtin that routes to
+# external exec on the agent ("operation not supported"), a separate pre-existing gap.
+# Baseline two-stage: Brush-builtin producer into each consumer family (run_tool grep, run_uu cat/wc).
+expect "echo | grep matches the line"                 'echo -e "a\nb\nc" | grep b'   $'b'
+expect "echo | cat round-trips"                       'echo hi | cat'                $'hi'
+expect "echo | wc -w counts words"                    'echo one two three | wc -w'   $'3'
+# A flag with a detached value must not be mistaken for a file operand.
+expect "echo | head -n takes flag values"             'echo -e "x\ny\nz" | head -n 2'  $'x\ny'
+expect "echo | sort orders lines"                     'echo -e "b\na\nc" | sort'     $'a\nb\nc'
+# tee: operands are OUTPUTS and stdin is always read — the inverse shape of cat/wc.
+expect "echo | tee writes file and passes through"    'echo hello | tee /tmp/work/tee-out; cat /tmp/work/tee-out'  $'hello\nhello'
+# Pipe a virtual /proc read into grep (was "native-only" before the fix).
+expect_contains "cat /proc/1/status | grep State"     'cat /proc/1/status | grep State'  'State'
+# Pipe the virtual /bin listing into grep (the other formerly-deferred case).
+expect_contains "ls /bin | grep curl"                 'ls /bin | grep curl'  'curl'
+# Three-stage pipeline: every non-last stage must hand off cleanly.
+expect "three-stage pipe (grep | grep | wc -l)"       'echo -e "apple\nbanana\napricot" | grep a | grep p | wc -l'  $'2'
+# Large producer (a compound `for` as a pipeline stage) into an early-terminating consumer must
+# COMPLETE (not hang) and truncate; and the same producer fully counted proves no bytes are lost.
+expect "large producer | head completes (no hang)"    'for i in {1..200}; do echo $i; done | head -n 3'  $'1\n2\n3'
+expect "loop producer | wc -l counts all lines"       'for i in {1..200}; do echo $i; done | wc -l'  $'200'
+# Standalone stdin-readers see EMPTY input — never the real wasip2 stdin resource, whose blocking
+# read traps (and permanently wedges) the agent instance.
+expect "standalone wc -l reads empty stdin (no trap)" 'wc -l'  $'0'
 
 # ============================================================================
 # 3. Durability — write in one invocation, read in a SEPARATE invocation

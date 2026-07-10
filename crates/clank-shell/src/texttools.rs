@@ -51,8 +51,10 @@ macro_rules! text_builtin {
             {
                 let argv: Vec<String> = args.map(|s| s.as_ref().to_string()).collect();
                 // Write through Brush's stdout/stderr sinks (captured on wasm), not io::stdout().
-                let code = crate::coreutils::run_tool(&context, move |out, err| {
-                    match $run(&argv, out) {
+                // `stdin` is Brush's assigned input `OpenFile` — the upstream pipe stage's output when
+                // this command is on the right-hand side of a `|` — so tools can read piped input.
+                let code = crate::coreutils::run_tool(&context, move |stdin, out, err| {
+                    match $run(&argv, stdin, out) {
                         Ok(code) => code,
                         Err(e) => {
                             let _ = writeln!(err, "{}: {e}", $name);
@@ -99,7 +101,7 @@ pub(crate) fn manifests() -> Vec<crate::manifest::Manifest> {
     ]
 }
 
-fn run_jq(argv: &[String], out: &mut dyn Write) -> ToolResult<i32> {
+fn run_jq(argv: &[String], stdin: &mut dyn std::io::Read, out: &mut dyn Write) -> ToolResult<i32> {
     use jaq_core::data::JustLut;
     use jaq_core::load::{import, Arena, File, Loader};
     use jaq_core::{compile::Compiler, unwrap_valr, Ctx, Vars};
@@ -120,9 +122,8 @@ fn run_jq(argv: &[String], out: &mut dyn Write) -> ToolResult<i32> {
         return usage("jq FILTER FILE... | jq -n FILTER");
     };
     let files = &args[i + 1..];
-    if files.is_empty() && !null_input {
-        return usage("jq FILTER FILE... | jq -n FILTER");
-    }
+    // With no file operands (and not -n), jq reads its JSON input from stdin — the pipeline case.
+    let read_stdin = files.is_empty() && !null_input;
 
     let arena = Arena::default();
     let loader = Loader::new(
@@ -154,6 +155,13 @@ fn run_jq(argv: &[String], out: &mut dyn Write) -> ToolResult<i32> {
 
     let inputs: Box<dyn Iterator<Item = Result<Val, String>>> = if null_input {
         Box::new(std::iter::once(Ok(Val::Null)))
+    } else if read_stdin {
+        let mut bytes = Vec::new();
+        stdin.read_to_end(&mut bytes)?;
+        let values: Vec<Result<Val, String>> = read::parse_many(&bytes)
+            .map(|value| value.map_err(|e| format!("(standard input): {e}")))
+            .collect();
+        Box::new(values.into_iter())
     } else {
         let mut values = Vec::new();
         for file in files {
@@ -192,7 +200,7 @@ fn run_jq(argv: &[String], out: &mut dyn Write) -> ToolResult<i32> {
     Ok(if failed { 1 } else { 0 })
 }
 
-fn run_grep(argv: &[String], out: &mut dyn Write) -> ToolResult<i32> {
+fn run_grep(argv: &[String], stdin: &mut dyn std::io::Read, out: &mut dyn Write) -> ToolResult<i32> {
     use grep::matcher::Matcher;
     use grep::regex::RegexMatcherBuilder;
     use grep::searcher::{BinaryDetection, SearcherBuilder};
@@ -214,9 +222,9 @@ fn run_grep(argv: &[String], out: &mut dyn Write) -> ToolResult<i32> {
         return usage("grep [-n] [-i] PATTERN FILE...");
     };
     let files: Vec<&String> = args.collect();
-    if files.is_empty() {
-        return usage("grep [-n] [-i] PATTERN FILE...");
-    }
+    // With no file operands, grep reads standard input — the upstream stage of a pipeline. This is
+    // the `cmd | grep PATTERN` path; the label "(standard input)" mirrors GNU grep's stdin naming.
+    let read_stdin = files.is_empty();
 
     let matcher = RegexMatcherBuilder::new()
         .case_insensitive(ignore_case)
@@ -235,36 +243,52 @@ fn run_grep(argv: &[String], out: &mut dyn Write) -> ToolResult<i32> {
     let environ = crate::procfs::current_environ();
     let mut matched = false;
     let mut failed = false;
-    for file in files {
-        let bytes = if crate::procfs::is_proc_path(file) {
-            match crate::proctable::active()
-                .map(|t| crate::procfs::resolve(file, &t.lock().unwrap(), &environ))
-            {
-                Some(Ok(content)) => content.into_bytes(),
-                _ => {
-                    eprintln!("grep: {file}: No such file or directory");
-                    failed = true;
-                    continue;
-                }
-            }
-        } else {
-            match std::fs::read(file) {
-                Ok(b) => b,
-                Err(e) => {
-                    eprintln!("grep: {file}: {e}");
-                    failed = true;
-                    continue;
-                }
-            }
-        };
 
+    // Build the list of (label, bytes) inputs to search: either stdin as one unnamed input, or each
+    // named file operand resolved from /proc or the real fs.
+    if read_stdin {
+        let mut bytes = Vec::new();
+        stdin.read_to_end(&mut bytes)?;
         if matcher.is_match(&bytes)? {
             matched = true;
         }
-        let result = searcher.search_slice(&matcher, &bytes, printer.sink_with_path(&matcher, file));
-        if let Err(e) = result {
-            eprintln!("grep: {file}: {e}");
+        if let Err(e) = searcher.search_slice(&matcher, &bytes, printer.sink(&matcher)) {
+            eprintln!("grep: (standard input): {e}");
             failed = true;
+        }
+    } else {
+        for file in files {
+            let bytes = if crate::procfs::is_proc_path(file) {
+                match crate::proctable::active()
+                    .map(|t| crate::procfs::resolve(file, &t.lock().unwrap(), &environ))
+                {
+                    Some(Ok(content)) => content.into_bytes(),
+                    _ => {
+                        eprintln!("grep: {file}: No such file or directory");
+                        failed = true;
+                        continue;
+                    }
+                }
+            } else {
+                match std::fs::read(file) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        eprintln!("grep: {file}: {e}");
+                        failed = true;
+                        continue;
+                    }
+                }
+            };
+
+            if matcher.is_match(&bytes)? {
+                matched = true;
+            }
+            let result =
+                searcher.search_slice(&matcher, &bytes, printer.sink_with_path(&matcher, file));
+            if let Err(e) = result {
+                eprintln!("grep: {file}: {e}");
+                failed = true;
+            }
         }
     }
 
@@ -277,31 +301,40 @@ fn run_grep(argv: &[String], out: &mut dyn Write) -> ToolResult<i32> {
     })
 }
 
-fn run_sed(argv: &[String], out: &mut dyn Write) -> ToolResult<i32> {
+fn run_sed(argv: &[String], stdin: &mut dyn std::io::Read, out: &mut dyn Write) -> ToolResult<i32> {
     let args = &argv[1..];
     let Some(script) = args.first() else {
         return usage("sed 's/PATTERN/REPLACEMENT/[g]' FILE...");
     };
     let files = &args[1..];
-    if files.is_empty() {
-        return usage("sed 's/PATTERN/REPLACEMENT/[g]' FILE...");
-    }
     let substitution = Substitution::parse(script)?;
     let regex = regex::Regex::new(&substitution.pattern)?;
 
-    for file in files {
-        let text = std::fs::read_to_string(file)?;
+    let apply = |text: &str, out: &mut dyn Write| -> ToolResult<()> {
         let replaced = if substitution.global {
-            regex.replace_all(&text, substitution.replacement.as_str())
+            regex.replace_all(text, substitution.replacement.as_str())
         } else {
-            regex.replace(&text, substitution.replacement.as_str())
+            regex.replace(text, substitution.replacement.as_str())
         };
         out.write_all(replaced.as_bytes())?;
+        Ok(())
+    };
+
+    // With no file operands, sed edits its standard input — the pipeline case (`cmd | sed …`).
+    if files.is_empty() {
+        let mut text = String::new();
+        stdin.read_to_string(&mut text)?;
+        apply(&text, out)?;
+    } else {
+        for file in files {
+            let text = std::fs::read_to_string(file)?;
+            apply(&text, out)?;
+        }
     }
     Ok(0)
 }
 
-fn run_diff(argv: &[String], out: &mut dyn Write) -> ToolResult<i32> {
+fn run_diff(argv: &[String], _stdin: &mut dyn std::io::Read, out: &mut dyn Write) -> ToolResult<i32> {
     let args = &argv[1..];
     if args.len() != 2 {
         return usage("diff OLD NEW");
@@ -318,7 +351,7 @@ fn run_diff(argv: &[String], out: &mut dyn Write) -> ToolResult<i32> {
     Ok(if rendered.is_empty() { 0 } else { 1 })
 }
 
-fn run_patch(argv: &[String], _out: &mut dyn Write) -> ToolResult<i32> {
+fn run_patch(argv: &[String], _stdin: &mut dyn std::io::Read, _out: &mut dyn Write) -> ToolResult<i32> {
     let args = &argv[1..];
     if args.len() != 2 {
         return usage("patch FILE PATCHFILE");
@@ -331,7 +364,7 @@ fn run_patch(argv: &[String], _out: &mut dyn Write) -> ToolResult<i32> {
     Ok(0)
 }
 
-fn run_file(argv: &[String], out: &mut dyn Write) -> ToolResult<i32> {
+fn run_file(argv: &[String], _stdin: &mut dyn std::io::Read, out: &mut dyn Write) -> ToolResult<i32> {
     let args = &argv[1..];
     if args.is_empty() {
         return usage("file FILE...");
