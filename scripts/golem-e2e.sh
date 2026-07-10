@@ -700,6 +700,26 @@ expect "awk printf formats"               "awk 'BEGIN {printf \"%d-%s\\n\", 42, 
 expect "awk concat and OFS"               "echo 'a b' | awk '{print \$2 \"-\" \$1}'"  $'b-a'
 
 # ============================================================================
+# 2q. Command substitution + redirects (fork std-utils: $() over the in-memory pipe)
+# ============================================================================
+step "Command substitution \$(...) and redirects"
+
+# $(...) previously died with "operation not supported" on the agent (std::io::pipe()). The fork
+# now runs the substitution inline over the Wall-C in-memory pipe.
+expect "simple \$() substitutes"           'echo $(echo nested)'                       $'nested'
+expect "backquotes substitute"             'echo `echo bq`'                            $'bq'
+expect "\$() captures a pipeline"          'N=$(echo -e "1\n2\n3" | wc -l); echo "count=$N"'  $'count=3'
+expect "nested \$()"                       'echo $(echo $(echo deep))'                 $'deep'
+expect "\$() composes with virtual /bin"   'echo "have $(ls /bin | grep -c curl) curl"'  $'have 1 curl'
+expect "\$() exit status flows to \$?"     'X=$(true); echo $?'                        $'0'
+
+# Redirect surface (the old "fd-clone limit" memory said `>` was broken — probe it for real).
+expect ">> appends"                        'echo one > /tmp/work/app; echo two >> /tmp/work/app; cat /tmp/work/app'  $'one\ntwo'
+expect_contains "2> captures stderr to a file"  'ls /bin/nope 2> /tmp/work/lserr; cat /tmp/work/lserr'  'No such file'
+expect_contains "&> captures both streams" 'ls /bin/nope &> /tmp/work/both; cat /tmp/work/both'  'No such file'
+expect "2>&1 pipes stderr downstream"      'ls /bin/nope 2>&1 | grep -c "No such"'     $'1'
+
+# ============================================================================
 # 3. Durability — write in one invocation, read in a SEPARATE invocation
 # ============================================================================
 step "Durability check (state persists across invocations)"

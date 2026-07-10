@@ -44,12 +44,13 @@ uu_printf = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasi
 # discards the write. Upstream `main` refactored `OpenFile::File` to `Arc<File>` (clone = `Arc::clone`,
 # no syscall), which fixes file redirects on wasip2, but that fix isn't on crates.io yet.
 #
-# The `wall-c-wasm-pipes` branch builds on that fix (branched from 0300a84) and adds wasm32 pipeline
-# support ("Wall C"): std::io::pipe() is unsupported on wasip2 and there's no blocking thread pool, so
-# on wasm we use an in-memory `OpenFile::Stream`-backed pipe and run owned-shell builtin stages inline
-# to completion in pipeline order (each upstream stage drops its writer → clean EOF for the next),
-# instead of OS pipes + tokio::spawn_blocking. Native behavior is unchanged. See memory
-# wall-c-pipe-concurrency-path. Pin all three brush crates (one monorepo; lockstep) to the exact commit.
-brush-core = { git = "https://github.com/Aditya1404Sal/brush", rev = "a235544" }
-brush-builtins = { git = "https://github.com/Aditya1404Sal/brush", rev = "a235544" }
-brush-parser = { git = "https://github.com/Aditya1404Sal/brush", rev = "a235544" }
+# The `std-utils` branch (stacked on `wall-c-wasm-pipes`, branched from 0300a84) carries the wasm32
+# changes: std::io::pipe() is unsupported on wasip2 and there's no blocking thread pool, so on wasm
+# both pipelines ("Wall C") AND command substitution `$(...)` use an in-memory
+# `OpenFile::Stream`-backed pipe with inline-sequential execution (the producer completes and drops
+# its writer → clean EOF for the reader) instead of OS pipes + tokio::spawn/spawn_blocking. Native
+# behavior is unchanged. See memory wall-c-pipe-concurrency-path. Pin all three brush crates (one
+# monorepo; lockstep) to the exact commit.
+brush-core = { git = "https://github.com/Aditya1404Sal/brush", rev = "d8cecbc" }
+brush-builtins = { git = "https://github.com/Aditya1404Sal/brush", rev = "d8cecbc" }
+brush-parser = { git = "https://github.com/Aditya1404Sal/brush", rev = "d8cecbc" }
