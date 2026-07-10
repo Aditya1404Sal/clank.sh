@@ -18,16 +18,80 @@
 use brush_parser::{tokenize_str, unquote_str, Token};
 
 use crate::manifest::{AuthorizationPolicy, ExecutionScope, Manifest};
+use crate::registry::CommandRegistry;
 
 /// The default model `ask` targets when `--model` is not given.
 pub const DEFAULT_MODEL: &str = "claude-opus-4-8";
 
-/// A short fixed system prompt for the Core `ask` increment. The real "computed from installed tools,
-/// skills, and shell configuration" builder (shared with `/proc/clank/system-prompt`) lands with the
-/// tool-surface increment — see `TODO(ask-tools)`.
+/// The fixed preamble of the `ask` system prompt: who the model is and how the shell context works.
+/// [`build_system_prompt`] appends the live command surface (rendered from the registry) after it.
 pub const CORE_SYSTEM_PROMPT: &str =
     "You are clank, an AI assistant embedded in a Unix-like shell. The user's shell transcript \
      (commands they ran and the output) is provided as context. Answer their question concisely.";
+
+/// The name of the generic shell tool the model calls to run a command line.
+pub const SHELL_TOOL: &str = "shell";
+
+/// The JSON schema for the `shell` tool's parameters: a single required `command` string.
+const SHELL_TOOL_SCHEMA: &str = r#"{"type":"object","properties":{"command":{"type":"string","description":"the shell command line to execute"}},"required":["command"]}"#;
+
+/// The tool definitions exposed to the model this turn. In v1 this is one generic [`SHELL_TOOL`] that
+/// executes a command line in the clank session (pipes/redirects/`$(...)` come free); per-command and
+/// MCP tools arrive later. Takes the registry so future increments can derive tools from it without a
+/// signature change.
+pub fn build_ask_tools(_registry: &CommandRegistry) -> Vec<AskTool> {
+    vec![AskTool {
+        name: SHELL_TOOL.to_string(),
+        description: "Execute one shell command line in the clank session and return its stdout, \
+                      stderr, and exit code. Supports pipes, redirects, and command substitution."
+            .to_string(),
+        parameters_schema: SHELL_TOOL_SCHEMA.to_string(),
+    }]
+}
+
+/// Build the `ask` system prompt: the fixed [`CORE_SYSTEM_PROMPT`] preamble plus the live command
+/// surface rendered from the registry. Only `Subprocess`-scoped commands are listed — per the README,
+/// `shell-internal`/`parent-shell` commands are not part of the model's tool surface (they mutate
+/// shell state a subprocess can't reach). Each line carries an authorization marker so the model knows
+/// which commands run freely vs. which come back needing confirmation.
+///
+/// Shared with `/proc/clank/system-prompt` (inspectable at runtime) so the model's instructions and
+/// the user-visible view are the same bytes.
+pub fn build_system_prompt(registry: &CommandRegistry) -> String {
+    let mut out = String::from(CORE_SYSTEM_PROMPT);
+    out.push_str(
+        "\n\nYou have one tool, `shell`, that runs a single command line in this session and returns \
+         its stdout, stderr, and exit code. Use it to inspect and act on the system. Compose with \
+         pipes, redirects, and $(...) as needed.\n\nAvailable commands (authorization in brackets; \
+         [confirm] and [sudo-only] commands come back needing user approval unless the user ran \
+         `sudo ask`):\n",
+    );
+
+    let mut rows: Vec<(&str, &str, &str)> = registry
+        .iter()
+        .filter(|m| m.execution_scope == ExecutionScope::Subprocess)
+        .map(|m| {
+            let marker = match m.authorization_policy {
+                AuthorizationPolicy::Allow => "",
+                AuthorizationPolicy::Confirm => " [confirm]",
+                AuthorizationPolicy::SudoOnly => " [sudo-only]",
+            };
+            (m.name.as_str(), m.synopsis.as_str(), marker)
+        })
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(b.0));
+    for (name, synopsis, marker) in rows {
+        out.push_str(&format!("  {name} — {synopsis}{marker}\n"));
+    }
+
+    out.push_str(
+        "\nNotes: `context`, `cd`, `export`, `kill`, and other shell-internal commands are NOT \
+         available as tools (they mutate shell state a subprocess can't reach). `ask` cannot call \
+         itself. To change directory or set a variable for a command, do it inside a single line \
+         (e.g. `cd /tmp && ls`).",
+    );
+    out
+}
 
 /// One tool the model may call, rendered from the manifest registry. The clank-neutral mirror of
 /// `golem-ai-llm`'s `ToolDefinition` — the `clank-agent` provider converts it at the seam so

@@ -308,7 +308,12 @@ impl Session {
             }
         }
 
-        let result = self.run_command(&effective, pid).await;
+        // `blanket_authorized` = whether an `ask` dispatched from this line runs its tool calls with
+        // blanket confirm-tier authorization. Only a literal `sudo ask` (elevated here) or a
+        // session-wide "all" grant qualifies — approving a bare `ask` later does NOT (see
+        // `resolve_auth_confirm`, which passes `false`).
+        let blanket = elevated || self.authz.allow_all;
+        let result = self.run_command(&effective, pid, blanket).await;
         self.transcript.lock().unwrap().record_output(&result.terminal_output());
         result
     }
@@ -323,7 +328,12 @@ impl Session {
     /// directly here keeps the HTTP one level under the Golem SDK's `wstd::block_on`, where the
     /// reactor is live. Both call paths funnel through here, so the direct-allow and
     /// post-approval-deferred routes both reach the HTTP correctly. See `httpcmd`.
-    async fn run_command(&mut self, line: &str, pid: Option<u32>) -> LineResult {
+    async fn run_command(
+        &mut self,
+        line: &str,
+        pid: Option<u32>,
+        blanket_authorized: bool,
+    ) -> LineResult {
         let result = if let Some(parsed) = crate::killcmd::classify(line) {
             // `kill` is Session-owned (it mutates the job table + proc table + pending state) and
             // MUST be tick-free: driving the runtime here could first-poll another parked
@@ -339,7 +349,7 @@ impl Session {
             // through `execute`'s nested runtime" rule as curl/wget. The provider's async `complete`
             // is awaited here, one level under the Golem SDK's `wstd::block_on` where the durable
             // context and the WASI-HTTP reactor are live. See `askcmd`.
-            self.run_ask(args).await
+            self.run_ask(args, blanket_authorized).await
         } else {
             match crate::httpcmd::classify(line) {
                 Some((crate::httpcmd::HttpCommand::Curl, args)) => {
@@ -487,11 +497,19 @@ impl Session {
     /// "not configured" error (exit 4) rather than panicking — the README's "features that require
     /// Golem fail with informative errors."
     ///
-    /// Takes `&mut self` because a tool call re-enters `run_command` (A2). The provider is `take()`n
-    /// for the duration and **restored before every return** — an early return that forgets to restore
-    /// would silently break the next `ask`.
-    async fn run_ask(&mut self, args: crate::askcmd::AskArgs) -> LineResult {
-        use crate::askcmd::{AskResponse, AskTool, AskTurn};
+    /// Takes `&mut self` because a tool call re-enters `run_command`. The provider is `take()`n for the
+    /// duration and **restored before every return** — an early return that forgets to restore would
+    /// silently break the next `ask`.
+    ///
+    /// `blanket_authorized` is the `sudo ask` (or session `allow_all`) grant: when set, the model's
+    /// tool calls that hit a `confirm`-policy command run without a per-call refusal. It never
+    /// satisfies `sudo-only` (destructive ops still refuse), matching [`authz::decide`].
+    async fn run_ask(
+        &mut self,
+        args: crate::askcmd::AskArgs,
+        blanket_authorized: bool,
+    ) -> LineResult {
+        use crate::askcmd::{AskResponse, AskTurn};
 
         let Some(provider) = self.ask_provider.take() else {
             return LineResult::from_outcome(
@@ -510,48 +528,161 @@ impl Session {
             String::from_utf8_lossy(&self.transcript.lock().unwrap().render()).into_owned()
         };
 
-        let system = crate::askcmd::CORE_SYSTEM_PROMPT.to_string();
-        let tools: Vec<AskTool> = Vec::new(); // A2 populates this with the `shell` tool.
+        let system = crate::askcmd::build_system_prompt(&self.registry);
+        let tools = crate::askcmd::build_ask_tools(&self.registry);
         let mut history: Vec<AskTurn> = vec![AskTurn::User(crate::askcmd::user_content(
             &base_transcript,
             &args.prompt,
         ))];
 
-        let final_text: String;
-        loop {
+        // Tool traces (`[tool] $ <line>` / `[tool] exit <code>`) accumulate on stderr; the final model
+        // text is stdout. Both land in the transcript via the caller's `record_output` — AI tool lines
+        // are never first-class transcript entries.
+        let mut trace: Vec<u8> = Vec::new();
+        let mut final_text = String::new();
+        let mut hit_cap = true;
+
+        for _ in 0..ASK_MAX_ITERATIONS {
             let resp: AskResponse = provider
                 .turn(Some(&system), &history, &tools, &args.model)
                 .await;
 
             if let Some(err) = resp.error {
                 self.ask_provider = Some(provider);
-                return LineResult::from_outcome(Vec::new(), err.into_bytes(), 4);
+                let mut stderr = trace;
+                stderr.extend_from_slice(err.as_bytes());
+                return LineResult::from_outcome(Vec::new(), stderr, 4);
             }
             if resp.tool_calls.is_empty() {
                 final_text = resp.text;
+                hit_cap = false;
                 break;
             }
-            // A1 has no tools, so a tool call can only be a model error against our (empty) tool set.
-            // Record the assistant turn and feed back a refusal for each call so the model can
-            // recover; A2 replaces this with real tool execution.
-            let tool_results = resp
-                .tool_calls
-                .iter()
-                .map(|call| crate::askcmd::AskToolResult {
-                    id: call.id.clone(),
-                    name: call.name.clone(),
-                    outcome: Err(format!("unknown tool '{}'", call.name)),
-                })
-                .collect();
+
+            let mut results = Vec::with_capacity(resp.tool_calls.len());
+            for call in &resp.tool_calls {
+                // Box to break the async recursion cycle (run_ask → execute_ask_tool → run_command →
+                // run_ask). A model `ask` tool line is guarded against, but the compiler can't see
+                // that, so the indirection is required for a finite future size.
+                let r = Box::pin(self.execute_ask_tool(call, blanket_authorized, &mut trace)).await;
+                results.push(r);
+            }
             history.push(AskTurn::Assistant {
                 text: resp.text,
                 tool_calls: resp.tool_calls,
             });
-            history.push(AskTurn::ToolResults(tool_results));
+            history.push(AskTurn::ToolResults(results));
+        }
+
+        if hit_cap {
+            trace.extend_from_slice(
+                format!("[ask] tool-call limit ({ASK_MAX_ITERATIONS}) reached\n").as_bytes(),
+            );
         }
 
         self.ask_provider = Some(provider);
-        LineResult::from_outcome(final_text.into_bytes(), Vec::new(), 0)
+        LineResult::from_outcome(final_text.into_bytes(), trace, 0)
+    }
+
+    /// Execute one tool call from the agentic loop and produce the [`AskToolResult`] fed back to the
+    /// model. Never panics: every failure is an honest `Err` result the model can react to.
+    ///
+    /// Only the generic `shell` tool exists in v1. Guards (each returns an `Err` result, loop
+    /// continues): a malformed/unknown tool, `ask` recursion, `prompt-user` (needs the A3 pause), and
+    /// any `shell-internal`/`parent-shell` command (`context`/`kill`/`cd`/`export`/… mutate shell
+    /// state a tool must not reach — this also closes the cwd/env leak vector). Then the authorization
+    /// pre-check (reusing [`authz`]): `confirm`/`sudo-only` refuse unless `blanket_authorized` (which
+    /// covers `confirm` only). Approved lines run through `run_command` — the full session surface, so
+    /// `curl`/`wget` work — with no proc row (`pid = None`); a nonzero exit is a *successful* tool
+    /// result carrying the code (the model must see failures).
+    async fn execute_ask_tool(
+        &mut self,
+        call: &crate::askcmd::AskToolCall,
+        blanket_authorized: bool,
+        trace: &mut Vec<u8>,
+    ) -> crate::askcmd::AskToolResult {
+        use crate::askcmd::AskToolResult;
+
+        let err = |msg: String| AskToolResult {
+            id: call.id.clone(),
+            name: call.name.clone(),
+            outcome: Err(msg),
+        };
+
+        if call.name != crate::askcmd::SHELL_TOOL {
+            return err(format!("unknown tool '{}'", call.name));
+        }
+
+        // Extract the `command` string from the tool arguments.
+        let command = match serde_json::from_str::<serde_json::Value>(&call.arguments_json) {
+            Ok(v) => match v.get("command").and_then(|c| c.as_str()) {
+                Some(s) => s.to_string(),
+                None => return err("malformed arguments: missing string field 'command'".into()),
+            },
+            Err(e) => return err(format!("malformed arguments: {e}")),
+        };
+
+        // Guard: `ask` cannot call itself.
+        if crate::askcmd::classify(&command).is_some() {
+            trace.extend_from_slice(format!("[tool] $ {command}\n[tool] refused: ask cannot call itself\n").as_bytes());
+            return err("ask cannot call itself".into());
+        }
+        // Guard: `prompt-user` needs the interactive pause (A3); not a tool in v1.
+        if promptuser::is_prompt_user(&command) {
+            trace.extend_from_slice(format!("[tool] $ {command}\n[tool] refused: prompt-user unavailable\n").as_bytes());
+            return err(
+                "prompt-user is not available to the model in this version (requires interactive pause)".into(),
+            );
+        }
+        // Guard: shell-internal / parent-shell commands mutate state a subprocess tool can't reach.
+        let (_policy, _elevated, cmd_name) = authz::resolve(&self.registry, &command);
+        if let Some(name) = cmd_name.as_deref() {
+            if let Some(m) = self.registry.get(name) {
+                use crate::manifest::ExecutionScope;
+                if matches!(
+                    m.execution_scope,
+                    ExecutionScope::ShellInternal | ExecutionScope::ParentShell
+                ) {
+                    trace.extend_from_slice(format!("[tool] $ {command}\n[tool] refused: shell-internal\n").as_bytes());
+                    return err(format!(
+                        "{name} is a shell-internal command, not available as a tool; it mutates \
+                         shell state ask cannot access"
+                    ));
+                }
+            }
+        }
+
+        // Authorization pre-check. `command` has no leading `sudo` (a model line won't carry it), so
+        // elevation is driven entirely by `blanket_authorized` (confirm-tier only).
+        let (policy, elevated, _) = authz::resolve(&self.registry, &command);
+        match authz::decide(policy, elevated, blanket_authorized) {
+            Decision::Allow => {}
+            Decision::Confirm { .. } | Decision::Deny => {
+                trace.extend_from_slice(format!("[tool] $ {command}\n[tool] refused: requires confirmation\n").as_bytes());
+                return err(
+                    "requires confirmation — run it under `sudo ask` or run it yourself".into(),
+                );
+            }
+        }
+
+        // Execute through the full session surface (curl/wget reach their async dispatch). No proc row.
+        let result = self.run_command(&command, None, blanket_authorized).await;
+        trace.extend_from_slice(
+            format!("[tool] $ {command}\n[tool] exit {}\n", result.exit_code).as_bytes(),
+        );
+
+        let stdout = truncate_tool_output(&result.stdout);
+        let stderr = truncate_tool_output(&result.stderr);
+        let payload = serde_json::json!({
+            "stdout": stdout,
+            "stderr": stderr,
+            "exit_code": result.exit_code,
+        });
+        AskToolResult {
+            id: call.id.clone(),
+            name: call.name.clone(),
+            outcome: Ok(payload.to_string()),
+        }
     }
 
     /// Complete an intercepted line's row and record its output (for intercepted paths that don't go
@@ -744,7 +875,11 @@ impl Session {
         }
 
         // Approved: run the gated command, reusing the row (still `R` after resume) and reaping it.
-        let result = self.run_command(command, pid).await;
+        // `blanket_authorized` is `false` here: approving a bare `ask`'s outbound-HTTP confirmation is
+        // not the same as `sudo ask` — the ask's own tool calls still gate individually. A prior "all"
+        // grant (now on `self.authz.allow_all`) is separately honored inside the tool executor.
+        let blanket = self.authz.allow_all;
+        let result = self.run_command(command, pid, blanket).await;
         self.transcript.lock().unwrap().record_output(&result.terminal_output());
         result
     }
@@ -837,6 +972,31 @@ fn strip_sudo_prefix(line: &str) -> String {
         Some(rest) if rest.starts_with(char::is_whitespace) => rest.trim_start().to_string(),
         _ => line.to_string(),
     }
+}
+
+/// The most tool-calling turns the agentic `ask` loop will drive before giving up. Bounds runaway
+/// tool use; the loop exits 0 with whatever text it has plus a stderr notice on hitting the cap.
+const ASK_MAX_ITERATIONS: usize = 16;
+
+/// Per-stream byte cap on a tool result fed back to the model. Bounds context growth from a `cat` of a
+/// large file; the payload is truncated with a marker, the JSON envelope is not.
+const ASK_TOOL_RESULT_CAP: usize = 16 * 1024;
+
+/// Truncate a tool-output stream to [`ASK_TOOL_RESULT_CAP`] bytes (on a UTF-8 boundary), appending a
+/// marker when clipped. Returns a `String` (lossy) for JSON embedding.
+fn truncate_tool_output(bytes: &[u8]) -> String {
+    if bytes.len() <= ASK_TOOL_RESULT_CAP {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    // Lossy-decode the whole prefix, then clip to the cap on a char boundary of the resulting string.
+    let decoded = String::from_utf8_lossy(bytes);
+    let mut end = ASK_TOOL_RESULT_CAP.min(decoded.len());
+    while end > 0 && !decoded.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut s = decoded[..end].to_string();
+    s.push_str("…[truncated]");
+    s
 }
 
 /// The README's default `$PATH` — the resolution namespace clank's package layout installs into.
@@ -1108,13 +1268,55 @@ mod tests {
     impl FakeProvider {
         /// A provider that replies once with `reply` text and records what it saw.
         fn reply(reply: &str, seen: std::sync::Arc<Mutex<Vec<SeenTurn>>>) -> Self {
-            let mut q = std::collections::VecDeque::new();
-            q.push_back(crate::askcmd::AskResponse::text(reply));
+            Self::scripted(
+                vec![crate::askcmd::AskResponse::text(reply)],
+                seen,
+            )
+        }
+
+        /// A provider driven by an explicit script of per-turn responses.
+        fn scripted(
+            responses: Vec<crate::askcmd::AskResponse>,
+            seen: std::sync::Arc<Mutex<Vec<SeenTurn>>>,
+        ) -> Self {
             Self {
-                scripted: std::sync::Arc::new(Mutex::new(q)),
+                scripted: std::sync::Arc::new(Mutex::new(responses.into())),
                 seen,
             }
         }
+    }
+
+    /// A single-`shell`-tool-call response for scripting the agentic loop in tests.
+    fn shell_tool_call(id: &str, command: &str) -> crate::askcmd::AskResponse {
+        crate::askcmd::AskResponse {
+            text: String::new(),
+            tool_calls: vec![crate::askcmd::AskToolCall {
+                id: id.to_string(),
+                name: crate::askcmd::SHELL_TOOL.to_string(),
+                arguments_json: serde_json::json!({ "command": command }).to_string(),
+            }],
+            finished_for_tools: true,
+            error: None,
+        }
+    }
+
+    /// The tool result the loop fed back for `call_id` in the most recent `ToolResults` turn the
+    /// provider saw, if any.
+    fn last_tool_result(
+        seen: &std::sync::Arc<Mutex<Vec<SeenTurn>>>,
+        call_id: &str,
+    ) -> Option<crate::askcmd::AskToolResult> {
+        let turns = seen.lock().unwrap();
+        for st in turns.iter().rev() {
+            for turn in st.history.iter().rev() {
+                if let crate::askcmd::AskTurn::ToolResults(results) = turn {
+                    if let Some(r) = results.iter().find(|r| r.id == call_id) {
+                        return Some(r.clone());
+                    }
+                }
+            }
+        }
+        None
     }
 
     #[async_trait::async_trait(?Send)]
@@ -1260,6 +1462,207 @@ mod tests {
             let answered = session.answer_prompt(Some("yes".to_string())).await;
             assert_eq!(answered.exit_code, 0);
             assert_eq!(String::from_utf8(answered.stdout).unwrap(), "should not run yet");
+        });
+    }
+
+    // ---- A2: the agentic shell-tool loop --------------------------------------------------------
+
+    /// The model calls the `shell` tool once, the loop runs the command, feeds back the result, and
+    /// the model answers. The tool result carries the command's stdout; the trace is on stderr.
+    #[test]
+    fn ask_shell_tool_runs_command_and_feeds_result_back() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+            session.set_ask_provider(Box::new(FakeProvider::scripted(
+                vec![
+                    shell_tool_call("c1", "echo MARK_42"),
+                    crate::askcmd::AskResponse::text("done: I saw MARK_42"),
+                ],
+                seen.clone(),
+            )));
+
+            let result = session.eval_line(r#"sudo ask "echo the marker""#).await;
+            assert_eq!(result.exit_code, 0);
+            assert_eq!(String::from_utf8(result.stdout).unwrap(), "done: I saw MARK_42");
+            // Trace framing on stderr.
+            let stderr = String::from_utf8(result.stderr).unwrap();
+            assert!(stderr.contains("[tool] $ echo MARK_42"), "got: {stderr}");
+            assert!(stderr.contains("[tool] exit 0"), "got: {stderr}");
+            // The tool result fed back carried the command's stdout.
+            let tr = last_tool_result(&seen, "c1").expect("a tool result for c1");
+            let payload = tr.outcome.expect("shell tool succeeded");
+            assert!(payload.contains("MARK_42"), "result payload: {payload}");
+        });
+    }
+
+    /// Under a plain (approved, non-sudo) ask, a `confirm`-policy tool line (curl) is refused with an
+    /// honest tool result and never runs — `blanket_authorized` is false.
+    #[test]
+    fn ask_confirm_tool_is_refused_without_sudo() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+            session.set_ask_provider(Box::new(FakeProvider::scripted(
+                vec![
+                    shell_tool_call("c1", "curl https://example.com"),
+                    crate::askcmd::AskResponse::text("I could not fetch it"),
+                ],
+                seen.clone(),
+            )));
+
+            // Bare ask → surfaces the ask confirmation; approve it (blanket stays false).
+            let first = session.eval_line(r#"ask "fetch it""#).await;
+            assert!(first.pending_prompt.is_some(), "bare ask should confirm first");
+            let result = session.answer_prompt(Some("yes".to_string())).await;
+            assert_eq!(result.exit_code, 0);
+
+            let tr = last_tool_result(&seen, "c1").expect("a tool result for c1");
+            let msg = tr.outcome.expect_err("curl should be refused");
+            assert!(msg.contains("confirmation"), "got: {msg}");
+        });
+    }
+
+    /// Even under `sudo ask`, a `sudo-only` tool line is refused — blanket covers confirm-tier only.
+    #[test]
+    fn ask_sudo_only_tool_is_refused_even_under_sudo_ask() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+            // `rm` is sudo-only in the default policy table; try to delete a marker file.
+            let path = std::env::temp_dir().join("clank_ask_sudoonly_proof");
+            std::fs::write(&path, b"keep").unwrap();
+            session.set_ask_provider(Box::new(FakeProvider::scripted(
+                vec![
+                    shell_tool_call("c1", &format!("rm {}", path.display())),
+                    crate::askcmd::AskResponse::text("could not remove"),
+                ],
+                seen.clone(),
+            )));
+
+            let result = session.eval_line(&format!(r#"sudo ask "delete {}""#, path.display())).await;
+            assert_eq!(result.exit_code, 0);
+            let tr = last_tool_result(&seen, "c1").expect("a tool result for c1");
+            assert!(tr.outcome.is_err(), "sudo-only rm should be refused under sudo ask");
+            assert!(path.exists(), "the file must survive the refused rm");
+            std::fs::remove_file(&path).ok();
+        });
+    }
+
+    /// The model trying to call `ask` recursively via the shell tool is refused.
+    #[test]
+    fn ask_recursion_is_refused() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+            session.set_ask_provider(Box::new(FakeProvider::scripted(
+                vec![
+                    shell_tool_call("c1", "ask what is 2+2"),
+                    crate::askcmd::AskResponse::text("ok"),
+                ],
+                seen.clone(),
+            )));
+
+            session.eval_line(r#"sudo ask "recurse""#).await;
+            let tr = last_tool_result(&seen, "c1").expect("a tool result for c1");
+            let msg = tr.outcome.expect_err("ask recursion should be refused");
+            assert!(msg.contains("itself"), "got: {msg}");
+        });
+    }
+
+    /// A `shell`-internal command (`context`) is refused as a tool: it mutates state a tool can't
+    /// reach. (Also guards `cd`/`export`/`kill` by the same scope check.)
+    #[test]
+    fn ask_shell_internal_command_is_refused() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+            session.set_ask_provider(Box::new(FakeProvider::scripted(
+                vec![
+                    shell_tool_call("c1", "context clear"),
+                    crate::askcmd::AskResponse::text("ok"),
+                ],
+                seen.clone(),
+            )));
+
+            session.eval_line(r#"sudo ask "clear it""#).await;
+            let tr = last_tool_result(&seen, "c1").expect("a tool result for c1");
+            let msg = tr.outcome.expect_err("context should be refused as a tool");
+            assert!(msg.contains("shell-internal"), "got: {msg}");
+        });
+    }
+
+    /// Malformed tool arguments produce an honest error result; the loop continues.
+    #[test]
+    fn ask_malformed_tool_args_error_and_continue() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+            let bad = crate::askcmd::AskResponse {
+                text: String::new(),
+                tool_calls: vec![crate::askcmd::AskToolCall {
+                    id: "c1".into(),
+                    name: crate::askcmd::SHELL_TOOL.into(),
+                    arguments_json: "{".into(), // not valid JSON
+                }],
+                finished_for_tools: true,
+                error: None,
+            };
+            session.set_ask_provider(Box::new(FakeProvider::scripted(
+                vec![bad, crate::askcmd::AskResponse::text("recovered")],
+                seen.clone(),
+            )));
+
+            let result = session.eval_line(r#"sudo ask "do something""#).await;
+            assert_eq!(String::from_utf8(result.stdout).unwrap(), "recovered");
+            let tr = last_tool_result(&seen, "c1").expect("a tool result for c1");
+            assert!(tr.outcome.unwrap_err().contains("malformed"), "expected a malformed-args error");
+        });
+    }
+
+    /// The loop stops at the iteration cap when the model calls a tool every turn, exiting 0 with a
+    /// stderr notice. The provider is called exactly `ASK_MAX_ITERATIONS` times.
+    #[test]
+    fn ask_loop_stops_at_the_iteration_cap() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+            // More tool-call responses than the cap: the loop must stop at the cap.
+            let script: Vec<_> = (0..ASK_MAX_ITERATIONS + 5)
+                .map(|i| shell_tool_call(&format!("c{i}"), "echo loop"))
+                .collect();
+            session.set_ask_provider(Box::new(FakeProvider::scripted(script, seen.clone())));
+
+            let result = session.eval_line(r#"sudo ask "loop forever""#).await;
+            assert_eq!(result.exit_code, 0);
+            assert!(
+                String::from_utf8(result.stderr).unwrap().contains("tool-call limit"),
+                "expected a cap notice on stderr"
+            );
+            // Exactly cap turns were requested.
+            assert_eq!(seen.lock().unwrap().len(), ASK_MAX_ITERATIONS);
+        });
+    }
+
+    /// Two `ask` calls in a row both succeed — the provider is take()n and restored each time. A
+    /// forgotten restore would make the second ask report "not configured".
+    #[test]
+    fn ask_provider_is_restored_between_calls() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            session.set_ask_provider(Box::new(FakeProvider::scripted(
+                vec![
+                    crate::askcmd::AskResponse::text("first"),
+                    crate::askcmd::AskResponse::text("second"),
+                ],
+                std::sync::Arc::new(Mutex::new(Vec::new())),
+            )));
+
+            let a = session.eval_line(r#"sudo ask --fresh "one""#).await;
+            assert_eq!(String::from_utf8(a.stdout).unwrap(), "first");
+            let b = session.eval_line(r#"sudo ask --fresh "two""#).await;
+            assert_eq!(b.exit_code, 0, "second ask must not report not-configured");
+            assert_eq!(String::from_utf8(b.stdout).unwrap(), "second");
         });
     }
 

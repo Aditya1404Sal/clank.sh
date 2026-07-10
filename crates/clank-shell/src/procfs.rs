@@ -144,15 +144,12 @@ pub fn list_children(dir: &str) -> Option<Vec<String>> {
     None
 }
 
-/// `/proc/clank/system-prompt` — an honest placeholder until the `ask` subsystem lands. When `ask`
-/// arrives, this is the one function body it replaces (per the README, this path is not owned by
-/// `ask` specifically — it lives here in the virtual-fs layer).
+/// `/proc/clank/system-prompt` — the live `ask` system prompt, computed on read from the current
+/// command surface. Delegates to [`crate::askcmd::build_system_prompt`] over the static registry
+/// snapshot, so this path and the model see the same bytes (README: "always inspectable"). Per the
+/// README the path lives in the virtual-fs layer, not owned by `ask` specifically.
 pub fn system_prompt_stub() -> String {
-    "# clank system prompt (placeholder)\n\
-     # The system prompt is computed on read from installed tools, skills, and shell\n\
-     # configuration. The `ask` subsystem is not yet implemented, so no prompt is\n\
-     # generated yet. This path will reflect the real prompt once `ask` lands.\n"
-        .to_string()
+    crate::askcmd::build_system_prompt(crate::binfs::registry())
 }
 
 #[cfg(test)]
@@ -237,11 +234,15 @@ mod tests {
     }
 
     #[test]
-    fn system_prompt_returns_placeholder() {
+    fn system_prompt_reflects_the_command_surface() {
         let (t, _pid) = table_with_one("echo x");
         let out = resolve("/proc/clank/system-prompt", &t, &env()).unwrap();
-        assert!(out.contains("system prompt"));
-        assert!(out.contains("placeholder"));
+        // The live prompt: the fixed preamble plus the rendered command surface. `ask` itself is a
+        // Subprocess command with a [confirm] marker; `shell` is the one tool.
+        assert!(out.contains("You are clank"), "got: {out}");
+        assert!(out.contains("`shell`"), "should describe the shell tool, got: {out}");
+        assert!(out.contains("ask —"), "should list ask in the surface, got: {out}");
+        assert!(out.contains("[confirm]"), "ask is confirm-tier, got: {out}");
     }
 
     #[test]

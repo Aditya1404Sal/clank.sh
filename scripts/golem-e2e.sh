@@ -371,8 +371,8 @@ expect_contains "grep State /proc/1/status (captured)" 'grep State /proc/1/statu
 expect_contains "cat /proc/2/cmdline (durable)"      'cat /proc/2/cmdline'  'mkdir'
 # environ reflects the shell env (the GOLEM_* set on the agent).
 expect_contains "cat /proc/<pid>/environ"            'cat /proc/2/environ'  'GOLEM_'
-# system-prompt placeholder is readable.
-expect_contains "cat /proc/clank/system-prompt"      'cat /proc/clank/system-prompt'  'system prompt'
+# system-prompt is readable and now carries the real ask preamble (A2).
+expect_contains "cat /proc/clank/system-prompt"      'cat /proc/clank/system-prompt'  'You are clank'
 # ls lists the fixed child names.
 expect_contains "ls /proc/1 lists status"            'ls /proc/1'           'status'
 expect_contains "ls /proc/clank lists system-prompt" 'ls /proc/clank'       'system-prompt'
@@ -547,6 +547,9 @@ step "ask (AI-native LLM command)"
 expect_contains "type ask resolves as builtin"        'type ask'          'ask is a shell builtin'
 expect_contains "ls /bin lists ask"                   'ls /bin'           'ask'
 expect_contains "ask --help prints help (no confirm)" 'ask --help'        'send the current shell transcript'
+# The live system prompt is inspectable and reflects the command surface + the shell tool (A2).
+expect_contains "/proc/clank/system-prompt describes the shell tool" 'cat /proc/clank/system-prompt' '`shell`'
+expect_contains "/proc/clank/system-prompt lists the command surface" 'cat /proc/clank/system-prompt' '[confirm]'
 
 if [[ $HAS_ANTHROPIC_KEY -eq 1 ]]; then
   note "ANTHROPIC_API_KEY present — running ask network assertions against the live model"
@@ -566,6 +569,24 @@ if [[ $HAS_ANTHROPIC_KEY -eq 1 ]]; then
   # Resolve the pending prompt (deny) so it doesn't block later lines; denial exits 5.
   ASK_DENY="$(eval_json answer_prompt '"no"')"
   expect_eval "denied ask exits 5"                     "$ASK_DENY"  '.exit_code'  '5'
+
+  # 4. Agentic proof-of-tool-use (A2): the model uses the `shell` tool to create a file, then we
+  #    read it back independently. A unique marker avoids stale-file false positives. `sudo ask`
+  #    grants blanket confirm-tier authz so the tool line runs without a per-call pause.
+  MARK="agentic_$(date +%s)_$$"
+  ASK_TOOL="$(eval_json eval "\"sudo ask \\\"Use the shell tool to create the file /tmp/${MARK} containing exactly the word ${MARK} and nothing else. Then stop.\\\"\"")"
+  expect_eval "agentic ask exits 0"                    "$ASK_TOOL"  '.exit_code'  '0'
+  expect_eval "agentic ask emits a tool trace"         "$ASK_TOOL"  '.stderr | contains("[tool]")'  'true'
+  expect_contains "the shell tool created the file"    "cat /tmp/${MARK}"  "${MARK}"
+
+  # 5. Denial honesty (A2): under a plain approved ask (not sudo), a confirm-tier tool line (curl)
+  #    comes back as a confirmation-required tool result — our wording, model-independent. Approve
+  #    the ask itself, then assert the trace shows the refusal.
+  ASK_REFUSE_P="$(eval_json eval '"ask \"Use the shell tool to run exactly: curl https://example.com . Report what happened.\""')"
+  expect_eval "plain ask with a curl tool confirms first" "$ASK_REFUSE_P"  '.pending_prompt != null'  'true'
+  ASK_REFUSE="$(eval_json answer_prompt '"yes"')"
+  expect_eval "the refused curl tool exits the ask 0"  "$ASK_REFUSE"  '.exit_code'  '0'
+  expect_eval "the trace shows a confirmation refusal" "$ASK_REFUSE"  '.stderr | contains("requires confirmation")'  'true'
 else
   note "ANTHROPIC_API_KEY not set — skipping ask network assertions (set it to exercise the live model)"
   # Sanity: with no key, sudo ask fails cleanly (exit 4 from the provider), never hangs or panics.
