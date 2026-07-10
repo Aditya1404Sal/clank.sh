@@ -21,3 +21,6 @@ serde = { version = "1", features = ["derive"] }
 # `repl-driver` feature, so it links as a plain rlib WITHOUT the `wasi:cli/run` export that would
 # clash with this crate's golem:agent world.
 clank-shell = { path = "../clank-shell", default-features = false }
+golem-ai-llm = "0.5.1"
+golem-ai-llm-anthropic = "0.5.1"
+async-trait = "0.1"

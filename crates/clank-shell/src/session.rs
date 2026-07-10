@@ -288,12 +288,11 @@ impl Session {
     /// post-approval-deferred routes both reach the HTTP correctly. See `httpcmd`.
     async fn run_command(&mut self, line: &str, pid: Option<u32>) -> LineResult {
         let result = if let Some(args) = crate::askcmd::classify(line) {
-            // `ask` dispatches to the injected LLM provider — same "async/sync at the Session layer,
-            // never through `execute`'s nested runtime" rule as curl/wget. The provider's call is
-            // synchronous (the durable Anthropic provider blocks internally via the Golem host), so
-            // there's no `.await` here, but it MUST run on this agent invocation where the durable
-            // context is live — which is exactly `run_command`. See `askcmd`.
-            self.run_ask(args)
+            // `ask` dispatches to the injected LLM provider — same "await at the Session layer, never
+            // through `execute`'s nested runtime" rule as curl/wget. The provider's async `complete`
+            // is awaited here, one level under the Golem SDK's `wstd::block_on` where the durable
+            // context and the WASI-HTTP reactor are live. See `askcmd`.
+            self.run_ask(args).await
         } else {
             match crate::httpcmd::classify(line) {
                 Some((crate::httpcmd::HttpCommand::Curl, args)) => {
@@ -317,7 +316,7 @@ impl Session {
     /// injected provider. If no provider is installed (e.g. the native build), degrade to a clean
     /// "not configured" error (exit 4) rather than panicking — the README's "features that require
     /// Golem fail with informative errors."
-    fn run_ask(&self, args: crate::askcmd::AskArgs) -> LineResult {
+    async fn run_ask(&self, args: crate::askcmd::AskArgs) -> LineResult {
         let Some(provider) = self.ask_provider.as_ref() else {
             return LineResult::from_outcome(
                 Vec::new(),
@@ -339,7 +338,7 @@ impl Session {
             prompt: args.prompt,
             model: args.model,
         };
-        let o = provider.complete(request);
+        let o = provider.complete(request).await;
         LineResult::from_outcome(o.stdout, o.stderr, o.exit_code)
     }
 
@@ -864,8 +863,9 @@ mod tests {
         seen: std::sync::Arc<Mutex<Option<crate::askcmd::AskRequest>>>,
     }
 
+    #[async_trait::async_trait(?Send)]
     impl crate::askcmd::AskProvider for FakeProvider {
-        fn complete(&self, request: crate::askcmd::AskRequest) -> crate::askcmd::AskOutcome {
+        async fn complete(&self, request: crate::askcmd::AskRequest) -> crate::askcmd::AskOutcome {
             *self.seen.lock().unwrap() = Some(request);
             crate::askcmd::AskOutcome::reply(self.reply.clone())
         }

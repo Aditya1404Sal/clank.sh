@@ -479,7 +479,10 @@ dependencies = [
 name = "clank-agent"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
  "clank-shell",
+ "golem-ai-llm",
+ "golem-ai-llm-anthropic",
  "golem-rust",
  "serde",
  "wstd",
@@ -489,6 +492,7 @@ dependencies = [
 name = "clank-shell"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
  "brush-builtins",
  "brush-core",
  "brush-parser",
@@ -1248,6 +1252,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "golem-ai-llm"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d2f3d162e39f4c02326dcf2805f9a36a7a2ea701e3c7b4c2d454ec6eba29cf4"
+dependencies = [
+ "async-trait",
+ "golem-rust",
+ "golem-wasi-http",
+ "indoc",
+ "log",
+ "mime",
+ "nom 7.1.3",
+ "thiserror",
+ "wasi-logger",
+ "wasip2",
+]
+
+[[package]]
+name = "golem-ai-llm-anthropic"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fa165bf6e2ff2e003ba14ad273a7f44bb20dc6451819a88b51db3c6bddaf494"
+dependencies = [
+ "base64",
+ "golem-ai-llm",
+ "golem-rust",
+ "golem-wasi-http",
+ "indoc",
+ "log",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "golem-rust"
 version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1281,6 +1319,25 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "golem-wasi-http"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e80794383f6d363e1f756c5ec9fa6ca0459824e54f9eef53b6b03491fb9d166"
+dependencies = [
+ "base64",
+ "bytes",
+ "encoding_rs",
+ "http",
+ "mime",
+ "percent-encoding",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "url",
+ "wasip2",
 ]
 
 [[package]]
@@ -1905,6 +1962,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "indoc"
+version = "2.0.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "79cf5c93f93228cf8efb3ba362535fb11199ac548a09ce117c9b1adc3030d706"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "infer"
 version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2229,6 +2295,12 @@ checksum = "d1219ed1b7f229ee7104d281dd01d6802fe28bb6e95d292942c4daacdeb798c0"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "mime"
+version = "0.3.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
 name = "minimal-lexical"

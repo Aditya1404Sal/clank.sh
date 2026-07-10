@@ -105,7 +105,12 @@ impl ClankAgentImpl {
     async fn ensure_session(&mut self) -> Result<(), EvalResult> {
         if self.session.is_none() {
             match Session::new().await {
-                Ok(s) => self.session = Some(s),
+                Ok(mut s) => {
+                    // Install the durable Anthropic provider so `ask` can reach the model. Only the
+                    // agent build has the Golem-host LLM bindings; native leaves `ask` unconfigured.
+                    s.set_ask_provider(Box::new(crate::ask_provider::DurableAnthropicProvider));
+                    self.session = Some(s);
+                }
                 Err(e) => {
                     return Err(EvalResult {
                         stdout: String::new(),

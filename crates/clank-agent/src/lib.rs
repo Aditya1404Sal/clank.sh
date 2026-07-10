@@ -4,4 +4,5 @@
 //! The `golem-rust` `export_golem_agentic` feature + the agent macros emit the component exports;
 //! there is no manual `export!` line.
 
+mod ask_provider;
 mod clank_agent;

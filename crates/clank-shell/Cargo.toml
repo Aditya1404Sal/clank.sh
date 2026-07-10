@@ -53,6 +53,7 @@ uu_tail = "0.9"
 uu_tee = "0.9"
 uu_touch = "0.9"
 uu_sleep = "0.9"
+async-trait = "0.1"
 
 [features]
 # The `wasi:cli/run` REPL driver (`mod wasm` + its p3 bindings). On by default so the native

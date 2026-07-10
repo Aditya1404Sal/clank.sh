@@ -76,12 +76,18 @@ impl AskOutcome {
 }
 
 /// The LLM transport seam. Implemented in `clank-agent` by the durable Anthropic provider and injected
-/// into the `Session`; absent on native. **Synchronous** — the durable provider blocks internally via
-/// the Golem host, and it must be called on the agent invocation where that durable context is live
-/// (i.e. from `Session::run_command`), never on a background thread.
-pub trait AskProvider: Send + Sync {
+/// into the `Session`; absent on native. **Async** — `golem-ai-llm`'s `LlmProvider::send` is an
+/// `async fn`, so `complete` is too; it is awaited from `Session::run_command`, one level under the
+/// Golem SDK's `wstd::block_on` where the durable-execution context and the WASI-HTTP reactor are live
+/// (the same "await at the Session layer, never through the nested Brush runtime" rule as curl/wget).
+///
+/// Uses `#[async_trait(?Send)]` so it stays `dyn`-compatible as `Box<dyn AskProvider>` (a plain
+/// `async fn` in a trait is not object-safe); `?Send` because wasip2 is single-threaded, matching how
+/// `golem-ai-llm`'s own `ChatStreamInterface` is declared.
+#[async_trait::async_trait(?Send)]
+pub trait AskProvider {
     /// Send the assembled request to the model and return its reply (or an error outcome).
-    fn complete(&self, request: AskRequest) -> AskOutcome;
+    async fn complete(&self, request: AskRequest) -> AskOutcome;
 }
 
 /// A parsed `ask` invocation.
