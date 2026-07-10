@@ -720,6 +720,48 @@ expect_contains "&> captures both streams" 'ls /bin/nope &> /tmp/work/both; cat 
 expect "2>&1 pipes stderr downstream"      'ls /bin/nope 2>&1 | grep -c "No such"'     $'1'
 
 # ============================================================================
+# 2r. Background jobs + synthetic kill + exec (fork std-utils phase 5)
+# ============================================================================
+step "Background jobs, kill, exec"
+
+# `cmd &` parks an in-shell future (bg tasks only progress while a foreground future awaits —
+# practically: during `wait`). The spawn must return IMMEDIATELY; the killed job must never run.
+# The 297s duration is a unique marker for the ps greps below.
+expect_contains "sleep 297 & returns immediately"  'sleep 297 &'   '] '
+expect_contains "jobs lists the running job"       'jobs'          'Running'
+# Count via the new awk (STAT is $2, command starts at $3, duration at $4) so neither the counting
+# line's own ps row nor OTHER blocks' sleep rows can match — 297 is this block's unique marker.
+expect "ps shows the bg row parked (S)"  "ps | awk '\$2 == \"S\" && \$3 == \"sleep\" && \$4 == \"297\" {n++} END {print n}'"  $'1'
+expect_contains "kill %1 cancels the job"          'kill %1'       'Killed'
+expect "killed rows are Z in ps"         "ps | awk '\$2 == \"Z\" && \$3 == \"sleep\" && \$4 == \"297\" {n++} END {print n}'"  $'2'
+expect "jobs is empty after kill"                  'jobs'          $''
+KILL_MISS="$(eval_json eval '"kill 99999"')"
+expect_eval "kill of unknown pid exits 1"          "$KILL_MISS" '.exit_code' '1'
+expect_eval "kill of unknown pid says so"          "$KILL_MISS" '.stderr | contains("No such process")' 'true'
+
+# Deferred execution proof: the parked job runs during `wait`, observable via file redirection
+# (bg stdout is orphaned — the spawning line's buffers are gone by the time it runs).
+expect "bg job runs during wait"    '{ echo bg-ran > /tmp/work/bgproof; } & wait; cat /tmp/work/bgproof'  $'bg-ran'
+
+# P-state kill: killing the prompt-paused pid == aborting the prompt (exit 130). The paused pid is
+# the row after the last one `ps` reports (pids are monotonic; the prompt line spawns the next).
+# The last row `ps` reports is the ps line itself; the next spawned line gets LAST+1.
+# NB: extract with `awk NF` — the jq -r in run_line leaves a trailing EMPTY line (the value ends
+# with \n and jq adds its own), so `tail -1` would grab "" and poison the arithmetic.
+LAST_PID="$(run_line 'ps' | awk 'NF {last=$1} END {print last}')"
+PU_PID=$((LAST_PID + 1))
+eval_json eval '"prompt-user \"kill me?\""' >/dev/null
+KILL_PENDING="$(eval_json eval "\"kill $PU_PID\"")"
+expect_eval "kill of P-state pid aborts the prompt (130)" "$KILL_PENDING" '.exit_code' '130'
+expect "shell accepts commands after P-state kill"  'echo ok'  $'ok'
+
+# exec — un-gated in the fork: the redirection-only form applies permanently; the command form on
+# wasm emulates replace-then-exit (run in-shell + ExitShell flow; the durable agent session itself
+# persists — there is no OS process to replace).
+expect "exec CMD runs the command"        'exec echo exec-ran'   $'exec-ran'
+expect "session survives exec (agent)"    'echo still-here'      $'still-here'
+
+# ============================================================================
 # 3. Durability — write in one invocation, read in a SEPARATE invocation
 # ============================================================================
 step "Durability check (state persists across invocations)"

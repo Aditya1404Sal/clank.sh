@@ -40,9 +40,9 @@ pub const SHELL_ROOT_PID: u32 = 1;
 /// The first PID handed out to a real (spawned) process. PID 1 is reserved for the root.
 pub const FIRST_PID: u32 = 2;
 
-/// Process state, the README's five. Only `R` (running) and `Z` (completed) are reachable in this
-/// increment; `S`/`T`/`P` are defined for the model but unreachable until background/paused
-/// execution exists (a later increment).
+/// Process state, the README's five. `R` (running), `Z` (completed), `P` (prompt-paused), and `S`
+/// (a background job parked on async work) are reachable; `T` remains defined-but-unreachable
+/// until suspension exists.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProcState {
     /// Running / active.
@@ -167,6 +167,25 @@ impl ProcessTable {
         pid
     }
 
+    /// Record a background job's row in state `S` (sleeping — parked async work), parented to the
+    /// spawning line's row. Used by the Session when a `cmd &` line leaves a Brush job behind; the
+    /// row completes (`S → Z`) when the job is reaped or killed.
+    pub fn spawn_bg(&mut self, kind: ProcessKind, argv: Vec<String>, ppid: u32) -> u32 {
+        let pid = self.next_pid;
+        self.next_pid += 1;
+        let start = self.start_seq;
+        self.start_seq += 1;
+        self.rows.push(ProcRow {
+            pid,
+            ppid,
+            kind,
+            argv,
+            state: ProcState::S,
+            start,
+        });
+        pid
+    }
+
     /// Mark a process paused (`R → P`) — awaiting a `prompt-user` response. No-op if the PID is
     /// unknown or not currently `R`. The row returns to `R` via [`resume`](Self::resume) when the
     /// answer arrives, then to `Z` via [`complete`](Self::complete).
@@ -189,12 +208,12 @@ impl ProcessTable {
         }
     }
 
-    /// Mark a process complete (`R → Z`, or `P → Z` for a still-paused row). No-op if the PID is
-    /// unknown or already terminal. Z rows are not reaped in this increment — they accumulate
-    /// (reaping arrives with `wait`/`/proc`).
+    /// Mark a process complete (`R → Z`; `P → Z` for a still-paused row; `S → Z` for a reaped or
+    /// killed background job). No-op if the PID is unknown or already terminal. Z rows are not
+    /// reaped in this increment — they accumulate (reaping arrives with `wait`/`/proc`).
     pub fn complete(&mut self, pid: u32) {
         if let Some(row) = self.rows.iter_mut().find(|r| r.pid == pid) {
-            if matches!(row.state, ProcState::R | ProcState::P) {
+            if matches!(row.state, ProcState::R | ProcState::P | ProcState::S) {
                 row.state = ProcState::Z;
             }
         }

@@ -36,8 +36,11 @@ use crate::manifest::{AuthorizationPolicy, ExecutionScope, Manifest};
 /// - `ask` — the AI-native LLM command, intercepted in `Session::run_command` (its LLM call must run at
 ///   the Session layer where the Golem durable context is live, not inside a synchronous Brush builtin
 ///   under the nested runtime); not `.builtins()`-registered. See `askcmd`.
+/// - `kill` — the synthetic kill, intercepted in `Session::run_command` (it mutates Session state:
+///   the bg-job mapping, proc table, and pending prompt; Brush's own kill is nix/unix-gated). See
+///   `killcmd`.
 pub const MANUAL_MANIFESTS: &[&str] =
-    &["prompt-user", "type", "command", "curl", "wget", "context", "ask"];
+    &["prompt-user", "type", "command", "curl", "wget", "context", "ask", "kill"];
 
 /// Hand-authored manifests for commands not backed by a clank `SimpleCommand` registration (see
 /// [`MANUAL_MANIFESTS`]).
@@ -154,6 +157,9 @@ pub fn build() -> CommandRegistry {
         registry.insert(manifest);
     }
     for manifest in crate::askcmd::manifests() {
+        registry.insert(manifest);
+    }
+    for manifest in crate::killcmd::manifests() {
         registry.insert(manifest);
     }
     for manifest in manual_manifests() {

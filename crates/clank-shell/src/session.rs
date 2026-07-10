@@ -45,6 +45,13 @@ struct Pending {
     kind: PendingKind,
 }
 
+/// One live background job: the Brush job manager's id and the clank process-table PID that
+/// represents it (row state `S` until reaped or killed).
+struct BgJob {
+    job_id: usize,
+    pid: u32,
+}
+
 /// The result of evaluating one shell line.
 pub struct LineResult {
     pub stdout: Vec<u8>,
@@ -127,6 +134,10 @@ pub struct Session {
     pending: Option<Pending>,
     /// Session-scoped authorization state (the "all" grant). See [`crate::authz`].
     authz: AuthzState,
+    /// Live background jobs: the Brush job id ↔ clank PID mapping `kill <pid>` resolves through.
+    /// Deterministic under Golem replay — derived purely from the replayed line history, like the
+    /// process table (the JoinHandles themselves are rebuilt by re-execution).
+    bg_jobs: Vec<BgJob>,
     /// The injected LLM provider for `ask`. Installed by the agent build (a durable Anthropic
     /// provider); `None` on native and until injected, in which case `ask` degrades to a clean
     /// "not configured" error. See [`crate::askcmd`].
@@ -151,6 +162,7 @@ impl Session {
                 proc_table: Arc::new(Mutex::new(ProcessTable::new())),
                 pending: None,
                 authz: AuthzState::default(),
+                bg_jobs: Vec::new(),
                 ask_provider: None,
                 source: SourceInfo::default(),
                 rt,
@@ -166,6 +178,7 @@ impl Session {
                 proc_table: Arc::new(Mutex::new(ProcessTable::new())),
                 pending: None,
                 authz: AuthzState::default(),
+                bg_jobs: Vec::new(),
                 ask_provider: None,
                 source: SourceInfo::default(),
             })
@@ -189,13 +202,32 @@ impl Session {
         // A prompt is already outstanding: the caller must answer it (via `answer_prompt`), not run
         // a new command. The shell never blocks, so it's the caller's job to notice `pending_prompt`
         // and respond. Reject the command with a clear message rather than silently interleaving.
+        // ONE command is allowed through: `kill <pid-of-the-paused-row>` aborts the pending prompt
+        // (the P-state kill) — the same contract as an explicit abort (exit 130 / 5).
         if self.pending.is_some() {
+            let pending_pid = self.pending.as_ref().and_then(|p| p.pid);
+            let kills_pending = matches!(
+                (crate::killcmd::classify(line), pending_pid),
+                (Some(Ok(args)), Some(pp)) if args
+                    .targets
+                    .iter()
+                    .any(|t| matches!(t, crate::killcmd::Target::Pid(p) if *p == pp))
+            );
+            if kills_pending {
+                self.transcript.record_command(line);
+                return self.answer_prompt(None).await;
+            }
             return LineResult::stderr(
                 "clank: a prompt-user question is awaiting a response; answer it first\n",
             );
         }
 
         self.transcript.record_command(line);
+
+        // Reap finished background jobs (a tick-free poll of Brush's job manager): their rows flip
+        // `S → Z`. Silent — bash-style "[1]+ Done" notifications are a later increment; `jobs`/`ps`
+        // reflect the state.
+        self.reap_bg_jobs();
 
         // Install this session's process table as the active one for the duration of the line, so
         // the `ps` builtin (a Brush builtin, which can't reach `Session` directly) can read it.
@@ -287,7 +319,17 @@ impl Session {
     /// reactor is live. Both call paths funnel through here, so the direct-allow and
     /// post-approval-deferred routes both reach the HTTP correctly. See `httpcmd`.
     async fn run_command(&mut self, line: &str, pid: Option<u32>) -> LineResult {
-        let result = if let Some(args) = crate::askcmd::classify(line) {
+        let result = if let Some(parsed) = crate::killcmd::classify(line) {
+            // `kill` is Session-owned (it mutates the job table + proc table + pending state) and
+            // MUST be tick-free: driving the runtime here could first-poll another parked
+            // background job and wedge the invocation on its synchronous body.
+            match parsed {
+                Ok(args) => self.run_kill(&args),
+                Err(e) => {
+                    LineResult::from_outcome(Vec::new(), format!("kill: {e}\n").into_bytes(), 2)
+                }
+            }
+        } else if let Some(args) = crate::askcmd::classify(line) {
             // `ask` dispatches to the injected LLM provider — same "await at the Session layer, never
             // through `execute`'s nested runtime" rule as curl/wget. The provider's async `complete`
             // is awaited here, one level under the Golem SDK's `wstd::block_on` where the durable
@@ -303,13 +345,134 @@ impl Session {
                     let o = waget::run(&args).await;
                     LineResult::from_outcome(o.stdout, o.stderr, o.exit_code)
                 }
-                None => self.execute(line).await,
+                None => {
+                    let mut result = self.execute(line).await;
+                    self.adopt_new_jobs(pid, &mut result);
+                    result
+                }
             }
         };
         if let Some(pid) = pid {
             self.proc_table.lock().unwrap().complete(pid);
         }
         result
+    }
+
+    /// Reap completed background jobs: poll Brush's job manager (never ticks the runtime — a
+    /// parked-but-unstarted job stays unstarted) and flip finished jobs' proc rows `S → Z`.
+    fn reap_bg_jobs(&mut self) {
+        let Ok(results) = self.shell.jobs_mut().poll() else {
+            return;
+        };
+        for (job, _result) in results {
+            if let Some(idx) = self.bg_jobs.iter().position(|b| b.job_id == job.id) {
+                let bg = self.bg_jobs.remove(idx);
+                self.proc_table.lock().unwrap().complete(bg.pid);
+            }
+        }
+    }
+
+    /// After a line executes, register any background jobs it left in Brush's job manager: a proc
+    /// row born `S` (parented to the spawning line's row), a job↔pid mapping for `kill`, and the
+    /// bash-style `[id] pid` start line appended to stdout (Brush's own print is interactive-only).
+    /// Then reap once — a `wait` in the same line may have completed jobs synchronously.
+    fn adopt_new_jobs(&mut self, line_pid: Option<u32>, result: &mut LineResult) {
+        let ppid = line_pid.unwrap_or(crate::proctable::SHELL_ROOT_PID);
+        let new_jobs: Vec<(usize, String)> = self
+            .shell
+            .jobs()
+            .jobs
+            .iter()
+            .filter(|j| !self.bg_jobs.iter().any(|b| b.job_id == j.id))
+            .map(|j| (j.id, j.command_line.clone()))
+            .collect();
+        for (job_id, command_line) in new_jobs {
+            let argv: Vec<String> = command_line.split_whitespace().map(String::from).collect();
+            let bg_pid = self
+                .proc_table
+                .lock()
+                .unwrap()
+                .spawn_bg(crate::process::ProcessKind::Builtin, argv, ppid);
+            self.bg_jobs.push(BgJob {
+                job_id,
+                pid: bg_pid,
+            });
+            result
+                .stdout
+                .extend_from_slice(format!("[{job_id}] {bg_pid}\n").as_bytes());
+        }
+        self.reap_bg_jobs();
+    }
+
+    /// Cancel background jobs — the synthetic `kill`. Resolves each target to a live job (by
+    /// jobspec via Brush, or by clank PID via the `bg_jobs` mapping), removes it from the manager,
+    /// aborts its future (dropped at its next await point — or never polled at all), and flips its
+    /// row to `Z`. **Tick-free by design** (see `run_command`). Exit 0 when every target was
+    /// killed, 1 on any miss (README exit-code table).
+    fn run_kill(&mut self, args: &crate::killcmd::KillArgs) -> LineResult {
+        use crate::killcmd::Target;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut any_missed = false;
+
+        for target in &args.targets {
+            let job_id = match target {
+                Target::Job(spec) => {
+                    match self.shell.jobs_mut().resolve_job_spec(spec).map(|j| j.id) {
+                        Some(id) => id,
+                        None => {
+                            stderr.extend_from_slice(
+                                format!("kill: {spec}: no such job\n").as_bytes(),
+                            );
+                            any_missed = true;
+                            continue;
+                        }
+                    }
+                }
+                Target::Pid(pid) => {
+                    if *pid == crate::proctable::SHELL_ROOT_PID {
+                        stderr.extend_from_slice(
+                            format!("kill: ({pid}) - Operation not permitted\n").as_bytes(),
+                        );
+                        any_missed = true;
+                        continue;
+                    }
+                    match self.bg_jobs.iter().find(|b| b.pid == *pid) {
+                        Some(bg) => bg.job_id,
+                        None => {
+                            stderr.extend_from_slice(
+                                format!("kill: ({pid}) - No such process\n").as_bytes(),
+                            );
+                            any_missed = true;
+                            continue;
+                        }
+                    }
+                }
+            };
+
+            let jobs = &mut self.shell.jobs_mut().jobs;
+            let Some(idx) = jobs.iter().position(|j| j.id == job_id) else {
+                stderr.extend_from_slice(format!("kill: %{job_id}: no such job\n").as_bytes());
+                any_missed = true;
+                continue;
+            };
+            let mut job = jobs.remove(idx);
+            job.abort();
+            let mapping_idx = self.bg_jobs.iter().position(|b| b.job_id == job_id);
+            let killed_pid = mapping_idx.map(|i| self.bg_jobs.remove(i).pid);
+            if let Some(killed_pid) = killed_pid {
+                self.proc_table.lock().unwrap().complete(killed_pid);
+                stdout.extend_from_slice(
+                    format!("[{job_id}] {killed_pid} Killed\t{}\n", job.command_line).as_bytes(),
+                );
+            } else {
+                stdout.extend_from_slice(
+                    format!("[{job_id}] Killed\t{}\n", job.command_line).as_bytes(),
+                );
+            }
+        }
+
+        LineResult::from_outcome(stdout, stderr, u8::from(any_missed))
     }
 
     /// Assemble the `ask` request (transcript window as context, unless `--fresh`) and call the
@@ -1081,6 +1244,39 @@ mod tests {
             let (transcript, _) = session.run_line("context show").await;
             let transcript = String::from_utf8(transcript).unwrap();
             assert!(transcript.contains("production"), "got: {transcript}");
+        });
+    }
+
+    /// `kill <pid>` of the P-state prompt-paused row is the one command allowed through while a
+    /// prompt is pending: it aborts the prompt (exit 130, same as an explicit abort). Any other
+    /// command — and a kill of a DIFFERENT pid — stays rejected.
+    #[test]
+    fn kill_of_pending_prompt_pid_aborts_it() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            session.eval_line(r#"prompt-user "q?""#).await;
+            assert!(session.has_pending_prompt());
+            let paused_pid = {
+                let table = session.proc_table.lock().unwrap();
+                let row = table
+                    .rows()
+                    .iter()
+                    .find(|r| r.state == crate::proctable::ProcState::P)
+                    .expect("a paused row");
+                row.pid
+            };
+
+            // A kill of some other pid is rejected like any other command.
+            let other = session.eval_line(&format!("kill {}", paused_pid + 100)).await;
+            assert_eq!(other.exit_code, 1);
+            assert!(session.has_pending_prompt());
+
+            // Killing the paused pid aborts the prompt: exit 130, pending cleared, row reaped.
+            let killed = session.eval_line(&format!("kill {paused_pid}")).await;
+            assert_eq!(killed.exit_code, 130);
+            assert!(!session.has_pending_prompt());
+            let after = session.eval_line("echo ok").await;
+            assert_eq!(String::from_utf8(after.stdout).unwrap(), "ok\n");
         });
     }
 

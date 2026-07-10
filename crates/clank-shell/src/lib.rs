@@ -21,6 +21,7 @@ pub mod binfs;
 mod coreutils;
 mod findcmd;
 mod httpcmd;
+mod killcmd;
 mod mancmd;
 pub mod manifest;
 pub mod process;
