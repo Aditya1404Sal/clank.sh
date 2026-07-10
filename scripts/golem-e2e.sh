@@ -493,6 +493,35 @@ eval_json eval '"sudo curl -o /tmp/work/page https://example.com"' >/dev/null
 expect_contains "curl -o wrote a file"             'cat /tmp/work/page'  'Example Domain'
 
 # ============================================================================
+# 2k. Resolution surface — type authoritative + virtual /bin + --help for intercepted cmds
+# ============================================================================
+# The README makes every capability discoverable on the PATH: `type` resolves ALL commands, `/bin`
+# is a virtual namespace listing the builtins, and each has `--help`. clank's intercepted commands
+# (prompt-user/curl/wget/context) are handled before Brush dispatch and are invisible to Brush's own
+# `type`/`--help` — this block proves clank now closes that gap on the live agent. All standalone
+# (no pipe): `ls /bin | grep` is native-only (Wall C), so we assert `ls /bin` output contains names.
+step "Resolution surface (type authoritative, virtual /bin, --help)"
+# `type` for an intercepted command Brush can't see — clank answers "is a shell builtin".
+expect_contains "type curl resolves as builtin"       'type curl'         'curl is a shell builtin'
+expect_contains "type prompt-user resolves as builtin" 'type prompt-user' 'prompt-user is a shell builtin'
+# `type -t` prints the bare word, like Brush.
+expect "type -t wget prints bare builtin"             'type -t wget'      $'builtin'
+# `type` for a Brush-registered builtin still works (fell through to Brush unchanged).
+expect_contains "type cat still resolves (Brush)"     'type cat'          'builtin'
+# virtual /bin: `ls /bin` enumerates every command; `cat /bin/<name>` reads its help.
+expect_contains "ls /bin lists curl"                  'ls /bin'           'curl'
+expect_contains "ls /bin lists prompt-user"           'ls /bin'           'prompt-user'
+expect_contains "ls /bin lists a Brush builtin (cat)" 'ls /bin'           'cat'
+expect_contains "cat /bin/curl shows help text"       'cat /bin/curl'     'fetch a URL over'
+expect_contains "cat /bin/prompt-user shows help"     'cat /bin/prompt-user'  'pause the'
+expect_contains "cat /bin/<unknown> errors"           'cat /bin/no-such-cmd'  'No such file'
+# `--help` for intercepted commands — must NOT surface a confirmation (help query, not an HTTP call).
+expect_contains "curl --help prints help (no confirm)" 'curl --help'      'fetch a URL over'
+expect_contains "prompt-user --help prints help"      'prompt-user --help'  'pause the'
+expect_contains "wget --help prints help"             'wget --help'       'download a URL'
+expect_contains "context --help prints help"          'context --help'    'session transcript'
+
+# ============================================================================
 # 3. Durability — write in one invocation, read in a SEPARATE invocation
 # ============================================================================
 step "Durability check (state persists across invocations)"
