@@ -127,6 +127,10 @@ pub struct Session {
     pending: Option<Pending>,
     /// Session-scoped authorization state (the "all" grant). See [`crate::authz`].
     authz: AuthzState,
+    /// The injected LLM provider for `ask`. Installed by the agent build (a durable Anthropic
+    /// provider); `None` on native and until injected, in which case `ask` degrades to a clean
+    /// "not configured" error. See [`crate::askcmd`].
+    ask_provider: Option<Box<dyn crate::askcmd::AskProvider>>,
     source: SourceInfo,
     #[cfg(target_arch = "wasm32")]
     rt: tokio::runtime::Runtime,
@@ -147,6 +151,7 @@ impl Session {
                 proc_table: Arc::new(Mutex::new(ProcessTable::new())),
                 pending: None,
                 authz: AuthzState::default(),
+                ask_provider: None,
                 source: SourceInfo::default(),
                 rt,
             })
@@ -161,6 +166,7 @@ impl Session {
                 proc_table: Arc::new(Mutex::new(ProcessTable::new())),
                 pending: None,
                 authz: AuthzState::default(),
+                ask_provider: None,
                 source: SourceInfo::default(),
             })
         }
@@ -169,6 +175,12 @@ impl Session {
     /// The command registry — clank's inventory of command manifests.
     pub fn registry(&self) -> &CommandRegistry {
         &self.registry
+    }
+
+    /// Install the LLM provider that backs `ask`. The agent build injects a durable Anthropic
+    /// provider here after constructing the session; without one, `ask` reports "not configured".
+    pub fn set_ask_provider(&mut self, provider: Box<dyn crate::askcmd::AskProvider>) {
+        self.ask_provider = Some(provider);
     }
 
     /// Evaluate one input line: record it, serve the clank-specific `context` builtin, otherwise
@@ -275,21 +287,60 @@ impl Session {
     /// reactor is live. Both call paths funnel through here, so the direct-allow and
     /// post-approval-deferred routes both reach the HTTP correctly. See `httpcmd`.
     async fn run_command(&mut self, line: &str, pid: Option<u32>) -> LineResult {
-        let result = match crate::httpcmd::classify(line) {
-            Some((crate::httpcmd::HttpCommand::Curl, args)) => {
-                let o = wcurl::run(&args).await;
-                LineResult::from_outcome(o.stdout, o.stderr, o.exit_code)
+        let result = if let Some(args) = crate::askcmd::classify(line) {
+            // `ask` dispatches to the injected LLM provider — same "async/sync at the Session layer,
+            // never through `execute`'s nested runtime" rule as curl/wget. The provider's call is
+            // synchronous (the durable Anthropic provider blocks internally via the Golem host), so
+            // there's no `.await` here, but it MUST run on this agent invocation where the durable
+            // context is live — which is exactly `run_command`. See `askcmd`.
+            self.run_ask(args)
+        } else {
+            match crate::httpcmd::classify(line) {
+                Some((crate::httpcmd::HttpCommand::Curl, args)) => {
+                    let o = wcurl::run(&args).await;
+                    LineResult::from_outcome(o.stdout, o.stderr, o.exit_code)
+                }
+                Some((crate::httpcmd::HttpCommand::Wget, args)) => {
+                    let o = waget::run(&args).await;
+                    LineResult::from_outcome(o.stdout, o.stderr, o.exit_code)
+                }
+                None => self.execute(line).await,
             }
-            Some((crate::httpcmd::HttpCommand::Wget, args)) => {
-                let o = waget::run(&args).await;
-                LineResult::from_outcome(o.stdout, o.stderr, o.exit_code)
-            }
-            None => self.execute(line).await,
         };
         if let Some(pid) = pid {
             self.proc_table.lock().unwrap().complete(pid);
         }
         result
+    }
+
+    /// Assemble the `ask` request (transcript window as context, unless `--fresh`) and call the
+    /// injected provider. If no provider is installed (e.g. the native build), degrade to a clean
+    /// "not configured" error (exit 4) rather than panicking — the README's "features that require
+    /// Golem fail with informative errors."
+    fn run_ask(&self, args: crate::askcmd::AskArgs) -> LineResult {
+        let Some(provider) = self.ask_provider.as_ref() else {
+            return LineResult::from_outcome(
+                Vec::new(),
+                b"ask: no model provider configured (available on the Golem agent)\n".to_vec(),
+                4,
+            );
+        };
+        // The base context is the same bytes `context show` renders — "the AI reads exactly what you
+        // see." `--fresh` sends no transcript. stdin-after-transcript is a later increment.
+        let transcript = if args.fresh {
+            String::new()
+        } else {
+            String::from_utf8_lossy(&self.transcript.render()).into_owned()
+        };
+        let request = crate::askcmd::AskRequest {
+            system: Some(crate::askcmd::CORE_SYSTEM_PROMPT.to_string()),
+            transcript,
+            stdin: None,
+            prompt: args.prompt,
+            model: args.model,
+        };
+        let o = provider.complete(request);
+        LineResult::from_outcome(o.stdout, o.stderr, o.exit_code)
     }
 
     /// Complete an intercepted line's row and record its output (for intercepted paths that don't go
@@ -802,6 +853,137 @@ mod tests {
                 out.contains("cat") && out.contains("builtin"),
                 "Brush's type should resolve cat as a builtin, got: {out}"
             );
+        });
+    }
+
+    /// A fake `AskProvider` for tests: returns a canned reply and records the last request it saw,
+    /// so tests can assert what context `ask` assembled (transcript-as-context).
+    #[derive(Clone, Default)]
+    struct FakeProvider {
+        reply: String,
+        seen: std::sync::Arc<Mutex<Option<crate::askcmd::AskRequest>>>,
+    }
+
+    impl crate::askcmd::AskProvider for FakeProvider {
+        fn complete(&self, request: crate::askcmd::AskRequest) -> crate::askcmd::AskOutcome {
+            *self.seen.lock().unwrap() = Some(request);
+            crate::askcmd::AskOutcome::reply(self.reply.clone())
+        }
+    }
+
+    /// With a provider installed, `ask` returns the model's reply on stdout (exit 0), and the request
+    /// it assembled carries the current transcript as context (the README "transcript is the context").
+    /// `ask` is `Confirm`-gated, so `sudo ask` is used here to skip the confirmation pause.
+    #[test]
+    fn ask_returns_reply_and_feeds_transcript_as_context() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let seen = std::sync::Arc::new(Mutex::new(None));
+            session.set_ask_provider(Box::new(FakeProvider {
+                reply: "the answer is 42".to_string(),
+                seen: seen.clone(),
+            }));
+
+            // Run a command first so there's transcript history to feed as context.
+            session.run_line("echo marker_abc").await;
+
+            let result = session.eval_line(r#"sudo ask "what did I just echo?""#).await;
+            assert_eq!(result.exit_code, 0);
+            assert!(result.pending_prompt.is_none(), "sudo ask must not confirm");
+            assert_eq!(
+                String::from_utf8(result.stdout).unwrap(),
+                "the answer is 42"
+            );
+
+            // The provider saw the prompt and the transcript (including the prior echo).
+            let req = seen.lock().unwrap().clone().expect("provider should have run");
+            assert_eq!(req.prompt, "what did I just echo?");
+            assert_eq!(req.model, crate::askcmd::DEFAULT_MODEL);
+            assert!(
+                req.transcript.contains("marker_abc"),
+                "transcript context should include the prior echo, got: {}",
+                req.transcript
+            );
+        });
+    }
+
+    /// `--fresh` sends no transcript context; the prompt still reaches the provider.
+    #[test]
+    fn ask_fresh_sends_empty_transcript() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let seen = std::sync::Arc::new(Mutex::new(None));
+            session.set_ask_provider(Box::new(FakeProvider {
+                reply: "ok".to_string(),
+                seen: seen.clone(),
+            }));
+
+            session.run_line("echo should_not_appear").await;
+            let result = session.eval_line(r#"sudo ask --fresh "hi""#).await;
+            assert_eq!(result.exit_code, 0);
+
+            let req = seen.lock().unwrap().clone().unwrap();
+            assert!(req.transcript.is_empty(), "got: {}", req.transcript);
+            assert_eq!(req.prompt, "hi");
+        });
+    }
+
+    /// `ask`'s reply is recorded into the transcript like any command output, so a follow-up `ask`
+    /// (or `context show`) sees the prior exchange — the README "run a command, ask about it" loop.
+    #[test]
+    fn ask_reply_is_recorded_in_transcript() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            session.set_ask_provider(Box::new(FakeProvider {
+                reply: "recorded_reply_xyz".to_string(),
+                seen: std::sync::Arc::new(Mutex::new(None)),
+            }));
+
+            session.run_line(r#"sudo ask "q""#).await;
+            let (transcript, _) = session.run_line("context show").await;
+            let transcript = String::from_utf8(transcript).unwrap();
+            assert!(
+                transcript.contains("recorded_reply_xyz"),
+                "the ask reply should be in the transcript, got: {transcript}"
+            );
+        });
+    }
+
+    /// Without a provider (the native default), `ask` degrades to a clean error (exit 4), not a panic.
+    #[test]
+    fn ask_without_provider_reports_not_configured() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let result = session.eval_line(r#"sudo ask "hi""#).await;
+            assert_eq!(result.exit_code, 4);
+            assert!(String::from_utf8(result.stderr)
+                .unwrap()
+                .contains("no model provider configured"));
+        });
+    }
+
+    /// Bare `ask` (no sudo) surfaces the outbound-HTTP confirmation, like curl/wget — it does not
+    /// call the provider until approved.
+    #[test]
+    fn ask_surfaces_a_confirmation() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let seen = std::sync::Arc::new(Mutex::new(None));
+            session.set_ask_provider(Box::new(FakeProvider {
+                reply: "should not run yet".to_string(),
+                seen: seen.clone(),
+            }));
+
+            let result = session.eval_line(r#"ask "hi""#).await;
+            let pending = result.pending_prompt.expect("bare ask should surface a confirm");
+            assert!(pending.question.to_lowercase().contains("ask"), "got: {}", pending.question);
+            // The provider must NOT have run before approval.
+            assert!(seen.lock().unwrap().is_none(), "provider ran before approval");
+
+            // Approving runs the deferred ask.
+            let answered = session.answer_prompt(Some("yes".to_string())).await;
+            assert_eq!(answered.exit_code, 0);
+            assert_eq!(String::from_utf8(answered.stdout).unwrap(), "should not run yet");
         });
     }
 
