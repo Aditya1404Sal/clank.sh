@@ -1058,6 +1058,7 @@ pub(crate) fn run_awk(
     argv: &[String],
     stdin: &mut dyn Read,
     out: &mut dyn Write,
+    _err: &mut dyn Write,
 ) -> Result<i32, Box<dyn std::error::Error>> {
     let args = &argv[1..];
     let mut fs = " ".to_string();
@@ -1164,7 +1165,8 @@ mod tests {
             .collect();
         let mut stdin = input.as_bytes();
         let mut out = Vec::new();
-        run_awk(&argv, &mut stdin, &mut out).unwrap();
+        let mut err = Vec::new();
+        run_awk(&argv, &mut stdin, &mut out, &mut err).unwrap();
         String::from_utf8(out).unwrap()
     }
 
@@ -1175,7 +1177,10 @@ mod tests {
             .collect();
         let mut stdin = "".as_bytes();
         let mut out = Vec::new();
-        run_awk(&argv, &mut stdin, &mut out).unwrap_err().to_string()
+        let mut err = Vec::new();
+        run_awk(&argv, &mut stdin, &mut out, &mut err)
+            .unwrap_err()
+            .to_string()
     }
 
     #[test]

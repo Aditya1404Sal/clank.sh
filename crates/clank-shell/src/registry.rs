@@ -200,6 +200,8 @@ mod tests {
             .chain(crate::statcmd::builtins::<SE>())
             .chain(crate::findcmd::builtins::<SE>())
             .chain(crate::xargscmd::builtins::<SE>())
+            .chain(crate::contextcmd::builtins::<SE>())
+            .chain(crate::interceptstub::builtins::<SE>())
             .map(|(name, _reg)| name)
             // MANUAL_MANIFESTS covers commands with a manifest but no `.builtins()` registration
             // (see its doc comment for why each entry is legitimate) — union them into the

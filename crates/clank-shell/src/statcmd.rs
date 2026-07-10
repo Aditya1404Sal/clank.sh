@@ -48,6 +48,17 @@ struct StatInfo {
 fn resolve(path: &str, follow: bool) -> Result<StatInfo, String> {
     let not_found = || format!("cannot stat '{path}': No such file or directory");
 
+    if path == "/dev/null" {
+        // The emulated null device (redirects handle it in the shell layer; not a real fs entry).
+        return Ok(StatInfo {
+            path: path.to_string(),
+            size: 0,
+            kind: "character special file",
+            modified: None,
+            accessed: None,
+            created: None,
+        });
+    }
     if crate::binfs::is_bin_path(path) {
         if crate::binfs::list_children(path).is_some() {
             return Ok(StatInfo::virtual_dir(path));

@@ -5,8 +5,9 @@
 //! Each `uu_*::uumain(args) -> i32` writes to `std::io::stdout()` directly, so to make its
 //! output compose with brush's fd table (pipes, redirections, the transcript capture) we
 //! redirect the real fd 1/2 onto the `OpenFile`s brush assigned for the command, run `uumain`,
-//! then restore them. On wasm there is no `dup2`, so stdout is captured by reopening fd 1 as a
-//! temporary read/write file, then replaying those bytes into Brush's stdout.
+//! then restore them. On wasm there is no restore-based swap: fds 0-2 are rebound per call via
+//! `__wasilibc_fd_renumber` to staging/capture files (stdin staged in, stdout and stderr captured
+//! to separate files and replayed into Brush's stdout/stderr so the streams stay distinct).
 //!
 //! `uucore` is patched for `wasm32-wasip2` via `[patch.crates-io]` in the workspace root.
 
@@ -118,10 +119,13 @@ pub(crate) fn run_uu<SE: ShellExtensions>(
         unsafe { __wasilibc_fd_renumber(raw, target_fd) };
     }
 
-    // A single capture file under /tmp receives BOTH fd 1 and fd 2, so stdout and stderr are
-    // captured together in write order and neither is dropped. Kept out of the working directory
-    // so it doesn't pollute it.
-    const CAPTURE_PATH: &str = "/tmp/.clank-uu-capture";
+    // Separate capture files for fd 1 and fd 2, so the tool's stdout and stderr reach Brush's
+    // stdout/stderr `OpenFile`s as DISTINCT streams — `cmd 2>/dev/null`, `2>file`, and the
+    // structured EvalResult's stderr all work for uutils commands. (The former single shared file
+    // preserved write-order interleaving but made the two streams inseparable.) Kept out of the
+    // working directory so they don't pollute it.
+    const CAPTURE_OUT_PATH: &str = "/tmp/.clank-uu-out";
+    const CAPTURE_ERR_PATH: &str = "/tmp/.clank-uu-err";
 
     // The stdin staging file — the piped bytes a uutils tool will see as fd 0.
     const STDIN_PATH: &str = "/tmp/.clank-uu-stdin";
@@ -142,14 +146,15 @@ pub(crate) fn run_uu<SE: ShellExtensions>(
         }
     }
 
-    // fd 1 ← fresh capture (truncating); fd 2 ← the same file in append mode so stderr interleaves
-    // after stdout instead of clobbering it.
-    let captured = match OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(CAPTURE_PATH)
-    {
+    // fd 1 ← fresh stdout capture; fd 2 ← fresh stderr capture (both truncating).
+    let fresh_capture = |path| {
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)
+    };
+    let captured = match fresh_capture(CAPTURE_OUT_PATH) {
         Ok(f) => {
             bind_to_fd(f, 1);
             true
@@ -157,7 +162,7 @@ pub(crate) fn run_uu<SE: ShellExtensions>(
         Err(_) => false, // no writable fs: run uncaptured
     };
     if captured {
-        if let Ok(f) = OpenOptions::new().append(true).open(CAPTURE_PATH) {
+        if let Ok(f) = fresh_capture(CAPTURE_ERR_PATH) {
             bind_to_fd(f, 2);
         }
     }
@@ -166,11 +171,14 @@ pub(crate) fn run_uu<SE: ShellExtensions>(
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
 
-    // Read back whatever landed in the capture (stdout + stderr, interleaved in write order) and
-    // feed it into brush's stdout so it reaches the transcript + p3 stream.
+    // Replay each capture into its Brush `OpenFile` so the streams stay separate all the way to
+    // the fd table (redirects) and the EvalResult (stdout vs stderr).
     if captured {
-        if let Ok(out_bytes) = std::fs::read(CAPTURE_PATH) {
+        if let Ok(out_bytes) = std::fs::read(CAPTURE_OUT_PATH) {
             let _ = context.stdout().write_all(&out_bytes);
+        }
+        if let Ok(err_bytes) = std::fs::read(CAPTURE_ERR_PATH) {
+            let _ = context.stderr().write_all(&err_bytes);
         }
     }
     code
@@ -347,10 +355,12 @@ impl SimpleCommand for Cat {
         S: AsRef<str>,
     {
         let argv: Vec<String> = args.map(|s| s.as_ref().to_string()).collect();
-        let touches_virtual = argv
-            .iter()
-            .skip(1)
-            .any(|a| !is_flag(a) && (crate::procfs::is_proc_path(a) || crate::binfs::is_bin_path(a)));
+        let touches_virtual = argv.iter().skip(1).any(|a| {
+            !is_flag(a)
+                && (crate::procfs::is_proc_path(a)
+                    || crate::binfs::is_bin_path(a)
+                    || a == "/dev/null")
+        });
 
         // Fast path: nothing virtual → delegate the whole argv to uutils unchanged.
         if !touches_virtual {
@@ -365,7 +375,9 @@ impl SimpleCommand for Cat {
         let mut out = context.stdout();
         let mut had_error = false;
         for op in argv.iter().skip(1).filter(|a| !is_flag(a)) {
-            if crate::binfs::is_bin_path(op) {
+            if op == "/dev/null" {
+                // Reads as empty (the emulated null device is not a real fs entry uu_cat can open).
+            } else if crate::binfs::is_bin_path(op) {
                 // `/bin/<name>` → the command's help text (static registry; no Session access).
                 match crate::binfs::resolve(op) {
                     Ok(content) => {

@@ -54,7 +54,7 @@ macro_rules! text_builtin {
                 // `stdin` is Brush's assigned input `OpenFile` — the upstream pipe stage's output when
                 // this command is on the right-hand side of a `|` — so tools can read piped input.
                 let code = crate::coreutils::run_tool(&context, move |stdin, out, err| {
-                    match $run(&argv, stdin, out) {
+                    match $run(&argv, stdin, out, err) {
                         Ok(code) => code,
                         Err(e) => {
                             let _ = writeln!(err, "{}: {e}", $name);
@@ -113,7 +113,12 @@ pub(crate) fn manifests() -> Vec<crate::manifest::Manifest> {
     ]
 }
 
-fn run_jq(argv: &[String], stdin: &mut dyn std::io::Read, out: &mut dyn Write) -> ToolResult<i32> {
+fn run_jq(
+    argv: &[String],
+    stdin: &mut dyn std::io::Read,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> ToolResult<i32> {
     use jaq_core::data::JustLut;
     use jaq_core::load::{import, Arena, File, Loader};
     use jaq_core::{compile::Compiler, unwrap_valr, Ctx, Vars};
@@ -190,7 +195,7 @@ fn run_jq(argv: &[String], stdin: &mut dyn std::io::Read, out: &mut dyn Write) -
         let input = match input {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("jq: {e}");
+                let _ = writeln!(err, "jq: {e}");
                 failed = true;
                 continue;
             }
@@ -202,7 +207,7 @@ fn run_jq(argv: &[String], stdin: &mut dyn std::io::Read, out: &mut dyn Write) -
                     writeln!(out)?;
                 }
                 Err(e) => {
-                    eprintln!("jq: {e}");
+                    let _ = writeln!(err, "jq: {e}");
                     failed = true;
                 }
             }
@@ -318,7 +323,10 @@ impl grep::searcher::Sink for CountSink {
 /// Resolve one named grep input to bytes: virtual `/bin` and `/proc` paths from their resolvers
 /// (so `grep x /bin/curl` and `grep State /proc/1/status` both work), anything else from disk.
 fn read_named_input(file: &str, environ: &[(String, String)]) -> Result<Vec<u8>, String> {
-    if crate::binfs::is_bin_path(file) {
+    if file == "/dev/null" {
+        // The emulated null device: reads as empty.
+        Ok(Vec::new())
+    } else if crate::binfs::is_bin_path(file) {
         crate::binfs::resolve(file)
             .map(String::into_bytes)
             .map_err(|_| format!("{file}: No such file or directory"))
@@ -356,7 +364,12 @@ fn collect_files_recursive(root: &str, acc: &mut Vec<String>, errs: &mut Vec<Str
     }
 }
 
-fn run_grep(argv: &[String], stdin: &mut dyn std::io::Read, out: &mut dyn Write) -> ToolResult<i32> {
+fn run_grep(
+    argv: &[String],
+    stdin: &mut dyn std::io::Read,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+) -> ToolResult<i32> {
     use grep::regex::RegexMatcherBuilder;
     use grep::searcher::{BinaryDetection, SearcherBuilder};
 
@@ -377,7 +390,7 @@ fn run_grep(argv: &[String], stdin: &mut dyn std::io::Read, out: &mut dyn Write)
             collect_files_recursive(root, &mut collected, &mut errs);
         }
         for e in errs {
-            eprintln!("grep: {e}");
+            let _ = writeln!(err, "grep: {e}");
             failed = true;
         }
         collected
@@ -418,7 +431,7 @@ fn run_grep(argv: &[String], stdin: &mut dyn std::io::Read, out: &mut dyn Write)
             match read_named_input(file, &environ) {
                 Ok(bytes) => inputs.push((Some(file.clone()), bytes)),
                 Err(e) => {
-                    eprintln!("grep: {e}");
+                    let _ = writeln!(err, "grep: {e}");
                     failed = true;
                 }
             }
@@ -432,7 +445,7 @@ fn run_grep(argv: &[String], stdin: &mut dyn std::io::Read, out: &mut dyn Write)
             let display = label.as_deref().unwrap_or("(standard input)");
             let mut sink = CountSink { count: 0 };
             if let Err(e) = searcher.search_slice(&matcher, bytes, &mut sink) {
-                eprintln!("grep: {display}: {e}");
+                let _ = writeln!(err, "grep: {display}: {e}");
                 failed = true;
                 continue;
             }
@@ -474,7 +487,7 @@ fn run_grep(argv: &[String], stdin: &mut dyn std::io::Read, out: &mut dyn Write)
                 }
             };
             if let Err(e) = result {
-                eprintln!("grep: {display}: {e}");
+                let _ = writeln!(err, "grep: {display}: {e}");
                 failed = true;
             }
         }
@@ -489,7 +502,12 @@ fn run_grep(argv: &[String], stdin: &mut dyn std::io::Read, out: &mut dyn Write)
     })
 }
 
-fn run_sed(argv: &[String], stdin: &mut dyn std::io::Read, out: &mut dyn Write) -> ToolResult<i32> {
+fn run_sed(
+    argv: &[String],
+    stdin: &mut dyn std::io::Read,
+    out: &mut dyn Write,
+    _err: &mut dyn Write,
+) -> ToolResult<i32> {
     let args = &argv[1..];
     let mut suppress = false; // -n
     let mut scripts: Vec<String> = Vec::new();
@@ -846,7 +864,12 @@ mod sed {
     }
 }
 
-fn run_diff(argv: &[String], _stdin: &mut dyn std::io::Read, out: &mut dyn Write) -> ToolResult<i32> {
+fn run_diff(
+    argv: &[String],
+    _stdin: &mut dyn std::io::Read,
+    out: &mut dyn Write,
+    _err: &mut dyn Write,
+) -> ToolResult<i32> {
     let args = &argv[1..];
     if args.len() != 2 {
         return usage("diff OLD NEW");
@@ -863,7 +886,12 @@ fn run_diff(argv: &[String], _stdin: &mut dyn std::io::Read, out: &mut dyn Write
     Ok(if rendered.is_empty() { 0 } else { 1 })
 }
 
-fn run_patch(argv: &[String], _stdin: &mut dyn std::io::Read, _out: &mut dyn Write) -> ToolResult<i32> {
+fn run_patch(
+    argv: &[String],
+    _stdin: &mut dyn std::io::Read,
+    _out: &mut dyn Write,
+    _err: &mut dyn Write,
+) -> ToolResult<i32> {
     let args = &argv[1..];
     if args.len() != 2 {
         return usage("patch FILE PATCHFILE");
@@ -876,7 +904,12 @@ fn run_patch(argv: &[String], _stdin: &mut dyn std::io::Read, _out: &mut dyn Wri
     Ok(0)
 }
 
-fn run_file(argv: &[String], _stdin: &mut dyn std::io::Read, out: &mut dyn Write) -> ToolResult<i32> {
+fn run_file(
+    argv: &[String],
+    _stdin: &mut dyn std::io::Read,
+    out: &mut dyn Write,
+    _err: &mut dyn Write,
+) -> ToolResult<i32> {
     let args = &argv[1..];
     if args.is_empty() {
         return usage("file FILE...");
@@ -938,7 +971,8 @@ mod tests {
             .collect();
         let mut stdin = input.as_bytes();
         let mut out = Vec::new();
-        run_sed(&argv, &mut stdin, &mut out).unwrap();
+        let mut err = Vec::new();
+        run_sed(&argv, &mut stdin, &mut out, &mut err).unwrap();
         String::from_utf8(out).unwrap()
     }
 
@@ -986,7 +1020,8 @@ mod tests {
         let argv: Vec<String> = ["sed", "y/ab/cd/"].map(String::from).to_vec();
         let mut stdin = "x\n".as_bytes();
         let mut out = Vec::new();
-        let err = run_sed(&argv, &mut stdin, &mut out).unwrap_err();
+        let mut errbuf = Vec::new();
+        let err = run_sed(&argv, &mut stdin, &mut out, &mut errbuf).unwrap_err();
         assert!(err.to_string().contains("unsupported command"), "{err}");
     }
 }

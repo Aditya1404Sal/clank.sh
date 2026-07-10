@@ -18,9 +18,11 @@ pub mod askcmd;
 mod awkcmd;
 pub mod authz;
 pub mod binfs;
+mod contextcmd;
 mod coreutils;
 mod findcmd;
 mod httpcmd;
+mod interceptstub;
 mod killcmd;
 mod mancmd;
 pub mod manifest;
@@ -225,26 +227,82 @@ pub fn dispatch_context(transcript: &mut Transcript, line: &str) -> Option<Vec<u
     if words.next()? != "context" {
         return None;
     }
-    match words.next() {
-        Some("show") | None => Some(transcript.render()),
+    // A line with shell operators is NOT a pure context command — falling through to Brush lets
+    // the registered `context` builtin (`contextcmd`) participate in pipes/substitutions properly
+    // (the interception used to swallow `context show | head`, silently ignoring the pipe).
+    if line.chars().any(|c| "|&;<>`$".contains(c)) {
+        return None;
+    }
+    Some(apply_context(transcript, words))
+}
+
+/// The `context` subcommand engine, shared by the top-level interception ([`dispatch_context`])
+/// and the Brush-registered builtin (`contextcmd`, for nested contexts like `$(context show)`).
+/// `args` are the words AFTER the `context` command name.
+pub(crate) fn apply_context<'a>(
+    transcript: &mut Transcript,
+    mut args: impl Iterator<Item = &'a str>,
+) -> Vec<u8> {
+    match args.next() {
+        Some("show") | None => transcript.render(),
         Some("clear") => {
             transcript.clear();
-            Some(Vec::new())
+            Vec::new()
         }
         // `context budget [<n>]` — with no argument, prints the current sliding-window token
         // budget; with a number, sets it (and re-enforces immediately). This is the runtime knob
         // for the window until the AI layer drives it from the model's real context size.
-        Some("budget") => match words.next() {
-            None => Some(format!("{}\n", transcript.budget()).into_bytes()),
+        Some("budget") => match args.next() {
+            None => format!("{}\n", transcript.budget()).into_bytes(),
             Some(arg) => match arg.parse::<usize>() {
                 Ok(n) => {
                     transcript.set_budget(n);
-                    Some(Vec::new())
+                    Vec::new()
                 }
-                Err(_) => Some(format!("context: budget: not a number: {arg}\n").into_bytes()),
+                Err(_) => format!("context: budget: not a number: {arg}\n").into_bytes(),
             },
         },
-        Some(other) => Some(format!("context: unknown subcommand: {other}\n").into_bytes()),
+        Some(other) => format!("context: unknown subcommand: {other}\n").into_bytes(),
+    }
+}
+
+thread_local! {
+    /// The transient "which session's transcript is mid-line on this thread" slot — the same
+    /// pattern as `proctable`'s active-table slot. Populated per executed line by
+    /// [`install_transcript`]; read by the Brush-registered `context` builtin (`contextcmd`),
+    /// which is how `$(context show)` and `context show | head` reach the session transcript.
+    /// Thread-local, so parallel Sessions (native tests) don't collide — the flip side is that
+    /// native worker-thread execution ($()/pipeline stages on the multi-thread runtime) can't see
+    /// it and errors honestly; on wasm everything is single-threaded and inline, so it always
+    /// resolves.
+    static ACTIVE_TRANSCRIPT: std::cell::RefCell<Option<std::sync::Arc<std::sync::Mutex<Transcript>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Install `transcript` as the active transcript for the current line, returning an RAII guard
+/// that restores the previous slot value on drop.
+#[must_use]
+pub(crate) fn install_transcript(
+    transcript: std::sync::Arc<std::sync::Mutex<Transcript>>,
+) -> TranscriptGuard {
+    let previous = ACTIVE_TRANSCRIPT.with(|slot| slot.borrow_mut().replace(transcript));
+    TranscriptGuard { previous }
+}
+
+/// The currently-installed transcript, if a line is executing on this thread.
+pub(crate) fn active_transcript() -> Option<std::sync::Arc<std::sync::Mutex<Transcript>>> {
+    ACTIVE_TRANSCRIPT.with(|slot| slot.borrow().clone())
+}
+
+/// Restores the previous active-transcript slot when dropped.
+pub(crate) struct TranscriptGuard {
+    previous: Option<std::sync::Arc<std::sync::Mutex<Transcript>>>,
+}
+
+impl Drop for TranscriptGuard {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        ACTIVE_TRANSCRIPT.with(|slot| *slot.borrow_mut() = previous);
     }
 }
 

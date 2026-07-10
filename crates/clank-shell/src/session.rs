@@ -119,7 +119,10 @@ impl LineResult {
 /// registry.
 pub struct Session {
     shell: Shell,
-    transcript: Transcript,
+    /// The session transcript. Shared behind `Arc<Mutex>` (like `proc_table`) so each executed
+    /// line can install it into the thread-local slot the Brush-registered `context` builtin
+    /// reads — that's how `$(context show)` and `context show | head` reach it.
+    transcript: Arc<Mutex<Transcript>>,
     /// The clank-owned inventory of command manifests (sits beside `transcript` as a shell-owned
     /// state object). Drives command metadata surfaces; not yet consulted on the execution path.
     registry: CommandRegistry,
@@ -157,7 +160,7 @@ impl Session {
             let shell = rt.block_on(build_shell())?;
             Ok(Self {
                 shell,
-                transcript: Transcript::new(),
+                transcript: Arc::new(Mutex::new(Transcript::new())),
                 registry: crate::registry::build(),
                 proc_table: Arc::new(Mutex::new(ProcessTable::new())),
                 pending: None,
@@ -173,7 +176,7 @@ impl Session {
             let shell = build_shell().await?;
             Ok(Self {
                 shell,
-                transcript: Transcript::new(),
+                transcript: Arc::new(Mutex::new(Transcript::new())),
                 registry: crate::registry::build(),
                 proc_table: Arc::new(Mutex::new(ProcessTable::new())),
                 pending: None,
@@ -214,7 +217,7 @@ impl Session {
                     .any(|t| matches!(t, crate::killcmd::Target::Pid(p) if *p == pp))
             );
             if kills_pending {
-                self.transcript.record_command(line);
+                self.transcript.lock().unwrap().record_command(line);
                 return self.answer_prompt(None).await;
             }
             return LineResult::stderr(
@@ -222,7 +225,7 @@ impl Session {
             );
         }
 
-        self.transcript.record_command(line);
+        self.transcript.lock().unwrap().record_command(line);
 
         // Reap finished background jobs (a tick-free poll of Brush's job manager): their rows flip
         // `S → Z`. Silent — bash-style "[1]+ Done" notifications are a later increment; `jobs`/`ps`
@@ -231,8 +234,10 @@ impl Session {
 
         // Install this session's process table as the active one for the duration of the line, so
         // the `ps` builtin (a Brush builtin, which can't reach `Session` directly) can read it.
-        // The guard clears the slot on drop.
+        // The guard clears the slot on drop. The transcript slot is the same pattern, read by the
+        // Brush-registered `context` builtin in nested contexts ($(context show), context | head).
         let _install = crate::proctable::install(self.proc_table.clone());
+        let _install_transcript = crate::install_transcript(self.transcript.clone());
 
         // Record this line as a process (one PID per executed line). Blank lines get no row, matching
         // the "empty line re-prompts" behavior. `context` lines DO get a row — they're real typed
@@ -261,7 +266,7 @@ impl Session {
         }
 
         // `context show` output is intentionally not recorded back into the transcript.
-        if let Some(bytes) = dispatch_context(&mut self.transcript, line) {
+        if let Some(bytes) = dispatch_context(&mut self.transcript.lock().unwrap(), line) {
             if let Some(pid) = pid {
                 self.proc_table.lock().unwrap().complete(pid);
             }
@@ -304,7 +309,7 @@ impl Session {
         }
 
         let result = self.run_command(&effective, pid).await;
-        self.transcript.record_output(&result.terminal_output());
+        self.transcript.lock().unwrap().record_output(&result.terminal_output());
         result
     }
 
@@ -492,7 +497,7 @@ impl Session {
         let transcript = if args.fresh {
             String::new()
         } else {
-            String::from_utf8_lossy(&self.transcript.render()).into_owned()
+            String::from_utf8_lossy(&self.transcript.lock().unwrap().render()).into_owned()
         };
         let request = crate::askcmd::AskRequest {
             system: Some(crate::askcmd::CORE_SYSTEM_PROMPT.to_string()),
@@ -511,7 +516,7 @@ impl Session {
         if let Some(pid) = pid {
             self.proc_table.lock().unwrap().complete(pid);
         }
-        self.transcript.record_output(&result.terminal_output());
+        self.transcript.lock().unwrap().record_output(&result.terminal_output());
         result
     }
 
@@ -583,7 +588,7 @@ impl Session {
         }
         let mut stdout = prompt.question.clone().into_bytes();
         stdout.push(b'\n');
-        self.transcript.record_output(&stdout);
+        self.transcript.lock().unwrap().record_output(&stdout);
 
         self.pending = Some(Pending {
             prompt: prompt.clone(),
@@ -655,7 +660,7 @@ impl Session {
             Resolution::InvalidChoice { .. } => unreachable!("handled by caller"),
         };
         if !secret {
-            self.transcript.record_output(&stdout);
+            self.transcript.lock().unwrap().record_output(&stdout);
         }
         LineResult {
             stdout,
@@ -686,7 +691,7 @@ impl Session {
                 self.proc_table.lock().unwrap().complete(pid);
             }
             let result = LineResult::denied();
-            self.transcript.record_output(&result.terminal_output());
+            self.transcript.lock().unwrap().record_output(&result.terminal_output());
             return result;
         }
 
@@ -696,7 +701,7 @@ impl Session {
 
         // Approved: run the gated command, reusing the row (still `R` after resume) and reaping it.
         let result = self.run_command(command, pid).await;
-        self.transcript.record_output(&result.terminal_output());
+        self.transcript.lock().unwrap().record_output(&result.terminal_output());
         result
     }
 
@@ -811,6 +816,8 @@ async fn build_shell() -> Result<Shell, brush_core::Error> {
         .builtins(crate::statcmd::builtins())
         .builtins(crate::findcmd::builtins())
         .builtins(crate::xargscmd::builtins())
+        .builtins(crate::contextcmd::builtins())
+        .builtins(crate::interceptstub::builtins())
         .build()
         .await?;
 

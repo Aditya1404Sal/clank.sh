@@ -762,6 +762,42 @@ expect "exec CMD runs the command"        'exec echo exec-ran'   $'exec-ran'
 expect "session survives exec (agent)"    'echo still-here'      $'still-here'
 
 # ============================================================================
+# 2s. Stream fidelity, /dev/null, nested contexts (the A-list)
+# ============================================================================
+step "Stream fidelity, /dev/null, nested contexts"
+
+# A1 — /dev/null, emulated in the fork with a truncate-on-open backing file. (/dev/stdin,
+# /dev/stdout, /dev/stderr were already fd-mapped by Brush's shell_fd_path_to_fd.)
+expect "> /dev/null discards"              'echo noise > /dev/null; echo ok'          $'ok'
+expect "< /dev/null reads empty"           'wc -l < /dev/null'                        $'0'
+expect "cat /dev/null is empty, exit 0"    'cat /dev/null; echo rc=$?'                $'rc=0'
+expect "stat /dev/null reports a device"   'stat -c %F /dev/null'                     $'character special file'
+DEVNULL_SILENCE="$(eval_json eval '"ls /definitely-absent-dir 2>/dev/null; echo rc=$?"')"
+expect_eval "2>/dev/null silences stderr"  "$DEVNULL_SILENCE" '.stderr' ''
+
+# A3 — uu-tool stderr is a distinct stream now (was merged into the stdout capture on wasm).
+CAT_MISS="$(eval_json eval '"cat /tmp/work/absent-a3"')"
+expect_eval "uu error text lands in stderr"  "$CAT_MISS" '.stderr | contains("No such file")' 'true'
+expect_eval "uu stdout stays clean"          "$CAT_MISS" '.stdout' ''
+expect_contains "2> file captures uu stderr" 'cat /tmp/work/absent-a3 2> /tmp/work/uu-err; cat /tmp/work/uu-err'  'No such file'
+
+# A4 — texttools per-file errors go through Brush stderr (were eprintln! to the real fd).
+GREP_MISS="$(eval_json eval '"grep x /tmp/work/absent-a4"')"
+expect_eval "grep miss error is stderr"    "$GREP_MISS" '.stderr | contains("No such file")' 'true'
+expect_eval "grep miss exits 2"            "$GREP_MISS" '.exit_code' '2'
+
+# A2 — `context` is now a real Brush builtin in nested contexts (via the per-line transcript
+# slot), and the other session commands error HONESTLY there instead of "operation not supported".
+expect_contains "context composes in \$( )"   'B=$(context budget); echo "budget=$B"'  'budget='
+# Content-independent (line 1 may be the elision marker once the window has compacted): the
+# assertion is that context's output flows through the pipe and head truncates it to one line.
+expect "context show pipes"                   'context show | head -n 1 | wc -l'       $'1'
+NESTED_ASK="$(eval_json eval '"echo got=$(ask q)"')"
+expect_eval "nested ask errors honestly"   "$NESTED_ASK" '.stderr | contains("top-level command")' 'true'
+NESTED_CURL="$(eval_json eval '"echo x | xargs curl"')"
+expect_eval "nested curl errors honestly"  "$NESTED_CURL" '.stderr | contains("top-level command")' 'true'
+
+# ============================================================================
 # 3. Durability — write in one invocation, read in a SEPARATE invocation
 # ============================================================================
 step "Durability check (state persists across invocations)"
