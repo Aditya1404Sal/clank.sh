@@ -507,6 +507,7 @@ dependencies = [
  "jaq-std",
  "libc",
  "regex",
+ "serde_json",
  "similar",
  "tempfile",
  "tokio",

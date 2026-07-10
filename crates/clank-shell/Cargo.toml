@@ -58,6 +58,9 @@ uu_sleep = "0.9"
 # Registering uu_printf fills wasm and shadows Brush's on native for uniform behavior.
 uu_printf = "0.9"
 async-trait = "0.1"
+# Parsing the agentic `ask` loop's tool-call arguments (the `shell` tool's JSON args) and, later,
+# MCP JSON-RPC. Pure Rust, dual-target-safe (no OS deps).
+serde_json = "1"
 # Timestamp rendering for `stat` (already in the tree via brush-core; compiles on wasm32-wasip2).
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Arg parsing for clank builtins written in Brush's `Command` form (xargs) — the same clap the

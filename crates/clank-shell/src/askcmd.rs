@@ -29,21 +29,93 @@ pub const CORE_SYSTEM_PROMPT: &str =
     "You are clank, an AI assistant embedded in a Unix-like shell. The user's shell transcript \
      (commands they ran and the output) is provided as context. Answer their question concisely.";
 
-/// A request to an [`AskProvider`]: the assembled context plus the prompt.
+/// One tool the model may call, rendered from the manifest registry. The clank-neutral mirror of
+/// `golem-ai-llm`'s `ToolDefinition` — the `clank-agent` provider converts it at the seam so
+/// `clank-shell` need not link the golem crates.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AskRequest {
-    /// The system prompt (see [`CORE_SYSTEM_PROMPT`]). `None` sends no system message.
-    pub system: Option<String>,
-    /// The base context: the rendered transcript window (empty when `--fresh`).
-    pub transcript: String,
-    /// Supplementary input piped to `ask`'s stdin, appended *after* the transcript. `None` for now —
-    /// stdin wiring into intercepted commands is a later increment. Kept in the type so the provider
-    /// contract is stable when it lands. `TODO(ask-stdin)`.
-    pub stdin: Option<String>,
-    /// The prompt the user typed.
-    pub prompt: String,
-    /// The model id to target (defaults to [`DEFAULT_MODEL`]).
-    pub model: String,
+pub struct AskTool {
+    /// The tool name the model calls (e.g. `shell`).
+    pub name: String,
+    /// Human/model-facing description of what the tool does.
+    pub description: String,
+    /// The tool's parameter schema, as a JSON-schema string.
+    pub parameters_schema: String,
+}
+
+/// A tool call the model requested in a turn. Mirrors `golem-ai-llm`'s `ToolCall`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AskToolCall {
+    /// Provider-assigned call id, echoed back in the matching [`AskToolResult`].
+    pub id: String,
+    /// The tool name the model wants to run.
+    pub name: String,
+    /// The call arguments as a JSON string (always valid JSON — the provider requires it to
+    /// round-trip through the Anthropic `tool_use` block, which parses it).
+    pub arguments_json: String,
+}
+
+/// The result of executing a tool call, fed back to the model on the next turn. Mirrors
+/// `golem-ai-llm`'s `ToolResult` (`Success`/`Error`) collapsed to a `Result`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AskToolResult {
+    /// The [`AskToolCall::id`] this answers.
+    pub id: String,
+    /// The tool name (echoed for the provider's `ToolSuccess`/`ToolFailure`).
+    pub name: String,
+    /// `Ok(result_json)` when the tool ran (even on a nonzero exit — the payload carries the code);
+    /// `Err(message)` only for a guard/authorization refusal the tool never executed.
+    pub outcome: Result<String, String>,
+}
+
+/// One entry of the running conversation the `Session` maintains across turns of the agentic loop.
+/// The `Session` owns the multi-turn state; the provider is a single-turn transport (see
+/// [`AskProvider::turn`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AskTurn {
+    /// The initial user message (the system prompt is passed separately to [`AskProvider::turn`]).
+    User(String),
+    /// The model's prior response: its text plus any tool calls it requested.
+    Assistant {
+        text: String,
+        tool_calls: Vec<AskToolCall>,
+    },
+    /// The results the `Session` computed for the previous turn's tool calls.
+    ToolResults(Vec<AskToolResult>),
+}
+
+/// What the model returned in a single turn.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AskResponse {
+    /// The model's text this turn (may be empty when it only made tool calls).
+    pub text: String,
+    /// The tool calls the model requested (empty ⇒ this is the terminal turn).
+    pub tool_calls: Vec<AskToolCall>,
+    /// Whether the finish reason was `ToolCalls` (informational; the loop drives off `tool_calls`).
+    pub finished_for_tools: bool,
+    /// Set on a transport error ⇒ the loop aborts with a `remote_error` outcome.
+    pub error: Option<String>,
+}
+
+impl AskResponse {
+    /// A terminal text-only response.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            tool_calls: Vec::new(),
+            finished_for_tools: false,
+            error: None,
+        }
+    }
+
+    /// A transport-failure response: the loop aborts and maps this to `AskOutcome::remote_error`.
+    pub fn error(message: impl Into<String>) -> Self {
+        Self {
+            text: String::new(),
+            tool_calls: Vec::new(),
+            finished_for_tools: false,
+            error: Some(message.into()),
+        }
+    }
 }
 
 /// A provider's response, in the same `stdout`/`stderr`/`exit_code` shape the HTTP commands use so it
@@ -77,17 +149,34 @@ impl AskOutcome {
 
 /// The LLM transport seam. Implemented in `clank-agent` by the durable Anthropic provider and injected
 /// into the `Session`; absent on native. **Async** — `golem-ai-llm`'s `LlmProvider::send` is an
-/// `async fn`, so `complete` is too; it is awaited from `Session::run_command`, one level under the
-/// Golem SDK's `wstd::block_on` where the durable-execution context and the WASI-HTTP reactor are live
-/// (the same "await at the Session layer, never through the nested Brush runtime" rule as curl/wget).
+/// `async fn`, so `turn` is too; it is awaited from `Session::run_ask` (under `run_command`), one level
+/// under the Golem SDK's `wstd::block_on` where the durable-execution context and the WASI-HTTP reactor
+/// are live (the same "await at the Session layer, never through the nested Brush runtime" rule as
+/// curl/wget).
+///
+/// The provider is a **single-turn transport**: it sends one turn of the conversation (system +
+/// history + tool definitions) and returns the model's response. The `Session` drives the multi-turn
+/// agentic loop — it owns the shell state a tool call executes against, so the loop cannot live behind
+/// this seam without leaking clank types into the golem crates (and vice versa). Each `turn` maps to
+/// one `DurableAnthropic::send`, i.e. one durable oplog op, replay-safe.
 ///
 /// Uses `#[async_trait(?Send)]` so it stays `dyn`-compatible as `Box<dyn AskProvider>` (a plain
 /// `async fn` in a trait is not object-safe); `?Send` because wasip2 is single-threaded, matching how
 /// `golem-ai-llm`'s own `ChatStreamInterface` is declared.
 #[async_trait::async_trait(?Send)]
 pub trait AskProvider {
-    /// Send the assembled request to the model and return its reply (or an error outcome).
-    async fn complete(&self, request: AskRequest) -> AskOutcome;
+    /// Send one turn of the conversation to the model and return its response.
+    ///
+    /// `system` is the system prompt (`None` sends none); `history` is the conversation so far (the
+    /// first entry is the user's [`AskTurn::User`], then alternating `Assistant`/`ToolResults`);
+    /// `tools` are the tool definitions the model may call this turn; `model` is the target id.
+    async fn turn(
+        &self,
+        system: Option<&str>,
+        history: &[AskTurn],
+        tools: &[AskTool],
+        model: &str,
+    ) -> AskResponse;
 }
 
 /// A parsed `ask` invocation.
@@ -135,6 +224,17 @@ pub fn classify(line: &str) -> Option<AskArgs> {
         model,
         fresh,
     })
+}
+
+/// Build the first user message body: the transcript window (if any) as context, then the prompt.
+/// Shared by the `Session` loop (which constructs the initial [`AskTurn::User`]); kept here so the
+/// transcript-as-context shaping lives beside the rest of the `ask` seam.
+pub fn user_content(transcript: &str, prompt: &str) -> String {
+    if transcript.is_empty() {
+        prompt.to_string()
+    } else {
+        format!("# Shell transcript (context)\n{transcript}\n# Question\n{prompt}")
+    }
 }
 
 /// The `Word` tokens of `line`, dequoted (quote-aware via Brush's tokenizer; operators dropped).

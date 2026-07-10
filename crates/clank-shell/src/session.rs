@@ -480,34 +480,78 @@ impl Session {
         LineResult::from_outcome(stdout, stderr, u8::from(any_missed))
     }
 
-    /// Assemble the `ask` request (transcript window as context, unless `--fresh`) and call the
-    /// injected provider. If no provider is installed (e.g. the native build), degrade to a clean
+    /// Run the agentic `ask` loop: assemble the transcript-as-context first user message, then drive
+    /// turns with the injected provider. In A1 the tool set is empty, so the model always answers in
+    /// one turn (behavior-identical to the pre-loop `ask`); A2 adds the `shell` tool and makes this a
+    /// real tool-calling loop. If no provider is installed (e.g. the native build), degrade to a clean
     /// "not configured" error (exit 4) rather than panicking — the README's "features that require
     /// Golem fail with informative errors."
-    async fn run_ask(&self, args: crate::askcmd::AskArgs) -> LineResult {
-        let Some(provider) = self.ask_provider.as_ref() else {
+    ///
+    /// Takes `&mut self` because a tool call re-enters `run_command` (A2). The provider is `take()`n
+    /// for the duration and **restored before every return** — an early return that forgets to restore
+    /// would silently break the next `ask`.
+    async fn run_ask(&mut self, args: crate::askcmd::AskArgs) -> LineResult {
+        use crate::askcmd::{AskResponse, AskTool, AskTurn};
+
+        let Some(provider) = self.ask_provider.take() else {
             return LineResult::from_outcome(
                 Vec::new(),
                 b"ask: no model provider configured (available on the Golem agent)\n".to_vec(),
                 4,
             );
         };
+
         // The base context is the same bytes `context show` renders — "the AI reads exactly what you
-        // see." `--fresh` sends no transcript. stdin-after-transcript is a later increment.
-        let transcript = if args.fresh {
+        // see." `--fresh` sends no transcript. Rendered to an owned String *before* the loop so the
+        // transcript lock is never held across an await.
+        let base_transcript = if args.fresh {
             String::new()
         } else {
             String::from_utf8_lossy(&self.transcript.lock().unwrap().render()).into_owned()
         };
-        let request = crate::askcmd::AskRequest {
-            system: Some(crate::askcmd::CORE_SYSTEM_PROMPT.to_string()),
-            transcript,
-            stdin: None,
-            prompt: args.prompt,
-            model: args.model,
-        };
-        let o = provider.complete(request).await;
-        LineResult::from_outcome(o.stdout, o.stderr, o.exit_code)
+
+        let system = crate::askcmd::CORE_SYSTEM_PROMPT.to_string();
+        let tools: Vec<AskTool> = Vec::new(); // A2 populates this with the `shell` tool.
+        let mut history: Vec<AskTurn> = vec![AskTurn::User(crate::askcmd::user_content(
+            &base_transcript,
+            &args.prompt,
+        ))];
+
+        let final_text: String;
+        loop {
+            let resp: AskResponse = provider
+                .turn(Some(&system), &history, &tools, &args.model)
+                .await;
+
+            if let Some(err) = resp.error {
+                self.ask_provider = Some(provider);
+                return LineResult::from_outcome(Vec::new(), err.into_bytes(), 4);
+            }
+            if resp.tool_calls.is_empty() {
+                final_text = resp.text;
+                break;
+            }
+            // A1 has no tools, so a tool call can only be a model error against our (empty) tool set.
+            // Record the assistant turn and feed back a refusal for each call so the model can
+            // recover; A2 replaces this with real tool execution.
+            let tool_results = resp
+                .tool_calls
+                .iter()
+                .map(|call| crate::askcmd::AskToolResult {
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                    outcome: Err(format!("unknown tool '{}'", call.name)),
+                })
+                .collect();
+            history.push(AskTurn::Assistant {
+                text: resp.text,
+                tool_calls: resp.tool_calls,
+            });
+            history.push(AskTurn::ToolResults(tool_results));
+        }
+
+        self.ask_provider = Some(provider);
+        LineResult::from_outcome(final_text.into_bytes(), Vec::new(), 0)
     }
 
     /// Complete an intercepted line's row and record its output (for intercepted paths that don't go
@@ -1029,19 +1073,70 @@ mod tests {
         });
     }
 
-    /// A fake `AskProvider` for tests: returns a canned reply and records the last request it saw,
-    /// so tests can assert what context `ask` assembled (transcript-as-context).
+    /// What a [`FakeProvider`] recorded about a single `turn` call, so tests can assert what context
+    /// `ask` assembled (transcript-as-context) and which model/tools it used.
+    #[derive(Clone, Default)]
+    struct SeenTurn {
+        system: Option<String>,
+        history: Vec<crate::askcmd::AskTurn>,
+        tools: Vec<crate::askcmd::AskTool>,
+        model: String,
+    }
+
+    impl SeenTurn {
+        /// The prompt text from the first user turn (the transcript-as-context body). Mirrors the old
+        /// `AskRequest.prompt`/`transcript` accessors the tests used.
+        fn user_content(&self) -> String {
+            match self.history.first() {
+                Some(crate::askcmd::AskTurn::User(s)) => s.clone(),
+                _ => String::new(),
+            }
+        }
+    }
+
+    /// A fake `AskProvider` for tests: replays a scripted queue of [`AskResponse`]s (one per turn) and
+    /// records every `turn` call it saw. A single-response script is the common one-turn case.
     #[derive(Clone, Default)]
     struct FakeProvider {
-        reply: String,
-        seen: std::sync::Arc<Mutex<Option<crate::askcmd::AskRequest>>>,
+        /// Scripted responses, consumed front-to-back. When exhausted, a terminal empty text is
+        /// returned (so a mis-scripted test terminates rather than looping).
+        scripted: std::sync::Arc<Mutex<std::collections::VecDeque<crate::askcmd::AskResponse>>>,
+        /// Every `turn` call, in order.
+        seen: std::sync::Arc<Mutex<Vec<SeenTurn>>>,
+    }
+
+    impl FakeProvider {
+        /// A provider that replies once with `reply` text and records what it saw.
+        fn reply(reply: &str, seen: std::sync::Arc<Mutex<Vec<SeenTurn>>>) -> Self {
+            let mut q = std::collections::VecDeque::new();
+            q.push_back(crate::askcmd::AskResponse::text(reply));
+            Self {
+                scripted: std::sync::Arc::new(Mutex::new(q)),
+                seen,
+            }
+        }
     }
 
     #[async_trait::async_trait(?Send)]
     impl crate::askcmd::AskProvider for FakeProvider {
-        async fn complete(&self, request: crate::askcmd::AskRequest) -> crate::askcmd::AskOutcome {
-            *self.seen.lock().unwrap() = Some(request);
-            crate::askcmd::AskOutcome::reply(self.reply.clone())
+        async fn turn(
+            &self,
+            system: Option<&str>,
+            history: &[crate::askcmd::AskTurn],
+            tools: &[crate::askcmd::AskTool],
+            model: &str,
+        ) -> crate::askcmd::AskResponse {
+            self.seen.lock().unwrap().push(SeenTurn {
+                system: system.map(str::to_string),
+                history: history.to_vec(),
+                tools: tools.to_vec(),
+                model: model.to_string(),
+            });
+            self.scripted
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| crate::askcmd::AskResponse::text(""))
         }
     }
 
@@ -1052,11 +1147,11 @@ mod tests {
     fn ask_returns_reply_and_feeds_transcript_as_context() {
         on_rt(async {
             let mut session = Session::new().await.unwrap();
-            let seen = std::sync::Arc::new(Mutex::new(None));
-            session.set_ask_provider(Box::new(FakeProvider {
-                reply: "the answer is 42".to_string(),
-                seen: seen.clone(),
-            }));
+            let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+            session.set_ask_provider(Box::new(FakeProvider::reply(
+                "the answer is 42",
+                seen.clone(),
+            )));
 
             // Run a command first so there's transcript history to feed as context.
             session.run_line("echo marker_abc").await;
@@ -1069,14 +1164,19 @@ mod tests {
                 "the answer is 42"
             );
 
-            // The provider saw the prompt and the transcript (including the prior echo).
-            let req = seen.lock().unwrap().clone().expect("provider should have run");
-            assert_eq!(req.prompt, "what did I just echo?");
-            assert_eq!(req.model, crate::askcmd::DEFAULT_MODEL);
+            // The provider saw one turn: the first user message carries the prompt and the transcript
+            // (including the prior echo), with the default model.
+            let turns = seen.lock().unwrap().clone();
+            assert_eq!(turns.len(), 1, "one turn expected, got: {}", turns.len());
+            let content = turns[0].user_content();
             assert!(
-                req.transcript.contains("marker_abc"),
-                "transcript context should include the prior echo, got: {}",
-                req.transcript
+                content.contains("what did I just echo?"),
+                "user content should carry the prompt, got: {content}"
+            );
+            assert_eq!(turns[0].model, crate::askcmd::DEFAULT_MODEL);
+            assert!(
+                content.contains("marker_abc"),
+                "transcript context should include the prior echo, got: {content}"
             );
         });
     }
@@ -1086,19 +1186,21 @@ mod tests {
     fn ask_fresh_sends_empty_transcript() {
         on_rt(async {
             let mut session = Session::new().await.unwrap();
-            let seen = std::sync::Arc::new(Mutex::new(None));
-            session.set_ask_provider(Box::new(FakeProvider {
-                reply: "ok".to_string(),
-                seen: seen.clone(),
-            }));
+            let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+            session.set_ask_provider(Box::new(FakeProvider::reply("ok", seen.clone())));
 
             session.run_line("echo should_not_appear").await;
             let result = session.eval_line(r#"sudo ask --fresh "hi""#).await;
             assert_eq!(result.exit_code, 0);
 
-            let req = seen.lock().unwrap().clone().unwrap();
-            assert!(req.transcript.is_empty(), "got: {}", req.transcript);
-            assert_eq!(req.prompt, "hi");
+            // --fresh sends no transcript: the user content is just the prompt, no marker.
+            let turns = seen.lock().unwrap().clone();
+            let content = turns[0].user_content();
+            assert!(
+                !content.contains("should_not_appear"),
+                "fresh should omit the transcript, got: {content}"
+            );
+            assert_eq!(content, "hi");
         });
     }
 
@@ -1108,10 +1210,10 @@ mod tests {
     fn ask_reply_is_recorded_in_transcript() {
         on_rt(async {
             let mut session = Session::new().await.unwrap();
-            session.set_ask_provider(Box::new(FakeProvider {
-                reply: "recorded_reply_xyz".to_string(),
-                seen: std::sync::Arc::new(Mutex::new(None)),
-            }));
+            session.set_ask_provider(Box::new(FakeProvider::reply(
+                "recorded_reply_xyz",
+                std::sync::Arc::new(Mutex::new(Vec::new())),
+            )));
 
             session.run_line(r#"sudo ask "q""#).await;
             let (transcript, _) = session.run_line("context show").await;
@@ -1142,17 +1244,17 @@ mod tests {
     fn ask_surfaces_a_confirmation() {
         on_rt(async {
             let mut session = Session::new().await.unwrap();
-            let seen = std::sync::Arc::new(Mutex::new(None));
-            session.set_ask_provider(Box::new(FakeProvider {
-                reply: "should not run yet".to_string(),
-                seen: seen.clone(),
-            }));
+            let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+            session.set_ask_provider(Box::new(FakeProvider::reply(
+                "should not run yet",
+                seen.clone(),
+            )));
 
             let result = session.eval_line(r#"ask "hi""#).await;
             let pending = result.pending_prompt.expect("bare ask should surface a confirm");
             assert!(pending.question.to_lowercase().contains("ask"), "got: {}", pending.question);
             // The provider must NOT have run before approval.
-            assert!(seen.lock().unwrap().is_none(), "provider ran before approval");
+            assert!(seen.lock().unwrap().is_empty(), "provider ran before approval");
 
             // Approving runs the deferred ask.
             let answered = session.answer_prompt(Some("yes".to_string())).await;
