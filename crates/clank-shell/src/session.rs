@@ -14,7 +14,7 @@
 //! cannot substitute for that. On wasm, pipelines/subshells that reach `spawn_blocking` are a
 //! known limitation (no threads); simple builtins and shell language work.
 
-use crate::{dispatch_context, promptuser, Flow, Transcript};
+use crate::{dispatch_context, promptuser, typecmd, Flow, Transcript};
 use brush_builtins::{BuiltinSet, ShellBuilderExt};
 use brush_core::openfiles::{OpenFile, OpenFiles};
 use brush_core::{ExecutionControlFlow, Shell, SourceInfo};
@@ -218,6 +218,16 @@ impl Session {
         // the `promptuser` module docs.
         if promptuser::is_prompt_user(line) {
             return self.surface_prompt(line, pid);
+        }
+
+        // `type` for clank's intercepted commands (`prompt-user`/`curl`/`wget`/`context`): Brush's
+        // own `type` can't see them (they aren't Brush builtins), so clank answers for lines that
+        // query ONLY intercepted names, matching Brush's wording. Any other `type` line (a
+        // Brush-known name, a mix, an unrecognized flag) returns `None` here and falls through to
+        // Brush's `type` unchanged. Read-only meta command — intercepted before the authz gate.
+        if let Some((stdout, exit_code)) = typecmd::dispatch(line, &self.registry) {
+            let result = LineResult::from_outcome(stdout.into_bytes(), Vec::new(), exit_code);
+            return self.finish_intercepted(pid, result);
         }
 
         // Authorization gate: enforce the leading command's `authorization-policy` (README). A
@@ -740,6 +750,46 @@ mod tests {
                 .find(|l| l.contains("prompt-user"))
                 .expect("ps should list the prompt-user line");
             assert!(row.contains('Z'), "completed line should be Z, got: {row}");
+        });
+    }
+
+    /// `type` for a clank-intercepted command resolves through clank's own dispatch (Brush's `type`
+    /// can't see it): `type curl` → "curl is a shell builtin", exit 0. This is the README's "type
+    /// authoritative for all commands" made true end-to-end through `eval_line`.
+    #[test]
+    fn type_resolves_intercepted_command_as_builtin() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            for name in typecmd::INTERCEPTED {
+                let result = session.eval_line(&format!("type {name}")).await;
+                assert_eq!(result.exit_code, 0, "type {name} should exit 0");
+                assert_eq!(
+                    String::from_utf8(result.stdout).unwrap(),
+                    format!("{name} is a shell builtin\n"),
+                    "type {name} should report a shell builtin"
+                );
+            }
+
+            // `-t` prints the bare word, like Brush.
+            let result = session.eval_line("type -t curl").await;
+            assert_eq!(String::from_utf8(result.stdout).unwrap(), "builtin\n");
+        });
+    }
+
+    /// `type` for a Brush-registered builtin (`cat`) falls through to Brush unchanged — clank does
+    /// NOT intercept it. Proves the fallthrough half of the design: clank owns only the intercepted
+    /// names, Brush keeps everything else.
+    #[test]
+    fn type_falls_through_to_brush_for_registered_builtin() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let result = session.eval_line("type cat").await;
+            let out = String::from_utf8(result.terminal_output()).unwrap();
+            // Brush's `type` resolves `cat` (a registered builtin) — clank didn't short-circuit it.
+            assert!(
+                out.contains("cat") && out.contains("builtin"),
+                "Brush's type should resolve cat as a builtin, got: {out}"
+            );
         });
     }
 

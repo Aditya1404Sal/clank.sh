@@ -26,6 +26,7 @@ mod ps;
 pub mod registry;
 pub mod session;
 mod texttools;
+pub mod typecmd;
 mod which;
 
 // The `wasi:cli/run` REPL driver. Gated behind the `repl-driver` feature so that dependents which

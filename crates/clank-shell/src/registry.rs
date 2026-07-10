@@ -30,7 +30,11 @@ use crate::manifest::{AuthorizationPolicy, ExecutionScope, Manifest};
 /// - `curl`, `wget` — HTTP commands intercepted in `Session::run_command` (their async HTTP can't run
 ///   inside a synchronous Brush builtin under the nested runtime); not `.builtins()`-registered. See
 ///   `httpcmd`.
-pub const MANUAL_MANIFESTS: &[&str] = &["prompt-user", "type", "command", "curl", "wget"];
+/// - `context` — the clank-specific transcript builtin, intercepted in `Session::eval_line` via
+///   `dispatch_context` *before* Brush dispatch (it operates on the session transcript, which a Brush
+///   builtin can't reach); not `.builtins()`-registered. See `dispatch_context`.
+pub const MANUAL_MANIFESTS: &[&str] =
+    &["prompt-user", "type", "command", "curl", "wget", "context"];
 
 /// Hand-authored manifests for commands not backed by a clank `SimpleCommand` registration (see
 /// [`MANUAL_MANIFESTS`]).
@@ -52,6 +56,16 @@ fn manual_manifests() -> Vec<Manifest> {
             .with_scope(ExecutionScope::ShellInternal),
         Manifest::builtin("command", "run a command, bypassing functions/aliases; or look it up")
             .with_scope(ExecutionScope::ShellInternal),
+        // `context` — the clank transcript builtin, intercepted in `eval_line`. Shell-internal (it
+        // operates on the session transcript); `Allow` (reading/managing one's own transcript needs
+        // no confirmation).
+        Manifest::builtin("context", "show, clear, or budget the session transcript")
+            .with_scope(ExecutionScope::ShellInternal)
+            .with_help(
+                "context show — print the session transcript\n\
+                 context clear — discard the session transcript\n\
+                 context budget [n] — show or set the transcript token budget",
+            ),
     ]
 }
 
