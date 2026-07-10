@@ -33,8 +33,11 @@ use crate::manifest::{AuthorizationPolicy, ExecutionScope, Manifest};
 /// - `context` — the clank-specific transcript builtin, intercepted in `Session::eval_line` via
 ///   `dispatch_context` *before* Brush dispatch (it operates on the session transcript, which a Brush
 ///   builtin can't reach); not `.builtins()`-registered. See `dispatch_context`.
+/// - `ask` — the AI-native LLM command, intercepted in `Session::run_command` (its LLM call must run at
+///   the Session layer where the Golem durable context is live, not inside a synchronous Brush builtin
+///   under the nested runtime); not `.builtins()`-registered. See `askcmd`.
 pub const MANUAL_MANIFESTS: &[&str] =
-    &["prompt-user", "type", "command", "curl", "wget", "context"];
+    &["prompt-user", "type", "command", "curl", "wget", "context", "ask"];
 
 /// Hand-authored manifests for commands not backed by a clank `SimpleCommand` registration (see
 /// [`MANUAL_MANIFESTS`]).
@@ -136,6 +139,9 @@ pub fn build() -> CommandRegistry {
         registry.insert(manifest);
     }
     for manifest in crate::httpcmd::manifests() {
+        registry.insert(manifest);
+    }
+    for manifest in crate::askcmd::manifests() {
         registry.insert(manifest);
     }
     for manifest in manual_manifests() {
