@@ -273,13 +273,13 @@ impl SimpleCommand for Cat {
         S: AsRef<str>,
     {
         let argv: Vec<String> = args.map(|s| s.as_ref().to_string()).collect();
-        let touches_proc = argv
+        let touches_virtual = argv
             .iter()
             .skip(1)
-            .any(|a| !is_flag(a) && crate::procfs::is_proc_path(a));
+            .any(|a| !is_flag(a) && (crate::procfs::is_proc_path(a) || crate::binfs::is_bin_path(a)));
 
         // Fast path: nothing virtual → delegate the whole argv to uutils unchanged.
-        if !touches_proc {
+        if !touches_virtual {
             let os_argv = argv.iter().map(std::ffi::OsString::from);
             let code = run_uu(&context, move || uu_cat::uumain(os_argv));
             return Ok(ExecutionResult::new(code.clamp(0, 255) as u8));
@@ -291,7 +291,18 @@ impl SimpleCommand for Cat {
         let mut out = context.stdout();
         let mut had_error = false;
         for op in argv.iter().skip(1).filter(|a| !is_flag(a)) {
-            if crate::procfs::is_proc_path(op) {
+            if crate::binfs::is_bin_path(op) {
+                // `/bin/<name>` → the command's help text (static registry; no Session access).
+                match crate::binfs::resolve(op) {
+                    Ok(content) => {
+                        let _ = out.write_all(content.as_bytes());
+                    }
+                    Err(_) => {
+                        let _ = writeln!(context.stderr(), "cat: {op}: No such file or directory");
+                        had_error = true;
+                    }
+                }
+            } else if crate::procfs::is_proc_path(op) {
                 let resolved = table
                     .as_ref()
                     .map(|t| crate::procfs::resolve(op, &t.lock().unwrap(), &environ));
@@ -343,6 +354,29 @@ impl SimpleCommand for Ls {
         S: AsRef<str>,
     {
         let argv: Vec<String> = args.map(|s| s.as_ref().to_string()).collect();
+
+        // `/bin` (the virtual builtin namespace): `ls /bin` lists every command name; `ls /bin/<name>`
+        // names the file (like real `ls` on a file), since `/bin/<name>` resolves but isn't a dir.
+        let bin_operand = argv
+            .iter()
+            .skip(1)
+            .find(|a| !is_flag(a) && crate::binfs::is_bin_path(a))
+            .cloned();
+        if let Some(op) = bin_operand {
+            let mut out = context.stdout();
+            if let Some(children) = crate::binfs::list_children(&op) {
+                let _ = writeln!(out, "{}", children.join("\n"));
+                return Ok(ExecutionResult::new(0));
+            }
+            // `/bin/<name>`: a file, not a directory. Exists → print its path; else not found.
+            if crate::binfs::resolve(&op).is_ok() {
+                let _ = writeln!(out, "{op}");
+                return Ok(ExecutionResult::new(0));
+            }
+            let _ = writeln!(context.stderr(), "ls: {op}: No such file or directory");
+            return Ok(ExecutionResult::new(1));
+        }
+
         let proc_operand = argv
             .iter()
             .skip(1)
@@ -360,7 +394,7 @@ impl SimpleCommand for Ls {
             return Ok(ExecutionResult::new(1));
         }
 
-        // No /proc operand → delegate unchanged.
+        // No virtual operand → delegate unchanged.
         let os_argv = argv.iter().map(std::ffi::OsString::from);
         let code = run_uu(&context, move || uu_ls::uumain(os_argv));
         Ok(ExecutionResult::new(code.clamp(0, 255) as u8))

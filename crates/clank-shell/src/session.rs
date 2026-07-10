@@ -1240,6 +1240,44 @@ mod tests {
         });
     }
 
+    /// `ls /bin` enumerates every registered command name — intercepted (`curl`, `prompt-user`) and
+    /// Brush-registered (`cat`) alike — so the AI can discover the full capability set. Virtual `/bin`.
+    #[test]
+    fn ls_bin_lists_all_commands() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let (out, _) = session.run_line("ls /bin").await;
+            let out = String::from_utf8(out).unwrap();
+            assert!(out.contains("curl"), "got: {out}");
+            assert!(out.contains("prompt-user"));
+            assert!(out.contains("cat"));
+        });
+    }
+
+    /// `cat /bin/<name>` prints the command's help text — the virtual file is `cat`-able like a
+    /// `/proc` file. Covers an intercepted command (`curl`, invisible to Brush's own resolution).
+    #[test]
+    fn cat_bin_curl_shows_help() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let (out, _) = session.run_line("cat /bin/curl").await;
+            let out = String::from_utf8(out).unwrap();
+            assert!(out.contains("fetch a URL over"), "got: {out}");
+        });
+    }
+
+    /// `cat /bin/<unknown>` reports "No such file or directory" (like a real missing file), not a
+    /// spurious success — the virtual namespace only serves registered names.
+    #[test]
+    fn cat_bin_unknown_is_not_found() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let (out, _) = session.run_line("cat /bin/does-not-exist").await;
+            let out = String::from_utf8(out).unwrap();
+            assert!(out.contains("No such file or directory"), "got: {out}");
+        });
+    }
+
     /// `grep` output is captured via `context.stdout()` (the `run_tool` path) — this is
     /// parallel-safe (no process-global fd swap) and verifies the wasm output-capture fix on the
     /// native side too.
