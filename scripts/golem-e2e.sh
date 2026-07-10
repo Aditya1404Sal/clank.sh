@@ -671,6 +671,35 @@ expect "find | xargs composes"            'find /tmp/work/ft -name "*.txt" | xar
 expect "xargs quotes spacey tokens"       'echo -e "p q" | xargs -I {} mkdir "/tmp/work/{}"; ls /tmp/work | grep -c "p q"'  $'1'
 
 # ============================================================================
+# 2p. Standard utilities — phase 3 (sed mini-engine, awk subset)
+# ============================================================================
+step "Standard utilities (sed engine, awk subset)"
+
+# sed — the line engine (addresses, d/p/q, -n, -e; previously whole-buffer s/// only).
+expect "sed s///g substitutes globally"   'echo -e "aa\naa" | sed s/a/X/g'            $'XX\nXX'
+expect "sed /re/d deletes matching lines" 'echo -e "#c\nkeep\n#d" | sed /^#/d'        $'keep'
+expect "sed 1d deletes by line number"    'echo -e "a\nb\nc" | sed 1d'                $'b\nc'
+expect "sed -n 2,3p prints a range"       'echo -e "a\nb\nc\nd" | sed -n 2,3p'        $'b\nc'
+expect "sed 2q quits early"               'echo -e "a\nb\nc" | sed 2q'                $'a\nb'
+expect "sed -e chains commands"           'echo ab | sed -e s/a/1/ -e s/b/2/'         $'12'
+expect "sed & backref in replacement"     'echo abc | sed "s/b/[&]/"'                 $'a[b]c'
+
+# awk — the hand-written subset interpreter (no wasm-viable awk crate exists).
+# NB: awk programs are single-quoted AT THE AGENT level. A `\$` in an assert cmd is an invalid
+# escape in the CLI's WIT string parser — the payload then degrades to a raw quoted string and the
+# agent execs the ENTIRE line as one command name ("operation not supported"). Single quotes keep
+# `$` out of Brush's expansion AND keep backslashes out of the WIT payload.
+expect "awk prints a field"               "echo -e 'a b c\nd e f' | awk '{print \$2}'"  $'b\ne'
+expect "awk -F splits on delimiter"       "echo root:x:0 | awk -F: '{print \$1}'"     $'root'
+expect "awk comparison pattern"           "echo -e 'a:x:5\nb:x:50' | awk -F: '\$3 > 10 {print \$1}'"  $'b'
+expect "awk regex pattern"                'echo -e "ok\nerr 1\nerr 2" | awk /err/'    $'err 1\nerr 2'
+expect "awk sums with END"                "echo -e '1\n2\n3' | awk '{s += \$1} END {print s}'"  $'6'
+expect "awk counts matches with n++"      'echo -e "x\ny\nx" | awk "/x/ {n++} END {print n}"'  $'2'
+expect "awk NR selects a line"            'echo -e "a\nb\nc" | awk "NR == 2"'         $'b'
+expect "awk printf formats"               "awk 'BEGIN {printf \"%d-%s\\n\", 42, \"x\"}'"  $'42-x'
+expect "awk concat and OFS"               "echo 'a b' | awk '{print \$2 \"-\" \$1}'"  $'b-a'
+
+# ============================================================================
 # 3. Durability — write in one invocation, read in a SEPARATE invocation
 # ============================================================================
 step "Durability check (state persists across invocations)"

@@ -15,6 +15,7 @@
 //! on both targets through [`session::Session`].
 
 pub mod askcmd;
+mod awkcmd;
 pub mod authz;
 pub mod binfs;
 mod coreutils;
