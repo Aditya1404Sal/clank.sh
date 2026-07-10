@@ -497,6 +497,7 @@ dependencies = [
  "brush-core",
  "brush-parser",
  "chrono",
+ "clap",
  "diffy",
  "futures",
  "grep",

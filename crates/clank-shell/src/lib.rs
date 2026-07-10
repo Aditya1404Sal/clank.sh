@@ -18,6 +18,7 @@ pub mod askcmd;
 pub mod authz;
 pub mod binfs;
 mod coreutils;
+mod findcmd;
 mod httpcmd;
 mod mancmd;
 pub mod manifest;
@@ -32,6 +33,7 @@ mod statcmd;
 mod texttools;
 pub mod typecmd;
 mod which;
+mod xargscmd;
 
 // The `wasi:cli/run` REPL driver. Gated behind the `repl-driver` feature so that dependents which
 // only want the shared `Session` core (e.g. the Golem agent crate, which exports its own

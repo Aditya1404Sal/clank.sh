@@ -649,6 +649,28 @@ expect "grep -r searches directories"     'mkdir -p /tmp/work/rd; echo needle > 
 expect_contains "grep pattern in /bin virtual file"  'grep -h "fetch a URL" /bin/curl'  'fetch a URL'
 
 # ============================================================================
+# 2o. Standard utilities — phase 2 (find, xargs)
+# ============================================================================
+step "Standard utilities (find, xargs)"
+
+# find — hand-written walker (-name/-iname/-path/-type/-maxdepth/-mindepth, implicit -print),
+# virtual namespaces served at listing depth.
+expect "find -name walks the tree"        'mkdir -p /tmp/work/ft/sub; echo 1 > /tmp/work/ft/a.txt; echo 2 > /tmp/work/ft/sub/b.txt; echo 3 > /tmp/work/ft/sub/c.log; find /tmp/work/ft -name "*.txt"'  $'/tmp/work/ft/a.txt\n/tmp/work/ft/sub/b.txt'
+expect "find -type d finds directories"   'find /tmp/work/ft -type d'                 $'/tmp/work/ft\n/tmp/work/ft/sub'
+expect "find -maxdepth limits descent"    'find /tmp/work/ft -maxdepth 1 -name "*.txt"'  $'/tmp/work/ft/a.txt'
+expect "find /bin serves the virtual namespace"  'find /bin -name "gre*"'             $'/bin/grep'
+FIND_MISSING="$(eval_json eval '"find /tmp/work/absent-root"')"
+expect_eval "find missing root exits 1"   "$FIND_MISSING" '.exit_code' '1'
+
+# xargs — shell re-entry (run_string): stdin tokens become in-shell command lines.
+expect "xargs appends stdin tokens"       'echo one two | xargs echo GOT:'            $'GOT: one two'
+expect "xargs -n batches invocations"     'echo -e "a\nb\nc" | xargs -n 2 echo B:'    $'B: a b\nB: c'
+expect "xargs -I substitutes whole lines" 'echo -e "x y\nz" | xargs -I {} echo "[{}]"'  $'[x y]\n[z]'
+expect "xargs default command is echo"    'echo hi there | xargs'                     $'hi there'
+expect "find | xargs composes"            'find /tmp/work/ft -name "*.txt" | xargs cat | wc -l'  $'2'
+expect "xargs quotes spacey tokens"       'echo -e "p q" | xargs -I {} mkdir "/tmp/work/{}"; ls /tmp/work | grep -c "p q"'  $'1'
+
+# ============================================================================
 # 3. Durability — write in one invocation, read in a SEPARATE invocation
 # ============================================================================
 step "Durability check (state persists across invocations)"

@@ -205,16 +205,30 @@ pub(crate) fn run_tool<SE: ShellExtensions>(
     context: &ExecutionContext<'_, SE>,
     run: impl FnOnce(&mut dyn std::io::Read, &mut dyn std::io::Write, &mut dyn std::io::Write) -> i32,
 ) -> i32 {
-    #[cfg(not(target_arch = "wasm32"))]
-    let mut stdin = context.stdin();
-    #[cfg(target_arch = "wasm32")]
-    let mut stdin = effective_stdin(context);
+    let mut stdin = tool_stdin(context);
     let mut out = context.stdout();
     let mut err = context.stderr();
     let code = run(&mut stdin, &mut out, &mut err);
     let _ = out.flush();
     let _ = err.flush();
     code
+}
+
+/// This command's stdin as a reader — Brush's assigned `OpenFile` on native, and on wasm the
+/// [`effective_stdin`] guard (piped/redirected input, or empty for the default stdin: the real
+/// wasip2 stdin resource must never be read — its blocking read traps the agent). For builtins
+/// that read stdin outside the [`run_tool`] closure shape (e.g. `xargs`).
+pub(crate) fn tool_stdin<SE: ShellExtensions>(
+    context: &ExecutionContext<'_, SE>,
+) -> Box<dyn std::io::Read> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Box::new(context.stdin())
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        effective_stdin(context)
+    }
 }
 
 /// Shared `get_content` body: derive real help content from a synopsis rather than a stub. Used by

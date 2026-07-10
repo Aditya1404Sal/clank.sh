@@ -646,6 +646,8 @@ async fn build_shell() -> Result<Shell, brush_core::Error> {
         .builtins(crate::which::builtins())
         .builtins(crate::mancmd::builtins())
         .builtins(crate::statcmd::builtins())
+        .builtins(crate::findcmd::builtins())
+        .builtins(crate::xargscmd::builtins())
         .build()
         .await?;
 
