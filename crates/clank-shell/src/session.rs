@@ -310,6 +310,11 @@ impl Session {
         // Brush-registered `context` builtin in nested contexts ($(context show), context | head).
         let _install = crate::proctable::install(self.proc_table.clone());
         let _install_transcript = crate::install_transcript(self.transcript.clone());
+        // Install the dynamic MCP manifests so `man <server>` (a Brush builtin that only sees the
+        // static registry) can resolve installed servers.
+        let _install_dynreg = crate::dynreg::install(std::sync::Arc::new(std::sync::Mutex::new(
+            self.mcp.all_manifests(),
+        )));
 
         // Record this line as a process (one PID per executed line). Blank lines get no row, matching
         // the "empty line re-prompts" behavior. `context` lines DO get a row — they're real typed
@@ -363,12 +368,22 @@ impl Session {
             return self.finish_intercepted(pid, result);
         }
 
+        // `<server> --help` / `<server> <tool> --help` for an installed MCP server: print generated
+        // help (before the authz gate — help never confirms).
+        if let Some(help) = self.mcp_help_for(line) {
+            let result = LineResult::from_outcome(help.into_bytes(), Vec::new(), 0);
+            return self.finish_intercepted(pid, result);
+        }
+
         // Authorization gate: enforce the leading command's `authorization-policy` (README). A
         // `confirm`/`sudo-only` command that isn't pre-authorized surfaces a confirmation pause
         // (reusing the `prompt-user` mechanism) and defers the command until approved. In every
         // path the command actually run is the line with any leading `sudo` token stripped — `sudo`
         // is a clank authorization marker, not a real executable to dispatch to Brush.
-        let (policy, elevated, command) = authz::resolve(&self.registry, line);
+        //
+        // Resolution consults the static registry AND the dynamic MCP manifests (an installed server
+        // name resolves to its Confirm-policy manifest — MCP tool calls are outbound HTTP).
+        let (policy, elevated, command) = self.resolve_authz(line);
         let effective = strip_sudo_prefix(line);
         match authz::decide(policy, elevated, self.authz.allow_all) {
             Decision::Allow => {}
@@ -429,6 +444,10 @@ impl Session {
                 Ok(cmd) => self.run_mcp(cmd).await,
                 Err(e) => LineResult::from_outcome(Vec::new(), format!("{e}\n").into_bytes(), 2),
             }
+        } else if self.is_mcp_tool_line(line) {
+            // `<server> <tool> …` for an installed MCP server: an outbound HTTP tool call (its authz
+            // Confirm was already resolved via the dynamic manifest at the gate).
+            self.run_mcp_tool(line).await
         } else {
             match crate::httpcmd::classify(line) {
                 Some((crate::httpcmd::HttpCommand::Curl, args)) => {
@@ -676,6 +695,42 @@ impl Session {
             .get_str("HOME", &self.shell)
             .map(|h| h.into_owned())
             .unwrap_or_else(|| DEFAULT_HOME.to_string())
+    }
+
+    /// Resolve a line's authorization policy, consulting the static registry AND the dynamic MCP
+    /// server manifests. Mirrors [`authz::resolve`] but adds the MCP layer: an installed server name
+    /// (leading command) resolves to its `Confirm` manifest. Returns `(policy, elevated, command)`.
+    fn resolve_authz(
+        &self,
+        line: &str,
+    ) -> (crate::manifest::AuthorizationPolicy, bool, Option<String>) {
+        let (command, elevated) = authz::leading_command(line);
+        if let Some(name) = command.as_deref() {
+            if self.registry.get(name).is_none() {
+                if let Some(m) = self.mcp.manifest_for(name) {
+                    return (m.authorization_policy, elevated, command);
+                }
+            }
+        }
+        authz::resolve(&self.registry, line)
+    }
+
+    /// Generated help for an MCP tool line ending in `--help` (or a bare `<server>`): the server's
+    /// tool list. `None` if the line isn't an installed-server line or doesn't request help.
+    fn mcp_help_for(&self, line: &str) -> Option<String> {
+        let inv = match crate::mcpcmd::parse_tool_invocation(line)? {
+            Ok(inv) => inv,
+            Err(_) => return None,
+        };
+        if !self.mcp.is_server(&inv.server) {
+            return None;
+        }
+        // Bare `<server>` or `--help` ⇒ server help; a `<tool> --help` ⇒ the same (tool-level help is
+        // the server help in MCP-lite).
+        if inv.help || inv.tool.is_none() {
+            return self.mcp.server_help(&inv.server);
+        }
+        None
     }
 
     /// Drive the `ask` agentic loop from `state` until it completes (model answers, transport error,
@@ -1385,6 +1440,111 @@ impl Session {
         }
     }
 
+    /// Whether `line`'s leading word is an installed MCP server (and it isn't `mcp` itself). Drives
+    /// the dynamic `<server> <tool>` dispatch.
+    fn is_mcp_tool_line(&self, line: &str) -> bool {
+        match crate::mcpcmd::parse_tool_invocation(line) {
+            Some(Ok(inv)) => self.mcp.is_server(&inv.server),
+            _ => false,
+        }
+    }
+
+    /// Execute a `<server> <tool> …` MCP tool call: build the arguments from the tool's inputSchema
+    /// (or `--args '<json>'`), issue `tools/call` (reusing an open session or initializing one), and
+    /// render the result (text content joined, or raw JSON with `--json`).
+    async fn run_mcp_tool(&mut self, line: &str) -> LineResult {
+        let inv = match crate::mcpcmd::parse_tool_invocation(line) {
+            Some(Ok(inv)) => inv,
+            Some(Err(e)) => {
+                return LineResult::from_outcome(Vec::new(), format!("{}: {e}\n", "mcp").into_bytes(), 2)
+            }
+            None => return LineResult::denied(),
+        };
+
+        let Some(tool_name) = inv.tool.clone() else {
+            // Bare `<server>` with no tool: show help (help path already handled this in eval_line, but
+            // a direct run_command re-entry lands here).
+            return LineResult::continue_with_stdout(
+                self.mcp.server_help(&inv.server).unwrap_or_default().into_bytes(),
+            );
+        };
+
+        // Resolve the tool + its schema.
+        let Some(tool) = self.mcp.tool(&inv.server, &tool_name).cloned() else {
+            return LineResult::from_outcome(
+                Vec::new(),
+                format!("{}: no tool '{tool_name}' on server '{}'\n", inv.server, inv.server).into_bytes(),
+                2,
+            );
+        };
+
+        // Build the arguments object: `--args` escape hatch wins; else map --flags via the schema.
+        let arguments = match &inv.raw_args {
+            Some(raw) => match serde_json::from_str::<serde_json::Value>(raw) {
+                Ok(v) => v,
+                Err(e) => {
+                    return LineResult::from_outcome(
+                        Vec::new(),
+                        format!("{}: --args is not valid JSON: {e}\n", inv.server).into_bytes(),
+                        2,
+                    )
+                }
+            },
+            None => match build_mcp_arguments(&tool.input_schema, &inv.flags) {
+                Ok(v) => v,
+                Err(e) => {
+                    return LineResult::from_outcome(
+                        Vec::new(),
+                        format!("{} {tool_name}: {e}\n", inv.server).into_bytes(),
+                        2,
+                    )
+                }
+            },
+        };
+
+        let Some(config) = self.mcp.get(&inv.server).map(|s| s.config.clone()) else {
+            return LineResult::from_outcome(
+                Vec::new(),
+                format!("{}: server not installed\n", inv.server).into_bytes(),
+                1,
+            );
+        };
+        // Reuse an explicit --session-id, else an open session for the server, else stateless.
+        let session_id = inv
+            .session_id
+            .clone()
+            .or_else(|| self.mcp.session_for(&inv.server).and_then(|s| s.server_session_id.clone()));
+
+        let Some(http) = self.mcp_http.as_deref() else {
+            return LineResult::from_outcome(
+                Vec::new(),
+                b"mcp: no HTTP transport configured (available on the Golem agent)\n".to_vec(),
+                4,
+            );
+        };
+        let auth = config.resolve_auth();
+        let mut client = crate::mcpclient::McpClient::new(http, &config.url, auth);
+        match client.call_tool(&tool_name, arguments, session_id.as_deref()).await {
+            Ok(result) => {
+                let out = if inv.json {
+                    result.raw.to_string()
+                } else {
+                    result.text
+                };
+                let mut out = out.into_bytes();
+                if !out.is_empty() && !out.ends_with(b"\n") {
+                    out.push(b'\n');
+                }
+                LineResult::continue_with_stdout(out)
+            }
+            Err(e) => LineResult::from_outcome(
+                Vec::new(),
+                format!("{} {tool_name}: {}\n", inv.server, e.message).into_bytes(),
+                e.exit_code,
+            ),
+        }
+    }
+
     /// Complete an intercepted line's row and record its output (for intercepted paths that don't go
     /// through `run_command`, e.g. an authorization denial).
     fn finish_intercepted(&mut self, pid: Option<u32>, result: LineResult) -> LineResult {
@@ -1434,6 +1594,7 @@ impl Session {
             .registry
             .get(name)
             .map(|m| m.synopsis.clone())
+            .or_else(|| self.mcp.manifest_for(name).map(|m| m.synopsis))
             .unwrap_or_else(|| "run this command".to_string());
         let prompt = PendingPrompt {
             question: authz::confirm_question(name, &synopsis, sudo_grant),
@@ -1711,6 +1872,51 @@ fn truncate_tool_output(bytes: &[u8]) -> String {
     let mut s = decoded[..end].to_string();
     s.push_str("…[truncated]");
     s
+}
+
+/// Build an MCP `tools/call` arguments object from `--flag value` pairs, coercing each value per the
+/// tool's JSON inputSchema (integer/number → number, boolean → bool, array/object → parsed JSON, else
+/// string). Bare flags (`--verbose`) become `true`. Errors if a required property is missing.
+fn build_mcp_arguments(
+    schema: &serde_json::Value,
+    flags: &[(String, Option<String>)],
+) -> Result<serde_json::Value, String> {
+    use serde_json::Value;
+    let props = schema.get("properties").and_then(Value::as_object);
+    let mut obj = serde_json::Map::new();
+    for (key, value) in flags {
+        let ty = props
+            .and_then(|p| p.get(key))
+            .and_then(|s| s.get("type"))
+            .and_then(Value::as_str);
+        let coerced = match (ty, value) {
+            (Some("boolean"), None) => Value::Bool(true),
+            (Some("boolean"), Some(v)) => Value::Bool(v == "true" || v == "1" || v == "yes"),
+            (Some("integer"), Some(v)) | (Some("number"), Some(v)) => v
+                .parse::<f64>()
+                .map(|n| serde_json::json!(n))
+                .map_err(|_| format!("--{key}: '{v}' is not a number"))?,
+            (Some("array"), Some(v)) | (Some("object"), Some(v)) => serde_json::from_str(v)
+                .map_err(|e| format!("--{key}: expected JSON: {e}"))?,
+            (_, Some(v)) => Value::String(v.clone()),
+            // A bare flag with no schema type: treat as a present boolean.
+            (_, None) => Value::Bool(true),
+        };
+        obj.insert(key.clone(), coerced);
+    }
+    // Check required properties are present.
+    if let Some(required) = schema.get("required").and_then(Value::as_array) {
+        let missing: Vec<String> = required
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|r| !obj.contains_key(*r))
+            .map(String::from)
+            .collect();
+        if !missing.is_empty() {
+            return Err(format!("missing required argument(s): {}", missing.join(", ")));
+        }
+    }
+    Ok(Value::Object(obj))
 }
 
 /// The README's default `$PATH` — the resolution namespace clank's package layout installs into.
@@ -2117,10 +2323,6 @@ mod tests {
         }
     }
 
-    /// Process-global lock: MCP tests set `$CLANK_MCP_ETC/$CLANK_MCP_BIN`, so they must not run
-    /// concurrently. The returned guard holds the lock and restores/clears the vars on drop.
-    static MCP_ENV_LOCK: Mutex<()> = Mutex::new(());
-
     struct McpDirsGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
         bin: String,
@@ -2133,9 +2335,9 @@ mod tests {
     }
 
     /// A fresh temp `$CLANK_MCP_ETC/$CLANK_MCP_BIN` pair, exported for the duration of the returned
-    /// guard (which serializes MCP tests and clears the vars on drop).
+    /// guard (which serializes MCP tests via the shared lock and clears the vars on drop).
     fn set_mcp_dirs() -> McpDirsGuard {
-        let lock = MCP_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let lock = crate::mcpconfig::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let base = std::env::temp_dir().join(format!("clank_mcp_sess_{}_{n}", std::process::id()));
@@ -2245,6 +2447,105 @@ mod tests {
             // Approve → the install runs.
             let done = session.answer_prompt(Some("yes".to_string())).await;
             assert_eq!(done.exit_code, 0);
+        });
+    }
+
+    /// A `tools/call` response echoing text content.
+    fn mcp_call_response(text: &str) -> crate::mcpclient::HttpResponse {
+        mcp_json(serde_json::json!({"jsonrpc":"2.0","id":9,"result":{
+            "content":[{"type":"text","text":text}], "isError":false}}))
+    }
+
+    /// `<server> <tool> --param v` runs a tool call: args mapped from the schema; result text returned.
+    #[test]
+    fn mcp_tool_dispatch_maps_args_and_returns_text() {
+        on_rt(async {
+            let dirs = set_mcp_dirs();
+            let mut session = Session::new().await.unwrap();
+            let mut script = mcp_install_script();
+            script.push(mcp_call_response("echoed: hello"));
+            session.set_mcp_http(Box::new(FakeMcpHttp::new(script)));
+            session.eval_line("sudo mcp add demo https://x/mcp").await;
+
+            // `sudo demo echo --text hello` runs the tool (sudo pre-authorizes the Confirm).
+            let out = session.eval_line("sudo demo echo --text hello").await;
+            assert_eq!(out.exit_code, 0, "stderr: {}", String::from_utf8_lossy(&out.stderr));
+            assert!(String::from_utf8(out.stdout).unwrap().contains("echoed: hello"));
+            let _ = dirs;
+        });
+    }
+
+    /// A missing required argument is a usage error (exit 2), no HTTP call.
+    #[test]
+    fn mcp_tool_missing_required_arg_errors() {
+        on_rt(async {
+            let _dirs = set_mcp_dirs();
+            let mut session = Session::new().await.unwrap();
+            session.set_mcp_http(Box::new(FakeMcpHttp::new(mcp_install_script())));
+            session.eval_line("sudo mcp add demo https://x/mcp").await;
+            // `echo` requires `text`; omit it.
+            let out = session.eval_line("sudo demo echo").await;
+            assert_eq!(out.exit_code, 2);
+            assert!(String::from_utf8(out.stderr).unwrap().contains("required"));
+        });
+    }
+
+    /// A bare `<server> <tool>` (no sudo) surfaces a confirmation; approving runs it.
+    #[test]
+    fn mcp_tool_confirms_then_runs() {
+        on_rt(async {
+            let _dirs = set_mcp_dirs();
+            let mut session = Session::new().await.unwrap();
+            let mut script = mcp_install_script();
+            script.push(mcp_call_response("ran"));
+            session.set_mcp_http(Box::new(FakeMcpHttp::new(script)));
+            session.eval_line("sudo mcp add demo https://x/mcp").await;
+
+            let first = session.eval_line("demo echo --text hi").await;
+            assert!(first.pending_prompt.is_some(), "MCP tool call should confirm");
+            let done = session.answer_prompt(Some("yes".to_string())).await;
+            assert_eq!(done.exit_code, 0);
+            assert!(String::from_utf8(done.stdout).unwrap().contains("ran"));
+        });
+    }
+
+    /// `<server> --help` prints the server's tool list without confirming; `man <server>` too.
+    #[test]
+    fn mcp_server_help_and_man_surfaces() {
+        on_rt(async {
+            let _dirs = set_mcp_dirs();
+            let mut session = Session::new().await.unwrap();
+            session.set_mcp_http(Box::new(FakeMcpHttp::new(mcp_install_script())));
+            session.eval_line("sudo mcp add demo https://x/mcp").await;
+
+            let help = session.eval_line("demo --help").await;
+            assert!(help.pending_prompt.is_none(), "help must not confirm");
+            assert!(String::from_utf8(help.stdout).unwrap().contains("echo"));
+
+            let (man, _) = session.run_line("man demo").await;
+            assert!(String::from_utf8(man).unwrap().contains("demo"), "man should resolve the server");
+        });
+    }
+
+    /// The `--args '<json>'` escape hatch bypasses schema mapping.
+    #[test]
+    fn mcp_tool_raw_args_escape_hatch() {
+        on_rt(async {
+            let _dirs = set_mcp_dirs();
+            let mut session = Session::new().await.unwrap();
+            let mut script = mcp_install_script();
+            script.push(mcp_call_response("raw ok"));
+            let http = FakeMcpHttp::new(script);
+            let seen = http.seen.clone();
+            session.set_mcp_http(Box::new(http));
+            session.eval_line("sudo mcp add demo https://x/mcp").await;
+
+            let out = session.eval_line(r#"sudo demo echo --args '{"text":"direct"}'"#).await;
+            assert_eq!(out.exit_code, 0, "stderr: {}", String::from_utf8_lossy(&out.stderr));
+            // The tools/call body carried the raw args verbatim.
+            let calls = seen.lock().unwrap();
+            let last = calls.last().unwrap();
+            assert!(last.1.contains("\"text\":\"direct\""), "tools/call body: {}", last.1);
         });
     }
 

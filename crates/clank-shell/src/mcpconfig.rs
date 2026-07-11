@@ -64,6 +64,11 @@ impl McpServerConfig {
     }
 }
 
+/// A process-global lock serializing tests that set `$CLANK_MCP_ETC/$CLANK_MCP_BIN` (both this
+/// module's and the Session's MCP tests share it, since the env vars are process-global).
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// The config directory, honoring `$CLANK_MCP_ETC`.
 pub fn etc_dir() -> PathBuf {
     PathBuf::from(std::env::var("CLANK_MCP_ETC").unwrap_or_else(|_| DEFAULT_ETC.to_string()))
@@ -146,10 +151,6 @@ pub fn write_bin_stub(name: &str, help: &str) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::Mutex;
-
-    // $CLANK_MCP_ETC/$CLANK_MCP_BIN are process-global; serialize the tests that set them.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn unique() -> u64 {
         static C: AtomicU64 = AtomicU64::new(0);
@@ -158,7 +159,7 @@ mod tests {
 
     /// Point the config/bin dirs at fresh temp dirs for the duration of `f`.
     fn with_temp_dirs<F: FnOnce(&str)>(f: F) {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = super::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let n = unique();
         let base = std::env::temp_dir().join(format!("clank_mcpcfg_{}_{n}", std::process::id()));
         let etc = base.join("etc");

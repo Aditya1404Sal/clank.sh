@@ -147,9 +147,7 @@ fn parse_session(args: &[String]) -> Result<McpCommand, String> {
     }
 }
 
-/// A parsed MCP tool invocation (`<server> <tool> …`) — for the dynamic command surface (C2, not yet
-/// wired into dispatch).
-#[allow(dead_code)]
+/// A parsed MCP tool invocation (`<server> <tool> …`) — the dynamic command surface.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ToolInvocation {
     pub server: String,
@@ -165,20 +163,23 @@ pub(crate) struct ToolInvocation {
 }
 
 /// Parse a line whose leading word is an installed server name into a [`ToolInvocation`]. The caller
-/// checks `is_server(leading)` first. Returns `Err` for a malformed invocation. (C2 dispatch.)
-#[allow(dead_code)]
+/// checks `is_server(leading)` first. Returns `Err` for a malformed invocation.
 pub(crate) fn parse_tool_invocation(line: &str) -> Option<Result<ToolInvocation, String>> {
     let tokens = tokenize_str(line).ok()?;
     if tokens.iter().any(|t| matches!(t, Token::Operator(_, _))) {
         return None; // operator-bearing lines fall through to Brush
     }
-    let words: Vec<String> = tokens
-        .into_iter()
-        .filter_map(|t| match t {
-            Token::Word(s, _) => Some(unquote_str(&s)),
-            Token::Operator(_, _) => None,
-        })
-        .collect();
+    // Two views of each word: the normal fully-dequoted form (`words`), and a form that strips ONLY
+    // the outer quote layer (`raw_words`) so a single-quoted JSON `--args '{"k":"v"}'` keeps its inner
+    // double-quotes (unquote_str would collapse them, yielding invalid JSON).
+    let mut words = Vec::new();
+    let mut raw_words = Vec::new();
+    for t in tokens {
+        if let Token::Word(s, _) = t {
+            raw_words.push(strip_outer_quotes(&s));
+            words.push(unquote_str(&s));
+        }
+    }
     let server = words.first()?.clone();
 
     let mut inv = ToolInvocation {
@@ -190,26 +191,36 @@ pub(crate) fn parse_tool_invocation(line: &str) -> Option<Result<ToolInvocation,
         raw_args: None,
         flags: Vec::new(),
     };
-    let mut iter = words[1..].iter().peekable();
-    // The first non-flag word is the tool name.
+    // Index-based walk so `--args` can pull the raw (outer-quote-only) form of the next word.
     let mut positional_seen = false;
-    while let Some(w) = iter.next() {
+    let mut i = 1;
+    while i < words.len() {
+        let w = &words[i];
         match w.as_str() {
             "--help" | "-h" => inv.help = true,
             "--json" => inv.json = true,
-            "--args" => match iter.next() {
-                Some(v) => inv.raw_args = Some(v.clone()),
-                None => return Some(Err("--args needs a JSON value".into())),
-            },
-            "--session-id" => match iter.next() {
-                Some(v) => inv.session_id = Some(v.clone()),
-                None => return Some(Err("--session-id needs a value".into())),
-            },
+            "--args" => {
+                i += 1;
+                match raw_words.get(i) {
+                    Some(v) => inv.raw_args = Some(v.clone()),
+                    None => return Some(Err("--args needs a JSON value".into())),
+                }
+            }
+            "--session-id" => {
+                i += 1;
+                match words.get(i) {
+                    Some(v) => inv.session_id = Some(v.clone()),
+                    None => return Some(Err("--session-id needs a value".into())),
+                }
+            }
             flag if flag.starts_with("--") => {
                 let key = flag.trim_start_matches("--").to_string();
                 // A following non-flag word is the value; otherwise it's a bare boolean flag.
-                let value = match iter.peek() {
-                    Some(next) if !next.starts_with("--") => Some(iter.next().unwrap().clone()),
+                let value = match words.get(i + 1) {
+                    Some(next) if !next.starts_with("--") => {
+                        i += 1;
+                        Some(words[i].clone())
+                    }
                     _ => None,
                 };
                 inv.flags.push((key, value));
@@ -220,8 +231,24 @@ pub(crate) fn parse_tool_invocation(line: &str) -> Option<Result<ToolInvocation,
             }
             other => return Some(Err(format!("unexpected argument '{other}'"))),
         }
+        i += 1;
     }
     Some(Ok(inv))
+}
+
+/// Strip only the OUTER matching quote pair from a raw token, preserving inner quotes. `'{"a":1}'` →
+/// `{"a":1}`; `"x"` → `x`; unquoted stays as-is. Used for `--args` JSON where `unquote_str` would
+/// over-strip the inner double-quotes.
+fn strip_outer_quotes(s: &str) -> String {
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2 {
+        let first = bytes[0];
+        let last = bytes[bytes.len() - 1];
+        if (first == b'\'' && last == b'\'') || (first == b'"' && last == b'"') {
+            return s[1..s.len() - 1].to_string();
+        }
+    }
+    s.to_string()
 }
 
 /// The `mcp` manifest. `Subprocess` scope, `Confirm` policy at the top level is too coarse — most
@@ -339,14 +366,13 @@ mod tests {
         let inv = parse_tool_invocation("gh --help").unwrap().unwrap();
         assert!(inv.help && inv.tool.is_none());
 
-        // --args carries the raw arguments token through; exact quote handling is the tokenizer's
-        // (nested quotes are dequoted by unquote_str, matching how the shell hands words to a
-        // command). Here we assert the token is captured, --json/--session-id parse, and the tool set.
-        let inv = parse_tool_invocation("gh call --args payload --json --session-id s2")
+        // --args preserves single-quoted JSON verbatim (only the outer quotes are stripped, so inner
+        // double-quotes survive — unlike normal word dequoting).
+        let inv = parse_tool_invocation("gh call --args '{\"a\":1}' --json --session-id s2")
             .unwrap()
             .unwrap();
         assert_eq!(inv.tool.as_deref(), Some("call"));
-        assert_eq!(inv.raw_args.as_deref(), Some("payload"));
+        assert_eq!(inv.raw_args.as_deref(), Some("{\"a\":1}"));
         assert!(inv.json);
         assert_eq!(inv.session_id.as_deref(), Some("s2"));
     }

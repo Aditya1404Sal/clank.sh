@@ -87,6 +87,9 @@ impl SimpleCommand for Man {
         for name in names {
             if let Some(m) = crate::binfs::registry().get(name) {
                 let _ = write!(out, "{}", render_manifest_page(m));
+            } else if let Some(m) = crate::dynreg::lookup(name) {
+                // A dynamically-installed command (an MCP server) — resolved via the per-line slot.
+                let _ = write!(out, "{}", render_manifest_page(&m));
             } else if let Some(reg) = context.shell.builtins().get(name.as_str()) {
                 match (reg.content_func)(name, ContentType::DetailedHelp, &ContentOptions::default())
                 {

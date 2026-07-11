@@ -172,6 +172,15 @@ impl McpState {
         Some(m)
     }
 
+    /// The dynamic manifests for all installed servers (for the per-line [`crate::dynreg`] slot that
+    /// `man` consults).
+    pub fn all_manifests(&self) -> Vec<Manifest> {
+        self.servers
+            .iter()
+            .filter_map(|s| self.manifest_for(&s.name))
+            .collect()
+    }
+
     /// Human-facing help for a server: its tools and their synopses.
     pub fn server_help(&self, name: &str) -> Option<String> {
         let server = self.get(name)?;

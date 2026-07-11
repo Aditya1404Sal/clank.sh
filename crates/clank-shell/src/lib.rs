@@ -21,6 +21,7 @@ pub mod authz;
 pub mod binfs;
 mod contextcmd;
 mod coreutils;
+pub mod dynreg;
 mod findcmd;
 mod httpcmd;
 mod interceptstub;
