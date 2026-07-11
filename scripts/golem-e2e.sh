@@ -777,6 +777,26 @@ else
 fi
 
 # ============================================================================
+# 2l-d. grease — the package manager (command seam + registry surface)
+# ============================================================================
+# grease is a Session-interception command (like mcp). Phase 1: the command resolves, `--help` works,
+# and the registry list (add/list/remove) persists to /etc/grease/registries.toml. install/list/etc.
+# are honest phase-2 stubs. No API key needed. (Prompt install + run land in a later grease phase.)
+step "grease (package manager: command seam + registry)"
+expect_contains "type grease is intercepted"          'type grease'       'grease is a shell builtin'
+expect_contains "grease --help documents subcommands" 'grease --help'     'install a prompt package'
+expect_contains "grease registry list empty initially" 'grease registry list'  'no registries configured'
+expect_contains "grease registry add records a URL"   'grease registry add https://reg.example/pkgs'  'added registry'
+expect_contains "grease registry list shows it"       'grease registry list'  'https://reg.example/pkgs'
+expect_contains "the registries file was written"     'cat /etc/grease/registries.toml'  'reg.example'
+expect_contains "grease registry remove drops it"     'grease registry remove https://reg.example/pkgs'  'removed registry'
+expect_contains "grease registry list empty again"    'grease registry list'  'no registries configured'
+expect_contains "grease install is a phase-2 stub"    'sudo grease install summarize'  'not yet implemented'
+# grease inside a substitution hits the honest stub (it runs at the session layer).
+GREASE_SUBST="$(eval_json eval '"echo $(grease list)"')"
+expect_eval "grease in \$() gives the honest pointer"  "$GREASE_SUBST"  '.stderr | contains("top-level command")'  'true'
+
+# ============================================================================
 # 2m. Pipelines — internal `cmd | cmd` on the single-threaded wasm agent (Wall C)
 # ============================================================================
 # Internal pipelines used to WEDGE the agent: std::io::pipe() is unsupported on wasip2 and there is
@@ -861,7 +881,7 @@ step "Standard utilities (find, xargs)"
 expect "find -name walks the tree"        'mkdir -p /tmp/work/ft/sub; echo 1 > /tmp/work/ft/a.txt; echo 2 > /tmp/work/ft/sub/b.txt; echo 3 > /tmp/work/ft/sub/c.log; find /tmp/work/ft -name "*.txt"'  $'/tmp/work/ft/a.txt\n/tmp/work/ft/sub/b.txt'
 expect "find -type d finds directories"   'find /tmp/work/ft -type d'                 $'/tmp/work/ft\n/tmp/work/ft/sub'
 expect "find -maxdepth limits descent"    'find /tmp/work/ft -maxdepth 1 -name "*.txt"'  $'/tmp/work/ft/a.txt'
-expect "find /bin serves the virtual namespace"  'find /bin -name "gre*"'             $'/bin/grep'
+expect "find /bin serves the virtual namespace"  'find /bin -name "grep*"'            $'/bin/grep'
 FIND_MISSING="$(eval_json eval '"find /tmp/work/absent-root"')"
 expect_eval "find missing root exits 1"   "$FIND_MISSING" '.exit_code' '1'
 

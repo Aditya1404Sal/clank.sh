@@ -23,6 +23,8 @@ mod contextcmd;
 mod coreutils;
 pub mod dynreg;
 mod findcmd;
+pub mod greaseconfig;
+mod greasecmd;
 mod httpcmd;
 mod interceptstub;
 mod killcmd;

@@ -21,7 +21,8 @@ use crate::registry::CommandRegistry;
 /// The commands clank intercepts before Brush dispatch — precisely the names in the registry that
 /// are **not** registered as Brush builtins, so Brush's `type`/`--help` never see them. clank's
 /// `type` and `--help` handling own exactly this set; everything else defers to Brush.
-pub const INTERCEPTED: &[&str] = &["prompt-user", "curl", "wget", "context", "ask", "kill", "mcp"];
+pub const INTERCEPTED: &[&str] =
+    &["prompt-user", "curl", "wget", "context", "ask", "kill", "mcp", "grease"];
 
 /// Whether `name` is a clank-intercepted command (one Brush can't resolve).
 pub fn is_intercepted(name: &str) -> bool {

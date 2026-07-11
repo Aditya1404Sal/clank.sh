@@ -535,6 +535,12 @@ impl Session {
                 Ok(cmd) => self.run_mcp(cmd).await,
                 Err(e) => LineResult::from_outcome(Vec::new(), format!("{e}\n").into_bytes(), 2),
             }
+        } else if let Some(parsed) = crate::greasecmd::classify(line) {
+            // `grease` package management runs at the Session layer — install/search/update do HTTP.
+            match parsed {
+                Ok(cmd) => self.run_grease(cmd).await,
+                Err(e) => LineResult::from_outcome(Vec::new(), format!("{e}\n").into_bytes(), 2),
+            }
         } else if self.is_mcp_tool_line(line) {
             // `<server> <tool> …` for an installed MCP server: an outbound HTTP tool call (its authz
             // Confirm was already resolved via the dynamic manifest at the gate).
@@ -1494,6 +1500,67 @@ impl Session {
     /// Dispatch a parsed `mcp` management command. HTTP-performing subcommands (`add`, `reload`,
     /// `session open`/`close`) require the injected transport; the sync ones (`list`, `tools`,
     /// `remove`, `session list`/`info`) work without it.
+    /// Dispatch a parsed `grease` command. Phase 1: `registry add/list/remove` work; the install-path
+    /// subcommands (`install`/`remove`/`list`/`search`/`info`/`update`) are honest "phase 2" stubs.
+    async fn run_grease(&mut self, cmd: crate::greasecmd::GreaseCommand) -> LineResult {
+        use crate::greasecmd::GreaseCommand;
+        match cmd {
+            GreaseCommand::RegistryAdd { url } => self.grease_registry_add(&url),
+            GreaseCommand::RegistryList => self.grease_registry_list(),
+            GreaseCommand::RegistryRemove { url } => self.grease_registry_remove(&url),
+            GreaseCommand::List
+            | GreaseCommand::Install { .. }
+            | GreaseCommand::Remove { .. }
+            | GreaseCommand::Search { .. }
+            | GreaseCommand::Info { .. }
+            | GreaseCommand::Update { .. } => LineResult::from_outcome(
+                Vec::new(),
+                b"grease: package install/list/search is not yet implemented (phase 2)\n".to_vec(),
+                1,
+            ),
+        }
+    }
+
+    /// `grease registry add <url>`: record a registry URL.
+    fn grease_registry_add(&self, url: &str) -> LineResult {
+        if !(url.starts_with("https://") || url.starts_with("http://")) {
+            return LineResult::from_outcome(
+                Vec::new(),
+                format!("grease registry add: '{url}' is not an http(s) URL\n").into_bytes(),
+                2,
+            );
+        }
+        match crate::greaseconfig::add_registry(url) {
+            Ok(true) => LineResult::continue_with_stdout(format!("added registry {url}\n").into_bytes()),
+            Ok(false) => {
+                LineResult::continue_with_stdout(format!("registry {url} already present\n").into_bytes())
+            }
+            Err(e) => LineResult::from_outcome(Vec::new(), format!("grease: {e}\n").into_bytes(), 1),
+        }
+    }
+
+    /// `grease registry list`: the configured registry URLs.
+    fn grease_registry_list(&self) -> LineResult {
+        let urls = crate::greaseconfig::list_registries();
+        if urls.is_empty() {
+            return LineResult::continue_with_stdout(b"no registries configured\n".to_vec());
+        }
+        LineResult::continue_with_stdout(format!("{}\n", urls.join("\n")).into_bytes())
+    }
+
+    /// `grease registry remove <url>`: drop a registry URL.
+    fn grease_registry_remove(&self, url: &str) -> LineResult {
+        match crate::greaseconfig::remove_registry(url) {
+            Ok(true) => LineResult::continue_with_stdout(format!("removed registry {url}\n").into_bytes()),
+            Ok(false) => LineResult::from_outcome(
+                Vec::new(),
+                format!("grease: registry {url} was not configured\n").into_bytes(),
+                1,
+            ),
+            Err(e) => LineResult::from_outcome(Vec::new(), format!("grease: {e}\n").into_bytes(), 1),
+        }
+    }
+
     async fn run_mcp(&mut self, cmd: crate::mcpcmd::McpCommand) -> LineResult {
         use crate::mcpcmd::McpCommand;
         match cmd {
@@ -2740,6 +2807,32 @@ mod tests {
         }
     }
 
+    /// A fresh temp `$CLANK_GREASE_*` triple, exported for the duration of the guard (serializes grease
+    /// tests via the shared lock, clears the vars on drop).
+    struct GreaseDirsGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+    impl Drop for GreaseDirsGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("CLANK_GREASE_ETC");
+            std::env::remove_var("CLANK_GREASE_STORE");
+            std::env::remove_var("CLANK_GREASE_BIN");
+        }
+    }
+    fn set_grease_dirs() -> GreaseDirsGuard {
+        let lock = crate::greaseconfig::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let base = std::env::temp_dir().join(format!("clank_grease_sess_{}_{n}", std::process::id()));
+        for sub in ["etc", "store", "bin"] {
+            std::fs::create_dir_all(base.join(sub)).unwrap();
+        }
+        std::env::set_var("CLANK_GREASE_ETC", base.join("etc"));
+        std::env::set_var("CLANK_GREASE_STORE", base.join("store"));
+        std::env::set_var("CLANK_GREASE_BIN", base.join("bin"));
+        GreaseDirsGuard { _lock: lock }
+    }
+
     struct McpDirsGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
         bin: String,
@@ -2788,6 +2881,56 @@ mod tests {
     }
 
     /// `mcp add` installs a server: config written, tools fetched, `mcp list`/`mcp tools`/`which`
+    /// `grease registry add/list/remove` through `eval_line`: the registry list is persisted and
+    /// surfaced. `registry` is Allow (local config only — no network, no pause).
+    #[test]
+    fn grease_registry_add_list_remove() {
+        on_rt(async {
+            let _dirs = set_grease_dirs();
+            let mut session = Session::new().await.unwrap();
+
+            let list0 = session.eval_line("grease registry list").await;
+            assert!(String::from_utf8(list0.stdout).unwrap().contains("no registries configured"));
+
+            let add = session.eval_line("grease registry add https://reg.example").await;
+            assert_eq!(add.exit_code, 0);
+            assert!(add.pending_prompt.is_none(), "registry add is Allow — no pause");
+            assert!(String::from_utf8(add.stdout).unwrap().contains("added registry"));
+
+            let list1 = session.eval_line("grease registry list").await;
+            assert!(String::from_utf8(list1.stdout).unwrap().contains("https://reg.example"));
+
+            let rm = session.eval_line("grease registry remove https://reg.example").await;
+            assert_eq!(rm.exit_code, 0);
+            let list2 = session.eval_line("grease registry list").await;
+            assert!(String::from_utf8(list2.stdout).unwrap().contains("no registries configured"));
+        });
+    }
+
+    /// `grease install` (a Confirm subcommand) surfaces a confirmation without sudo; a non-http
+    /// registry URL is rejected; the install-path subcommands are honest phase-2 stubs.
+    #[test]
+    fn grease_install_confirms_and_stubs() {
+        on_rt(async {
+            let _dirs = set_grease_dirs();
+            let mut session = Session::new().await.unwrap();
+
+            let bad = session.eval_line("grease registry add not-a-url").await;
+            assert_eq!(bad.exit_code, 2);
+            assert!(String::from_utf8(bad.stderr).unwrap().contains("not an http"));
+
+            // `install` is Confirm — a bare invocation pauses.
+            let confirm = session.eval_line("grease install summarize").await;
+            assert!(confirm.pending_prompt.is_some(), "install should confirm without sudo");
+            session.answer_prompt(Some("no".into())).await;
+
+            // Under sudo it runs (and hits the honest phase-2 stub, exit 1, no panic).
+            let inst = session.eval_line("sudo grease install summarize").await;
+            assert_eq!(inst.exit_code, 1);
+            assert!(String::from_utf8(inst.stderr).unwrap().contains("phase 2"));
+        });
+    }
+
     /// reflect it. Uses a scripted fake transport.
     #[test]
     fn mcp_add_installs_and_surfaces_the_server() {

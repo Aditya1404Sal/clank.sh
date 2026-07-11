@@ -80,6 +80,7 @@ session_stub!(WgetStub, "wget");
 session_stub!(AskStub, "ask");
 session_stub!(KillStub, "kill");
 session_stub!(McpStub, "mcp");
+session_stub!(GreaseStub, "grease");
 
 pub(crate) fn builtins<SE: ShellExtensions>() -> Vec<(String, Registration<SE>)> {
     use brush_core::builtins::simple_builtin;
@@ -89,5 +90,6 @@ pub(crate) fn builtins<SE: ShellExtensions>() -> Vec<(String, Registration<SE>)>
         ("ask".into(), simple_builtin::<AskStub, SE>()),
         ("kill".into(), simple_builtin::<KillStub, SE>()),
         ("mcp".into(), simple_builtin::<McpStub, SE>()),
+        ("grease".into(), simple_builtin::<GreaseStub, SE>()),
     ]
 }
