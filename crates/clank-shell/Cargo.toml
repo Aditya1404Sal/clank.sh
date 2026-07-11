@@ -70,6 +70,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Arg parsing for clank builtins written in Brush's `Command` form (xargs) — the same clap the
 # Brush builtins themselves use (already in the tree).
 clap = { version = "4", features = ["derive"] }
+sha2 = "0.11.0"
 
 [features]
 # The `wasi:cli/run` REPL driver (`mod wasm` + its p3 bindings). On by default so the native

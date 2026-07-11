@@ -25,6 +25,8 @@ pub mod dynreg;
 mod findcmd;
 pub mod greaseconfig;
 mod greasecmd;
+pub mod greasepkg;
+pub mod greasestate;
 mod httpcmd;
 mod interceptstub;
 mod killcmd;

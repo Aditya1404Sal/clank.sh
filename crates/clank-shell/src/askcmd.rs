@@ -469,6 +469,25 @@ fn leading_words(line: &str) -> Option<Vec<String>> {
     (!words.is_empty()).then_some(words)
 }
 
+/// The dequoted words of a **top-level** (operator-free) `line`. `None` if the line doesn't tokenize,
+/// is empty, OR contains any shell operator (`|`/`;`/`&&`/redirects) — so a nested use falls through
+/// to Brush (and its honest stub). Used by grease's prompt dispatch (a prompt can't run in a pipe/`$()`
+/// — it makes an LLM call, the Wall-C wall). Public sibling of [`leading_words`].
+pub fn dequote_words(line: &str) -> Option<Vec<String>> {
+    let tokens = tokenize_str(line).ok()?;
+    if tokens.iter().any(|t| matches!(t, Token::Operator(_, _))) {
+        return None;
+    }
+    let words: Vec<String> = tokens
+        .into_iter()
+        .filter_map(|t| match t {
+            Token::Word(s, _) => Some(unquote_str(&s)),
+            Token::Operator(_, _) => None,
+        })
+        .collect();
+    (!words.is_empty()).then_some(words)
+}
+
 /// The upstream + parsed `ask` tail of an ask-tail pipeline (`… | ask "q"`). `elevated` reflects a
 /// `sudo` on the tail stage (`… | sudo ask "q"`), which pre-authorizes the ask like a top-level
 /// `sudo ask`.

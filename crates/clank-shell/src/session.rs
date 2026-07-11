@@ -231,8 +231,11 @@ pub struct Session {
     /// Installed MCP servers + open sessions. Reconstructed deterministically under Golem replay.
     mcp: crate::mcpstate::McpState,
     /// The injected MCP HTTP transport. Installed by the agent build (a durable `wstd` client);
-    /// `None` on native, in which case MCP degrades to a clean "not configured" error.
+    /// `None` on native, in which case MCP degrades to a clean "not configured" error. Also used by
+    /// `grease` for registry fetches (it's a generic durable "fetch bytes over HTTPS" seam).
     mcp_http: Option<Box<dyn crate::mcpclient::McpHttp>>,
+    /// Installed grease packages (prompts). Reconstructed from the durable agent FS on boot.
+    grease: crate::greasestate::GreaseState,
     source: SourceInfo,
     #[cfg(target_arch = "wasm32")]
     rt: tokio::runtime::Runtime,
@@ -259,6 +262,7 @@ impl Session {
                 repl: None,
                 mcp: crate::mcpstate::McpState::default(),
                 mcp_http: None,
+                grease: crate::greasestate::GreaseState::load(),
                 source: SourceInfo::default(),
                 rt,
             })
@@ -279,6 +283,7 @@ impl Session {
                 repl: None,
                 mcp: crate::mcpstate::McpState::default(),
                 mcp_http: None,
+                grease: crate::greasestate::GreaseState::load(),
                 source: SourceInfo::default(),
             })
         }
@@ -340,11 +345,12 @@ impl Session {
         // Brush-registered `context` builtin in nested contexts ($(context show), context | head).
         let _install = crate::proctable::install(self.proc_table.clone());
         let _install_transcript = crate::install_transcript(self.transcript.clone());
-        // Install the dynamic MCP manifests so `man <server>` (a Brush builtin that only sees the
-        // static registry) can resolve installed servers.
-        let _install_dynreg = crate::dynreg::install(std::sync::Arc::new(std::sync::Mutex::new(
-            self.mcp.all_manifests(),
-        )));
+        // Install the dynamic manifests (installed MCP servers + grease prompts) so `man`/`type` (Brush
+        // surfaces that only see the static registry) can resolve runtime-registered names.
+        let mut dynamic = self.mcp.all_manifests();
+        dynamic.extend(self.grease.all_manifests());
+        let _install_dynreg =
+            crate::dynreg::install(std::sync::Arc::new(std::sync::Mutex::new(dynamic)));
 
         // Record this line as a process (one PID per executed line). Blank lines get no row, matching
         // the "empty line re-prompts" behavior. `context` lines DO get a row — they're real typed
@@ -438,6 +444,12 @@ impl Session {
         // `<server> --help` / `<server> <tool> --help` for an installed MCP server: print generated
         // help (before the authz gate — help never confirms).
         if let Some(help) = self.mcp_help_for(line) {
+            let result = LineResult::from_outcome(help.into_bytes(), Vec::new(), 0);
+            return self.finish_intercepted(pid, result);
+        }
+
+        // `<prompt> --help` for an installed grease prompt: print its generated help (before the gate).
+        if let Some(help) = self.prompt_help_for(line) {
             let result = LineResult::from_outcome(help.into_bytes(), Vec::new(), 0);
             return self.finish_intercepted(pid, result);
         }
@@ -545,6 +557,10 @@ impl Session {
             // `<server> <tool> …` for an installed MCP server: an outbound HTTP tool call (its authz
             // Confirm was already resolved via the dynamic manifest at the gate).
             self.run_mcp_tool(line).await
+        } else if self.is_prompt_line(line) {
+            // A grease-installed prompt: fill its body from args and run it through the model (its
+            // Confirm was resolved via the dynamic manifest at the gate; sudo pre-authorizes).
+            self.run_prompt(line, blanket_authorized).await
         } else {
             match crate::httpcmd::classify(line) {
                 Some((crate::httpcmd::HttpCommand::Curl, args)) => {
@@ -1029,6 +1045,10 @@ impl Session {
                 if let Some(m) = self.mcp.manifest_for(name) {
                     return (m.authorization_policy, elevated, command);
                 }
+                // An installed grease prompt: running it is an outbound LLM call ⇒ Confirm.
+                if let Some(m) = self.grease.manifest_for(name) {
+                    return (m.authorization_policy, elevated, command);
+                }
             }
         }
         authz::resolve(&self.registry, line)
@@ -1500,25 +1520,267 @@ impl Session {
     /// Dispatch a parsed `mcp` management command. HTTP-performing subcommands (`add`, `reload`,
     /// `session open`/`close`) require the injected transport; the sync ones (`list`, `tools`,
     /// `remove`, `session list`/`info`) work without it.
-    /// Dispatch a parsed `grease` command. Phase 1: `registry add/list/remove` work; the install-path
-    /// subcommands (`install`/`remove`/`list`/`search`/`info`/`update`) are honest "phase 2" stubs.
+    /// Dispatch a parsed `grease` command.
     async fn run_grease(&mut self, cmd: crate::greasecmd::GreaseCommand) -> LineResult {
         use crate::greasecmd::GreaseCommand;
         match cmd {
             GreaseCommand::RegistryAdd { url } => self.grease_registry_add(&url),
             GreaseCommand::RegistryList => self.grease_registry_list(),
             GreaseCommand::RegistryRemove { url } => self.grease_registry_remove(&url),
-            GreaseCommand::List
-            | GreaseCommand::Install { .. }
-            | GreaseCommand::Remove { .. }
-            | GreaseCommand::Search { .. }
-            | GreaseCommand::Info { .. }
-            | GreaseCommand::Update { .. } => LineResult::from_outcome(
+            GreaseCommand::List => self.grease_list(),
+            GreaseCommand::Info { name } => self.grease_info(&name),
+            GreaseCommand::Install { name } => self.grease_install(&name).await,
+            GreaseCommand::Remove { name } => self.grease_remove(&name),
+            GreaseCommand::Search { query } => self.grease_search(&query).await,
+            GreaseCommand::Update { name } => self.grease_update(name.as_deref()).await,
+        }
+    }
+
+    /// `grease list`: installed prompt packages.
+    fn grease_list(&self) -> LineResult {
+        let prompts = self.grease.prompts();
+        if prompts.is_empty() {
+            return LineResult::continue_with_stdout(b"no packages installed\n".to_vec());
+        }
+        let mut out = String::new();
+        for p in prompts {
+            out.push_str(&format!("{}  {}\n", p.package.name, p.package.description));
+        }
+        LineResult::continue_with_stdout(out.into_bytes())
+    }
+
+    /// `grease info <name>`: an installed package's metadata (name, description, model, arguments).
+    fn grease_info(&self, name: &str) -> LineResult {
+        match self.grease.prompt_help(name) {
+            Some(help) => LineResult::continue_with_stdout(help.into_bytes()),
+            None => LineResult::from_outcome(
                 Vec::new(),
-                b"grease: package install/list/search is not yet implemented (phase 2)\n".to_vec(),
+                format!("grease: '{name}' is not installed\n").into_bytes(),
                 1,
             ),
         }
+    }
+
+    /// `grease install <name>`: fetch the package from the first configured registry that has it,
+    /// verify its sha256, persist it to the store, write the bin stub, and register it. The installed
+    /// prompt becomes a Confirm-policy command that runs `ask` with the (filled) body.
+    async fn grease_install(&mut self, name: &str) -> LineResult {
+        if !crate::greaseconfig::is_valid_name(name) {
+            return LineResult::from_outcome(
+                Vec::new(),
+                format!("grease install: '{name}' is not a valid kebab-case package name\n").into_bytes(),
+                2,
+            );
+        }
+        // Reject a name that collides with a static builtin (mirrors `mcp_add`).
+        if self.registry.get(name).is_some() {
+            return LineResult::from_outcome(
+                Vec::new(),
+                format!("grease install: '{name}' collides with a built-in command\n").into_bytes(),
+                2,
+            );
+        }
+        let registries = crate::greaseconfig::list_registries();
+        if registries.is_empty() {
+            return LineResult::from_outcome(
+                Vec::new(),
+                b"grease install: no registries configured (try `grease registry add <url>`)\n".to_vec(),
+                1,
+            );
+        }
+        let Some(http) = self.mcp_http.as_ref() else {
+            return LineResult::from_outcome(
+                Vec::new(),
+                b"grease install: no HTTP transport configured (available on the Golem agent)\n".to_vec(),
+                4,
+            );
+        };
+
+        // Try each registry in order: GET <url>/packages/<name>.json.
+        let mut last_err = String::from("package not found in any configured registry");
+        for base in &registries {
+            let url = format!("{}/packages/{name}.json", base.trim_end_matches('/'));
+            match http.request("GET", &url, &[], None).await {
+                Ok(resp) if resp.status == 200 => {
+                    return self.grease_finish_install(name, base, &resp.body);
+                }
+                Ok(resp) if resp.status == 404 => {
+                    last_err = format!("package '{name}' not found (404) at {base}");
+                }
+                Ok(resp) => {
+                    last_err = format!("registry {base} returned HTTP {}", resp.status);
+                }
+                Err(e) => {
+                    last_err = format!("registry {base}: {e}");
+                }
+            }
+        }
+        LineResult::from_outcome(Vec::new(), format!("grease install: {last_err}\n").into_bytes(), 4)
+    }
+
+    /// Verify + persist a fetched package payload and register it. The payload JSON carries the package;
+    /// its sha256 is computed and stored as the integrity marker (the registry may also advertise a
+    /// hash out of band — v1 records what it fetched).
+    fn grease_finish_install(&mut self, name: &str, registry: &str, body: &[u8]) -> LineResult {
+        let package = match crate::greasepkg::PromptPackage::from_json(body) {
+            Ok(p) => p,
+            Err(e) => {
+                return LineResult::from_outcome(
+                    Vec::new(),
+                    format!("grease install: {e}\n").into_bytes(),
+                    4,
+                )
+            }
+        };
+        // The package's own `name` must match what was requested (guards a misconfigured registry).
+        if package.name != name {
+            return LineResult::from_outcome(
+                Vec::new(),
+                format!(
+                    "grease install: registry returned package '{}' for request '{name}'\n",
+                    package.name
+                )
+                .into_bytes(),
+                4,
+            );
+        }
+        let sha256 = crate::greasepkg::sha256_hex(body);
+
+        // Persist: <store>/<name>/prompt.json + <etc>/<name>.toml marker + the bin stub.
+        let store = crate::greaseconfig::store_dir().join(name);
+        if let Err(e) = std::fs::create_dir_all(&store) {
+            return LineResult::from_outcome(
+                Vec::new(),
+                format!("grease install: cannot create store dir: {e}\n").into_bytes(),
+                1,
+            );
+        }
+        if let Err(e) = std::fs::write(store.join("prompt.json"), package.to_json()) {
+            return LineResult::from_outcome(
+                Vec::new(),
+                format!("grease install: cannot write payload: {e}\n").into_bytes(),
+                1,
+            );
+        }
+        let marker = crate::greasestate::InstallMarker {
+            registry: registry.to_string(),
+            sha256: sha256.clone(),
+        };
+        let marker_toml = match toml::to_string_pretty(&marker) {
+            Ok(t) => t,
+            Err(e) => {
+                return LineResult::from_outcome(
+                    Vec::new(),
+                    format!("grease install: marker serialize error: {e}\n").into_bytes(),
+                    1,
+                )
+            }
+        };
+        let etc = crate::greaseconfig::etc_dir();
+        let _ = std::fs::create_dir_all(&etc);
+        if let Err(e) = std::fs::write(etc.join(format!("{name}.toml")), marker_toml) {
+            return LineResult::from_outcome(
+                Vec::new(),
+                format!("grease install: cannot write marker: {e}\n").into_bytes(),
+                1,
+            );
+        }
+        let help = self
+            .grease
+            .prompt_help(name)
+            .unwrap_or_else(|| format!("{name} — installed prompt\n"));
+        let _ = crate::greaseconfig::write_bin_stub(name, &help);
+
+        // Register in the in-memory view.
+        self.grease.set_installed(crate::greasestate::InstalledPrompt { marker, package });
+
+        LineResult::continue_with_stdout(
+            format!("installed {name} (sha256 {})\nrun it with `{name}`\n", &sha256[..12]).into_bytes(),
+        )
+    }
+
+    /// `grease remove <name>`: delete the store, marker, and stub, and deregister.
+    fn grease_remove(&mut self, name: &str) -> LineResult {
+        if !self.grease.is_prompt(name) {
+            return LineResult::from_outcome(
+                Vec::new(),
+                format!("grease remove: '{name}' is not installed\n").into_bytes(),
+                1,
+            );
+        }
+        let _ = std::fs::remove_file(crate::greaseconfig::etc_dir().join(format!("{name}.toml")));
+        let _ = std::fs::remove_dir_all(crate::greaseconfig::store_dir().join(name));
+        let _ = std::fs::remove_file(crate::greaseconfig::bin_dir().join(name));
+        self.grease.remove(name);
+        LineResult::continue_with_stdout(format!("removed {name}\n").into_bytes())
+    }
+
+    /// `grease search <query>`: fetch each registry's `index.json` and list matching package names.
+    async fn grease_search(&mut self, query: &str) -> LineResult {
+        let registries = crate::greaseconfig::list_registries();
+        if registries.is_empty() {
+            return LineResult::from_outcome(
+                Vec::new(),
+                b"grease search: no registries configured\n".to_vec(),
+                1,
+            );
+        }
+        let Some(http) = self.mcp_http.as_ref() else {
+            return LineResult::from_outcome(
+                Vec::new(),
+                b"grease search: no HTTP transport configured (available on the Golem agent)\n".to_vec(),
+                4,
+            );
+        };
+        let mut hits = Vec::new();
+        for base in &registries {
+            let url = format!("{}/index.json", base.trim_end_matches('/'));
+            if let Ok(resp) = http.request("GET", &url, &[], None).await {
+                if resp.status == 200 {
+                    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&resp.body) {
+                        if let Some(arr) = v.get("packages").and_then(|p| p.as_array()) {
+                            for pkg in arr {
+                                let name = pkg.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                                let desc = pkg.get("description").and_then(|d| d.as_str()).unwrap_or("");
+                                if name.contains(query) || desc.contains(query) {
+                                    hits.push(format!("{name}  {desc}"));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if hits.is_empty() {
+            return LineResult::continue_with_stdout(format!("no packages match '{query}'\n").into_bytes());
+        }
+        hits.sort();
+        hits.dedup();
+        LineResult::continue_with_stdout(format!("{}\n", hits.join("\n")).into_bytes())
+    }
+
+    /// `grease update [<name>]`: re-fetch + re-verify + re-persist installed packages (all, or one).
+    async fn grease_update(&mut self, name: Option<&str>) -> LineResult {
+        let targets: Vec<String> = match name {
+            Some(n) if self.grease.is_prompt(n) => vec![n.to_string()],
+            Some(n) => {
+                return LineResult::from_outcome(
+                    Vec::new(),
+                    format!("grease update: '{n}' is not installed\n").into_bytes(),
+                    1,
+                )
+            }
+            None => self.grease.prompts().iter().map(|p| p.package.name.clone()).collect(),
+        };
+        if targets.is_empty() {
+            return LineResult::continue_with_stdout(b"nothing to update\n".to_vec());
+        }
+        let mut out = String::new();
+        for t in targets {
+            let result = Box::pin(self.grease_install(&t)).await;
+            out.push_str(&String::from_utf8_lossy(&result.terminal_output()));
+        }
+        LineResult::continue_with_stdout(out.into_bytes())
     }
 
     /// `grease registry add <url>`: record a registry URL.
@@ -1885,6 +2147,90 @@ impl Session {
             Some(Ok(inv)) => self.mcp.is_server(&inv.server),
             _ => false,
         }
+    }
+
+    /// Whether `line`'s leading word is an installed grease prompt. Drives the `run_prompt` dispatch.
+    /// Only top-level lines (no operators) count — a prompt makes an LLM call and can't run in Brush's
+    /// nested runtime (the Wall-C wall), so a nested use falls through to the stub honest error.
+    fn is_prompt_line(&self, line: &str) -> bool {
+        let Some(word) = prompt_leading_word(line) else {
+            return false;
+        };
+        self.grease.is_prompt(&word)
+    }
+
+    /// Run an installed grease prompt: parse `--arg value` flags against the package's declared
+    /// arguments, fill the body's `{{arg}}` placeholders, and dispatch the filled prompt through
+    /// `run_ask`. `--model` on the prompt line overrides the package model. Missing required args are
+    /// an exit-2 usage error (no model call).
+    async fn run_prompt(&mut self, line: &str, blanket_authorized: bool) -> LineResult {
+        let words = match crate::askcmd::dequote_words(line) {
+            Some(w) => w,
+            None => return LineResult::from_outcome(Vec::new(), b"grease: parse error\n".to_vec(), 2),
+        };
+        let name = words[0].clone();
+        let Some(installed) = self.grease.get(&name) else {
+            return LineResult::denied(); // shouldn't happen (is_prompt_line gated it)
+        };
+        let package = installed.package.clone();
+
+        // Parse `--key value` pairs (and `--model <id>`) from the rest.
+        let mut provided: Vec<(String, String)> = Vec::new();
+        let mut model_override: Option<String> = None;
+        let mut iter = words[1..].iter();
+        while let Some(w) = iter.next() {
+            if let Some(key) = w.strip_prefix("--") {
+                let Some(val) = iter.next() else {
+                    return LineResult::from_outcome(
+                        Vec::new(),
+                        format!("{name}: --{key} needs a value\n").into_bytes(),
+                        2,
+                    );
+                };
+                if key == "model" {
+                    model_override = Some(val.clone());
+                } else {
+                    provided.push((key.to_string(), val.clone()));
+                }
+            }
+            // Bare positional words are ignored in v1 (args are named).
+        }
+
+        // Fill the template; a missing required arg is a clean usage error.
+        let filled = match package.fill(&provided) {
+            Ok(f) => f,
+            Err(e) => {
+                return LineResult::from_outcome(
+                    Vec::new(),
+                    format!("{name}: {e}\n").into_bytes(),
+                    2,
+                )
+            }
+        };
+
+        let model = model_override.or_else(|| package.model.clone());
+        let args = crate::askcmd::AskArgs {
+            prompt: filled,
+            model,
+            fresh: false,
+            json: false,
+            stdin: None,
+        };
+        self.run_ask(args, blanket_authorized).await
+    }
+
+    /// Generated help for an installed prompt line ending in `--help` (or a bare prompt name with
+    /// `--help`). `None` if the line isn't an installed prompt or doesn't request help.
+    fn prompt_help_for(&self, line: &str) -> Option<String> {
+        let words = crate::askcmd::dequote_words(line)?;
+        let name = words.first()?;
+        if !self.grease.is_prompt(name) {
+            return None;
+        }
+        if words.iter().any(|w| w == "--help") {
+            return self.grease.prompt_help(name);
+        }
+        None
     }
 
     /// Execute a `<server> <tool> …` MCP tool call: build the arguments from the tool's inputSchema
@@ -2296,6 +2642,18 @@ fn strip_sudo_prefix(line: &str) -> String {
         // Only a `sudo` token followed by whitespace (not `sudoedit`, etc.).
         Some(rest) if rest.starts_with(char::is_whitespace) => rest.trim_start().to_string(),
         _ => line.to_string(),
+    }
+}
+
+/// The leading command word of a top-level (operator-free) `line`, with any `sudo` prefix stripped —
+/// for matching against installed grease prompts. `None` for a nested line (operators present).
+fn prompt_leading_word(line: &str) -> Option<String> {
+    let words = crate::askcmd::dequote_words(line)?;
+    let first = words.first()?;
+    if first == "sudo" {
+        words.get(1).cloned()
+    } else {
+        Some(first.clone())
     }
 }
 
@@ -2907,10 +3265,85 @@ mod tests {
         });
     }
 
-    /// `grease install` (a Confirm subcommand) surfaces a confirmation without sudo; a non-http
-    /// registry URL is rejected; the install-path subcommands are honest phase-2 stubs.
+    /// End-to-end: `grease install` fetches a prompt package, persists it, registers it as a command,
+    /// and running the installed prompt name dispatches to the model with the (filled) body. Uses the
+    /// scripted fake HTTP transport (reused from MCP — grease shares the `McpHttp` seam).
     #[test]
-    fn grease_install_confirms_and_stubs() {
+    fn grease_install_then_run_a_prompt() {
+        on_rt(async {
+            let _dirs = set_grease_dirs();
+            let mut session = Session::new().await.unwrap();
+            let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+            session.set_ask_provider(Box::new(FakeProvider::reply("the summary", seen.clone())));
+
+            // Script the registry: GET /packages/tldr.json → a parameterized prompt package.
+            let pkg = serde_json::json!({
+                "name": "tldr",
+                "description": "summarize a file",
+                "arguments": [{"name":"file","required":true}],
+                "body": "Summarize the file {{file}} concisely."
+            });
+            session.set_mcp_http(Box::new(FakeMcpHttp::new(vec![mcp_json(pkg)])));
+            session.run_line("grease registry add https://reg.example").await;
+
+            // Install (sudo pre-authorizes the Confirm).
+            let inst = session.eval_line("sudo grease install tldr").await;
+            assert_eq!(inst.exit_code, 0, "install stderr: {}", String::from_utf8_lossy(&inst.stderr));
+            assert!(String::from_utf8(inst.stdout).unwrap().contains("installed tldr"));
+
+            // It's now an installed prompt: `grease list` shows it, `type tldr` sees it.
+            let list = session.eval_line("grease list").await;
+            assert!(String::from_utf8(list.stdout).unwrap().contains("tldr"));
+
+            // `tldr --help` shows its generated help (with the arg), no confirmation.
+            let help = session.eval_line("tldr --help").await;
+            assert_eq!(help.exit_code, 0);
+            assert!(String::from_utf8(help.stdout).unwrap().contains("--file"));
+
+            // Missing required arg → exit 2 (no model call).
+            let miss = session.eval_line("sudo tldr").await;
+            assert_eq!(miss.exit_code, 2);
+            assert!(String::from_utf8(miss.stderr).unwrap().contains("missing required argument --file"));
+
+            // Run it with the arg (sudo pre-authorizes the prompt's Confirm) → the model sees the
+            // FILLED body.
+            let run = session.eval_line("sudo tldr --file report.md").await;
+            assert_eq!(run.exit_code, 0);
+            assert_eq!(String::from_utf8(run.stdout).unwrap(), "the summary");
+            let content = seen.lock().unwrap()[0].user_content();
+            assert!(content.contains("Summarize the file report.md concisely."), "got: {content}");
+
+            // A bare (non-sudo) prompt run confirms (outbound LLM).
+            let confirm = session.eval_line("tldr --file x.md").await;
+            assert!(confirm.pending_prompt.is_some(), "prompt run should confirm without sudo");
+            session.answer_prompt(Some("no".into())).await;
+
+            // Remove deregisters: the name is no longer an installed prompt.
+            let rm = session.eval_line("sudo grease remove tldr").await;
+            assert_eq!(rm.exit_code, 0);
+            assert!(!session.grease.is_prompt("tldr"));
+        });
+    }
+
+    /// A registry-name collision with a builtin is rejected at install.
+    #[test]
+    fn grease_install_rejects_builtin_collision() {
+        on_rt(async {
+            let _dirs = set_grease_dirs();
+            let mut session = Session::new().await.unwrap();
+            session.set_mcp_http(Box::new(FakeMcpHttp::new(vec![])));
+            session.run_line("grease registry add https://reg.example").await;
+            // `ask` is a builtin — installing a package named `ask` must fail before any fetch.
+            let r = session.eval_line("sudo grease install ask").await;
+            assert_eq!(r.exit_code, 2);
+            assert!(String::from_utf8(r.stderr).unwrap().contains("collides with a built-in"));
+        });
+    }
+
+    /// `grease install` (a Confirm subcommand) surfaces a confirmation without sudo; a non-http
+    /// registry URL is rejected; install with no registry gives an honest error.
+    #[test]
+    fn grease_install_confirms_and_errors_without_registry() {
         on_rt(async {
             let _dirs = set_grease_dirs();
             let mut session = Session::new().await.unwrap();
@@ -2924,10 +3357,10 @@ mod tests {
             assert!(confirm.pending_prompt.is_some(), "install should confirm without sudo");
             session.answer_prompt(Some("no".into())).await;
 
-            // Under sudo it runs (and hits the honest phase-2 stub, exit 1, no panic).
+            // Under sudo it runs; with no registry configured it errors honestly (no panic).
             let inst = session.eval_line("sudo grease install summarize").await;
             assert_eq!(inst.exit_code, 1);
-            assert!(String::from_utf8(inst.stderr).unwrap().contains("phase 2"));
+            assert!(String::from_utf8(inst.stderr).unwrap().contains("no registries configured"));
         });
     }
 

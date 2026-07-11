@@ -791,10 +791,33 @@ expect_contains "grease registry list shows it"       'grease registry list'  'h
 expect_contains "the registries file was written"     'cat /etc/grease/registries.toml'  'reg.example'
 expect_contains "grease registry remove drops it"     'grease registry remove https://reg.example/pkgs'  'removed registry'
 expect_contains "grease registry list empty again"    'grease registry list'  'no registries configured'
-expect_contains "grease install is a phase-2 stub"    'sudo grease install summarize'  'not yet implemented'
+expect_contains "grease list is empty initially"      'grease list'       'no packages installed'
+# install with no registry configured errors honestly (no panic, no hang). sudo pre-authorizes.
+expect_contains "grease install without a registry errors" 'sudo grease install summarize'  'no registries configured'
 # grease inside a substitution hits the honest stub (it runs at the session layer).
 GREASE_SUBST="$(eval_json eval '"echo $(grease list)"')"
 expect_eval "grease in \$() gives the honest pointer"  "$GREASE_SUBST"  '.stderr | contains("top-level command")'  'true'
+
+# --- Gated live-registry block: needs a registry serving /packages/<name>.json (+ /index.json for
+#     search). Set GREASE_TEST_URL + GREASE_TEST_PKG to run a real install; the installed prompt RUN
+#     also needs --with-llm (it calls the model). Gated because it needs an external registry.
+if [[ -n "${GREASE_TEST_URL:-}" && -n "${GREASE_TEST_PKG:-}" ]]; then
+  note "GREASE_TEST_URL set — running live grease install against $GREASE_TEST_URL"
+  run_line "grease registry add ${GREASE_TEST_URL}" >/dev/null
+  GR_INST="$(eval_json eval "\"sudo grease install ${GREASE_TEST_PKG}\"")"
+  expect_eval "live grease install exits 0"           "$GR_INST"  '.exit_code'  '0'
+  expect_eval "live grease install reports installed"  "$GR_INST"  '.stdout | contains("installed")'  'true'
+  expect_contains "installed package appears in list"  'grease list'  "${GREASE_TEST_PKG}"
+  expect_contains "which finds the installed stub"     "which ${GREASE_TEST_PKG}"  "${GREASE_TEST_PKG}"
+  if [[ $RUN_LLM -eq 1 ]]; then
+    GR_RUN="$(eval_json eval "\"sudo ${GREASE_TEST_PKG}\"")"
+    expect_eval "running the installed prompt exits 0" "$GR_RUN"  '.exit_code'  '0'
+    expect_eval "the prompt produced a model reply"    "$GR_RUN"  '.stdout | length > 0'  'true'
+  fi
+  run_line "sudo grease remove ${GREASE_TEST_PKG}" >/dev/null
+else
+  note "GREASE_TEST_URL/GREASE_TEST_PKG not set — skipping live grease install (native FakeHttp tests cover it)"
+fi
 
 # ============================================================================
 # 2m. Pipelines — internal `cmd | cmd` on the single-threaded wasm agent (Wall C)
