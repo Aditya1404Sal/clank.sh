@@ -579,14 +579,24 @@ if [[ $HAS_ANTHROPIC_KEY -eq 1 ]]; then
   expect_eval "agentic ask emits a tool trace"         "$ASK_TOOL"  '.stderr | contains("[tool]")'  'true'
   expect_contains "the shell tool created the file"    "cat /tmp/${MARK}"  "${MARK}"
 
-  # 5. Denial honesty (A2): under a plain approved ask (not sudo), a confirm-tier tool line (curl)
-  #    comes back as a confirmation-required tool result — our wording, model-independent. Approve
-  #    the ask itself, then assert the trace shows the refusal.
-  ASK_REFUSE_P="$(eval_json eval '"ask \"Use the shell tool to run exactly: curl https://example.com . Report what happened.\""')"
-  expect_eval "plain ask with a curl tool confirms first" "$ASK_REFUSE_P"  '.pending_prompt != null'  'true'
-  ASK_REFUSE="$(eval_json answer_prompt '"yes"')"
-  expect_eval "the refused curl tool exits the ask 0"  "$ASK_REFUSE"  '.exit_code'  '0'
-  expect_eval "the trace shows a confirmation refusal" "$ASK_REFUSE"  '.stderr | contains("requires confirmation")'  'true'
+  # 5. Mid-loop authorization pause (A3): under a plain (non-sudo) ask, a confirm-tier tool line
+  #    (curl) PAUSES for the human. Flow: eval → ask-confirm pause → approve → curl-tool authz pause
+  #    → deny → the model sees "denied by user" and finishes. Both pauses surface pending_prompt.
+  ASK_PAUSE1="$(eval_json eval '"ask \"Use the shell tool to run exactly: curl https://example.com/ . Then report what happened in one sentence.\""')"
+  expect_eval "plain ask confirms the ask itself first" "$ASK_PAUSE1"  '.pending_prompt != null'  'true'
+  ASK_PAUSE2="$(eval_json answer_prompt '"yes"')"
+  expect_eval "the curl tool then pauses for authz"    "$ASK_PAUSE2"  '.pending_prompt != null'  'true'
+  expect_eval "the authz prompt names permission"      "$ASK_PAUSE2"  '.pending_prompt.question | ascii_downcase | contains("permission")'  'true'
+  ASK_PAUSE3="$(eval_json answer_prompt '"no"')"
+  expect_eval "denying the tool still exits the ask 0" "$ASK_PAUSE3"  '.exit_code'  '0'
+  expect_eval "the trace shows the tool was denied"    "$ASK_PAUSE3"  '.stderr | contains("denied by user")'  'true'
+
+  # 6. prompt_user tool round-trip (A3): ask the model to collect a value from the human, answer it,
+  #    and confirm the model used our answer. Deterministic on our side (the pause is ours).
+  ASK_PU1="$(eval_json eval '"sudo ask \"Use the prompt_user tool to ask the user for a codeword, then reply with exactly that codeword and nothing else.\""')"
+  expect_eval "prompt_user pauses for the human"       "$ASK_PU1"  '.pending_prompt != null'  'true'
+  ASK_PU2="$(eval_json answer_prompt '"zebra-legend-first"')"
+  expect_eval "the model echoes the human answer"      "$ASK_PU2"  '.stdout | contains("zebra-legend-first")'  'true'
 else
   note "ANTHROPIC_API_KEY not set — skipping ask network assertions (set it to exercise the live model)"
   # Sanity: with no key, sudo ask fails cleanly (exit 4 from the provider), never hangs or panics.

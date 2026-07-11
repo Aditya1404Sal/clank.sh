@@ -32,21 +32,38 @@ pub const CORE_SYSTEM_PROMPT: &str =
 /// The name of the generic shell tool the model calls to run a command line.
 pub const SHELL_TOOL: &str = "shell";
 
+/// The name of the tool the model calls to ask the human a question (the model→human back-channel).
+pub const PROMPT_USER_TOOL: &str = "prompt_user";
+
 /// The JSON schema for the `shell` tool's parameters: a single required `command` string.
 const SHELL_TOOL_SCHEMA: &str = r#"{"type":"object","properties":{"command":{"type":"string","description":"the shell command line to execute"}},"required":["command"]}"#;
 
-/// The tool definitions exposed to the model this turn. In v1 this is one generic [`SHELL_TOOL`] that
-/// executes a command line in the clank session (pipes/redirects/`$(...)` come free); per-command and
-/// MCP tools arrive later. Takes the registry so future increments can derive tools from it without a
-/// signature change.
+/// The JSON schema for the `prompt_user` tool: a required `question` string (Markdown allowed).
+const PROMPT_USER_TOOL_SCHEMA: &str = r#"{"type":"object","properties":{"question":{"type":"string","description":"the question to put to the human; Markdown is allowed"}},"required":["question"]}"#;
+
+/// The tool definitions exposed to the model each turn: the generic [`SHELL_TOOL`] (executes a command
+/// line in the clank session — pipes/redirects/`$(...)` come free) and [`PROMPT_USER_TOOL`] (the
+/// model→human back-channel; pauses the loop for an answer). Per-command and MCP tools arrive later.
+/// Takes the registry so future increments can derive tools from it without a signature change.
 pub fn build_ask_tools(_registry: &CommandRegistry) -> Vec<AskTool> {
-    vec![AskTool {
-        name: SHELL_TOOL.to_string(),
-        description: "Execute one shell command line in the clank session and return its stdout, \
-                      stderr, and exit code. Supports pipes, redirects, and command substitution."
-            .to_string(),
-        parameters_schema: SHELL_TOOL_SCHEMA.to_string(),
-    }]
+    vec![
+        AskTool {
+            name: SHELL_TOOL.to_string(),
+            description: "Execute one shell command line in the clank session and return its \
+                          stdout, stderr, and exit code. Supports pipes, redirects, and command \
+                          substitution."
+                .to_string(),
+            parameters_schema: SHELL_TOOL_SCHEMA.to_string(),
+        },
+        AskTool {
+            name: PROMPT_USER_TOOL.to_string(),
+            description: "Ask the human user a question and get their answer. Use this to gather \
+                          information you need, confirm intent, or collect a missing value before \
+                          proceeding. The user's typed reply is returned to you."
+                .to_string(),
+            parameters_schema: PROMPT_USER_TOOL_SCHEMA.to_string(),
+        },
+    ]
 }
 
 /// Build the `ask` system prompt: the fixed [`CORE_SYSTEM_PROMPT`] preamble plus the live command
@@ -60,11 +77,12 @@ pub fn build_ask_tools(_registry: &CommandRegistry) -> Vec<AskTool> {
 pub fn build_system_prompt(registry: &CommandRegistry) -> String {
     let mut out = String::from(CORE_SYSTEM_PROMPT);
     out.push_str(
-        "\n\nYou have one tool, `shell`, that runs a single command line in this session and returns \
-         its stdout, stderr, and exit code. Use it to inspect and act on the system. Compose with \
-         pipes, redirects, and $(...) as needed.\n\nAvailable commands (authorization in brackets; \
-         [confirm] and [sudo-only] commands come back needing user approval unless the user ran \
-         `sudo ask`):\n",
+        "\n\nYou have two tools. `shell` runs a single command line in this session and returns its \
+         stdout, stderr, and exit code — use it to inspect and act on the system; compose with pipes, \
+         redirects, and $(...) as needed. `prompt_user` asks the human a question and returns their \
+         answer — use it to gather information or confirm intent.\n\nAvailable commands (authorization \
+         in brackets; [confirm] and [sudo-only] commands pause for the user's approval unless the user \
+         ran `sudo ask`, which pre-approves [confirm] commands):\n",
     );
 
     let mut rows: Vec<(&str, &str, &str)> = registry
@@ -86,8 +104,9 @@ pub fn build_system_prompt(registry: &CommandRegistry) -> String {
 
     out.push_str(
         "\nNotes: `context`, `cd`, `export`, `kill`, and other shell-internal commands are NOT \
-         available as tools (they mutate shell state a subprocess can't reach). `ask` cannot call \
-         itself. To change directory or set a variable for a command, do it inside a single line \
+         available through the `shell` tool (they mutate shell state a subprocess can't reach); to \
+         reach the human, use the `prompt_user` tool, not a `prompt-user` shell line. `ask` cannot \
+         call itself. To change directory or set a variable for a command, do it inside a single line \
          (e.g. `cd /tmp && ls`).",
     );
     out

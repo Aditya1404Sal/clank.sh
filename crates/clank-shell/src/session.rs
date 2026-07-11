@@ -36,6 +36,63 @@ enum PendingKind {
     /// An authorization confirmation gating a command: on approval the stashed `command` runs; on
     /// denial the caller gets exit `5`. `all` (when offered) also sets the session `allow_all` grant.
     AuthConfirm { command: String, sudo_grant: bool },
+    /// An `ask` agentic loop paused mid-flight: the model requested a tool call that needs the human
+    /// (an authorization confirmation, or the `prompt_user` tool). The whole conversation-so-far is
+    /// carried in `state`; `answer_prompt` resolves the paused tool call and resumes the loop. This is
+    /// in-memory but replay-safe — Golem rebuilds it by deterministic replay, and each model `turn`
+    /// replays from the oplog.
+    AgentLoop {
+        state: Box<AskLoopState>,
+        /// The pause under resolution: what the human is being asked and how to resolve it.
+        pause: AskPause,
+    },
+}
+
+/// A tool call in an `ask` loop that paused for the human, plus the sibling calls in the same turn
+/// still to run and the results already computed — everything needed to resume the loop after the
+/// human answers.
+struct AskPause {
+    /// The tool call awaiting the human's answer.
+    call: crate::askcmd::AskToolCall,
+    /// The kind of pause, which decides how the human's answer resolves the call.
+    kind: AskPauseKind,
+    /// Sibling calls from the same assistant turn, not yet executed.
+    remaining: Vec<crate::askcmd::AskToolCall>,
+    /// Results already computed for earlier calls in this turn.
+    completed: Vec<crate::askcmd::AskToolResult>,
+}
+
+/// The outcome of attempting one tool call in the loop: either a finished result to feed back, or a
+/// pause requiring the human before the call can be resolved.
+enum ToolStep {
+    Done(crate::askcmd::AskToolResult),
+    Pause(AskPauseKind),
+}
+
+/// How a paused `ask` tool call is resolved by the human's answer.
+enum AskPauseKind {
+    /// An authorization confirmation for a `shell` command line. On approval the line runs; on denial
+    /// a refusal tool result is fed back. `sudo_grant` marks a sudo-only gate (no "all" offered).
+    Confirm { command: String, sudo_grant: bool },
+    /// The `prompt_user` tool: the human's answer text becomes the tool result verbatim.
+    PromptUser,
+}
+
+/// The carried state of an in-flight `ask` agentic loop, enough to resume it after a pause. Owned data
+/// only (replay-safe).
+struct AskLoopState {
+    /// The system prompt (rebuilt once at loop start; stable across turns).
+    system: String,
+    /// The tool definitions offered each turn (stable across turns).
+    tools: Vec<crate::askcmd::AskTool>,
+    /// The conversation so far: `User`, then alternating `Assistant`/`ToolResults`.
+    history: Vec<crate::askcmd::AskTurn>,
+    /// The model id.
+    model: String,
+    /// Accumulated tool trace (→ the final result's stderr).
+    trace: Vec<u8>,
+    /// Blanket confirm-tier authorization for the rest of this loop (upgraded to true on "all").
+    blanket_authorized: bool,
 }
 
 /// The shell's paused state: the surfaced prompt, the process-table row it belongs to, and why.
@@ -509,15 +566,15 @@ impl Session {
         args: crate::askcmd::AskArgs,
         blanket_authorized: bool,
     ) -> LineResult {
-        use crate::askcmd::{AskResponse, AskTurn};
+        use crate::askcmd::AskTurn;
 
-        let Some(provider) = self.ask_provider.take() else {
+        if self.ask_provider.is_none() {
             return LineResult::from_outcome(
                 Vec::new(),
                 b"ask: no model provider configured (available on the Golem agent)\n".to_vec(),
                 4,
             );
-        };
+        }
 
         // The base context is the same bytes `context show` renders — "the AI reads exactly what you
         // see." `--fresh` sends no transcript. Rendered to an owned String *before* the loop so the
@@ -528,113 +585,347 @@ impl Session {
             String::from_utf8_lossy(&self.transcript.lock().unwrap().render()).into_owned()
         };
 
-        let system = crate::askcmd::build_system_prompt(&self.registry);
-        let tools = crate::askcmd::build_ask_tools(&self.registry);
-        let mut history: Vec<AskTurn> = vec![AskTurn::User(crate::askcmd::user_content(
-            &base_transcript,
-            &args.prompt,
-        ))];
+        let state = AskLoopState {
+            system: crate::askcmd::build_system_prompt(&self.registry),
+            tools: crate::askcmd::build_ask_tools(&self.registry),
+            history: vec![AskTurn::User(crate::askcmd::user_content(
+                &base_transcript,
+                &args.prompt,
+            ))],
+            model: args.model,
+            trace: Vec::new(),
+            blanket_authorized,
+        };
+        // `resume` is empty on a fresh loop; the pid carries the paused row on a resume.
+        self.drive_ask_loop(state, Vec::new(), None).await
+    }
 
-        // Tool traces (`[tool] $ <line>` / `[tool] exit <code>`) accumulate on stderr; the final model
-        // text is stdout. Both land in the transcript via the caller's `record_output` — AI tool lines
-        // are never first-class transcript entries.
-        let mut trace: Vec<u8> = Vec::new();
-        let mut final_text = String::new();
-        let mut hit_cap = true;
+    /// Drive the `ask` agentic loop from `state` until it completes (model answers, transport error,
+    /// or the cap) or pauses for the human. `pending_results` are results already accumulated for the
+    /// *current* assistant turn (non-empty only on resume, after a pause mid-batch); `pid` is the
+    /// process-table row to pause on surfacing (the ask's own row, threaded through on resume).
+    ///
+    /// The provider is `take()`n and restored before every return. On a pause, the whole `state` is
+    /// stashed in `PendingKind::AgentLoop` and a `pending_prompt` is returned; `answer_prompt` calls
+    /// back into this helper to continue.
+    async fn drive_ask_loop(
+        &mut self,
+        mut state: AskLoopState,
+        mut pending_results: Vec<crate::askcmd::AskToolResult>,
+        pid: Option<u32>,
+    ) -> LineResult {
+        use crate::askcmd::AskTurn;
 
-        for _ in 0..ASK_MAX_ITERATIONS {
-            let resp: AskResponse = provider
-                .turn(Some(&system), &history, &tools, &args.model)
+        let Some(provider) = self.ask_provider.take() else {
+            return LineResult::from_outcome(
+                Vec::new(),
+                b"ask: no model provider configured (available on the Golem agent)\n".to_vec(),
+                4,
+            );
+        };
+
+        // Tool traces accumulate on `state.trace` (→ stderr); the final model text is stdout. Both land
+        // in the transcript via the caller's `record_output` — AI tool lines are never first-class
+        // transcript entries.
+        let final_text;
+
+        // Bound the number of *model* turns. Count assistant turns already in history so a resumed loop
+        // doesn't restart the budget.
+        let turns_taken = state
+            .history
+            .iter()
+            .filter(|t| matches!(t, AskTurn::Assistant { .. }))
+            .count();
+
+        let mut turn = turns_taken;
+        loop {
+            if turn >= ASK_MAX_ITERATIONS {
+                state.trace.extend_from_slice(
+                    format!("[ask] tool-call limit ({ASK_MAX_ITERATIONS}) reached\n").as_bytes(),
+                );
+                self.ask_provider = Some(provider);
+                if let Some(pid) = pid {
+                    self.proc_table.lock().unwrap().complete(pid);
+                }
+                return LineResult::from_outcome(Vec::new(), state.trace, 0);
+            }
+
+            let resp = provider
+                .turn(Some(&state.system), &state.history, &state.tools, &state.model)
                 .await;
 
             if let Some(err) = resp.error {
                 self.ask_provider = Some(provider);
-                let mut stderr = trace;
+                if let Some(pid) = pid {
+                    self.proc_table.lock().unwrap().complete(pid);
+                }
+                let mut stderr = state.trace;
                 stderr.extend_from_slice(err.as_bytes());
                 return LineResult::from_outcome(Vec::new(), stderr, 4);
             }
             if resp.tool_calls.is_empty() {
                 final_text = resp.text;
-                hit_cap = false;
                 break;
             }
+            turn += 1;
 
-            let mut results = Vec::with_capacity(resp.tool_calls.len());
-            for call in &resp.tool_calls {
-                // Box to break the async recursion cycle (run_ask → execute_ask_tool → run_command →
-                // run_ask). A model `ask` tool line is guarded against, but the compiler can't see
-                // that, so the indirection is required for a finite future size.
-                let r = Box::pin(self.execute_ask_tool(call, blanket_authorized, &mut trace)).await;
-                results.push(r);
+            // Execute this turn's calls in order. A pause stashes the remaining calls + accumulated
+            // results and returns immediately (non-blocking); `answer_prompt` resumes here.
+            let calls = resp.tool_calls.clone();
+            let mut results = std::mem::take(&mut pending_results);
+            for (i, call) in calls.iter().enumerate() {
+                let step = Box::pin(self.execute_ask_tool(
+                    call,
+                    state.blanket_authorized,
+                    &mut state.trace,
+                ))
+                .await;
+                match step {
+                    ToolStep::Done(r) => results.push(r),
+                    ToolStep::Pause(kind) => {
+                        // Record the assistant turn before pausing so the stashed history is complete.
+                        state.history.push(AskTurn::Assistant {
+                            text: resp.text.clone(),
+                            tool_calls: calls.clone(),
+                        });
+                        let pause = AskPause {
+                            call: call.clone(),
+                            kind,
+                            remaining: calls[i + 1..].to_vec(),
+                            completed: results,
+                        };
+                        self.ask_provider = Some(provider);
+                        return self.surface_agent_pause(state, pause, pid);
+                    }
+                }
             }
-            history.push(AskTurn::Assistant {
-                text: resp.text,
-                tool_calls: resp.tool_calls,
-            });
-            history.push(AskTurn::ToolResults(results));
-        }
 
-        if hit_cap {
-            trace.extend_from_slice(
-                format!("[ask] tool-call limit ({ASK_MAX_ITERATIONS}) reached\n").as_bytes(),
-            );
+            state.history.push(AskTurn::Assistant {
+                text: resp.text,
+                tool_calls: calls,
+            });
+            state.history.push(AskTurn::ToolResults(results));
         }
 
         self.ask_provider = Some(provider);
-        LineResult::from_outcome(final_text.into_bytes(), trace, 0)
+        if let Some(pid) = pid {
+            self.proc_table.lock().unwrap().complete(pid);
+        }
+        LineResult::from_outcome(final_text.into_bytes(), state.trace, 0)
     }
 
-    /// Execute one tool call from the agentic loop and produce the [`AskToolResult`] fed back to the
-    /// model. Never panics: every failure is an honest `Err` result the model can react to.
+    /// Surface the human-facing prompt for a paused `ask` loop and stash the loop state. Returns a
+    /// `pending_prompt` result; the shell does not block. For a `Confirm` pause the prompt is the
+    /// README's authorization copy; for `prompt_user` it's the model's question.
+    fn surface_agent_pause(
+        &mut self,
+        state: AskLoopState,
+        pause: AskPause,
+        pid: Option<u32>,
+    ) -> LineResult {
+        let prompt = match &pause.kind {
+            AskPauseKind::Confirm {
+                command,
+                sudo_grant,
+            } => {
+                let name = authz::leading_command(command).0.unwrap_or_else(|| command.clone());
+                let synopsis = format!("run `{command}`");
+                PendingPrompt {
+                    question: authz::confirm_question(&name, &synopsis, *sudo_grant),
+                    choices: Some(authz::confirm_choices(*sudo_grant)),
+                    secret: false,
+                }
+            }
+            AskPauseKind::PromptUser => {
+                // The model's question is the first user-facing text; re-derive it from the call args.
+                let question = serde_json::from_str::<serde_json::Value>(&pause.call.arguments_json)
+                    .ok()
+                    .and_then(|v| v.get("question").and_then(|q| q.as_str()).map(String::from))
+                    .unwrap_or_else(|| "the model has a question".to_string());
+                PendingPrompt {
+                    question,
+                    choices: None,
+                    secret: false,
+                }
+            }
+        };
+        self.surface_pending(
+            prompt,
+            pid,
+            PendingKind::AgentLoop {
+                state: Box::new(state),
+                pause,
+            },
+        )
+    }
+
+    /// Resume a paused `ask` loop after the human answers. Resolves the paused tool call per its kind,
+    /// drains any sibling calls from the same turn (each may pause again), then re-enters
+    /// [`Session::drive_ask_loop`] to continue the conversation.
+    async fn resolve_agent_loop(
+        &mut self,
+        resolution: Resolution,
+        mut state: Box<AskLoopState>,
+        pause: AskPause,
+        pid: Option<u32>,
+    ) -> LineResult {
+        use crate::askcmd::{AskToolResult, AskTurn};
+
+        // An abort (Ctrl-C, or `kill <paused-pid>`) terminates the WHOLE ask, not just this tool call:
+        // exit 130 with the trace so far. The paused row is reaped here.
+        if matches!(resolution, Resolution::Aborted) {
+            if let Some(pid) = pid {
+                self.proc_table.lock().unwrap().complete(pid);
+            }
+            state.trace.extend_from_slice(b"[ask] aborted by user\n");
+            return LineResult::from_outcome(Vec::new(), state.trace, 130);
+        }
+
+        let answer_text = match &resolution {
+            Resolution::Answered { stdout, .. } => {
+                String::from_utf8_lossy(stdout).trim().to_string()
+            }
+            Resolution::Aborted => unreachable!("handled above"),
+            Resolution::InvalidChoice { .. } => unreachable!("handled by answer_prompt"),
+        };
+
+        // Resolve the paused call.
+        let resolved: AskToolResult = match pause.kind {
+            AskPauseKind::Confirm {
+                command,
+                sudo_grant,
+            } => {
+                let approved = matches!(answer_text.as_str(), "yes" | "all");
+                if answer_text == "all" && !sudo_grant {
+                    // Blanket confirm-tier authorization for the rest of THIS loop only (not the
+                    // session `allow_all`). Sudo-only never gets an "all".
+                    state.blanket_authorized = true;
+                }
+                if approved {
+                    Box::pin(self.run_shell_tool(
+                        &pause.call,
+                        &command,
+                        state.blanket_authorized,
+                        &mut state.trace,
+                    ))
+                    .await
+                } else {
+                    state
+                        .trace
+                        .extend_from_slice(format!("[tool] $ {command}\n[tool] denied by user\n").as_bytes());
+                    AskToolResult {
+                        id: pause.call.id.clone(),
+                        name: pause.call.name.clone(),
+                        outcome: Err("denied by user".into()),
+                    }
+                }
+            }
+            AskPauseKind::PromptUser => {
+                let payload = serde_json::json!({ "answer": answer_text });
+                AskToolResult {
+                    id: pause.call.id.clone(),
+                    name: pause.call.name.clone(),
+                    outcome: Ok(payload.to_string()),
+                }
+            }
+        };
+
+        let mut results = pause.completed;
+        results.push(resolved);
+
+        // Drain the sibling calls from the same turn; any may pause again (re-stashing AgentLoop).
+        for (i, call) in pause.remaining.iter().enumerate() {
+            let step = Box::pin(self.execute_ask_tool(
+                call,
+                state.blanket_authorized,
+                &mut state.trace,
+            ))
+            .await;
+            match step {
+                ToolStep::Done(r) => results.push(r),
+                ToolStep::Pause(kind) => {
+                    let next = AskPause {
+                        call: call.clone(),
+                        kind,
+                        remaining: pause.remaining[i + 1..].to_vec(),
+                        completed: results,
+                    };
+                    return self.surface_agent_pause(*state, next, pid);
+                }
+            }
+        }
+
+        // All calls in the paused turn are resolved: append their results and continue the loop.
+        state.history.push(AskTurn::ToolResults(results));
+        self.drive_ask_loop(*state, Vec::new(), pid).await
+    }
+
+    /// Attempt one tool call from the agentic loop. Returns either a finished [`AskToolResult`] (the
+    /// call ran, was refused by a guard, or malformed) or a [`ToolStep::Pause`] when the call needs the
+    /// human — a `confirm`/`sudo-only` command awaiting authorization, or the `prompt_user` tool.
     ///
-    /// Only the generic `shell` tool exists in v1. Guards (each returns an `Err` result, loop
-    /// continues): a malformed/unknown tool, `ask` recursion, `prompt-user` (needs the A3 pause), and
-    /// any `shell-internal`/`parent-shell` command (`context`/`kill`/`cd`/`export`/… mutate shell
-    /// state a tool must not reach — this also closes the cwd/env leak vector). Then the authorization
-    /// pre-check (reusing [`authz`]): `confirm`/`sudo-only` refuse unless `blanket_authorized` (which
-    /// covers `confirm` only). Approved lines run through `run_command` — the full session surface, so
-    /// `curl`/`wget` work — with no proc row (`pid = None`); a nonzero exit is a *successful* tool
+    /// Guards return `Done(Err(..))` (loop continues): malformed/unknown tool, `ask` recursion, and any
+    /// `shell-internal`/`parent-shell` command (`context`/`kill`/`cd`/`export`/… mutate shell state a
+    /// tool must not reach — closes the cwd/env leak vector). The authorization pre-check reuses
+    /// [`authz`]: `Allow` executes, `Confirm` pauses. Approved lines run through `run_command` (full
+    /// session surface — `curl`/`wget` work) with no proc row; a nonzero exit is a *successful* tool
     /// result carrying the code (the model must see failures).
     async fn execute_ask_tool(
         &mut self,
         call: &crate::askcmd::AskToolCall,
         blanket_authorized: bool,
         trace: &mut Vec<u8>,
-    ) -> crate::askcmd::AskToolResult {
+    ) -> ToolStep {
         use crate::askcmd::AskToolResult;
 
-        let err = |msg: String| AskToolResult {
-            id: call.id.clone(),
-            name: call.name.clone(),
-            outcome: Err(msg),
+        let done_err = |msg: String| {
+            ToolStep::Done(AskToolResult {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                outcome: Err(msg),
+            })
         };
 
+        // The `prompt_user` tool: pause and ask the human directly; the answer becomes the result.
+        if call.name == crate::askcmd::PROMPT_USER_TOOL {
+            let question = match serde_json::from_str::<serde_json::Value>(&call.arguments_json) {
+                Ok(v) => match v.get("question").and_then(|q| q.as_str()) {
+                    Some(s) => s.to_string(),
+                    None => {
+                        return done_err(
+                            "malformed arguments: missing string field 'question'".into(),
+                        )
+                    }
+                },
+                Err(e) => return done_err(format!("malformed arguments: {e}")),
+            };
+            trace.extend_from_slice(format!("[tool] prompt_user: {question}\n").as_bytes());
+            return ToolStep::Pause(AskPauseKind::PromptUser);
+        }
+
         if call.name != crate::askcmd::SHELL_TOOL {
-            return err(format!("unknown tool '{}'", call.name));
+            return done_err(format!("unknown tool '{}'", call.name));
         }
 
         // Extract the `command` string from the tool arguments.
         let command = match serde_json::from_str::<serde_json::Value>(&call.arguments_json) {
             Ok(v) => match v.get("command").and_then(|c| c.as_str()) {
                 Some(s) => s.to_string(),
-                None => return err("malformed arguments: missing string field 'command'".into()),
+                None => {
+                    return done_err("malformed arguments: missing string field 'command'".into())
+                }
             },
-            Err(e) => return err(format!("malformed arguments: {e}")),
+            Err(e) => return done_err(format!("malformed arguments: {e}")),
         };
 
         // Guard: `ask` cannot call itself.
         if crate::askcmd::classify(&command).is_some() {
             trace.extend_from_slice(format!("[tool] $ {command}\n[tool] refused: ask cannot call itself\n").as_bytes());
-            return err("ask cannot call itself".into());
-        }
-        // Guard: `prompt-user` needs the interactive pause (A3); not a tool in v1.
-        if promptuser::is_prompt_user(&command) {
-            trace.extend_from_slice(format!("[tool] $ {command}\n[tool] refused: prompt-user unavailable\n").as_bytes());
-            return err(
-                "prompt-user is not available to the model in this version (requires interactive pause)".into(),
-            );
+            return done_err("ask cannot call itself".into());
         }
         // Guard: shell-internal / parent-shell commands mutate state a subprocess tool can't reach.
+        // (`prompt-user` as a bare shell line lands here too — it's ShellInternal — and is refused;
+        // the model reaches the human through the dedicated `prompt_user` tool above instead.)
         let (_policy, _elevated, cmd_name) = authz::resolve(&self.registry, &command);
         if let Some(name) = cmd_name.as_deref() {
             if let Some(m) = self.registry.get(name) {
@@ -644,7 +935,7 @@ impl Session {
                     ExecutionScope::ShellInternal | ExecutionScope::ParentShell
                 ) {
                     trace.extend_from_slice(format!("[tool] $ {command}\n[tool] refused: shell-internal\n").as_bytes());
-                    return err(format!(
+                    return done_err(format!(
                         "{name} is a shell-internal command, not available as a tool; it mutates \
                          shell state ask cannot access"
                     ));
@@ -657,28 +948,39 @@ impl Session {
         let (policy, elevated, _) = authz::resolve(&self.registry, &command);
         match authz::decide(policy, elevated, blanket_authorized) {
             Decision::Allow => {}
-            Decision::Confirm { .. } | Decision::Deny => {
-                trace.extend_from_slice(format!("[tool] $ {command}\n[tool] refused: requires confirmation\n").as_bytes());
-                return err(
-                    "requires confirmation — run it under `sudo ask` or run it yourself".into(),
-                );
+            Decision::Confirm { sudo_grant } => {
+                // Pause and ask the human to authorize this command line (A3).
+                trace.extend_from_slice(format!("[tool] $ {command}\n[tool] awaiting authorization\n").as_bytes());
+                return ToolStep::Pause(AskPauseKind::Confirm { command, sudo_grant });
+            }
+            Decision::Deny => {
+                trace.extend_from_slice(format!("[tool] $ {command}\n[tool] refused: denied\n").as_bytes());
+                return done_err("denied by policy".into());
             }
         }
 
-        // Execute through the full session surface (curl/wget reach their async dispatch). No proc row.
-        let result = self.run_command(&command, None, blanket_authorized).await;
+        ToolStep::Done(self.run_shell_tool(call, &command, blanket_authorized, trace).await)
+    }
+
+    /// Run an authorized `shell` command line and build its tool result (JSON stdout/stderr/exit,
+    /// truncated). Shared by the inline path and the post-approval resume. Emits the `[tool]` trace.
+    async fn run_shell_tool(
+        &mut self,
+        call: &crate::askcmd::AskToolCall,
+        command: &str,
+        blanket_authorized: bool,
+        trace: &mut Vec<u8>,
+    ) -> crate::askcmd::AskToolResult {
+        let result = self.run_command(command, None, blanket_authorized).await;
         trace.extend_from_slice(
             format!("[tool] $ {command}\n[tool] exit {}\n", result.exit_code).as_bytes(),
         );
-
-        let stdout = truncate_tool_output(&result.stdout);
-        let stderr = truncate_tool_output(&result.stderr);
         let payload = serde_json::json!({
-            "stdout": stdout,
-            "stderr": stderr,
+            "stdout": truncate_tool_output(&result.stdout),
+            "stderr": truncate_tool_output(&result.stderr),
             "exit_code": result.exit_code,
         });
-        AskToolResult {
+        crate::askcmd::AskToolResult {
             id: call.id.clone(),
             name: call.name.clone(),
             outcome: Ok(payload.to_string()),
@@ -819,6 +1121,20 @@ impl Session {
             } => {
                 self.resolve_auth_confirm(resolution, &command, sudo_grant, pending.pid)
                     .await
+            }
+            PendingKind::AgentLoop { state, pause } => {
+                let result = self
+                    .resolve_agent_loop(resolution, state, pause, pending.pid)
+                    .await;
+                // A resumed ask that completes (not re-paused) records its output like the direct
+                // path. A re-pause returns a fresh `pending_prompt`; don't record that as final.
+                if result.pending_prompt.is_none() {
+                    self.transcript
+                        .lock()
+                        .unwrap()
+                        .record_output(&result.terminal_output());
+                }
+                result
             }
         }
     }
@@ -1496,10 +1812,10 @@ mod tests {
         });
     }
 
-    /// Under a plain (approved, non-sudo) ask, a `confirm`-policy tool line (curl) is refused with an
-    /// honest tool result and never runs — `blanket_authorized` is false.
+    /// Under a plain (approved, non-sudo) ask, a `confirm`-policy tool line (curl) PAUSES for
+    /// authorization (A3); denying it feeds a "denied by user" result back and the loop continues.
     #[test]
-    fn ask_confirm_tool_is_refused_without_sudo() {
+    fn ask_confirm_tool_pauses_and_deny_continues() {
         on_rt(async {
             let mut session = Session::new().await.unwrap();
             let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
@@ -1514,18 +1830,25 @@ mod tests {
             // Bare ask → surfaces the ask confirmation; approve it (blanket stays false).
             let first = session.eval_line(r#"ask "fetch it""#).await;
             assert!(first.pending_prompt.is_some(), "bare ask should confirm first");
-            let result = session.answer_prompt(Some("yes".to_string())).await;
+            let second = session.answer_prompt(Some("yes".to_string())).await;
+            // The curl tool call now surfaces its OWN authorization pause.
+            let pending = second.pending_prompt.expect("curl tool should pause for authz");
+            assert!(pending.question.to_lowercase().contains("permission"), "got: {}", pending.question);
+            // Deny it → loop continues, model answers, ask exits 0.
+            let result = session.answer_prompt(Some("no".to_string())).await;
             assert_eq!(result.exit_code, 0);
+            assert_eq!(String::from_utf8(result.stdout).unwrap(), "I could not fetch it");
 
             let tr = last_tool_result(&seen, "c1").expect("a tool result for c1");
-            let msg = tr.outcome.expect_err("curl should be refused");
-            assert!(msg.contains("confirmation"), "got: {msg}");
+            let msg = tr.outcome.expect_err("denied curl is an error result");
+            assert!(msg.contains("denied by user"), "got: {msg}");
         });
     }
 
-    /// Even under `sudo ask`, a `sudo-only` tool line is refused — blanket covers confirm-tier only.
+    /// Even under `sudo ask`, a `sudo-only` tool line (rm) still PAUSES (blanket covers confirm-tier
+    /// only); denying it leaves the file intact.
     #[test]
-    fn ask_sudo_only_tool_is_refused_even_under_sudo_ask() {
+    fn ask_sudo_only_tool_pauses_even_under_sudo_ask() {
         on_rt(async {
             let mut session = Session::new().await.unwrap();
             let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
@@ -1540,12 +1863,140 @@ mod tests {
                 seen.clone(),
             )));
 
-            let result = session.eval_line(&format!(r#"sudo ask "delete {}""#, path.display())).await;
+            let first = session.eval_line(&format!(r#"sudo ask "delete {}""#, path.display())).await;
+            // Even under sudo ask, the sudo-only rm pauses (no "all" offered for this tier).
+            let pending = first.pending_prompt.expect("sudo-only rm should pause under sudo ask");
+            assert!(!pending.choices.clone().unwrap_or_default().contains(&"all".to_string()),
+                "sudo-only pause must not offer 'all'");
+            let result = session.answer_prompt(Some("no".to_string())).await;
             assert_eq!(result.exit_code, 0);
             let tr = last_tool_result(&seen, "c1").expect("a tool result for c1");
-            assert!(tr.outcome.is_err(), "sudo-only rm should be refused under sudo ask");
-            assert!(path.exists(), "the file must survive the refused rm");
+            assert!(tr.outcome.is_err(), "denied rm is an error result");
+            assert!(path.exists(), "the file must survive the denied rm");
             std::fs::remove_file(&path).ok();
+        });
+    }
+
+    /// `sudo ask` pre-authorizes confirm-tier up front: a curl tool call runs without any pause and
+    /// its body comes back in the tool result.
+    #[test]
+    fn ask_sudo_pre_authorizes_confirm_tool() {
+        on_rt(async {
+            let url = http_mock("fetched-body");
+            let mut session = Session::new().await.unwrap();
+            let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+            session.set_ask_provider(Box::new(FakeProvider::scripted(
+                vec![
+                    shell_tool_call("c1", &format!("curl {url}")),
+                    crate::askcmd::AskResponse::text("done"),
+                ],
+                seen.clone(),
+            )));
+
+            let first = session.eval_line(r#"sudo ask "fetch it""#).await;
+            // sudo ask grants blanket confirm-tier up front → curl does not pause.
+            assert!(first.pending_prompt.is_none(), "sudo ask pre-authorizes curl (no pause)");
+            assert_eq!(first.exit_code, 0);
+            let tr = last_tool_result(&seen, "c1").unwrap().outcome.unwrap();
+            assert!(tr.contains("fetched-body"), "curl body should be in the tool result: {tr}");
+        });
+    }
+
+    /// A `curl` under a plain approved ask pauses; answering "all" runs it and pre-authorizes a second
+    /// confirm-tier call in a later turn (no second pause).
+    #[test]
+    fn ask_all_answer_upgrades_blanket_mid_loop() {
+        on_rt(async {
+            let url_a = http_mock("body-a");
+            let url_b = http_mock("body-b");
+            let mut session = Session::new().await.unwrap();
+            let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+            session.set_ask_provider(Box::new(FakeProvider::scripted(
+                vec![
+                    shell_tool_call("c1", &format!("curl {url_a}")),
+                    shell_tool_call("c2", &format!("curl {url_b}")),
+                    crate::askcmd::AskResponse::text("done"),
+                ],
+                seen.clone(),
+            )));
+
+            // Plain ask (blanket false): approve the ask, then the first curl pauses.
+            session.eval_line(r#"ask "fetch a then b""#).await;
+            let after_ask = session.answer_prompt(Some("yes".to_string())).await;
+            assert!(after_ask.pending_prompt.is_some(), "first curl should pause");
+            // Answer "all" → runs c1 AND pre-authorizes c2 (no second pause) → loop completes.
+            let done = session.answer_prompt(Some("all".to_string())).await;
+            assert!(done.pending_prompt.is_none(), "all should carry through to c2");
+            assert_eq!(done.exit_code, 0);
+            assert_eq!(String::from_utf8(done.stdout).unwrap(), "done");
+            // Both curls actually ran.
+            assert!(last_tool_result(&seen, "c1").unwrap().outcome.unwrap().contains("body-a"));
+            assert!(last_tool_result(&seen, "c2").unwrap().outcome.unwrap().contains("body-b"));
+        });
+    }
+
+    /// The `prompt_user` tool pauses the loop with the model's question; the human's answer becomes the
+    /// tool result and the loop continues.
+    #[test]
+    fn ask_prompt_user_tool_round_trips() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+            let prompt_call = crate::askcmd::AskResponse {
+                text: String::new(),
+                tool_calls: vec![crate::askcmd::AskToolCall {
+                    id: "p1".into(),
+                    name: crate::askcmd::PROMPT_USER_TOOL.into(),
+                    arguments_json: serde_json::json!({ "question": "What port should I use?" })
+                        .to_string(),
+                }],
+                finished_for_tools: true,
+                error: None,
+            };
+            session.set_ask_provider(Box::new(FakeProvider::scripted(
+                vec![prompt_call, crate::askcmd::AskResponse::text("using port 8080")],
+                seen.clone(),
+            )));
+
+            let first = session.eval_line(r#"sudo ask "set up the server""#).await;
+            let pending = first.pending_prompt.expect("prompt_user should pause");
+            assert!(pending.question.contains("port"), "got: {}", pending.question);
+            let done = session.answer_prompt(Some("8080".to_string())).await;
+            assert_eq!(done.exit_code, 0);
+            assert_eq!(String::from_utf8(done.stdout).unwrap(), "using port 8080");
+            // The answer reached the model as the tool result.
+            let tr = last_tool_result(&seen, "p1").unwrap();
+            assert!(tr.outcome.unwrap().contains("8080"), "answer should be the tool result");
+        });
+    }
+
+    /// Killing the paused ask row (or Ctrl-C) aborts the whole ask: exit 130.
+    #[test]
+    fn ask_pause_kill_aborts_the_whole_ask() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+            let prompt_call = crate::askcmd::AskResponse {
+                text: String::new(),
+                tool_calls: vec![crate::askcmd::AskToolCall {
+                    id: "p1".into(),
+                    name: crate::askcmd::PROMPT_USER_TOOL.into(),
+                    arguments_json: serde_json::json!({ "question": "continue?" }).to_string(),
+                }],
+                finished_for_tools: true,
+                error: None,
+            };
+            session.set_ask_provider(Box::new(FakeProvider::scripted(
+                vec![prompt_call, crate::askcmd::AskResponse::text("should not reach")],
+                seen.clone(),
+            )));
+
+            let first = session.eval_line(r#"sudo ask "do a thing""#).await;
+            assert!(first.pending_prompt.is_some(), "prompt_user should pause");
+            // Abort (as a kill of the paused row would, via answer_prompt(None)).
+            let aborted = session.answer_prompt(None).await;
+            assert_eq!(aborted.exit_code, 130);
+            assert!(session.pending.is_none(), "no pending after abort");
         });
     }
 
