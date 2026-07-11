@@ -128,6 +128,35 @@ pub fn build_system_prompt_with_mcp(
     mcp: &crate::mcpstate::McpState,
 ) -> String {
     let mut out = build_system_prompt(registry);
+    append_mcp_tools(&mut out, mcp);
+    out
+}
+
+/// The full agentic system prompt: the command surface + installed MCP tools + installed grease
+/// prompts. Each installed prompt is a `prompt__<name>` tool the model can call. Shared with
+/// `/proc/clank/system-prompt` so the human-visible view matches what the model sees.
+pub fn build_system_prompt_with_capabilities(
+    registry: &CommandRegistry,
+    mcp: &crate::mcpstate::McpState,
+    grease: &crate::greasestate::GreaseState,
+) -> String {
+    let mut out = build_system_prompt(registry);
+    append_mcp_tools(&mut out, mcp);
+    let prompts = grease.ask_tool_definitions();
+    if !prompts.is_empty() {
+        out.push_str(
+            "\n\nInstalled prompt tools (call them by their exact tool name; each runs a stored prompt \
+             through the model and requires confirmation unless the user ran `sudo ask`):\n",
+        );
+        for t in &prompts {
+            out.push_str(&format!("  {} — {}\n", t.name, t.description));
+        }
+    }
+    out
+}
+
+/// Append the installed-MCP-tools block to `out` (shared by both system-prompt builders).
+fn append_mcp_tools(out: &mut String, mcp: &crate::mcpstate::McpState) {
     let mcp_tools = mcp.ask_tool_definitions();
     if !mcp_tools.is_empty() {
         out.push_str(
@@ -138,7 +167,6 @@ pub fn build_system_prompt_with_mcp(
             out.push_str(&format!("  {} — {}\n", t.name, t.description));
         }
     }
-    out
 }
 
 /// One tool the model may call, rendered from the manifest registry. The clank-neutral mirror of

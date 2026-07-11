@@ -797,6 +797,14 @@ expect_contains "grease install without a registry errors" 'sudo grease install 
 # grease inside a substitution hits the honest stub (it runs at the session layer).
 GREASE_SUBST="$(eval_json eval '"echo $(grease list)"')"
 expect_eval "grease in \$() gives the honest pointer"  "$GREASE_SUBST"  '.stderr | contains("top-level command")'  'true'
+# Capability disclosure: a bare `grease install` confirmation names the package + the ask capability.
+# No registry/HTTP needed to see the confirm text (the gate fires before any fetch).
+run_line 'grease registry add https://reg.example/pkgs' >/dev/null
+GREASE_DISCLOSE="$(eval_json eval '"grease install some-prompt"')"
+expect_eval "grease install discloses the package"    "$GREASE_DISCLOSE"  '.pending_prompt.question | contains("some-prompt")'  'true'
+expect_eval "grease install discloses the ask capability" "$GREASE_DISCLOSE"  '.pending_prompt.question | contains("runs via ask")'  'true'
+eval_json abort_prompt >/dev/null   # clear the pending confirm
+run_line 'grease registry remove https://reg.example/pkgs' >/dev/null
 
 # --- Gated live-registry block: needs a registry serving /packages/<name>.json (+ /index.json for
 #     search). Set GREASE_TEST_URL + GREASE_TEST_PKG to run a real install; the installed prompt RUN
@@ -808,6 +816,11 @@ if [[ -n "${GREASE_TEST_URL:-}" && -n "${GREASE_TEST_PKG:-}" ]]; then
   GR_INST="$(eval_json eval "\"sudo grease install ${GREASE_TEST_PKG}\"")"
   expect_eval "live grease install exits 0"           "$GR_INST"  '.exit_code'  '0'
   expect_eval "live grease install reports installed"  "$GR_INST"  '.stdout | contains("installed")'  'true'
+  # If the registry's index.json advertises the package's sha256, install VERIFIES it (content-
+  # addressed integrity). If GREASE_TEST_VERIFIED=1, assert the "verified" status in the output.
+  if [[ "${GREASE_TEST_VERIFIED:-}" == "1" ]]; then
+    expect_eval "live grease install verifies sha256"  "$GR_INST"  '.stdout | contains("verified")'  'true'
+  fi
   expect_contains "installed package appears in list"  'grease list'  "${GREASE_TEST_PKG}"
   expect_contains "which finds the installed stub"     "which ${GREASE_TEST_PKG}"  "${GREASE_TEST_PKG}"
   # The prompt's required args (if any) come from GREASE_TEST_ARGS; a bare run of an arg-less package
@@ -816,6 +829,10 @@ if [[ -n "${GREASE_TEST_URL:-}" && -n "${GREASE_TEST_PKG:-}" ]]; then
     GR_RUN="$(eval_json eval "\"sudo ${GREASE_TEST_PKG} ${GREASE_TEST_ARGS:-}\"")"
     expect_eval "running the installed prompt exits 0" "$GR_RUN"  '.exit_code'  '0'
     expect_eval "the prompt produced a model reply"    "$GR_RUN"  '.stdout | length > 0'  'true'
+    # The model can invoke the installed prompt as a `prompt__<name>` tool. Ask it to use the prompt;
+    # assert clean completion (whether haiku calls the tool is model-dependent, so assert exit 0).
+    GR_ASK="$(eval_json eval "\"sudo ask \\\"use the ${GREASE_TEST_PKG} prompt ${GREASE_TEST_ARGS:-}\\\"\"")"
+    expect_eval "ask can use the installed prompt tool" "$GR_ASK"  '.exit_code'  '0'
   fi
   run_line "sudo grease remove ${GREASE_TEST_PKG}" >/dev/null
 else

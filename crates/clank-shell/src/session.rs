@@ -758,13 +758,19 @@ impl Session {
             trace.extend_from_slice(w.as_bytes());
         }
 
-        // The tool surface = the generic shell/prompt_user tools plus one ToolDefinition per installed
-        // MCP tool (namespaced mcp__<server>__<tool>, with its real inputSchema).
+        // The tool surface = the generic shell/prompt_user tools, plus one ToolDefinition per installed
+        // MCP tool (mcp__<server>__<tool>) and per installed grease prompt (prompt__<name>). Every
+        // `grease install`/`mcp add` thus expands what `ask` can do (README).
         let mut tools = crate::askcmd::build_ask_tools(&self.registry);
         tools.extend(self.mcp.ask_tool_definitions());
+        tools.extend(self.grease.ask_tool_definitions());
 
         let system = crate::askcmd::with_json_addendum(
-            crate::askcmd::build_system_prompt_with_mcp(&self.registry, &self.mcp),
+            crate::askcmd::build_system_prompt_with_capabilities(
+                &self.registry,
+                &self.mcp,
+                &self.grease,
+            ),
             args.json,
         );
         let state = AskLoopState {
@@ -1088,7 +1094,7 @@ impl Session {
     ) -> LineResult {
         use crate::askcmd::AskTurn;
 
-        let Some(provider) = self.ask_provider.take() else {
+        let Some(mut provider) = self.ask_provider.take() else {
             return LineResult::from_outcome(
                 Vec::new(),
                 b"ask: no model provider configured (available on the Golem agent)\n".to_vec(),
@@ -1151,6 +1157,11 @@ impl Session {
 
             // Execute this turn's calls in order. A pause stashes the remaining calls + accumulated
             // results and returns immediately (non-blocking); `answer_prompt` resumes here.
+            //
+            // Restore the provider onto `self` for the duration of tool execution: a `prompt__<name>`
+            // tool call re-enters `run_ask` (running the stored prompt through the model), which needs
+            // the provider available. Re-take it after the batch, before the next `provider.turn`.
+            self.ask_provider = Some(provider);
             let calls = resp.tool_calls.clone();
             let mut results = std::mem::take(&mut pending_results);
             for (i, call) in calls.iter().enumerate() {
@@ -1174,7 +1185,7 @@ impl Session {
                             remaining: calls[i + 1..].to_vec(),
                             completed: results,
                         };
-                        self.ask_provider = Some(provider);
+                        // Provider already restored on `self` above; leave it there for the resume.
                         return self.surface_agent_pause(state, pause, pid);
                     }
                 }
@@ -1185,6 +1196,20 @@ impl Session {
                 tool_calls: calls,
             });
             state.history.push(AskTurn::ToolResults(results));
+
+            // Re-take the provider for the next turn's `provider.turn` (it was restored on `self` for
+            // tool execution above). A nested prompt tool call has already returned it to `self`.
+            let Some(p) = self.ask_provider.take() else {
+                if let Some(pid) = pid {
+                    self.proc_table.lock().unwrap().complete(pid);
+                }
+                return LineResult::from_outcome(
+                    Vec::new(),
+                    b"ask: model provider went missing mid-loop\n".to_vec(),
+                    4,
+                );
+            };
+            provider = p;
         }
 
         self.ask_provider = Some(provider);
@@ -1430,6 +1455,33 @@ impl Session {
             // Single-quote the JSON so the shell tokenizer preserves it (inner double-quotes survive
             // via the outer-quote-only handling in parse_tool_invocation).
             format!("{server} {tool} --args '{args_str}'")
+        } else if let Some(name) = call.name.strip_prefix("prompt__") {
+            // An installed grease prompt (`prompt__<name>`): decode the arguments object into
+            // `--key value` flags and route the `<name> --flags` line through the shell-tool machinery
+            // (so its Confirm authz pauses under a plain ask, runs under `sudo ask`; `run_prompt` fills
+            // the body and dispatches to the model). Each value is single-quoted for the tokenizer.
+            let args_val = if call.arguments_json.trim().is_empty() {
+                serde_json::json!({})
+            } else {
+                match serde_json::from_str::<serde_json::Value>(&call.arguments_json) {
+                    Ok(v @ serde_json::Value::Object(_)) => v,
+                    Ok(_) => return done_err("prompt arguments must be a JSON object".into()),
+                    Err(e) => return done_err(format!("malformed arguments: {e}")),
+                }
+            };
+            let mut line = name.to_string();
+            if let Some(obj) = args_val.as_object() {
+                for (k, v) in obj {
+                    // Render the value as a string (JSON strings unquoted; others via to_string).
+                    let val = match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+                    let escaped = val.replace('\'', r"'\''");
+                    line.push_str(&format!(" --{k} '{escaped}'"));
+                }
+            }
+            line
         } else if call.name == crate::askcmd::SHELL_TOOL {
             // Extract the `command` string from the tool arguments.
             match serde_json::from_str::<serde_json::Value>(&call.arguments_json) {
@@ -1596,13 +1648,20 @@ impl Session {
             );
         };
 
-        // Try each registry in order: GET <url>/packages/<name>.json.
+        // Try each registry in order: look up the package's expected sha256 in the registry's
+        // index.json, then GET <url>/packages/<name>.json and verify the body matches. The fetch is
+        // done here (while `http` is borrowed); persistence happens in `grease_finish_install` (which
+        // needs `&mut self`), so we capture the results and drop the borrow first.
         let mut last_err = String::from("package not found in any configured registry");
+        let mut fetched: Option<(String, Vec<u8>, Option<String>)> = None; // (registry, body, expected)
         for base in &registries {
+            // Expected hash from the index (best-effort — a loose registry may omit it).
+            let expected = fetch_index_sha256(http.as_ref(), base, name).await;
             let url = format!("{}/packages/{name}.json", base.trim_end_matches('/'));
             match http.request("GET", &url, &[], None).await {
                 Ok(resp) if resp.status == 200 => {
-                    return self.grease_finish_install(name, base, &resp.body);
+                    fetched = Some((base.clone(), resp.body, expected));
+                    break;
                 }
                 Ok(resp) if resp.status == 404 => {
                     last_err = format!("package '{name}' not found (404) at {base}");
@@ -1615,13 +1674,53 @@ impl Session {
                 }
             }
         }
-        LineResult::from_outcome(Vec::new(), format!("grease install: {last_err}\n").into_bytes(), 4)
+        let Some((registry, body, expected)) = fetched else {
+            return LineResult::from_outcome(
+                Vec::new(),
+                format!("grease install: {last_err}\n").into_bytes(),
+                4,
+            );
+        };
+
+        // Content-addressed integrity: verify the fetched body against the registry's advertised hash.
+        // A mismatch is a hard reject (tamper/corruption); a missing index hash falls back to
+        // record-only (older/loose registries still work), with a stderr note.
+        let actual = crate::greasepkg::sha256_hex(&body);
+        let mut note = Vec::new();
+        match &expected {
+            Some(exp) if exp.eq_ignore_ascii_case(&actual) => {} // verified
+            Some(exp) => {
+                return LineResult::from_outcome(
+                    Vec::new(),
+                    format!(
+                        "grease install: integrity check failed for '{name}': \
+                         expected {exp}, got {actual}\n"
+                    )
+                    .into_bytes(),
+                    4,
+                );
+            }
+            None => {
+                note.extend_from_slice(
+                    format!("grease: no integrity hash in {registry} index — recording fetched digest\n")
+                        .as_bytes(),
+                );
+            }
+        }
+        self.grease_finish_install(name, &registry, &body, actual, expected.is_some(), note)
     }
 
-    /// Verify + persist a fetched package payload and register it. The payload JSON carries the package;
-    /// its sha256 is computed and stored as the integrity marker (the registry may also advertise a
-    /// hash out of band — v1 records what it fetched).
-    fn grease_finish_install(&mut self, name: &str, registry: &str, body: &[u8]) -> LineResult {
+    /// Verify + persist a fetched package payload and register it. `sha256` is the (already-computed)
+    /// digest of `body`; `verified` marks whether it matched the registry's advertised hash.
+    fn grease_finish_install(
+        &mut self,
+        name: &str,
+        registry: &str,
+        body: &[u8],
+        sha256: String,
+        verified: bool,
+        note: Vec<u8>,
+    ) -> LineResult {
         let package = match crate::greasepkg::PromptPackage::from_json(body) {
             Ok(p) => p,
             Err(e) => {
@@ -1644,8 +1743,6 @@ impl Session {
                 4,
             );
         }
-        let sha256 = crate::greasepkg::sha256_hex(body);
-
         // Persist: <store>/<name>/prompt.json + <etc>/<name>.toml marker + the bin stub.
         let store = crate::greaseconfig::store_dir().join(name);
         if let Err(e) = std::fs::create_dir_all(&store) {
@@ -1665,6 +1762,7 @@ impl Session {
         let marker = crate::greasestate::InstallMarker {
             registry: registry.to_string(),
             sha256: sha256.clone(),
+            verified,
         };
         let marker_toml = match toml::to_string_pretty(&marker) {
             Ok(t) => t,
@@ -1694,9 +1792,13 @@ impl Session {
         // Register in the in-memory view.
         self.grease.set_installed(crate::greasestate::InstalledPrompt { marker, package });
 
-        LineResult::continue_with_stdout(
-            format!("installed {name} (sha256 {})\nrun it with `{name}`\n", &sha256[..12]).into_bytes(),
-        )
+        let status = if verified { "verified" } else { "unverified" };
+        let mut out = note; // any record-only note first
+        out.extend_from_slice(
+            format!("installed {name} (sha256 {} — {status})\nrun it with `{name}`\n", &sha256[..12])
+                .as_bytes(),
+        );
+        LineResult::continue_with_stdout(out)
     }
 
     /// `grease remove <name>`: delete the store, marker, and stub, and deregister.
@@ -2375,14 +2477,25 @@ impl Session {
         ask_stdin: Option<String>,
     ) -> LineResult {
         let name = command_name.unwrap_or("command");
-        let synopsis = self
-            .registry
-            .get(name)
-            .map(|m| m.synopsis.clone())
-            .or_else(|| self.mcp.manifest_for(name).map(|m| m.synopsis))
-            .unwrap_or_else(|| "run this command".to_string());
+        // Capability disclosure: a `grease install <pkg>` confirmation discloses what the package is
+        // and does (name, source registries, that it runs via `ask` = LLM + shell tools under
+        // per-command authz) BEFORE the human approves — README "discloses capability requests before
+        // completing". Only what's knowable pre-fetch is shown; declared args are one `grease info`
+        // away after install.
+        let question = if let Some(question) = self.grease_install_disclosure(&gated_command, sudo_grant)
+        {
+            question
+        } else {
+            let synopsis = self
+                .registry
+                .get(name)
+                .map(|m| m.synopsis.clone())
+                .or_else(|| self.mcp.manifest_for(name).map(|m| m.synopsis))
+                .unwrap_or_else(|| "run this command".to_string());
+            authz::confirm_question(name, &synopsis, sudo_grant)
+        };
         let prompt = PendingPrompt {
-            question: authz::confirm_question(name, &synopsis, sudo_grant),
+            question,
             choices: Some(authz::confirm_choices(sudo_grant)),
             secret: false,
         };
@@ -2395,6 +2508,27 @@ impl Session {
                 ask_stdin,
             },
         )
+    }
+
+    /// If `gated_command` is a `grease install <pkg>` line, build a capability-disclosure confirmation
+    /// prompt naming the package, its source registries, and its `ask` capability. `None` otherwise
+    /// (the caller falls back to the generic confirm text).
+    fn grease_install_disclosure(&self, gated_command: &str, sudo_grant: bool) -> Option<String> {
+        let cmd = crate::greasecmd::classify(gated_command)?.ok()?;
+        let crate::greasecmd::GreaseCommand::Install { name } = cmd else {
+            return None;
+        };
+        let registries = crate::greaseconfig::list_registries();
+        let from = if registries.is_empty() {
+            "no configured registry".to_string()
+        } else {
+            registries.join(", ")
+        };
+        let tail = if sudo_grant { "(y)es, (n)o" } else { "(y)es, (n)o, (a)ll" };
+        Some(format!(
+            "Install prompt package \"{name}\" from {from}? It runs via ask (outbound LLM; may invoke \
+             shell commands under per-command authorization). {tail}"
+        ))
     }
 
     /// Shared tail of the surface paths: pause the row, record the question, stash the pending
@@ -2643,6 +2777,28 @@ fn strip_sudo_prefix(line: &str) -> String {
         Some(rest) if rest.starts_with(char::is_whitespace) => rest.trim_start().to_string(),
         _ => line.to_string(),
     }
+}
+
+/// Best-effort lookup of a package's advertised sha256 from a registry's `index.json`. GETs
+/// `<base>/index.json` and returns the `sha256` field of the entry whose `name` matches. `None` if the
+/// index is unreachable, unparseable, has no entry for `name`, or the entry carries no hash (a loose
+/// registry) — the caller then falls back to record-only integrity.
+async fn fetch_index_sha256(
+    http: &dyn crate::mcpclient::McpHttp,
+    base: &str,
+    name: &str,
+) -> Option<String> {
+    let url = format!("{}/index.json", base.trim_end_matches('/'));
+    let resp = http.request("GET", &url, &[], None).await.ok()?;
+    if resp.status != 200 {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_slice(&resp.body).ok()?;
+    let arr = v.get("packages")?.as_array()?;
+    arr.iter()
+        .find(|p| p.get("name").and_then(|n| n.as_str()) == Some(name))
+        .and_then(|p| p.get("sha256").and_then(|s| s.as_str()))
+        .map(String::from)
 }
 
 /// The leading command word of a top-level (operator-free) `line`, with any `sudo` prefix stripped —
@@ -3165,6 +3321,44 @@ mod tests {
         }
     }
 
+    /// A URL-routed fake HTTP transport for grease tests: unlike the order-based `FakeMcpHttp`, it maps
+    /// a URL substring → response, so grease's `index.json` + `packages/<name>.json` fetches don't
+    /// collide. An unmatched URL is a 404.
+    struct FakeGreaseHttp {
+        routes: Vec<(String, crate::mcpclient::HttpResponse)>,
+    }
+    impl FakeGreaseHttp {
+        fn new(routes: Vec<(&str, crate::mcpclient::HttpResponse)>) -> Self {
+            Self { routes: routes.into_iter().map(|(u, r)| (u.to_string(), r)).collect() }
+        }
+    }
+    #[async_trait::async_trait(?Send)]
+    impl crate::mcpclient::McpHttp for FakeGreaseHttp {
+        async fn request(
+            &self,
+            _method: &str,
+            url: &str,
+            _headers: &[(String, String)],
+            _body: Option<Vec<u8>>,
+        ) -> Result<crate::mcpclient::HttpResponse, String> {
+            for (pat, resp) in &self.routes {
+                if url.contains(pat.as_str()) {
+                    return Ok(resp.clone());
+                }
+            }
+            Ok(crate::mcpclient::HttpResponse { status: 404, headers: vec![], body: Vec::new() })
+        }
+    }
+
+    /// A 200 JSON response (for `FakeGreaseHttp` routes).
+    fn grease_json(value: serde_json::Value) -> crate::mcpclient::HttpResponse {
+        crate::mcpclient::HttpResponse {
+            status: 200,
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: value.to_string().into_bytes(),
+        }
+    }
+
     /// A fresh temp `$CLANK_GREASE_*` triple, exported for the duration of the guard (serializes grease
     /// tests via the shared lock, clears the vars on drop).
     struct GreaseDirsGuard {
@@ -3283,7 +3477,9 @@ mod tests {
                 "arguments": [{"name":"file","required":true}],
                 "body": "Summarize the file {{file}} concisely."
             });
-            session.set_mcp_http(Box::new(FakeMcpHttp::new(vec![mcp_json(pkg)])));
+            // No index route → the index lookup 404s → record-only install (these tests don't assert
+            // on integrity; the verify path has its own dedicated tests).
+            session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![("/packages/", grease_json(pkg))])));
             session.run_line("grease registry add https://reg.example").await;
 
             // Install (sudo pre-authorizes the Confirm).
@@ -3322,6 +3518,205 @@ mod tests {
             let rm = session.eval_line("sudo grease remove tldr").await;
             assert_eq!(rm.exit_code, 0);
             assert!(!session.grease.is_prompt("tldr"));
+        });
+    }
+
+    /// A bare `grease install` surfaces a capability-disclosure confirmation naming the package, its
+    /// source registries, and the ask capability (README "discloses capability requests"). `sudo`
+    /// pre-authorizes (no pause).
+    #[test]
+    fn grease_install_discloses_capabilities() {
+        on_rt(async {
+            let _dirs = set_grease_dirs();
+            let mut session = Session::new().await.unwrap();
+            session.run_line("grease registry add https://reg.example/pkgs").await;
+
+            let surface = session.eval_line("grease install tldr").await;
+            let q = surface.pending_prompt.expect("install should confirm").question;
+            assert!(q.contains("\"tldr\""), "discloses the package name: {q}");
+            assert!(q.contains("https://reg.example/pkgs"), "discloses the source registry: {q}");
+            assert!(q.contains("runs via ask"), "discloses the ask capability: {q}");
+            // Deny to leave state clean.
+            session.answer_prompt(Some("no".into())).await;
+
+            // `sudo grease install` pre-authorizes — no pause (it then errors on the fetch, which is
+            // fine; we're only asserting the no-pause behavior here).
+            let sudo = session.eval_line("sudo grease install tldr").await;
+            assert!(sudo.pending_prompt.is_none(), "sudo should not pause");
+        });
+    }
+
+    /// A matching index sha256 → verified install.
+    #[test]
+    fn grease_install_verifies_matching_sha256() {
+        on_rt(async {
+            let _dirs = set_grease_dirs();
+            let pkg = serde_json::json!({
+                "name": "vpkg", "description": "verified package", "body": "hello."
+            });
+            let good = crate::greasepkg::sha256_hex(pkg.to_string().as_bytes());
+            let mut session = Session::new().await.unwrap();
+            let index = serde_json::json!({
+                "packages": [{"name":"vpkg","description":"verified package","sha256": good}]
+            });
+            session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![
+                ("/index.json", grease_json(index)),
+                ("/packages/", grease_json(pkg)),
+            ])));
+            session.run_line("grease registry add https://reg.example").await;
+            let inst = session.eval_line("sudo grease install vpkg").await;
+            assert_eq!(inst.exit_code, 0, "stderr: {}", String::from_utf8_lossy(&inst.stderr));
+            assert!(String::from_utf8(inst.stdout).unwrap().contains("verified"));
+            assert!(session.grease.is_prompt("vpkg"));
+        });
+    }
+
+    /// A mismatched index sha256 → reject (exit 4), nothing persisted.
+    #[test]
+    fn grease_install_rejects_sha256_mismatch() {
+        on_rt(async {
+            let _dirs = set_grease_dirs();
+            let pkg = serde_json::json!({"name":"vpkg","description":"d","body":"hello."});
+            let mut session = Session::new().await.unwrap();
+            let index = serde_json::json!({
+                "packages": [{"name":"vpkg","sha256":"0000000000000000000000000000000000000000000000000000000000000000"}]
+            });
+            session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![
+                ("/index.json", grease_json(index)),
+                ("/packages/", grease_json(pkg)),
+            ])));
+            session.run_line("grease registry add https://reg.example").await;
+            let inst = session.eval_line("sudo grease install vpkg").await;
+            assert_eq!(inst.exit_code, 4);
+            assert!(String::from_utf8(inst.stderr).unwrap().contains("integrity check failed"));
+            assert!(!session.grease.is_prompt("vpkg"), "a mismatched package must not install");
+            assert!(!crate::greaseconfig::store_dir().join("vpkg").exists());
+        });
+    }
+
+    /// A registry index with no sha256 for the package → record-only install, with a stderr note.
+    #[test]
+    fn grease_install_record_only_without_index_hash() {
+        on_rt(async {
+            let _dirs = set_grease_dirs();
+            let mut session = Session::new().await.unwrap();
+            let pkg = serde_json::json!({"name":"loose","description":"d","body":"hi."});
+            // Index present but with no sha256 field for the package.
+            let index = serde_json::json!({"packages":[{"name":"loose","description":"d"}]});
+            session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![
+                ("/index.json", grease_json(index)),
+                ("/packages/", grease_json(pkg)),
+            ])));
+            session.run_line("grease registry add https://reg.example").await;
+            let inst = session.eval_line("sudo grease install loose").await;
+            assert_eq!(inst.exit_code, 0);
+            let out = String::from_utf8(inst.stdout).unwrap();
+            assert!(out.contains("no integrity hash"), "expected record-only note, got: {out}");
+            assert!(out.contains("unverified"));
+            assert!(session.grease.is_prompt("loose"));
+        });
+    }
+
+    /// An installed prompt is exposed to the model as a `prompt__<name>` tool: it appears in the tool
+    /// surface + the system prompt, and a scripted tool call runs the prompt (the model sees the FILLED
+    /// body). Confirms under a plain ask; runs under `sudo ask`.
+    #[test]
+    fn ask_can_call_an_installed_prompt() {
+        on_rt(async {
+            let _dirs = set_grease_dirs();
+            let mut session = Session::new().await.unwrap();
+
+            // Install a parameterized prompt (reuse the fetch flow).
+            let pkg = serde_json::json!({
+                "name": "tldr",
+                "description": "one-line summary",
+                "arguments": [{"name":"file","required":true}],
+                "body": "TL;DR of {{file}} please."
+            });
+            // No index route → the index lookup 404s → record-only install (these tests don't assert
+            // on integrity; the verify path has its own dedicated tests).
+            session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![("/packages/", grease_json(pkg))])));
+            session.run_line("grease registry add https://reg.example").await;
+            let inst = session.eval_line("sudo grease install tldr").await;
+            assert_eq!(inst.exit_code, 0);
+
+            // The model calls the prompt tool by its namespaced name with the required arg. The shared
+            // FakeProvider serves three turns in order: (1) the outer ask's tool call, (2) the NESTED
+            // prompt run's reply (the prompt tool re-enters the model), (3) the outer ask's final text.
+            let ask_seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+            session.set_ask_provider(Box::new(FakeProvider::scripted(
+                vec![
+                    crate::askcmd::AskResponse {
+                        text: String::new(),
+                        tool_calls: vec![crate::askcmd::AskToolCall {
+                            id: "p1".into(),
+                            name: "prompt__tldr".into(),
+                            arguments_json: serde_json::json!({ "file": "report.md" }).to_string(),
+                        }],
+                        finished_for_tools: true,
+                        error: None,
+                    },
+                    crate::askcmd::AskResponse::text("the one-line summary"), // nested prompt reply
+                    crate::askcmd::AskResponse::text("summarized it"),        // outer ask final text
+                ],
+                ask_seen.clone(),
+            )));
+
+            let result = session.eval_line(r#"sudo ask "summarize report.md with the tldr prompt""#).await;
+            assert_eq!(result.exit_code, 0, "stderr: {}", String::from_utf8_lossy(&result.stderr));
+            assert_eq!(String::from_utf8(result.stdout).unwrap(), "summarized it");
+
+            let turns = ask_seen.lock().unwrap();
+            // The prompt tool was in the outer ask's tool surface AND listed in its system prompt.
+            assert!(
+                turns[0].tools.iter().any(|t| t.name == "prompt__tldr"),
+                "the prompt should be an ask tool"
+            );
+            let system = turns[0].system.clone().unwrap_or_default();
+            assert!(system.contains("prompt__tldr"), "system prompt should list the prompt tool");
+            // The nested prompt run saw the FILLED body (turn 2 — the {{file}} was substituted).
+            let saw_filled = turns
+                .iter()
+                .any(|t| t.user_content().contains("TL;DR of report.md please."));
+            assert!(saw_filled, "the model should have seen the filled prompt body");
+        });
+    }
+
+    /// Under a plain (non-sudo) ask, an installed-prompt tool call pauses for authorization (running a
+    /// prompt is an outbound LLM call → Confirm).
+    #[test]
+    fn ask_prompt_tool_pauses_without_sudo() {
+        on_rt(async {
+            let _dirs = set_grease_dirs();
+            let mut session = Session::new().await.unwrap();
+            let pkg = serde_json::json!({
+                "name": "greet", "description": "greet", "body": "Say hello."
+            });
+            // No index route → the index lookup 404s → record-only install (these tests don't assert
+            // on integrity; the verify path has its own dedicated tests).
+            session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![("/packages/", grease_json(pkg))])));
+            session.run_line("grease registry add https://reg.example").await;
+            session.eval_line("sudo grease install greet").await;
+
+            session.set_ask_provider(Box::new(FakeProvider::scripted(
+                vec![crate::askcmd::AskResponse {
+                    text: String::new(),
+                    tool_calls: vec![crate::askcmd::AskToolCall {
+                        id: "p1".into(),
+                        name: "prompt__greet".into(),
+                        arguments_json: "{}".into(),
+                    }],
+                    finished_for_tools: true,
+                    error: None,
+                }],
+                std::sync::Arc::new(Mutex::new(Vec::new())),
+            )));
+            // Plain (non-sudo) ask: the prompt tool call pauses for authorization.
+            let r = session.eval_line(r#"ask "greet the user""#).await;
+            // The ask itself first confirms (outbound HTTP), then the tool call confirms — either way a
+            // pause is surfaced.
+            assert!(r.pending_prompt.is_some(), "a plain ask + prompt tool call should pause");
+            session.answer_prompt(Some("no".into())).await; // drain
         });
     }
 

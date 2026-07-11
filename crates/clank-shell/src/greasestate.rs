@@ -22,6 +22,10 @@ pub struct InstallMarker {
     pub registry: String,
     /// The sha256 of the payload at install time (integrity + change detection).
     pub sha256: String,
+    /// Whether the sha256 was verified against the registry's advertised hash (`false` = record-only,
+    /// the registry index carried no hash). Defaults false for markers written before this field.
+    #[serde(default)]
+    pub verified: bool,
 }
 
 /// One installed prompt: its marker + the full package payload.
@@ -114,8 +118,10 @@ impl GreaseState {
     }
 
     /// Every installed prompt as an [`crate::askcmd::AskTool`], so the model can invoke prompts as
-    /// tools. The tool name is the prompt name; the parameters schema is a JSON-schema object built
-    /// from the declared arguments.
+    /// tools. The tool name is namespaced `prompt__<name>` (mirroring `mcp__<server>__<tool>`; the
+    /// executor decodes it back to a `<name> --arg value …` line); the parameters schema is a
+    /// JSON-schema object built from the declared arguments. `is_valid_name` forbids underscores in a
+    /// package name, so `prompt__<kebab>` is unambiguous.
     pub fn ask_tool_definitions(&self) -> Vec<crate::askcmd::AskTool> {
         self.prompts
             .iter()
@@ -137,7 +143,7 @@ impl GreaseState {
                     "type": "object", "properties": props, "required": required
                 });
                 crate::askcmd::AskTool {
-                    name: p.package.name.clone(),
+                    name: format!("prompt__{}", p.package.name),
                     description: format!("[prompt] {}", p.package.description),
                     parameters_schema: schema.to_string(),
                 }
@@ -159,9 +165,14 @@ impl GreaseState {
                 out.push_str(&format!("  --{} — {}{req}{def}\n", a.name, a.description));
             }
         }
+        let integrity = if p.marker.verified {
+            format!("sha256 {} (verified)", &p.marker.sha256[..p.marker.sha256.len().min(12)])
+        } else {
+            format!("sha256 {} (unverified)", &p.marker.sha256[..p.marker.sha256.len().min(12)])
+        };
         out.push_str(&format!(
             "\nRunning `{name}` sends the prompt to the AI model (outbound HTTP; confirms unless run \
-             with sudo). Installed by grease from {}.\n",
+             with sudo). Installed by grease from {} [{integrity}].\n",
             p.marker.registry
         ));
         Some(out)
@@ -202,7 +213,11 @@ mod tests {
     fn manifest_and_tools_reflect_the_package() {
         let mut state = GreaseState::default();
         state.set_installed(InstalledPrompt {
-            marker: InstallMarker { registry: "https://r".into(), sha256: "abc".into() },
+            marker: InstallMarker {
+                registry: "https://r".into(),
+                sha256: "abc".into(),
+                verified: true,
+            },
             package: sample(),
         });
         assert!(state.is_prompt("summarize"));
@@ -215,7 +230,7 @@ mod tests {
 
         let tools = state.ask_tool_definitions();
         assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name, "summarize");
+        assert_eq!(tools[0].name, "prompt__summarize");
         assert!(tools[0].parameters_schema.contains("file"));
 
         let help = state.prompt_help("summarize").unwrap();
