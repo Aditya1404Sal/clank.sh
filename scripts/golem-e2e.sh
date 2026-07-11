@@ -560,6 +560,12 @@ step "ask (AI-native LLM command)"
 expect_contains "type ask resolves as builtin"        'type ask'          'ask is a shell builtin'
 expect_contains "ls /bin lists ask"                   'ls /bin'           'ask'
 expect_contains "ask --help prints help (no confirm)" 'ask --help'        'send the current shell transcript'
+expect_contains "ask --help documents --json"         'ask --help'        '--json'
+expect_contains "ask --help documents piped stdin"    'ask --help'        'Piped input'
+# ask inside a command substitution hits the honest stub with a pointer to the working forms.
+# No API key needed — the stub fires before any model call (it can't run under Brush's nested runtime).
+ASK_SUBST="$(eval_json eval '"echo $(ask \"q\")"')"
+expect_eval "ask in \$() gives the honest pointer"    "$ASK_SUBST"  '.stderr | contains("LAST pipeline stage")'  'true'
 # The live system prompt is inspectable and reflects the command surface + the shell tool (A2).
 expect_contains "/proc/clank/system-prompt describes the shell tool" 'cat /proc/clank/system-prompt' '`shell`'
 expect_contains "/proc/clank/system-prompt lists the command surface" 'cat /proc/clank/system-prompt' '[confirm]'
@@ -596,6 +602,22 @@ if [[ $RUN_LLM -eq 1 ]]; then
   expect_eval "agentic ask exits 0"                    "$ASK_TOOL"  '.exit_code'  '0'
   expect_eval "agentic ask emits a tool trace"         "$ASK_TOOL"  '.stderr | contains("[tool]")'  'true'
   expect_contains "the shell tool created the file"    "cat /tmp/${MARK}"  "${MARK}"
+
+  # 4b. --json output contract (Phase A): the model is instructed to emit one JSON value; the shell
+  #     validates it. Happy path — a valid object on stdout, exit 0, and jq can parse .ok.
+  ASK_JSON="$(eval_json eval '"sudo ask --json --fresh \"Return a JSON object with a single key ok set to boolean true. Emit only the JSON.\""')"
+  expect_eval "ask --json exits 0 on valid JSON"       "$ASK_JSON"  '.exit_code'  '0'
+  expect_eval "ask --json stdout is parseable JSON"    "$ASK_JSON"  '.stdout | fromjson | .ok'  'true'
+
+  # 4c. stdin-as-context (Phase B): pipe a fact into `ask --fresh` (no transcript). The model can only
+  #     answer from the piped stdin, proving the session pre-extracted the upstream and fed it in.
+  ASK_STDIN="$(eval_json eval '"echo \"the secret animal is platypus\" | sudo ask --fresh \"What is the secret animal? Reply with just the one word.\""')"
+  expect_eval "piped ask exits 0"                      "$ASK_STDIN"  '.exit_code'  '0'
+  expect_eval "ask reads piped stdin as context"       "$ASK_STDIN"  '.stdout | ascii_downcase | contains("platypus")'  'true'
+  # 4c2. B+A compose: pipe JSON in, ask for a transformed JSON out under --json.
+  ASK_STDIN_JSON="$(eval_json eval '"printf %s {\\\"n\\\":41} | sudo ask --json --fresh \"Increment n by one and return the same JSON shape. Emit only the JSON.\""')"
+  expect_eval "piped ask --json exits 0"               "$ASK_STDIN_JSON"  '.exit_code'  '0'
+  expect_eval "piped ask --json increments n"          "$ASK_STDIN_JSON"  '.stdout | fromjson | .n'  '42'
 
   # 5. Mid-loop authorization pause (A3): under a plain (non-sudo) ask, a confirm-tier tool line
   #    (curl) PAUSES for the human. This is robust to the model's exact behavior: the ONLY thing

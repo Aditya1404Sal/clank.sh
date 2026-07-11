@@ -55,10 +55,20 @@ macro_rules! session_stub {
             {
                 let _ = writeln!(
                     context.stderr(),
-                    "{}: only available as a top-level command (it runs at the session layer); \
-                     not usable inside $(...), pipelines, xargs, or eval on this build",
-                    $name
+                    "{name}: only available as a top-level command (it runs at the session layer); \
+                     not usable inside $(...), xargs, or eval on this build",
+                    name = $name,
                 );
+                // `ask` DOES work as the final stage of a pipeline (`cat x | ask \"…\"`) — the
+                // session pre-extracts the upstream. This stub only fires when `ask` is NOT the tail
+                // (mid-pipe or inside a substitution); point the user at the forms that work.
+                if $name == "ask" {
+                    let _ = writeln!(
+                        context.stderr(),
+                        "ask: to feed input to ask, put it as the LAST pipeline stage \
+                         (cat x | ask \"…\") or inline it (ask \"$(cat x)\")",
+                    );
+                }
                 Ok(ExecutionResult::new(1))
             }
         }

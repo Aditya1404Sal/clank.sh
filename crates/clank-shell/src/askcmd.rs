@@ -293,13 +293,23 @@ pub struct AskArgs {
     pub model: Option<String>,
     /// `--fresh` / `--no-transcript`: send no transcript context.
     pub fresh: bool,
+    /// `--json`: the model's final answer must be a single valid JSON value. The `Session` validates
+    /// it — valid JSON on stdout (exit 0), or exit 6 with the raw response on stderr (README's
+    /// `--json` contract). Also instructs the model to emit JSON and nothing else.
+    pub json: bool,
+    /// Bytes piped into `ask` as supplementary context (`cat x | ask "…"`), decoded lossily. The
+    /// `Session` sets this by pre-extracting the upstream pipeline stage; it is appended to the
+    /// first user message after the transcript. `None` when nothing was piped.
+    pub stdin: Option<String>,
 }
 
 /// If `line`'s leading command word is `ask`, parse its flags and prompt. `None` for any other line.
 ///
 /// Recognizes `--fresh` / `--no-transcript` (alias) and `--inherit` (the default, accepted for
-/// explicitness) and `--model <id>`. Every other non-flag word joins the prompt. An unknown `--flag`
-/// is treated as prompt text (kept simple — no error surface this increment).
+/// explicitness), `--model <id>`, and `--json` (validated-JSON output contract). Every other non-flag
+/// word joins the prompt. An unknown `--flag` is treated as prompt text (kept simple — no error
+/// surface this increment). `stdin` is always `None` here — the `Session` fills it when `ask` is the
+/// tail of a pipeline.
 pub fn classify(line: &str) -> Option<AskArgs> {
     let words = leading_words(line)?;
     let (first, rest) = words.split_first()?;
@@ -309,12 +319,14 @@ pub fn classify(line: &str) -> Option<AskArgs> {
 
     let mut model: Option<String> = None;
     let mut fresh = false;
+    let mut json = false;
     let mut prompt_words: Vec<String> = Vec::new();
     let mut iter = rest.iter();
     while let Some(w) = iter.next() {
         match w.as_str() {
             "--fresh" | "--no-transcript" => fresh = true,
             "--inherit" => fresh = false,
+            "--json" => json = true,
             "--model" => {
                 if let Some(id) = iter.next() {
                     model = Some(id.clone());
@@ -328,6 +340,8 @@ pub fn classify(line: &str) -> Option<AskArgs> {
         prompt: prompt_words.join(" "),
         model,
         fresh,
+        json,
+        stdin: None,
     })
 }
 
@@ -335,11 +349,55 @@ pub fn classify(line: &str) -> Option<AskArgs> {
 /// Shared by the `Session` loop (which constructs the initial [`AskTurn::User`]); kept here so the
 /// transcript-as-context shaping lives beside the rest of the `ask` seam.
 pub fn user_content(transcript: &str, prompt: &str) -> String {
-    if transcript.is_empty() {
+    user_content_with_stdin(transcript, prompt, None)
+}
+
+/// Like [`user_content`] but also appends piped stdin as a clearly-delimited supplementary block
+/// AFTER the prompt (README: "the transcript is the base context, stdin is appended after it").
+/// `--fresh` drops the transcript but keeps this block — piped input is explicit, not ambient.
+pub fn user_content_with_stdin(transcript: &str, prompt: &str, stdin: Option<&str>) -> String {
+    let mut out = if transcript.is_empty() {
         prompt.to_string()
     } else {
         format!("# Shell transcript (context)\n{transcript}\n# Question\n{prompt}")
+    };
+    if let Some(input) = stdin {
+        out.push_str(&format!("\n# Piped input (stdin)\n{input}"));
     }
+    out
+}
+
+/// The JSON-mode addendum appended to the system prompt when `ask --json` is in effect: the model's
+/// FINAL answer must be one valid JSON value and nothing else. The `Session` still validates the
+/// output and enforces the exit-6 contract, but the instruction makes the happy path reliable.
+pub const JSON_SYSTEM_ADDENDUM: &str =
+    "\n\nOUTPUT FORMAT: Your final answer MUST be a single valid JSON value (object, array, string, \
+     number, boolean, or null) and NOTHING else — no prose, no explanation, no Markdown code fences. \
+     Emit only the JSON.";
+
+/// Append [`JSON_SYSTEM_ADDENDUM`] to `system` when `json` is set; return `system` unchanged
+/// otherwise. Kept out of [`build_system_prompt`] so `/proc/clank/system-prompt` (the human-facing,
+/// non-JSON view) is unaffected.
+pub fn with_json_addendum(system: String, json: bool) -> String {
+    if json {
+        system + JSON_SYSTEM_ADDENDUM
+    } else {
+        system
+    }
+}
+
+/// Extract a JSON value from a model's final text under `--json`. Strips a single leading/trailing
+/// Markdown code fence (```json … ``` or ``` … ```) that small models tend to wrap around JSON, then
+/// returns the trimmed body. The caller parses the result; this only unwraps the common fence case.
+pub fn strip_json_fence(text: &str) -> &str {
+    let t = text.trim();
+    let Some(inner) = t.strip_prefix("```") else {
+        return t;
+    };
+    // Drop an optional language tag on the opening fence line (```json), then the trailing fence.
+    let inner = inner.strip_prefix("json").unwrap_or(inner);
+    let inner = inner.trim_start_matches(['\n', '\r']);
+    inner.strip_suffix("```").map(str::trim).unwrap_or(t)
 }
 
 /// The `Word` tokens of `line`, dequoted (quote-aware via Brush's tokenizer; operators dropped).
@@ -356,6 +414,60 @@ fn leading_words(line: &str) -> Option<Vec<String>> {
     (!words.is_empty()).then_some(words)
 }
 
+/// The upstream + parsed `ask` tail of an ask-tail pipeline (`… | ask "q"`). `elevated` reflects a
+/// `sudo` on the tail stage (`… | sudo ask "q"`), which pre-authorizes the ask like a top-level
+/// `sudo ask`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AskTailPipe {
+    /// Everything before the last top-level `|` — the producer whose stdout becomes `ask`'s stdin.
+    pub upstream: String,
+    /// The parsed `ask` invocation (its `stdin` is `None`; the `Session` fills it from the capture).
+    pub args: AskArgs,
+    /// Whether the tail carried `sudo` (blanket confirm-tier authorization for the ask).
+    pub elevated: bool,
+}
+
+/// If `line` is a pipeline whose FINAL stage is `ask` (`… | ask "q"` or `… | sudo ask "q"`), split it
+/// into the upstream (everything before the last top-level `|`) and the parsed `ask` tail. Returns
+/// `None` when the line isn't such a pipeline: a bare `ask`, no `ask` tail, or a non-`|` operator
+/// between stages.
+///
+/// The split is byte-exact via the tokenizer's source spans (quoting in the upstream survives), and
+/// only a literal `|` pipe operator counts — `||`/`|&`/`&&`/`;` are not pipe boundaries, so an `ask`
+/// after them is not a pipe tail (and stays the honest stub error). This is how `cat x | ask "…"`
+/// reaches the model: the `Session` runs the upstream, captures its stdout, and dispatches the tail
+/// at the session layer with those bytes as stdin (the LLM call can't run inside Brush's pipeline).
+pub fn split_ask_tail(line: &str) -> Option<AskTailPipe> {
+    let tokens = tokenize_str(line).ok()?;
+    // The byte index just past the last top-level `|` operator (word tokens after it are the tail).
+    let mut last_pipe_end: Option<usize> = None;
+    for t in &tokens {
+        if let Token::Operator(op, span) = t {
+            if op == "|" {
+                last_pipe_end = Some(span.end.index);
+            }
+        }
+    }
+    let pipe_end = last_pipe_end?;
+    // Guard against a byte index that isn't a char boundary (defensive; spans are byte offsets).
+    if pipe_end > line.len() || !line.is_char_boundary(pipe_end) {
+        return None;
+    }
+    let (upstream, tail) = line.split_at(pipe_end);
+    // A `sudo` on the tail elevates the ask; strip it before classifying.
+    let tail_trimmed = tail.trim_start();
+    let (tail_effective, elevated) = match tail_trimmed.strip_prefix("sudo") {
+        Some(rest) if rest.starts_with(char::is_whitespace) => (rest.trim_start(), true),
+        _ => (tail_trimmed, false),
+    };
+    let args = classify(tail_effective)?; // the tail must itself be an `ask` invocation
+    let upstream = upstream.trim_end().trim_end_matches('|').trim_end().to_string();
+    if upstream.is_empty() {
+        return None; // `| ask` with no producer — not a real pipeline
+    }
+    Some(AskTailPipe { upstream, args, elevated })
+}
+
 /// The `ask` manifest. `Subprocess` scope (runs isolated, no shell-state access), `Confirm` policy
 /// (outbound LLM HTTP pauses for user confirmation, mirroring the README's curl/wget "Outbound HTTP →
 /// confirm" rule; `sudo ask` pre-authorizes).
@@ -365,10 +477,13 @@ pub fn manifests() -> Vec<Manifest> {
             .with_scope(ExecutionScope::Subprocess)
             .with_policy(AuthorizationPolicy::Confirm)
             .with_help(
-                "ask <question> [--fresh|--no-transcript] [--inherit] [--model <id>] — send the \
-                 current shell transcript plus <question> to the AI model and print the reply. \
+                "ask <question> [--fresh|--no-transcript] [--inherit] [--model <id>] [--json] — send \
+                 the current shell transcript plus <question> to the AI model and print the reply. \
                  --fresh sends no transcript context; --inherit (default) sends the full window; \
-                 --model overrides the default model. Outbound HTTP requires confirmation.",
+                 --model overrides the default model; --json requires the model's answer to be valid \
+                 JSON (printed on stdout, or exit 6 with the raw response on stderr). Piped input \
+                 (cat x | ask \"…\") is sent to the model as supplementary context after the \
+                 transcript. Outbound HTTP requires confirmation.",
             ),
     ]
 }
@@ -407,6 +522,95 @@ mod tests {
         assert_eq!(args.prompt, "tell me a joke");
         assert_eq!(args.model.as_deref(), Some("x"));
         assert!(args.fresh);
+        assert!(!args.json);
+    }
+
+    #[test]
+    fn parses_json_flag() {
+        let args = classify("ask --json list the causes").unwrap();
+        assert!(args.json);
+        assert_eq!(args.prompt, "list the causes");
+        // Not set by default.
+        assert!(!classify("ask hello").unwrap().json);
+        // stdin is never populated by classify (the Session fills it for a pipeline tail).
+        assert!(args.stdin.is_none());
+    }
+
+    #[test]
+    fn json_addendum_only_applies_under_json() {
+        let base = "SYSTEM".to_string();
+        assert_eq!(with_json_addendum(base.clone(), false), "SYSTEM");
+        assert!(with_json_addendum(base, true).contains("single valid JSON value"));
+    }
+
+    #[test]
+    fn strip_json_fence_unwraps_common_forms() {
+        // Plain JSON is returned trimmed.
+        assert_eq!(strip_json_fence("  {\"a\":1}  "), "{\"a\":1}");
+        // ```json … ``` fence.
+        assert_eq!(strip_json_fence("```json\n{\"a\":1}\n```"), "{\"a\":1}");
+        // bare ``` … ``` fence.
+        assert_eq!(strip_json_fence("```\n[1,2]\n```"), "[1,2]");
+        // An opening fence with no closing fence falls back to the original trimmed text.
+        assert_eq!(strip_json_fence("```json\n{\"a\":1}"), "```json\n{\"a\":1}");
+    }
+
+    #[test]
+    fn split_ask_tail_detects_pipe_tail() {
+        // Basic: cat x | ask "q" → upstream "cat x", tail is an ask with the prompt.
+        let p = split_ask_tail(r#"cat x | ask "summarize this""#).unwrap();
+        assert_eq!(p.upstream, "cat x");
+        assert_eq!(p.args.prompt, "summarize this");
+        assert!(p.args.stdin.is_none()); // classify never fills stdin; the Session does
+        assert!(!p.elevated);
+
+        // Flags on the tail survive.
+        let p = split_ask_tail(r#"echo hi | ask --json --fresh "q""#).unwrap();
+        assert_eq!(p.upstream, "echo hi");
+        assert!(p.args.json && p.args.fresh);
+
+        // Multi-stage upstream: the LAST pipe is the boundary; upstream keeps its inner pipe.
+        let p = split_ask_tail(r#"cat a | grep x | ask "q""#).unwrap();
+        assert_eq!(p.upstream, "cat a | grep x");
+        assert_eq!(p.args.prompt, "q");
+
+        // `sudo` on the tail elevates and is stripped from the parsed ask.
+        let p = split_ask_tail(r#"cat x | sudo ask "q""#).unwrap();
+        assert_eq!(p.upstream, "cat x");
+        assert!(p.elevated);
+        assert_eq!(p.args.prompt, "q");
+    }
+
+    #[test]
+    fn split_ask_tail_rejects_non_tails() {
+        // Bare ask (no pipe) — not a pipe tail.
+        assert!(split_ask_tail(r#"ask "q""#).is_none());
+        // ask is NOT the tail.
+        assert!(split_ask_tail(r#"ask "q" | cat"#).is_none());
+        // A non-pipe operator before ask is not a pipe boundary.
+        assert!(split_ask_tail(r#"echo hi || ask "q""#).is_none());
+        assert!(split_ask_tail(r#"echo hi ; ask "q""#).is_none());
+        // A `|` inside quotes is not a top-level pipe.
+        assert!(split_ask_tail(r#"echo "a | ask b""#).is_none());
+        // `| ask` with no producer.
+        assert!(split_ask_tail(r#"| ask "q""#).is_none());
+        // Not an ask line at all.
+        assert!(split_ask_tail(r#"cat x | grep y"#).is_none());
+    }
+
+    #[test]
+    fn user_content_appends_stdin_block() {
+        let c = user_content_with_stdin("", "summarize", Some("log line one"));
+        assert!(c.contains("# Piped input (stdin)"));
+        assert!(c.contains("log line one"));
+        assert!(c.contains("summarize"));
+        // With a transcript, stdin still comes AFTER the question.
+        let c2 = user_content_with_stdin("prior history", "q", Some("piped"));
+        let q = c2.find("# Question").unwrap();
+        let s = c2.find("# Piped input").unwrap();
+        assert!(q < s, "stdin block must follow the question");
+        // No stdin ⇒ identical to user_content.
+        assert_eq!(user_content_with_stdin("t", "p", None), user_content("t", "p"));
     }
 
     #[test]

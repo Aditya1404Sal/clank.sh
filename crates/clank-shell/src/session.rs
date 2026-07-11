@@ -35,7 +35,13 @@ enum PendingKind {
     UserPrompt,
     /// An authorization confirmation gating a command: on approval the stashed `command` runs; on
     /// denial the caller gets exit `5`. `all` (when offered) also sets the session `allow_all` grant.
-    AuthConfirm { command: String, sudo_grant: bool },
+    /// `ask_stdin` carries a pre-captured pipeline stdin payload for a deferred `cat x | ask` tail, so
+    /// the piped context survives the pause/resume (restored into `next_ask_stdin` before re-running).
+    AuthConfirm {
+        command: String,
+        sudo_grant: bool,
+        ask_stdin: Option<String>,
+    },
     /// An `ask` agentic loop paused mid-flight: the model requested a tool call that needs the human
     /// (an authorization confirmation, or the `prompt_user` tool). The whole conversation-so-far is
     /// carried in `state`; `answer_prompt` resolves the paused tool call and resumes the loop. This is
@@ -93,6 +99,9 @@ struct AskLoopState {
     trace: Vec<u8>,
     /// Blanket confirm-tier authorization for the rest of this loop (upgraded to true on "all").
     blanket_authorized: bool,
+    /// `--json`: the final answer must validate as JSON (exit 0) or the loop exits 6 with the raw
+    /// text on stderr (README's `--json` contract).
+    json: bool,
 }
 
 /// The shell's paused state: the surfaced prompt, the process-table row it belongs to, and why.
@@ -202,6 +211,10 @@ pub struct Session {
     /// provider); `None` on native and until injected, in which case `ask` degrades to a clean
     /// "not configured" error. See [`crate::askcmd`].
     ask_provider: Option<Box<dyn crate::askcmd::AskProvider>>,
+    /// Out-of-band stdin for the next `ask` dispatch: the captured stdout of an upstream pipeline
+    /// stage (`cat x | ask "…"`). Set by the pipe pre-extraction in `eval_line` (or restored on a
+    /// deferred-confirm resume) and `take()`n by `run_ask`. `None` for an ordinary `ask` line.
+    next_ask_stdin: Option<String>,
     /// Installed MCP servers + open sessions. Reconstructed deterministically under Golem replay.
     mcp: crate::mcpstate::McpState,
     /// The injected MCP HTTP transport. Installed by the agent build (a durable `wstd` client);
@@ -229,6 +242,7 @@ impl Session {
                 authz: AuthzState::default(),
                 bg_jobs: Vec::new(),
                 ask_provider: None,
+                next_ask_stdin: None,
                 mcp: crate::mcpstate::McpState::default(),
                 mcp_http: None,
                 source: SourceInfo::default(),
@@ -247,6 +261,7 @@ impl Session {
                 authz: AuthzState::default(),
                 bg_jobs: Vec::new(),
                 ask_provider: None,
+                next_ask_stdin: None,
                 mcp: crate::mcpstate::McpState::default(),
                 mcp_http: None,
                 source: SourceInfo::default(),
@@ -375,6 +390,14 @@ impl Session {
             return self.finish_intercepted(pid, result);
         }
 
+        // stdin-as-context: `cat x | ask "…"`. The LLM call can't run inside Brush's pipeline (the
+        // reactor isn't live there — the "Wall C" wall), so the Session pre-extracts it: run the
+        // upstream, capture its stdout, and dispatch the `ask` tail at the session layer with those
+        // bytes as stdin. `ask` must be the FINAL stage; anywhere else it stays the honest stub error.
+        if let Some(pipe) = crate::askcmd::split_ask_tail(line) {
+            return self.run_ask_pipe(pipe, pid).await;
+        }
+
         // Authorization gate: enforce the leading command's `authorization-policy` (README). A
         // `confirm`/`sudo-only` command that isn't pre-authorized surfaces a confirmation pause
         // (reusing the `prompt-user` mechanism) and defers the command until approved. In every
@@ -391,7 +414,8 @@ impl Session {
                 return self.finish_intercepted(pid, LineResult::denied());
             }
             Decision::Confirm { sudo_grant } => {
-                return self.surface_auth_confirm(command.as_deref(), effective, pid, sudo_grant);
+                return self
+                    .surface_auth_confirm(command.as_deref(), effective, pid, sudo_grant, None);
             }
         }
 
@@ -604,10 +628,16 @@ impl Session {
     /// satisfies `sudo-only` (destructive ops still refuse), matching [`authz::decide`].
     async fn run_ask(
         &mut self,
-        args: crate::askcmd::AskArgs,
+        mut args: crate::askcmd::AskArgs,
         blanket_authorized: bool,
     ) -> LineResult {
         use crate::askcmd::AskTurn;
+
+        // Pick up any pipeline stdin captured for this dispatch (`cat x | ask "…"`). Taken so it
+        // never leaks into an unrelated later `ask`.
+        if let Some(stdin) = self.next_ask_stdin.take() {
+            args.stdin = Some(stdin);
+        }
 
         if self.ask_provider.is_none() {
             return LineResult::from_outcome(
@@ -644,19 +674,86 @@ impl Session {
         let mut tools = crate::askcmd::build_ask_tools(&self.registry);
         tools.extend(self.mcp.ask_tool_definitions());
 
+        let system = crate::askcmd::with_json_addendum(
+            crate::askcmd::build_system_prompt_with_mcp(&self.registry, &self.mcp),
+            args.json,
+        );
         let state = AskLoopState {
-            system: crate::askcmd::build_system_prompt_with_mcp(&self.registry, &self.mcp),
+            system,
             tools,
-            history: vec![AskTurn::User(crate::askcmd::user_content(
+            history: vec![AskTurn::User(crate::askcmd::user_content_with_stdin(
                 &base_transcript,
                 &args.prompt,
+                args.stdin.as_deref(),
             ))],
             model,
             trace,
             blanket_authorized,
+            json: args.json,
         };
         // `resume` is empty on a fresh loop; the pid carries the paused row on a resume.
         self.drive_ask_loop(state, Vec::new(), None).await
+    }
+
+    /// Handle an ask-tail pipeline (`… | ask "q"`): run the upstream, capture its stdout, and
+    /// dispatch the `ask` tail at the session layer with those bytes as stdin. `ask` is Confirm-gated
+    /// (outbound HTTP), so a bare tail surfaces a confirmation (carrying the captured stdin so it
+    /// survives the pause); `… | sudo ask` pre-authorizes. The upstream runs through the normal
+    /// `execute` capture path — its own commands carry whatever policy they have (`cat`/`grep` are
+    /// Allow); this gates only the `ask` itself.
+    async fn run_ask_pipe(
+        &mut self,
+        pipe: crate::askcmd::AskTailPipe,
+        pid: Option<u32>,
+    ) -> LineResult {
+        let crate::askcmd::AskTailPipe {
+            upstream,
+            args,
+            elevated,
+        } = pipe;
+
+        // Authorize the ask tail FIRST (before running the upstream), so a denied ask doesn't run the
+        // producer for nothing and matches the top-level `ask` gate. `ask` ⇒ Confirm; a `sudo` on the
+        // tail (`elevated`) or a session "all" grant pre-authorizes.
+        let policy = crate::manifest::AuthorizationPolicy::Confirm; // the `ask` manifest's policy
+        let blanket = elevated || self.authz.allow_all;
+        match authz::decide(policy, elevated, self.authz.allow_all) {
+            Decision::Allow => {}
+            Decision::Deny => {
+                return self.finish_intercepted(pid, LineResult::denied());
+            }
+            Decision::Confirm { sudo_grant } => {
+                // Capture the upstream now so the piped context is preserved across the pause, then
+                // defer the ask with that stdin stashed on the pending confirmation.
+                let captured = self.capture_upstream(&upstream).await;
+                return self.surface_auth_confirm(
+                    Some("ask"),
+                    ask_reconstruct(&args),
+                    pid,
+                    sudo_grant,
+                    Some(captured),
+                );
+            }
+        }
+
+        // Approved (allow / sudo / all): run the upstream, capture, and dispatch the ask with stdin.
+        let captured = self.capture_upstream(&upstream).await;
+        self.next_ask_stdin = Some(captured);
+        let result = self.run_ask(args, blanket).await;
+        if let Some(pid) = pid {
+            self.proc_table.lock().unwrap().complete(pid);
+        }
+        self.transcript.lock().unwrap().record_output(&result.terminal_output());
+        result
+    }
+
+    /// Run an upstream pipeline stage and return its stdout as a lossy String (the stdin payload for
+    /// an ask-tail pipeline). A nonzero exit is not fatal — pipes feed whatever the producer emitted.
+    /// The upstream is not recorded as its own transcript line (the whole `… | ask` line is recorded
+    /// by the caller).
+    async fn capture_upstream(&mut self, upstream: &str) -> String {
+        let result = self.execute(upstream).await;
+        String::from_utf8_lossy(&result.stdout).into_owned()
     }
 
     /// Resolve the model id `ask` should target: `--model` (if given) > the ask.toml default > the
@@ -785,6 +882,14 @@ impl Session {
                 if let Some(pid) = pid {
                     self.proc_table.lock().unwrap().complete(pid);
                 }
+                // Under `--json` a truncated loop can't have produced a validated JSON answer, so
+                // honor the exit-6 contract rather than a bare exit 0.
+                if state.json {
+                    state.trace.extend_from_slice(
+                        b"ask: --json: tool-call limit reached before a final JSON answer\n",
+                    );
+                    return LineResult::from_outcome(Vec::new(), state.trace, 6);
+                }
                 return LineResult::from_outcome(Vec::new(), state.trace, 0);
             }
 
@@ -849,6 +954,32 @@ impl Session {
         if let Some(pid) = pid {
             self.proc_table.lock().unwrap().complete(pid);
         }
+
+        // `--json`: enforce the output contract. Valid JSON (after stripping a stray code fence) ⇒
+        // the JSON on stdout, exit 0, trace still on stderr. Otherwise exit 6 with the raw text on
+        // stderr so it isn't lost (README: "raw model response emitted to stderr").
+        if state.json {
+            let candidate = crate::askcmd::strip_json_fence(&final_text);
+            match serde_json::from_str::<serde_json::Value>(candidate) {
+                Ok(_) => {
+                    return LineResult::from_outcome(
+                        candidate.as_bytes().to_vec(),
+                        state.trace,
+                        0,
+                    );
+                }
+                Err(_) => {
+                    let mut stderr = state.trace;
+                    stderr.extend_from_slice(b"ask: --json: model did not return valid JSON\n");
+                    stderr.extend_from_slice(final_text.as_bytes());
+                    if !final_text.ends_with('\n') {
+                        stderr.push(b'\n');
+                    }
+                    return LineResult::from_outcome(Vec::new(), stderr, 6);
+                }
+            }
+        }
+
         LineResult::from_outcome(final_text.into_bytes(), state.trace, 0)
     }
 
@@ -1617,6 +1748,7 @@ impl Session {
         gated_command: String,
         pid: Option<u32>,
         sudo_grant: bool,
+        ask_stdin: Option<String>,
     ) -> LineResult {
         let name = command_name.unwrap_or("command");
         let synopsis = self
@@ -1636,6 +1768,7 @@ impl Session {
             PendingKind::AuthConfirm {
                 command: gated_command,
                 sudo_grant,
+                ask_stdin,
             },
         )
     }
@@ -1706,7 +1839,11 @@ impl Session {
             PendingKind::AuthConfirm {
                 command,
                 sudo_grant,
+                ask_stdin,
             } => {
+                // Restore any pre-captured pipeline stdin so a deferred `cat x | ask` tail sees it
+                // when re-run (consumed by `run_ask` via `next_ask_stdin`).
+                self.next_ask_stdin = ask_stdin;
                 self.resolve_auth_confirm(resolution, &command, sudo_grant, pending.pid)
                     .await
             }
@@ -1765,7 +1902,9 @@ impl Session {
             if String::from_utf8_lossy(stdout).trim() == "all");
 
         if !approved {
-            // "no" or abort → denied (exit 5). Reap the row.
+            // "no" or abort → denied (exit 5). Reap the row. Drop any pre-captured pipeline stdin so
+            // it can't leak into an unrelated later `ask`.
+            self.next_ask_stdin = None;
             if let Some(pid) = pid {
                 self.proc_table.lock().unwrap().complete(pid);
             }
@@ -1876,6 +2015,26 @@ fn strip_sudo_prefix(line: &str) -> String {
         Some(rest) if rest.starts_with(char::is_whitespace) => rest.trim_start().to_string(),
         _ => line.to_string(),
     }
+}
+
+/// Reconstruct a top-level `ask` command line from parsed [`AskArgs`], for deferring an ask-tail
+/// pipeline's confirmation (the deferred path re-runs a line string). Flags come first, then the
+/// single-quoted prompt. The captured stdin travels separately via `next_ask_stdin`, so it is NOT
+/// embedded here. Single quotes in the prompt are escaped bash-style (`'\''`).
+fn ask_reconstruct(args: &crate::askcmd::AskArgs) -> String {
+    let mut line = String::from("ask");
+    if args.fresh {
+        line.push_str(" --fresh");
+    }
+    if args.json {
+        line.push_str(" --json");
+    }
+    if let Some(m) = &args.model {
+        line.push_str(&format!(" --model {m}"));
+    }
+    let escaped = args.prompt.replace('\'', r"'\''");
+    line.push_str(&format!(" '{escaped}'"));
+    line
 }
 
 /// The most tool-calling turns the agentic `ask` loop will drive before giving up. Bounds runaway
@@ -2810,6 +2969,148 @@ mod tests {
                 "fresh should omit the transcript, got: {content}"
             );
             assert_eq!(content, "hi");
+        });
+    }
+
+    /// `ask --json` with a valid-JSON reply: the JSON is on stdout, exit 0, and the model saw the
+    /// JSON-mode directive in its system prompt.
+    #[test]
+    fn ask_json_valid_reply_exits_zero() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+            session.set_ask_provider(Box::new(FakeProvider::reply(
+                r#"{"ok":true}"#,
+                seen.clone(),
+            )));
+
+            let result = session.eval_line(r#"sudo ask --json --fresh "give me json""#).await;
+            assert_eq!(result.exit_code, 0);
+            assert_eq!(String::from_utf8(result.stdout).unwrap(), r#"{"ok":true}"#);
+
+            // The system prompt carried the JSON-mode directive.
+            let turns = seen.lock().unwrap().clone();
+            let system = turns[0].system.clone().unwrap_or_default();
+            assert!(
+                system.contains("single valid JSON value"),
+                "json mode should add the directive, got: {system}"
+            );
+        });
+    }
+
+    /// `ask --json` wrapping its JSON in a Markdown code fence still validates (the fence is stripped).
+    #[test]
+    fn ask_json_strips_code_fence() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            session.set_ask_provider(Box::new(FakeProvider::reply(
+                "```json\n[1,2,3]\n```",
+                std::sync::Arc::new(Mutex::new(Vec::new())),
+            )));
+            let result = session.eval_line(r#"sudo ask --json --fresh "list""#).await;
+            assert_eq!(result.exit_code, 0);
+            assert_eq!(String::from_utf8(result.stdout).unwrap(), "[1,2,3]");
+        });
+    }
+
+    /// `ask --json` with a prose (non-JSON) reply exits 6 with the raw text on stderr and empty
+    /// stdout — the README `--json` contract.
+    #[test]
+    fn ask_json_invalid_reply_exits_six() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            session.set_ask_provider(Box::new(FakeProvider::reply(
+                "sorry, I cannot do that",
+                std::sync::Arc::new(Mutex::new(Vec::new())),
+            )));
+            let result = session.eval_line(r#"sudo ask --json --fresh "give me json""#).await;
+            assert_eq!(result.exit_code, 6);
+            assert!(result.stdout.is_empty(), "no stdout on a --json failure");
+            let stderr = String::from_utf8(result.stderr).unwrap();
+            assert!(stderr.contains("did not return valid JSON"), "stderr: {stderr}");
+            assert!(stderr.contains("sorry, I cannot do that"), "raw text preserved: {stderr}");
+        });
+    }
+
+    /// `echo hi | sudo ask "q"` (Phase B): the upstream runs, its stdout is captured and fed to the
+    /// model as a stdin block. `sudo` on the tail pre-authorizes (no confirmation).
+    #[test]
+    fn ask_pipe_feeds_upstream_stdout_as_stdin() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+            session.set_ask_provider(Box::new(FakeProvider::reply("got it", seen.clone())));
+
+            let result = session
+                .eval_line(r#"echo piped_marker_xyz | sudo ask --fresh "what did I pipe?""#)
+                .await;
+            assert_eq!(result.exit_code, 0);
+            assert_eq!(String::from_utf8(result.stdout).unwrap(), "got it");
+
+            let turns = seen.lock().unwrap().clone();
+            assert_eq!(turns.len(), 1);
+            let content = turns[0].user_content();
+            assert!(
+                content.contains("# Piped input (stdin)"),
+                "stdin block missing, got: {content}"
+            );
+            assert!(
+                content.contains("piped_marker_xyz"),
+                "captured upstream stdout should be in the stdin block, got: {content}"
+            );
+            // --fresh: the prompt is present, but no transcript context header.
+            assert!(content.contains("what did I pipe?"));
+        });
+    }
+
+    /// A bare (non-sudo) ask-tail pipeline surfaces the ask's confirmation, and the captured stdin
+    /// survives the pause: after approval, the model sees the piped bytes.
+    #[test]
+    fn ask_pipe_confirmation_preserves_stdin() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+            session.set_ask_provider(Box::new(FakeProvider::reply("answer", seen.clone())));
+
+            // Bare ask ⇒ pauses for confirmation; the upstream was captured for the pause.
+            let surface = session
+                .eval_line(r#"echo survives_pause_marker | ask --fresh "q""#)
+                .await;
+            assert!(surface.pending_prompt.is_some(), "bare ask-pipe should confirm");
+            assert!(seen.lock().unwrap().is_empty(), "model not called before approval");
+
+            // Approve ⇒ the ask runs with the preserved stdin.
+            let done = session.answer_prompt(Some("yes".into())).await;
+            assert_eq!(done.exit_code, 0);
+            let content = seen.lock().unwrap()[0].user_content();
+            assert!(
+                content.contains("survives_pause_marker"),
+                "stdin should survive the pause, got: {content}"
+            );
+        });
+    }
+
+    /// A denied ask-tail pipeline exits 5 and does NOT leak the captured stdin into a later ask.
+    #[test]
+    fn ask_pipe_denied_exits_five_and_clears_stdin() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+            session.set_ask_provider(Box::new(FakeProvider::reply("later", seen.clone())));
+
+            let surface = session.eval_line(r#"echo leak_marker | ask --fresh "q""#).await;
+            assert!(surface.pending_prompt.is_some());
+            let denied = session.answer_prompt(Some("no".into())).await;
+            assert_eq!(denied.exit_code, 5);
+            assert!(seen.lock().unwrap().is_empty(), "denied ask never calls the model");
+
+            // A subsequent unrelated sudo ask must not carry the earlier pipe's stdin.
+            session.eval_line(r#"sudo ask --fresh "hello""#).await;
+            let content = seen.lock().unwrap()[0].user_content();
+            assert!(
+                !content.contains("leak_marker"),
+                "stale stdin leaked into a later ask, got: {content}"
+            );
         });
     }
 
