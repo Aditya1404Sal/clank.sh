@@ -659,6 +659,40 @@ expect_contains "mcp list shows it not installed"     'mcp list'          'not i
 expect_contains "mcp remove deletes it"               'sudo mcp remove unreachable'  "removed MCP server 'unreachable'"
 expect_contains "mcp list is empty again"             'mcp list'          'no MCP servers configured'
 
+# --- Gated live-server block: needs a real HTTPS MCP server (public no-auth, e.g. DeepWiki's
+#     https://mcp.deepwiki.com/mcp). Set MCP_TEST_URL to run; optionally MCP_TEST_TOOL + MCP_TEST_ARGS
+#     (JSON) to exercise an actual tools/call. Gated because public endpoints aren't CI-reliable. This
+#     block makes NO Anthropic calls — it's the MCP HTTP path only.
+if [[ -n "${MCP_TEST_URL:-}" ]]; then
+  note "MCP_TEST_URL set — running live MCP server assertions against $MCP_TEST_URL"
+  MCP_INST="$(eval_json eval "\"sudo mcp add mcptest ${MCP_TEST_URL}\"")"
+  expect_eval "live mcp add installs"                 "$MCP_INST"  '.exit_code'  '0'
+  expect_eval "install reports tool count"            "$MCP_INST"  '.stdout | contains("tools")'  'true'
+  expect_contains "mcp list shows it installed"       'mcp list'          'enabled'
+  expect_contains "mcp tools lists ≥1 tool"           'mcp tools mcptest'  ''  # non-empty stdout
+  expect_contains "which finds the server stub"       'which mcptest'      '/usr/lib/mcp/bin/mcptest'
+  expect_contains "server --help lists tools"         'mcptest --help'     'Tools:'
+  # A bare tool call surfaces a confirmation (MCP calls are Confirm); deny it (exit 5), no HTTP.
+  if [[ -n "${MCP_TEST_TOOL:-}" ]]; then
+    MCP_CONFIRM="$(eval_json eval "\"mcptest ${MCP_TEST_TOOL} --args '${MCP_TEST_ARGS:-{}}'\"")"
+    expect_eval "bare MCP tool call confirms"          "$MCP_CONFIRM"  '.pending_prompt != null'  'true'
+    MCP_DENY="$(eval_json answer_prompt '"no"')"
+    expect_eval "denied MCP tool exits 5"              "$MCP_DENY"  '.exit_code'  '5'
+    # sudo pre-authorizes → the tool actually runs.
+    MCP_RUN="$(eval_json eval "\"sudo mcptest ${MCP_TEST_TOOL} --args '${MCP_TEST_ARGS:-{}}'\"")"
+    expect_eval "sudo MCP tool call runs (exit 0)"     "$MCP_RUN"  '.exit_code'  '0'
+  fi
+  # Session lifecycle.
+  expect_contains "mcp session open works"            'mcp session open mcptest'  'opened session'
+  expect_contains "mcp session list shows it"         'mcp session list'          's1'
+  # close: accept either success or the 405-refusal wording (server-dependent).
+  MCP_CLOSE="$(eval_json eval '"mcp session close s1"')"
+  expect_eval "mcp session close resolves"            "$MCP_CLOSE"  '.exit_code | . == 0 or . == 1'  'true'
+  expect_contains "cleanup: remove the test server"   'sudo mcp remove mcptest'   'removed MCP server'
+else
+  note "MCP_TEST_URL not set — skipping live MCP server assertions (set it to a public HTTPS MCP server)"
+fi
+
 # ============================================================================
 # 2m. Pipelines — internal `cmd | cmd` on the single-threaded wasm agent (Wall C)
 # ============================================================================

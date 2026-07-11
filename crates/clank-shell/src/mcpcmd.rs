@@ -282,7 +282,9 @@ pub(crate) fn manifests() -> Vec<crate::manifest::Manifest> {
         confirm("remove", "remove an MCP server"),
         confirm("reload", "re-read config and re-install (outbound HTTP)"),
         allow("tools", "list an MCP server's tools"),
-        confirm("session", "manage MCP sessions"),
+        // `session` is Allow at this level (list/info are read-only, open/close are low-risk session
+        // lifecycle). The actual outbound tool CALLS carry Confirm via the per-server manifest.
+        allow("session", "manage MCP sessions"),
     ];
     vec![m]
 }

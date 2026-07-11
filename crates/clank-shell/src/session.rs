@@ -2549,6 +2549,78 @@ mod tests {
         });
     }
 
+    /// `mcp session open/list/info/close` lifecycle over a fake transport.
+    #[test]
+    fn mcp_session_lifecycle() {
+        on_rt(async {
+            let _dirs = set_mcp_dirs();
+            let mut session = Session::new().await.unwrap();
+            // install script (init+initialized+tools/list) then a SECOND init for `session open`.
+            let mut script = mcp_install_script();
+            let mut open_init = mcp_json(serde_json::json!({"jsonrpc":"2.0","id":3,"result":{
+                "protocolVersion":"2025-03-26",
+                "serverInfo":{"name":"demo","version":"1.0"},"capabilities":{"tools":{}}}}));
+            open_init.headers.push(("mcp-session-id".into(), "srv-open".into()));
+            script.push(open_init);
+            script.push(mcp_json(serde_json::json!({}))); // initialized
+            script.push(mcp_json(serde_json::json!({}))); // DELETE close (200)
+            session.set_mcp_http(Box::new(FakeMcpHttp::new(script)));
+            session.eval_line("sudo mcp add demo https://x/mcp").await;
+
+            // No sessions yet.
+            let (list0, _) = session.run_line("mcp session list").await;
+            assert!(String::from_utf8(list0).unwrap().contains("no open MCP sessions"));
+
+            // Open one.
+            let open = session.eval_line("sudo mcp session open demo").await;
+            assert_eq!(open.exit_code, 0, "stderr: {}", String::from_utf8_lossy(&open.stderr));
+            assert!(String::from_utf8(open.stdout).unwrap().contains("s1"));
+
+            let (list1, _) = session.run_line("mcp session list").await;
+            let list1 = String::from_utf8(list1).unwrap();
+            assert!(list1.contains("s1") && list1.contains("srv-open"), "got: {list1}");
+
+            let (info, _) = session.run_line("mcp session info s1").await;
+            assert!(String::from_utf8(info).unwrap().contains("demo"));
+
+            // Close it.
+            let close = session.eval_line("sudo mcp session close s1").await;
+            assert_eq!(close.exit_code, 0);
+            let (list2, _) = session.run_line("mcp session list").await;
+            assert!(String::from_utf8(list2).unwrap().contains("no open MCP sessions"));
+        });
+    }
+
+    /// Closing a session the server refuses (HTTP 405) still removes it locally, with a clear message.
+    #[test]
+    fn mcp_session_close_405_removes_locally() {
+        on_rt(async {
+            let _dirs = set_mcp_dirs();
+            let mut session = Session::new().await.unwrap();
+            let mut script = mcp_install_script();
+            let mut open_init = mcp_json(serde_json::json!({"jsonrpc":"2.0","id":3,"result":{
+                "serverInfo":{"name":"demo","version":"1.0"},"capabilities":{}}}));
+            open_init.headers.push(("mcp-session-id".into(), "srv-open".into()));
+            script.push(open_init);
+            script.push(mcp_json(serde_json::json!({}))); // initialized
+            script.push(crate::mcpclient::HttpResponse { status: 405, headers: vec![], body: vec![] });
+            session.set_mcp_http(Box::new(FakeMcpHttp::new(script)));
+            session.eval_line("sudo mcp add demo https://x/mcp").await;
+            session.eval_line("sudo mcp session open demo").await;
+
+            let close = session.eval_line("sudo mcp session close s1").await;
+            // Message names the 405 refusal; the local session is gone regardless.
+            let combined = format!(
+                "{}{}",
+                String::from_utf8_lossy(&close.stdout),
+                String::from_utf8_lossy(&close.stderr)
+            );
+            assert!(combined.contains("405") || combined.contains("locally"), "got: {combined}");
+            let (list, _) = session.run_line("mcp session list").await;
+            assert!(String::from_utf8(list).unwrap().contains("no open MCP sessions"));
+        });
+    }
+
     /// `mcp watch` is an honest not-supported error in MCP-lite.
     #[test]
     fn mcp_watch_is_not_supported() {
