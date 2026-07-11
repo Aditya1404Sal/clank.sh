@@ -84,6 +84,14 @@ enum AskPauseKind {
     PromptUser,
 }
 
+/// An active `ask repl` session: its isolated transcript and the model it targets. Held on the
+/// `Session` only while the native driver is inside the REPL loop. `:model` mutates `model`;
+/// `:new-session` clears `transcript`.
+struct ReplState {
+    transcript: Transcript,
+    model: String,
+}
+
 /// The carried state of an in-flight `ask` agentic loop, enough to resume it after a pause. Owned data
 /// only (replay-safe).
 struct AskLoopState {
@@ -215,6 +223,11 @@ pub struct Session {
     /// stage (`cat x | ask "…"`). Set by the pipe pre-extraction in `eval_line` (or restored on a
     /// deferred-confirm resume) and `take()`n by `run_ask`. `None` for an ordinary `ask` line.
     next_ask_stdin: Option<String>,
+    /// An active `ask repl` session's isolated transcript + model. `Some` only while the native
+    /// driver is inside a REPL; `run_repl_turn` renders/records against THIS transcript, not the main
+    /// one, giving the REPL its own context window. Never set on the durable agent (REPL is a
+    /// native-terminal feature there).
+    repl: Option<ReplState>,
     /// Installed MCP servers + open sessions. Reconstructed deterministically under Golem replay.
     mcp: crate::mcpstate::McpState,
     /// The injected MCP HTTP transport. Installed by the agent build (a durable `wstd` client);
@@ -243,6 +256,7 @@ impl Session {
                 bg_jobs: Vec::new(),
                 ask_provider: None,
                 next_ask_stdin: None,
+                repl: None,
                 mcp: crate::mcpstate::McpState::default(),
                 mcp_http: None,
                 source: SourceInfo::default(),
@@ -262,6 +276,7 @@ impl Session {
                 bg_jobs: Vec::new(),
                 ask_provider: None,
                 next_ask_stdin: None,
+                repl: None,
                 mcp: crate::mcpstate::McpState::default(),
                 mcp_http: None,
                 source: SourceInfo::default(),
@@ -388,6 +403,16 @@ impl Session {
         if let Some(help) = self.mcp_help_for(line) {
             let result = LineResult::from_outcome(help.into_bytes(), Vec::new(), 0);
             return self.finish_intercepted(pid, result);
+        }
+
+        // `ask repl` reaching `eval_line` is the durable-agent path (the native driver intercepts it
+        // before `eval_line` and runs the interactive loop). An interactive REPL needs a terminal and
+        // a blocking read-loop, which the durable agent can't own (Golem serializes invocations — it
+        // can't park mid-loop waiting for a human). Return an honest pointer to the working forms.
+        if crate::askcmd::classify_repl(line).is_some() {
+            let msg = b"ask repl: interactive REPL is a native-terminal feature; on the durable \
+                        agent, drive a conversation with repeated `ask` calls (each is one turn)\n";
+            return self.finish_intercepted(pid, LineResult::from_outcome(Vec::new(), msg.to_vec(), 2));
         }
 
         // stdin-as-context: `cat x | ask "…"`. The LLM call can't run inside Brush's pipeline (the
@@ -754,6 +779,100 @@ impl Session {
     async fn capture_upstream(&mut self, upstream: &str) -> String {
         let result = self.execute(upstream).await;
         String::from_utf8_lossy(&result.stdout).into_owned()
+    }
+
+    // ---- ask repl (native-only interactive session with its own transcript) --------------------
+
+    /// Start an `ask repl` session: resolve the model, seed the isolated transcript (empty for
+    /// `--fresh`, a copy of the parent for `--inherit`), and stash it on `self.repl`. Returns the
+    /// resolved model id for the prompt banner, or an `Err` message (unknown provider / no provider).
+    /// Native-only — the durable agent returns an honest message from `eval_line` instead.
+    pub fn repl_start(&mut self, args: &crate::askcmd::ReplArgs) -> Result<String, String> {
+        if self.ask_provider.is_none() {
+            return Err("ask repl: no model provider configured\n".to_string());
+        }
+        let (model, _warning) = self.resolve_ask_model(args.model.as_deref())?;
+        let transcript = match args.seed {
+            crate::askcmd::ReplSeed::Fresh => Transcript::new(),
+            crate::askcmd::ReplSeed::Inherit => self.transcript.lock().unwrap().clone(),
+        };
+        self.repl = Some(ReplState { transcript, model });
+        Ok(self.repl.as_ref().unwrap().model.clone())
+    }
+
+    /// The active REPL's model id, for the `[model]>` prompt. `None` if no REPL is active.
+    pub fn repl_model(&self) -> Option<String> {
+        self.repl.as_ref().map(|r| r.model.clone())
+    }
+
+    /// Handle a REPL meta-command (`:model <id>`, `:new-session`, `:exit`). Returns `Some(output)`
+    /// for a handled meta-command (the bool is whether the REPL should exit), or `None` if `line`
+    /// isn't a meta-command (the caller then treats it as a prompt via [`Self::repl_turn`]).
+    pub fn repl_meta(&mut self, line: &str) -> Option<(String, bool)> {
+        let line = line.trim();
+        let Some(repl) = self.repl.as_mut() else {
+            return None;
+        };
+        let mut words = line.split_whitespace();
+        match words.next()? {
+            ":exit" | ":quit" => Some((String::new(), true)),
+            ":new-session" => {
+                repl.transcript = Transcript::new();
+                Some(("(new session)\n".to_string(), false))
+            }
+            ":model" => match words.next() {
+                Some(id) => {
+                    // Accept `anthropic/…` or a bare id; store as given (resolved per-turn).
+                    repl.model = id.strip_prefix("anthropic/").unwrap_or(id).to_string();
+                    Some((format!("model set to {}\n", repl.model), false))
+                }
+                None => Some((format!("current model: {}\n", repl.model), false)),
+            },
+            other if other.starts_with(':') => {
+                Some((format!("unknown REPL command: {other}\n"), false))
+            }
+            _ => None, // not a meta-command — it's a prompt
+        }
+    }
+
+    /// Run one REPL turn: send the isolated transcript + `prompt` to the model, record the exchange
+    /// into the REPL transcript, and return the reply text. Conversational only (no shell tools) —
+    /// the REPL is a chat surface, distinct from agentic `ask`. Requires an active REPL.
+    pub async fn repl_turn(&mut self, prompt: &str) -> String {
+        use crate::askcmd::AskTurn;
+        let Some(repl) = self.repl.as_ref() else {
+            return "ask repl: no active session\n".to_string();
+        };
+        let model = repl.model.clone();
+        let context = String::from_utf8_lossy(&repl.transcript.render()).into_owned();
+
+        let state = AskLoopState {
+            system: crate::askcmd::build_system_prompt_with_mcp(&self.registry, &self.mcp),
+            tools: Vec::new(), // conversational: the REPL doesn't expose shell tools
+            history: vec![AskTurn::User(crate::askcmd::user_content(&context, prompt))],
+            model,
+            trace: Vec::new(),
+            blanket_authorized: false,
+            json: false,
+        };
+        let result = self.drive_ask_loop(state, Vec::new(), None).await;
+        let reply = String::from_utf8_lossy(&result.stdout).into_owned();
+
+        // Record the exchange into the REPL's own transcript so the next turn has context.
+        if let Some(repl) = self.repl.as_mut() {
+            repl.transcript.record_command(&format!("> {prompt}"));
+            repl.transcript.record_output(reply.as_bytes());
+        }
+        reply
+    }
+
+    /// End the REPL session: render its transcript to stdout (so it enters the parent transcript once
+    /// as rendered output, per the README) and clear `self.repl`. Returns the rendered session bytes.
+    pub fn repl_end(&mut self) -> Vec<u8> {
+        match self.repl.take() {
+            Some(repl) => repl.transcript.render(),
+            None => Vec::new(),
+        }
     }
 
     /// Resolve the model id `ask` should target: `--model` (if given) > the ask.toml default > the
@@ -3111,6 +3230,104 @@ mod tests {
                 !content.contains("leak_marker"),
                 "stale stdin leaked into a later ask, got: {content}"
             );
+        });
+    }
+
+    /// `ask repl` on the durable-agent path (via `eval_line`) returns an honest not-here message
+    /// (exit 2), never trying to run a blocking interactive loop.
+    #[test]
+    fn ask_repl_via_eval_line_is_honest_message() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let result = session.eval_line("ask repl").await;
+            assert_eq!(result.exit_code, 2);
+            let stderr = String::from_utf8(result.stderr).unwrap();
+            assert!(stderr.contains("native-terminal feature"), "stderr: {stderr}");
+            assert!(result.pending_prompt.is_none());
+        });
+    }
+
+    /// A native REPL turn runs against the ISOLATED transcript: the model sees the REPL's own history,
+    /// the main session transcript is untouched, and the exchange is recorded into the REPL transcript.
+    #[test]
+    fn repl_turn_uses_isolated_transcript() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+            session.set_ask_provider(Box::new(FakeProvider::scripted(
+                vec![
+                    crate::askcmd::AskResponse::text("first reply"),
+                    crate::askcmd::AskResponse::text("second reply"),
+                ],
+                seen.clone(),
+            )));
+
+            // Put a marker in the MAIN transcript; the REPL (fresh) must NOT see it.
+            session.run_line("echo main_transcript_marker").await;
+
+            let args = crate::askcmd::ReplArgs {
+                model: None,
+                seed: crate::askcmd::ReplSeed::Fresh,
+            };
+            session.repl_start(&args).unwrap();
+
+            let r1 = session.repl_turn("hello there").await;
+            assert_eq!(r1, "first reply");
+            // The first turn saw a fresh context (no main-transcript marker).
+            let content1 = seen.lock().unwrap()[0].user_content();
+            assert!(!content1.contains("main_transcript_marker"), "repl leaked main: {content1}");
+            assert!(content1.contains("hello there"));
+
+            // The second turn sees the FIRST exchange (isolated transcript grew).
+            let _r2 = session.repl_turn("and again").await;
+            let content2 = seen.lock().unwrap()[1].user_content();
+            assert!(content2.contains("first reply"), "repl turn2 missing history: {content2}");
+            assert!(content2.contains("hello there"), "repl turn2 missing prior prompt");
+
+            // Exiting renders the REPL session; the main transcript still has only its own marker.
+            let rendered = String::from_utf8(session.repl_end()).unwrap();
+            assert!(rendered.contains("first reply") && rendered.contains("and again"));
+            let main = String::from_utf8(session.eval_line("context show").await.stdout).unwrap();
+            assert!(main.contains("main_transcript_marker"));
+            assert!(!main.contains("first reply"), "REPL content leaked into main mid-session");
+        });
+    }
+
+    /// `:model` switches the REPL's model; `:new-session` clears its transcript; `:exit` signals exit.
+    #[test]
+    fn repl_meta_commands() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            session.set_ask_provider(Box::new(FakeProvider::reply(
+                "ok",
+                std::sync::Arc::new(Mutex::new(Vec::new())),
+            )));
+            let args = crate::askcmd::ReplArgs {
+                model: None,
+                seed: crate::askcmd::ReplSeed::Fresh,
+            };
+            session.repl_start(&args).unwrap();
+            assert_eq!(session.repl_model().as_deref(), Some(crate::askcmd::DEFAULT_MODEL));
+
+            // :model switches (anthropic/ prefix stripped).
+            let (out, exit) = session.repl_meta(":model anthropic/claude-sonnet-5").unwrap();
+            assert!(!exit);
+            assert!(out.contains("claude-sonnet-5"));
+            assert_eq!(session.repl_model().as_deref(), Some("claude-sonnet-5"));
+
+            // A prompt grows the transcript; :new-session clears it.
+            session.repl_turn("hi").await;
+            let (_out, _exit) = session.repl_meta(":new-session").unwrap();
+            // After clearing, the next turn sees no prior history.
+            let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+            session.set_ask_provider(Box::new(FakeProvider::reply("ok2", seen.clone())));
+            session.repl_turn("fresh start").await;
+            let content = seen.lock().unwrap()[0].user_content();
+            assert!(!content.contains("hi"), "new-session should have cleared history: {content}");
+
+            // :exit signals exit; a non-meta line returns None.
+            assert_eq!(session.repl_meta(":exit").unwrap().1, true);
+            assert!(session.repl_meta("just a prompt").is_none());
         });
     }
 

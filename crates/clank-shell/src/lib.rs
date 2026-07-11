@@ -84,6 +84,7 @@ pub const DEFAULT_TOKEN_BUDGET: usize = 24_000;
 /// and live history stays explicit (rather than history silently vanishing). Today the marker
 /// just records how many entries were dropped; when the AI layer lands it becomes the slot for a
 /// generated summary of that dropped span.
+#[derive(Clone)]
 pub struct Transcript {
     entries: Vec<Entry>,
     token_budget: usize,
@@ -98,6 +99,7 @@ impl Default for Transcript {
     }
 }
 
+#[derive(Clone)]
 enum Entry {
     /// A command line and the output it produced.
     Command { command: String, output: Vec<u8> },

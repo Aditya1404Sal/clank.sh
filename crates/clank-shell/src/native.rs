@@ -22,6 +22,15 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let line_str = String::from_utf8_lossy(trim_eol(line.as_bytes())).into_owned();
+
+        // `ask repl` is a native-terminal feature: run the interactive REPL loop inline (the native
+        // driver owns the terminal, so it can block on human input between turns — the durable agent
+        // cannot, and returns an honest message from `eval_line`). See `Session::repl_*`.
+        if let Some(args) = crate::askcmd::classify_repl(&line_str) {
+            run_repl(&mut session, &args).await?;
+            continue;
+        }
+
         let result = session.eval_line(&line_str).await;
         write_stdout(&result.terminal_output())?;
         let flow = result.flow;
@@ -47,6 +56,64 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    Ok(())
+}
+
+/// Run an interactive `ask repl` session: an AI conversation with its OWN isolated transcript.
+/// Prompts `[<model>]> `; each line is either a meta-command (`:model`/`:new-session`/`:exit`) or a
+/// prompt sent to the model. On exit (`:exit`, `:quit`, or Ctrl-D), the session content is printed
+/// to stdout so it enters the parent transcript once as rendered output (README). The parent shell's
+/// transcript is untouched during the REPL — only the isolated one grows.
+async fn run_repl(
+    session: &mut Session,
+    args: &crate::askcmd::ReplArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let model = match session.repl_start(args) {
+        Ok(m) => m,
+        Err(msg) => {
+            write_stdout(msg.as_bytes())?;
+            return Ok(());
+        }
+    };
+    write_stdout(format!("ask repl — model {model}. Type :exit to leave.\n").as_bytes())?;
+
+    let mut line = String::new();
+    loop {
+        // The prompt shows the CURRENT model (it can change via :model).
+        let prompt_model = session.repl_model().unwrap_or_default();
+        write_stdout(format!("[{prompt_model}]> ").as_bytes())?;
+
+        line.clear();
+        if io::stdin().read_line(&mut line)? == 0 {
+            write_stdout(b"\n")?; // Ctrl-D: leave the REPL cleanly.
+            break;
+        }
+        let input = String::from_utf8_lossy(trim_eol(line.as_bytes())).into_owned();
+        if input.trim().is_empty() {
+            continue;
+        }
+
+        // Meta-command? (`:model`, `:new-session`, `:exit`, …)
+        if let Some((output, should_exit)) = session.repl_meta(&input) {
+            write_stdout(output.as_bytes())?;
+            if should_exit {
+                break;
+            }
+            continue;
+        }
+
+        // Otherwise it's a prompt: one model turn against the isolated transcript.
+        let reply = session.repl_turn(&input).await;
+        write_stdout(reply.as_bytes())?;
+        if !reply.ends_with('\n') {
+            write_stdout(b"\n")?;
+        }
+    }
+
+    // On exit, emit the session content to stdout (enters the parent transcript once, as rendered
+    // output) and drop the REPL state.
+    let rendered = session.repl_end();
+    write_stdout(&rendered)?;
     Ok(())
 }
 

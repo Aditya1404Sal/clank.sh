@@ -566,6 +566,11 @@ expect_contains "ask --help documents piped stdin"    'ask --help'        'Piped
 # No API key needed — the stub fires before any model call (it can't run under Brush's nested runtime).
 ASK_SUBST="$(eval_json eval '"echo $(ask \"q\")"')"
 expect_eval "ask in \$() gives the honest pointer"    "$ASK_SUBST"  '.stderr | contains("LAST pipeline stage")'  'true'
+# `ask repl` on the durable agent is an honest not-here message (interactive REPL is native-only).
+# No API key needed — the message returns before any model call.
+ASK_REPL="$(eval_json eval '"ask repl"')"
+expect_eval "ask repl on the agent is honest"         "$ASK_REPL"  '.stderr | contains("native-terminal feature")'  'true'
+expect_eval "ask repl exits 2 on the agent"           "$ASK_REPL"  '.exit_code'  '2'
 # The live system prompt is inspectable and reflects the command surface + the shell tool (A2).
 expect_contains "/proc/clank/system-prompt describes the shell tool" 'cat /proc/clank/system-prompt' '`shell`'
 expect_contains "/proc/clank/system-prompt lists the command surface" 'cat /proc/clank/system-prompt' '[confirm]'

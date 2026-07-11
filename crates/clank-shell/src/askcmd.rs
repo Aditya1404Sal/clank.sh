@@ -345,6 +345,53 @@ pub fn classify(line: &str) -> Option<AskArgs> {
     })
 }
 
+/// How an `ask repl` session seeds its isolated transcript on start.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplSeed {
+    /// `--fresh`: empty transcript (the model sees only what's typed in the REPL).
+    Fresh,
+    /// `--inherit`: the full parent transcript is copied in as the REPL's starting context.
+    Inherit,
+}
+
+/// A parsed `ask repl` invocation: an interactive AI session with its OWN isolated transcript.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplArgs {
+    /// The model id from `--model <id>`, or `None` for the resolved default.
+    pub model: Option<String>,
+    /// How the REPL seeds its transcript on start.
+    pub seed: ReplSeed,
+}
+
+/// If `line` is `ask repl [--fresh|--inherit] [--model <id>]`, parse it. `None` otherwise (including
+/// a plain `ask …` — that's [`classify`]). The default seed is `Fresh` (v1: summary-injection, the
+/// README default, is deferred until transcript summarization lands — see the plan).
+pub fn classify_repl(line: &str) -> Option<ReplArgs> {
+    let words = leading_words(line)?;
+    let mut iter = words.iter();
+    if iter.next()?.as_str() != "ask" {
+        return None;
+    }
+    if iter.next()?.as_str() != "repl" {
+        return None;
+    }
+    let mut model = None;
+    let mut seed = ReplSeed::Fresh;
+    while let Some(w) = iter.next() {
+        match w.as_str() {
+            "--fresh" | "--no-transcript" => seed = ReplSeed::Fresh,
+            "--inherit" => seed = ReplSeed::Inherit,
+            "--model" => {
+                if let Some(id) = iter.next() {
+                    model = Some(id.clone());
+                }
+            }
+            _ => {} // stray words after `repl` are ignored (no prompt on the repl start line)
+        }
+    }
+    Some(ReplArgs { model, seed })
+}
+
 /// Build the first user message body: the transcript window (if any) as context, then the prompt.
 /// Shared by the `Session` loop (which constructs the initial [`AskTurn::User`]); kept here so the
 /// transcript-as-context shaping lives beside the rest of the `ask` seam.
@@ -553,6 +600,31 @@ mod tests {
         assert_eq!(strip_json_fence("```\n[1,2]\n```"), "[1,2]");
         // An opening fence with no closing fence falls back to the original trimmed text.
         assert_eq!(strip_json_fence("```json\n{\"a\":1}"), "```json\n{\"a\":1}");
+    }
+
+    #[test]
+    fn classify_repl_detects_and_parses() {
+        let r = classify_repl("ask repl").unwrap();
+        assert_eq!(r.seed, ReplSeed::Fresh); // default
+        assert_eq!(r.model, None);
+
+        let r = classify_repl("ask repl --inherit --model claude-sonnet-5").unwrap();
+        assert_eq!(r.seed, ReplSeed::Inherit);
+        assert_eq!(r.model.as_deref(), Some("claude-sonnet-5"));
+
+        let r = classify_repl("ask repl --fresh").unwrap();
+        assert_eq!(r.seed, ReplSeed::Fresh);
+    }
+
+    #[test]
+    fn classify_repl_rejects_non_repl() {
+        // Plain ask is not a repl.
+        assert!(classify_repl(r#"ask "what""#).is_none());
+        // `repl` as a prompt word (not the subcommand) — only `ask repl` as the leading two words.
+        assert!(classify_repl("echo ask repl").is_none());
+        assert!(classify_repl("").is_none());
+        // But plain `ask repl …` IS a repl, and a plain ask with a "repl"-containing prompt is not.
+        assert!(classify_repl(r#"ask "tell me about repl loops""#).is_none());
     }
 
     #[test]
