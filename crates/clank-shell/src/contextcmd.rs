@@ -29,14 +29,19 @@ impl SimpleCommand for Context {
     ) -> Result<String, Error> {
         match content_type {
             ContentType::ShortDescription => {
-                Ok(format!("{name} - show, clear, or budget the session transcript\n"))
+                Ok(format!("{name} - manage the session transcript (show/clear/budget/trim/summarize)\n"))
             }
-            ContentType::ShortUsage => Ok(format!("{name}: {name} [show|clear|budget [n]]\n")),
+            ContentType::ShortUsage => {
+                Ok(format!("{name}: {name} [show|clear|budget [n]|trim <n>|summarize]\n"))
+            }
             ContentType::DetailedHelp => Ok(format!(
                 "{name} - manage the session transcript as a first-class value\n\n\
                  context show — print the session transcript\n\
                  context clear — discard the session transcript\n\
-                 context budget [n] — show or set the transcript token budget\n"
+                 context budget [n] — show or set the transcript token budget\n\
+                 context trim <n> — drop the oldest n transcript entries\n\
+                 context summarize — print an AI summary of the transcript (needs the model; \
+                 top-level only, confirms unless run with sudo)\n"
             )),
             ContentType::ManPage => brush_core::error::unimp("man page not yet implemented"),
         }

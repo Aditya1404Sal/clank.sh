@@ -30,6 +30,14 @@ pub const CORE_SYSTEM_PROMPT: &str =
     "You are clank, an AI assistant embedded in a Unix-like shell. The user's shell transcript \
      (commands they ran and the output) is provided as context. Answer their question concisely.";
 
+/// The system prompt for `context summarize`: a narrow, tool-less summarization instruction. Distinct
+/// from [`build_system_prompt`] (no command surface — summarize never calls tools). The transcript is
+/// passed as the single user turn's content.
+pub const SUMMARIZE_SYSTEM_PROMPT: &str =
+    "You are summarizing a shell session transcript. Produce a concise plain-prose summary of what the \
+     user did, the key command outputs, and the current state of the session. No preamble, no \
+     bullet-point boilerplate, no Markdown headers — just the summary.";
+
 /// The name of the generic shell tool the model calls to run a command line.
 pub const SHELL_TOOL: &str = "shell";
 

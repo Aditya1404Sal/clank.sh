@@ -372,6 +372,43 @@ impl Session {
             return self.finish_intercepted(pid, result);
         }
 
+        // `context summarize` is the ONE context subcommand that needs the model (an outbound LLM
+        // call), so it can't be served by the sync `dispatch_context`/`apply_context` engine — it
+        // routes to the async Session layer like `ask`. Detected here (a top-level `context
+        // summarize` with no shell operators, and any leading `sudo`), it goes through the authz gate
+        // as Confirm (outbound HTTP; `sudo context summarize` pre-authorizes), then
+        // `run_context_summarize`. A nested `$(context summarize)`/pipe stays with Brush and hits the
+        // honest error in `apply_context`. Its output is inspection-only — NOT recorded back.
+        if is_context_summarize(line) {
+            let elevated = authz::leading_command(line).1;
+            match authz::decide(
+                crate::manifest::AuthorizationPolicy::Confirm,
+                elevated,
+                self.authz.allow_all,
+            ) {
+                Decision::Allow => {
+                    // Inspection output — reap the row but do NOT record it back (like `context show`).
+                    let result = self.run_context_summarize().await;
+                    if let Some(pid) = pid {
+                        self.proc_table.lock().unwrap().complete(pid);
+                    }
+                    return result;
+                }
+                Decision::Deny => {
+                    return self.finish_intercepted(pid, LineResult::denied());
+                }
+                Decision::Confirm { sudo_grant } => {
+                    return self.surface_auth_confirm(
+                        Some("context"),
+                        "context summarize".to_string(),
+                        pid,
+                        sudo_grant,
+                        None,
+                    );
+                }
+            }
+        }
+
         // `context show` output is intentionally not recorded back into the transcript.
         if let Some(bytes) = dispatch_context(&mut self.transcript.lock().unwrap(), line) {
             if let Some(pid) = pid {
@@ -470,7 +507,12 @@ impl Session {
         pid: Option<u32>,
         blanket_authorized: bool,
     ) -> LineResult {
-        let result = if let Some(parsed) = crate::killcmd::classify(line) {
+        let result = if is_context_summarize(line) {
+            // Reached here only on a deferred-confirm re-run (top-level `context summarize` is
+            // intercepted in `eval_line`). Route to the async summarizer; the caller
+            // (`resolve_auth_confirm`) skips recording its inspection output.
+            self.run_context_summarize().await
+        } else if let Some(parsed) = crate::killcmd::classify(line) {
             // `kill` is Session-owned (it mutates the job table + proc table + pending state) and
             // MUST be tick-free: driving the runtime here could first-poll another parked
             // background job and wedge the invocation on its synchronous body.
@@ -873,6 +915,56 @@ impl Session {
             Some(repl) => repl.transcript.render(),
             None => Vec::new(),
         }
+    }
+
+    // ---- context summarize (LLM one-shot; inspection only, never mutates the transcript) ---------
+
+    /// `context summarize`: send the rendered transcript to the model and print an AI summary on
+    /// stdout. A single tool-less provider `turn` (the [`Self::repl_turn`] shape, not the agentic
+    /// `drive_ask_loop`). **Inspection only** — it does NOT mutate the transcript, and the caller
+    /// must NOT record its output back (matching `context show`). Runs at the Session async layer
+    /// (like `ask`), so it's only reachable from a top-level `context summarize` line — a nested one
+    /// (`$(...)`/pipe) hits the honest error in `apply_context`.
+    async fn run_context_summarize(&mut self) -> LineResult {
+        use crate::askcmd::AskTurn;
+
+        // Render before awaiting so the transcript lock is never held across the model call.
+        let rendered = String::from_utf8_lossy(&self.transcript.lock().unwrap().render()).into_owned();
+        if rendered.trim().is_empty() {
+            return LineResult::from_outcome(b"(transcript is empty)\n".to_vec(), Vec::new(), 0);
+        }
+
+        let (model, _warning) = match self.resolve_ask_model(None) {
+            Ok(pair) => pair,
+            Err(msg) => return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 2),
+        };
+
+        let Some(provider) = self.ask_provider.take() else {
+            return LineResult::from_outcome(
+                Vec::new(),
+                b"context summarize: no model provider configured (available on the Golem agent)\n"
+                    .to_vec(),
+                4,
+            );
+        };
+        let resp = provider
+            .turn(
+                Some(crate::askcmd::SUMMARIZE_SYSTEM_PROMPT),
+                &[AskTurn::User(rendered)],
+                &[],
+                &model,
+            )
+            .await;
+        self.ask_provider = Some(provider); // restore before returning
+
+        if let Some(err) = resp.error {
+            return LineResult::from_outcome(Vec::new(), err.into_bytes(), 4);
+        }
+        let mut text = resp.text.into_bytes();
+        if !text.ends_with(b"\n") {
+            text.push(b'\n');
+        }
+        LineResult::from_outcome(text, Vec::new(), 0)
     }
 
     /// Resolve the model id `ask` should target: `--model` (if given) > the ask.toml default > the
@@ -2042,7 +2134,11 @@ impl Session {
         // grant (now on `self.authz.allow_all`) is separately honored inside the tool executor.
         let blanket = self.authz.allow_all;
         let result = self.run_command(command, pid, blanket).await;
-        self.transcript.lock().unwrap().record_output(&result.terminal_output());
+        // `context summarize` is inspection output — never recorded back (like `context show`). Every
+        // other gated command records normally.
+        if !is_context_summarize(command) {
+            self.transcript.lock().unwrap().record_output(&result.terminal_output());
+        }
         result
     }
 
@@ -2134,6 +2230,20 @@ fn strip_sudo_prefix(line: &str) -> String {
         Some(rest) if rest.starts_with(char::is_whitespace) => rest.trim_start().to_string(),
         _ => line.to_string(),
     }
+}
+
+/// Whether `line` is a top-level `context summarize` (optionally `sudo`-prefixed) — the one context
+/// subcommand that needs the async LLM layer. False for any line with shell operators (`|&;<>` `$`),
+/// so `$(context summarize)` / `context summarize | …` fall through to Brush and hit the honest error
+/// in `apply_context` (the LLM can't run in Brush's nested runtime — the "Wall C" wall). Matches the
+/// operator-bail in [`crate::dispatch_context`].
+fn is_context_summarize(line: &str) -> bool {
+    if line.chars().any(|c| "|&;<>`$".contains(c)) {
+        return false;
+    }
+    let effective = strip_sudo_prefix(line);
+    let mut words = effective.split_whitespace();
+    words.next() == Some("context") && words.next() == Some("summarize") && words.next().is_none()
 }
 
 /// Reconstruct a top-level `ask` command line from parsed [`AskArgs`], for deferring an ask-tail
@@ -3230,6 +3340,114 @@ mod tests {
                 !content.contains("leak_marker"),
                 "stale stdin leaked into a later ask, got: {content}"
             );
+        });
+    }
+
+    /// `sudo context summarize` runs the LLM (no pause), prints the summary, and does NOT mutate or
+    /// re-record the transcript (inspection only, like `context show`).
+    #[test]
+    fn context_summarize_returns_summary_without_mutating() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+            session.set_ask_provider(Box::new(FakeProvider::reply(
+                "You ran two echo commands.",
+                seen.clone(),
+            )));
+            session.run_line("echo original_marker_one").await;
+            session.run_line("echo original_marker_two").await;
+
+            let result = session.eval_line("sudo context summarize").await;
+            assert_eq!(result.exit_code, 0);
+            assert_eq!(
+                String::from_utf8(result.stdout).unwrap(),
+                "You ran two echo commands.\n"
+            );
+            assert!(result.pending_prompt.is_none(), "sudo must not pause");
+            // The provider saw the transcript (the two echoes) as its user content.
+            let content = seen.lock().unwrap()[0].user_content();
+            assert!(content.contains("original_marker_one") && content.contains("original_marker_two"));
+
+            // The transcript is UNCHANGED: both echoes still there, the summary is NOT recorded.
+            let shown = String::from_utf8(session.eval_line("context show").await.stdout).unwrap();
+            assert!(shown.contains("original_marker_one") && shown.contains("original_marker_two"));
+            assert!(!shown.contains("You ran two echo commands"), "summary must not be recorded");
+        });
+    }
+
+    /// A bare (non-sudo) `context summarize` surfaces a Confirm pause (outbound LLM HTTP); deny → exit
+    /// 5, approve → runs.
+    #[test]
+    fn context_summarize_confirms_then_runs() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+            session.set_ask_provider(Box::new(FakeProvider::reply("a summary", seen.clone())));
+            session.run_line("echo something").await;
+
+            // Bare summarize pauses.
+            let surface = session.eval_line("context summarize").await;
+            assert!(surface.pending_prompt.is_some(), "bare summarize should confirm");
+            assert!(seen.lock().unwrap().is_empty(), "model not called before approval");
+
+            // Approve ⇒ runs.
+            let done = session.answer_prompt(Some("yes".into())).await;
+            assert_eq!(done.exit_code, 0);
+            assert_eq!(String::from_utf8(done.stdout).unwrap(), "a summary\n");
+            // The summary is still not recorded after the deferred run.
+            let shown = String::from_utf8(session.eval_line("context show").await.stdout).unwrap();
+            assert!(!shown.contains("a summary"), "deferred summary must not be recorded");
+        });
+    }
+
+    /// A denied `context summarize` exits 5 and never calls the model.
+    #[test]
+    fn context_summarize_denied_exits_five() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+            session.set_ask_provider(Box::new(FakeProvider::reply("nope", seen.clone())));
+            session.run_line("echo x").await;
+            let surface = session.eval_line("context summarize").await;
+            assert!(surface.pending_prompt.is_some());
+            let denied = session.answer_prompt(Some("no".into())).await;
+            assert_eq!(denied.exit_code, 5);
+            assert!(seen.lock().unwrap().is_empty(), "denied summarize never calls the model");
+        });
+    }
+
+    /// `context summarize` with no provider (native) degrades to a clean exit-4 error.
+    #[test]
+    fn context_summarize_without_provider_errors() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            session.run_line("echo x").await;
+            let result = session.eval_line("sudo context summarize").await;
+            assert_eq!(result.exit_code, 4);
+            assert!(String::from_utf8(result.stderr).unwrap().contains("no model provider"));
+        });
+    }
+
+    /// `context summarize` inside `$(...)` stays with Brush and hits the honest error (it can't run
+    /// the LLM in the nested runtime).
+    #[test]
+    fn context_summarize_in_substitution_is_honest() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            session.set_ask_provider(Box::new(FakeProvider::reply(
+                "should not run",
+                std::sync::Arc::new(Mutex::new(Vec::new())),
+            )));
+            session.run_line("echo x").await;
+            let result = session.eval_line("echo $(context summarize)").await;
+            // The nested summarize errors honestly; the outer echo still exits 0 with the error text
+            // captured (Brush substitutes the stderr-less builtin output).
+            let combined = format!(
+                "{}{}",
+                String::from_utf8_lossy(&result.stdout),
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(combined.contains("needs the model"), "combined: {combined}");
         });
     }
 

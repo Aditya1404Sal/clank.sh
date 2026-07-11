@@ -58,7 +58,7 @@ pub mod native;
 /// The interactive prompt written before each line is read.
 pub const PROMPT: &[u8] = b"clank$ ";
 
-const HELP: &[u8] = b"clank.sh builtins:\n  echo [args...]     write arguments to stdout\n  help               show this listing\n  context show       print the session transcript\n  context clear      discard the session transcript\n  context budget [n] show or set the transcript token budget\n  exit               leave the shell\n";
+const HELP: &[u8] = b"clank.sh builtins:\n  echo [args...]     write arguments to stdout\n  help               show this listing\n  context show       print the session transcript\n  context clear      discard the session transcript\n  context budget [n] show or set the transcript token budget\n  context trim <n>   drop the oldest n transcript entries\n  context summarize  print an AI summary of the transcript (top-level only)\n  exit               leave the shell\n";
 
 /// What the loop should do after evaluating a line.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -223,6 +223,31 @@ impl Transcript {
     pub fn clear(&mut self) {
         self.entries.clear();
     }
+
+    /// Drop the oldest `n` `Command` entries, folding each into the leading [`Entry::Elided`] marker
+    /// (the same eviction shape as [`enforce_budget`](Self::enforce_budget), but count-driven rather
+    /// than budget-driven). Never drops the marker itself, and never drops the last (current) entry —
+    /// so a live session always keeps at least its most recent command. Returns how many entries were
+    /// actually dropped (may be `< n` if the window is short). `context trim <n>`.
+    pub fn trim(&mut self, n: usize) -> usize {
+        let mut dropped = 0;
+        for _ in 0..n {
+            let has_marker = matches!(self.entries.first(), Some(Entry::Elided { .. }));
+            let oldest_cmd = if has_marker { 1 } else { 0 };
+            // Stop if there's nothing left to drop, or dropping would remove the current entry.
+            if oldest_cmd >= self.entries.len() || oldest_cmd == self.entries.len() - 1 {
+                break;
+            }
+            self.entries.remove(oldest_cmd);
+            if let Some(Entry::Elided { count }) = self.entries.first_mut() {
+                *count += 1;
+            } else {
+                self.entries.insert(0, Entry::Elided { count: 1 });
+            }
+            dropped += 1;
+        }
+        dropped
+    }
 }
 
 /// Handle the clank-specific `context` builtin against the transcript. Returns
@@ -271,6 +296,25 @@ pub(crate) fn apply_context<'a>(
                 Err(_) => format!("context: budget: not a number: {arg}\n").into_bytes(),
             },
         },
+        // `context trim <n>` — drop the oldest `n` entries (pure/sync; no LLM). Composable everywhere.
+        Some("trim") => match args.next() {
+            None => b"context: trim: expects a count\n".to_vec(),
+            Some(arg) => match arg.parse::<usize>() {
+                Ok(n) => {
+                    transcript.trim(n);
+                    Vec::new()
+                }
+                Err(_) => format!("context: trim: not a number: {arg}\n").into_bytes(),
+            },
+        },
+        // `context summarize` needs the model (an outbound LLM call), which can only run at the
+        // Session async layer. A top-level `context summarize` is intercepted BEFORE this engine
+        // (see `Session::eval_line`); reaching here means it's inside `$(...)`, a pipe, `xargs`, or
+        // `eval` — Brush's nested runtime, where the LLM call can't run (the "Wall C" wall). Give the
+        // honest pointer rather than "unknown subcommand".
+        Some("summarize") => b"context summarize: needs the model; run it as a top-level command, \
+                               not inside $(...), a pipe, xargs, or eval\n"
+            .to_vec(),
         Some(other) => format!("context: unknown subcommand: {other}\n").into_bytes(),
     }
 }
@@ -547,6 +591,88 @@ mod tests {
         // Non-numeric → error message.
         let err = dispatch_context(&mut t, "context budget nope").unwrap();
         assert!(String::from_utf8(err).unwrap().contains("not a number"));
+    }
+
+    #[test]
+    fn trim_drops_oldest_and_folds_into_marker() {
+        let mut t = Transcript::with_budget(10_000); // big budget: no auto-eviction
+        for i in 0..4 {
+            record(&mut t, &format!("cmd{i}"), b"out");
+        }
+        let dropped = t.trim(2);
+        assert_eq!(dropped, 2);
+        let rendered = String::from_utf8(t.render()).unwrap();
+        assert!(rendered.starts_with("[2 earlier entries dropped]\n"));
+        assert!(!rendered.contains("clank$ cmd0") && !rendered.contains("clank$ cmd1"));
+        assert!(rendered.contains("clank$ cmd2") && rendered.contains("clank$ cmd3"));
+    }
+
+    #[test]
+    fn trim_more_than_present_keeps_the_last_entry() {
+        let mut t = Transcript::with_budget(10_000);
+        for i in 0..3 {
+            record(&mut t, &format!("cmd{i}"), b"out");
+        }
+        // Ask to trim 10 from a 3-entry window: drops all but the last (2 dropped).
+        let dropped = t.trim(10);
+        assert_eq!(dropped, 2);
+        let rendered = String::from_utf8(t.render()).unwrap();
+        assert!(rendered.contains("clank$ cmd2"), "the current entry must survive");
+        assert!(rendered.starts_with("[2 earlier entries dropped]\n"));
+    }
+
+    #[test]
+    fn trim_zero_and_empty_are_noops() {
+        let mut t = Transcript::with_budget(10_000);
+        record(&mut t, "only", b"out");
+        assert_eq!(t.trim(0), 0);
+        assert!(String::from_utf8(t.render()).unwrap().contains("clank$ only"));
+        let mut empty = Transcript::new();
+        assert_eq!(empty.trim(5), 0);
+        assert!(empty.render().is_empty());
+    }
+
+    #[test]
+    fn trim_folds_into_an_existing_marker() {
+        // A window that already has a leading Elided marker (from budget eviction) accumulates the
+        // trim drops into the SAME marker rather than inserting a second one.
+        let mut t = Transcript::with_budget(2);
+        for i in 0..5 {
+            record(&mut t, &format!("cmd{i}"), b"xxxx"); // forces eviction → a marker exists
+        }
+        assert_eq!(String::from_utf8(t.render()).unwrap().matches("dropped").count(), 1);
+        t.trim(1);
+        // Still exactly one marker line.
+        assert_eq!(String::from_utf8(t.render()).unwrap().matches("dropped").count(), 1);
+    }
+
+    #[test]
+    fn context_trim_via_dispatch() {
+        let mut t = Transcript::with_budget(10_000);
+        for i in 0..4 {
+            record(&mut t, &format!("cmd{i}"), b"out");
+        }
+        // `context trim 2` → empty output, window mutated.
+        assert!(dispatch_context(&mut t, "context trim 2").unwrap().is_empty());
+        assert!(!String::from_utf8(t.render()).unwrap().contains("clank$ cmd0"));
+        // Missing / non-numeric args error honestly.
+        assert!(String::from_utf8(dispatch_context(&mut t, "context trim").unwrap())
+            .unwrap()
+            .contains("expects a count"));
+        assert!(String::from_utf8(dispatch_context(&mut t, "context trim nope").unwrap())
+            .unwrap()
+            .contains("not a number"));
+    }
+
+    #[test]
+    fn context_summarize_in_nested_context_is_honest() {
+        // Reaching `apply_context` with `summarize` means a nested context (top-level is intercepted
+        // earlier by the Session). It must give the honest pointer, not run or "unknown subcommand".
+        let mut t = Transcript::new();
+        record(&mut t, "echo hi", b"hi\n");
+        let out = String::from_utf8(apply_context(&mut t, ["summarize"].into_iter())).unwrap();
+        assert!(out.contains("needs the model"));
+        assert!(out.contains("top-level"));
     }
 
     #[test]

@@ -340,6 +340,21 @@ expect_contains "window keeps the newest entry"  'context show'  'echo delta'
 # restore a roomy budget so it doesn't interfere with anything after
 run_line 'context budget 24000' >/dev/null
 
+# context trim <n> — drop the oldest n entries (pure/sync, no LLM). Fresh window, trim, assert the
+# oldest is gone and the newest survives.
+run_line 'context clear' >/dev/null
+run_line 'echo trim_alpha' >/dev/null
+run_line 'echo trim_bravo' >/dev/null
+run_line 'echo trim_charlie' >/dev/null
+run_line 'context trim 2' >/dev/null
+# Assert the drop marker shows exactly 2 dropped, and the newest survives. (We avoid `context show
+# | grep trim_alpha` — the pipeline's own command line contains "trim_alpha", which `context show`
+# would render back, matching itself. So assert on the marker count + the surviving entry instead.)
+expect_contains "trim drops exactly 2 entries"   'context show'  '[2 earlier entries dropped]'
+expect_contains "trim keeps the newest entry"    'context show'  'trim_charlie'
+expect_contains "context trim without a count errors" 'context trim'  'expects a count'
+run_line 'context clear' >/dev/null
+
 # ============================================================================
 # 2d. Command manifests — `help <cmd>` surfaces the manifest synopsis, not the old stub
 # ============================================================================
@@ -546,6 +561,11 @@ expect_contains "curl --help prints help (no confirm)" 'curl --help'      'fetch
 expect_contains "prompt-user --help prints help"      'prompt-user --help'  'pause the'
 expect_contains "wget --help prints help"             'wget --help'       'download a URL'
 expect_contains "context --help prints help"          'context --help'    'session transcript'
+expect_contains "context --help documents summarize"  'context --help'    'summarize'
+expect_contains "context --help documents trim"       'context --help'    'trim'
+# `context summarize` inside $() can't run the LLM (Wall-C) — honest error, no hang. No key needed.
+CTX_SUBST="$(eval_json eval '"echo $(context summarize)"')"
+expect_eval "context summarize in \$() is honest"     "$CTX_SUBST"  '.stdout | contains("needs the model")'  'true'
 
 # ============================================================================
 # 2l. ask — the AI-native LLM command (transcript-as-context)
@@ -623,6 +643,16 @@ if [[ $RUN_LLM -eq 1 ]]; then
   ASK_STDIN_JSON="$(eval_json eval '"printf %s {\\\"n\\\":41} | sudo ask --json --fresh \"Increment n by one and return the same JSON shape. Emit only the JSON.\""')"
   expect_eval "piped ask --json exits 0"               "$ASK_STDIN_JSON"  '.exit_code'  '0'
   expect_eval "piped ask --json increments n"          "$ASK_STDIN_JSON"  '.stdout | fromjson | .n'  '42'
+
+  # 4d. context summarize (LLM): run a couple of distinctive commands, then summarize. sudo
+  #     pre-authorizes (no pause). Assert exit 0 + non-empty summary; the transcript is NOT mutated
+  #     (the original marker still shows), matching the inspection-only contract.
+  run_line 'echo summarize_probe_kiwi' >/dev/null
+  CTX_SUM="$(eval_json eval '"sudo context summarize"')"
+  expect_eval "sudo context summarize exits 0"         "$CTX_SUM"  '.exit_code'  '0'
+  expect_eval "context summarize returns a summary"    "$CTX_SUM"  '.stdout | length > 0'  'true'
+  expect_eval "context summarize did not pause"        "$CTX_SUM"  '.pending_prompt'  'null'
+  expect_contains "summarize did not mutate the transcript" 'context show'  'summarize_probe_kiwi'
 
   # 5. Mid-loop authorization pause (A3): under a plain (non-sudo) ask, a confirm-tier tool line
   #    (curl) PAUSES for the human. This is robust to the model's exact behavior: the ONLY thing
