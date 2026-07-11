@@ -784,7 +784,8 @@ fi
 # are honest phase-2 stubs. No API key needed. (Prompt install + run land in a later grease phase.)
 step "grease (package manager: command seam + registry)"
 expect_contains "type grease is intercepted"          'type grease'       'grease is a shell builtin'
-expect_contains "grease --help documents subcommands" 'grease --help'     'install a prompt package'
+expect_contains "grease --help documents subcommands" 'grease --help'     'install a package'
+expect_contains "grease --help lists the package kinds" 'grease --help'    'Package kinds:'
 expect_contains "grease registry list empty initially" 'grease registry list'  'no registries configured'
 expect_contains "grease registry add records a URL"   'grease registry add https://reg.example/pkgs'  'added registry'
 expect_contains "grease registry list shows it"       'grease registry list'  'https://reg.example/pkgs'
@@ -797,12 +798,14 @@ expect_contains "grease install without a registry errors" 'sudo grease install 
 # grease inside a substitution hits the honest stub (it runs at the session layer).
 GREASE_SUBST="$(eval_json eval '"echo $(grease list)"')"
 expect_eval "grease in \$() gives the honest pointer"  "$GREASE_SUBST"  '.stderr | contains("top-level command")'  'true'
-# Capability disclosure: a bare `grease install` confirmation names the package + the ask capability.
-# No registry/HTTP needed to see the confirm text (the gate fires before any fetch).
+# Capability disclosure: a bare `grease install` confirmation names the package + the capabilities an
+# install may grant (ask / local shell / skill). No registry/HTTP needed to see the confirm text (the
+# gate fires before any fetch, so the kind isn't known yet — it discloses the full possible surface).
 run_line 'grease registry add https://reg.example/pkgs' >/dev/null
-GREASE_DISCLOSE="$(eval_json eval '"grease install some-prompt"')"
-expect_eval "grease install discloses the package"    "$GREASE_DISCLOSE"  '.pending_prompt.question | contains("some-prompt")'  'true'
-expect_eval "grease install discloses the ask capability" "$GREASE_DISCLOSE"  '.pending_prompt.question | contains("runs via ask")'  'true'
+GREASE_DISCLOSE="$(eval_json eval '"grease install some-pkg"')"
+expect_eval "grease install discloses the package"    "$GREASE_DISCLOSE"  '.pending_prompt.question | contains("some-pkg")'  'true'
+expect_eval "grease install discloses the ask capability"  "$GREASE_DISCLOSE"  '.pending_prompt.question | contains("run via ask")'  'true'
+expect_eval "grease install discloses the shell capability" "$GREASE_DISCLOSE"  '.pending_prompt.question | contains("local shell")'  'true'
 eval_json abort_prompt >/dev/null   # clear the pending confirm
 run_line 'grease registry remove https://reg.example/pkgs' >/dev/null
 
@@ -837,6 +840,64 @@ if [[ -n "${GREASE_TEST_URL:-}" && -n "${GREASE_TEST_PKG:-}" ]]; then
   run_line "sudo grease remove ${GREASE_TEST_PKG}" >/dev/null
 else
   note "GREASE_TEST_URL/GREASE_TEST_PKG not set — skipping live grease install (native FakeHttp tests cover it)"
+fi
+
+# --- Gated live-registry block for a SCRIPT package (kind:script). A script runs its shell body
+#     LOCALLY (Brush run_string) — NO API key needed, so this whole block is assistant-runnable given
+#     a registry. Set GREASE_TEST_SCRIPT_URL + GREASE_TEST_SCRIPT_PKG; GREASE_TEST_SCRIPT_ARGS carries
+#     any required-arg flags; GREASE_TEST_SCRIPT_EXPECT (optional) is a substring the run must print.
+if [[ -n "${GREASE_TEST_SCRIPT_URL:-}" && -n "${GREASE_TEST_SCRIPT_PKG:-}" ]]; then
+  note "GREASE_TEST_SCRIPT_URL set — running live grease script install against $GREASE_TEST_SCRIPT_URL"
+  run_line "grease registry add ${GREASE_TEST_SCRIPT_URL}" >/dev/null
+  GS_INST="$(eval_json eval "\"sudo grease install ${GREASE_TEST_SCRIPT_PKG}\"")"
+  expect_eval "live script install exits 0"            "$GS_INST"  '.exit_code'  '0'
+  expect_eval "live script install reports the kind"   "$GS_INST"  '.stdout | contains("[script]")'  'true'
+  # The script stub lands in /usr/bin (the script bin dir), and `type` resolves it.
+  expect_contains "type finds the installed script"    "type ${GREASE_TEST_SCRIPT_PKG}"  "${GREASE_TEST_SCRIPT_PKG}"
+  expect_contains "the script stub is in /usr/bin"     "cat /usr/bin/${GREASE_TEST_SCRIPT_PKG}"  'clank script'
+  # `<script> --help` discloses the local-shell capability (no confirm).
+  expect_contains "script --help discloses shell"      "${GREASE_TEST_SCRIPT_PKG} --help"  'local shell'
+  # Run it (sudo pre-authorizes the Confirm) → the filled shell body runs locally, exit 0. No key.
+  GS_RUN="$(eval_json eval "\"sudo ${GREASE_TEST_SCRIPT_PKG} ${GREASE_TEST_SCRIPT_ARGS:-}\"")"
+  expect_eval "running the installed script exits 0"   "$GS_RUN"  '.exit_code'  '0'
+  if [[ -n "${GREASE_TEST_SCRIPT_EXPECT:-}" ]]; then
+    expect_eval "the script produced the expected output" "$GS_RUN"  ".stdout | contains(\"${GREASE_TEST_SCRIPT_EXPECT}\")"  'true'
+  fi
+  # A bare (non-sudo) script run confirms (running local shell is a Confirm capability).
+  GS_CONFIRM="$(eval_json eval "\"${GREASE_TEST_SCRIPT_PKG} ${GREASE_TEST_SCRIPT_ARGS:-}\"")"
+  expect_eval "a bare script run confirms"             "$GS_CONFIRM"  '.pending_prompt != null'  'true'
+  eval_json abort_prompt >/dev/null
+  run_line "sudo grease remove ${GREASE_TEST_SCRIPT_PKG}" >/dev/null
+else
+  note "GREASE_TEST_SCRIPT_URL/PKG not set — skipping live grease script install (native tests cover it)"
+fi
+
+# --- Gated live-registry block for a SKILL package (kind:skill). Materialization + the model surface
+#     need NO key for the install/materialize asserts; the "ask sees the skill" assert needs --with-llm.
+#     Set GREASE_TEST_SKILL_URL + GREASE_TEST_SKILL_PKG; GREASE_TEST_SKILL_DOC (optional) is a doc path
+#     the install must materialize under /usr/share/skills/<pkg>/.
+if [[ -n "${GREASE_TEST_SKILL_URL:-}" && -n "${GREASE_TEST_SKILL_PKG:-}" ]]; then
+  note "GREASE_TEST_SKILL_URL set — running live grease skill install against $GREASE_TEST_SKILL_URL"
+  run_line "grease registry add ${GREASE_TEST_SKILL_URL}" >/dev/null
+  GK_INST="$(eval_json eval "\"sudo grease install ${GREASE_TEST_SKILL_PKG}\"")"
+  expect_eval "live skill install exits 0"             "$GK_INST"  '.exit_code'  '0'
+  expect_eval "live skill install reports the kind"    "$GK_INST"  '.stdout | contains("[skill]")'  'true'
+  # A skill is NOT a command: `type` must not resolve it as a runnable command name.
+  GK_TYPE="$(eval_json eval "\"type ${GREASE_TEST_SKILL_PKG}\"")"
+  expect_eval "a skill is not a command"               "$GK_TYPE"  '.stdout | contains("is a shell builtin") | not'  'true'
+  # `grease info` describes the envelope.
+  expect_contains "grease info shows the skill kind"   "grease info ${GREASE_TEST_SKILL_PKG}"  '[skill]'
+  # The skill's dir tree is materialized under /usr/share/skills/<pkg>/ (durable, FS-observable — the
+  # model-surface listing is covered by the native `grease_install_a_skill_...` test).
+  if [[ -n "${GREASE_TEST_SKILL_DOC:-}" ]]; then
+    expect_contains "the skill document was materialized" "ls /usr/share/skills/${GREASE_TEST_SKILL_PKG}"  "${GREASE_TEST_SKILL_DOC}"
+  fi
+  # Remove tears the whole skill dir down: `grease info` no longer finds it.
+  run_line "sudo grease remove ${GREASE_TEST_SKILL_PKG}" >/dev/null
+  GK_GONE="$(eval_json eval "\"grease info ${GREASE_TEST_SKILL_PKG}\"")"
+  expect_eval "removing the skill deregisters it"      "$GK_GONE"  '.stderr | contains("not installed")'  'true'
+else
+  note "GREASE_TEST_SKILL_URL/PKG not set — skipping live grease skill install (native tests cover it)"
 fi
 
 # ============================================================================

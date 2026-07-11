@@ -110,24 +110,25 @@ pub(crate) fn manifests() -> Vec<crate::manifest::Manifest> {
     let allow = |name: &str, synopsis: &str| {
         Manifest::builtin(name, synopsis).with_scope(ExecutionScope::Subprocess)
     };
-    let mut m = Manifest::builtin("grease", "install and manage capability packages (prompts)")
+    let mut m = Manifest::builtin("grease", "install and manage capability packages")
         .with_scope(ExecutionScope::Subprocess)
         .with_help(
             "grease registry add <url> | list | remove <url> — manage package registries\n\
-             grease install <name> — install a prompt package (outbound HTTP)\n\
+             grease install <name> — install a package (outbound HTTP); the registry declares its kind\n\
              grease remove <name> — uninstall a package\n\
              grease list — installed packages\n\
              grease search <query> — search the registries (outbound HTTP)\n\
              grease info <name> — show a package's metadata\n\
              grease update [<name>] — re-fetch installed packages (outbound HTTP)\n\
-             grease v1: standalone prompt packages only.",
+             Package kinds: prompt (runs via ask), script (/usr/bin, runs local shell), \
+             skill (/usr/share/skills, model context + $PATH scripts).",
         );
     m.subcommands = vec![
         // `registry` is Allow at this level (its `list` is read-only; `add`/`remove` write only local
         // config, no network — the same low-risk local-config tier as mcp's `session`). The outbound
         // HTTP + payload-installing subcommands below carry Confirm.
         allow("registry", "manage package registries"),
-        confirm("install", "install a prompt package (outbound HTTP)"),
+        confirm("install", "install a package (outbound HTTP)"),
         confirm("remove", "uninstall a package"),
         confirm("update", "re-fetch installed packages (outbound HTTP)"),
         allow("list", "list installed packages"),

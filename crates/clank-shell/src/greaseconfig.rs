@@ -4,20 +4,26 @@
 //! are hermetic; on the agent the defaults are used (and the agent FS is durable, so what grease
 //! writes survives across invocations):
 //!
-//! - `$CLANK_GREASE_ETC`   (default `/etc/grease`)        — `registries.toml` + one `<name>.toml`/pkg.
-//! - `$CLANK_GREASE_STORE` (default `/var/lib/grease`)    — the versioned payload store (Phase 2).
-//! - `$CLANK_GREASE_BIN`   (default `/usr/lib/prompts/bin`) — the inert bin stubs (already on `$PATH`).
+//! - `$CLANK_GREASE_ETC`        (default `/etc/grease`)          — `registries.toml` + one `<name>.toml`/pkg.
+//! - `$CLANK_GREASE_STORE`      (default `/var/lib/grease`)      — the versioned payload store.
+//! - `$CLANK_GREASE_BIN`        (default `/usr/lib/prompts/bin`) — prompt bin stubs (already on `$PATH`).
+//! - `$CLANK_GREASE_SCRIPT_BIN` (default `/usr/bin`)             — script bin stubs (already on `$PATH`).
+//! - `$CLANK_GREASE_SKILLS`     (default `/usr/share/skills`)    — skill dirs (`<name>/`, `<name>/bin/`).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 /// Default config directory (`registries.toml` + one `<name>.toml` per installed package).
 pub const DEFAULT_ETC: &str = "/etc/grease";
-/// Default payload store (`<store>/<name>/prompt.md`), the source of truth for derived executables.
+/// Default payload store (`<store>/<name>/<kind>.json`), the source of truth for derived executables.
 pub const DEFAULT_STORE: &str = "/var/lib/grease";
-/// Default generated-command directory (`/usr/lib/prompts/bin/<name>`), already on `$PATH`.
+/// Default prompt bin directory (`/usr/lib/prompts/bin/<name>`), already on `$PATH`.
 pub const DEFAULT_BIN: &str = "/usr/lib/prompts/bin";
+/// Default script bin directory (`/usr/bin/<name>`), already on `$PATH`.
+pub const DEFAULT_SCRIPT_BIN: &str = "/usr/bin";
+/// Default skills directory (`/usr/share/skills/<name>/`), whose `*/bin` glob is already on `$PATH`.
+pub const DEFAULT_SKILLS: &str = "/usr/share/skills";
 
 /// The registry list — configured registry URLs `grease install`/`search` fetch from, in order.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,9 +53,21 @@ pub fn store_dir() -> PathBuf {
     PathBuf::from(std::env::var("CLANK_GREASE_STORE").unwrap_or_else(|_| DEFAULT_STORE.to_string()))
 }
 
-/// The generated-command directory, honoring `$CLANK_GREASE_BIN`.
+/// The prompt bin directory, honoring `$CLANK_GREASE_BIN`.
 pub fn bin_dir() -> PathBuf {
     PathBuf::from(std::env::var("CLANK_GREASE_BIN").unwrap_or_else(|_| DEFAULT_BIN.to_string()))
+}
+
+/// The script bin directory (`/usr/bin`), honoring `$CLANK_GREASE_SCRIPT_BIN`.
+pub fn script_bin_dir() -> PathBuf {
+    PathBuf::from(
+        std::env::var("CLANK_GREASE_SCRIPT_BIN").unwrap_or_else(|_| DEFAULT_SCRIPT_BIN.to_string()),
+    )
+}
+
+/// The skills directory (`/usr/share/skills`), honoring `$CLANK_GREASE_SKILLS`.
+pub fn skills_dir() -> PathBuf {
+    PathBuf::from(std::env::var("CLANK_GREASE_SKILLS").unwrap_or_else(|_| DEFAULT_SKILLS.to_string()))
 }
 
 /// The `registries.toml` path.
@@ -113,17 +131,60 @@ pub fn list_registries() -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Write the inert `/usr/lib/prompts/bin/<name>` stub file (a managed-by header + help text). A real
-/// file so `which`/`ls`/`cat`/`type` see it with no virtual-fs code — but it is NEVER executed (wasip2
-/// has no process spawn); the command runs via Session interception. Mirrors
-/// [`crate::mcpconfig::write_bin_stub`].
-pub fn write_bin_stub(name: &str, help: &str) -> Result<(), String> {
-    let dir = bin_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {dir:?}: {e}"))?;
+/// Write an inert bin stub at `<dir>/<name>` (a managed-by header + help text). A real file so
+/// `which`/`ls`/`cat`/`type` see it with no virtual-fs code — but it is NEVER executed (wasip2 has no
+/// process spawn); the command runs via Session interception. `label` names the kind in the header
+/// (`prompt`/`script`). Mirrors [`crate::mcpconfig::write_bin_stub`].
+pub fn write_bin_stub(dir: &Path, name: &str, help: &str, label: &str) -> Result<(), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {dir:?}: {e}"))?;
     let content = format!(
-        "# clank prompt (package: {name}, managed by `grease`; runs at the session layer)\n{help}"
+        "# clank {label} (package: {name}, managed by `grease`; runs at the session layer)\n{help}"
     );
     std::fs::write(dir.join(name), content).map_err(|e| format!("write stub error: {e}"))
+}
+
+/// Materialize a skill's on-disk surface under `<skills>/<name>/`: write each reference document
+/// verbatim (relative to the skill dir) and deposit each bundled script to `<name>/bin/<script>` (on
+/// `$PATH`). Best-effort; the durable payload is already persisted in the store. Any document `path`
+/// that escapes the skill dir (`..` / absolute) is skipped (defense-in-depth against a hostile
+/// registry).
+pub fn materialize_skill(sk: &crate::greasepkg::SkillPackage) -> Result<(), String> {
+    let root = skills_dir().join(&sk.name);
+    std::fs::create_dir_all(&root).map_err(|e| format!("cannot create {root:?}: {e}"))?;
+    for doc in &sk.documents {
+        let Some(dest) = safe_join(&root, &doc.path) else {
+            continue; // path escapes the skill dir — skip
+        };
+        if let Some(parent) = dest.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&dest, &doc.content);
+    }
+    if !sk.scripts.is_empty() {
+        let bin = root.join("bin");
+        let _ = std::fs::create_dir_all(&bin);
+        for script in &sk.scripts {
+            // Bundled script names must be simple (no path components) — skip anything suspicious.
+            if script.name.is_empty() || script.name.contains('/') || script.name.contains("..") {
+                continue;
+            }
+            let _ = std::fs::write(bin.join(&script.name), &script.body);
+        }
+    }
+    Ok(())
+}
+
+/// Join `rel` onto `root`, returning `None` if the result escapes `root` (absolute path or `..`
+/// component). Keeps a skill's documents confined to its own directory.
+fn safe_join(root: &Path, rel: &str) -> Option<PathBuf> {
+    let rel_path = Path::new(rel);
+    if rel_path.is_absolute() {
+        return None;
+    }
+    if rel_path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return None;
+    }
+    Some(root.join(rel_path))
 }
 
 #[cfg(test)]
@@ -141,16 +202,20 @@ mod tests {
         let _guard = super::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let n = unique();
         let base = std::env::temp_dir().join(format!("clank_grease_{}_{n}", std::process::id()));
-        for sub in ["etc", "store", "bin"] {
+        for sub in ["etc", "store", "bin", "script-bin", "skills"] {
             std::fs::create_dir_all(base.join(sub)).unwrap();
         }
         std::env::set_var("CLANK_GREASE_ETC", base.join("etc"));
         std::env::set_var("CLANK_GREASE_STORE", base.join("store"));
         std::env::set_var("CLANK_GREASE_BIN", base.join("bin"));
+        std::env::set_var("CLANK_GREASE_SCRIPT_BIN", base.join("script-bin"));
+        std::env::set_var("CLANK_GREASE_SKILLS", base.join("skills"));
         f();
         std::env::remove_var("CLANK_GREASE_ETC");
         std::env::remove_var("CLANK_GREASE_STORE");
         std::env::remove_var("CLANK_GREASE_BIN");
+        std::env::remove_var("CLANK_GREASE_SCRIPT_BIN");
+        std::env::remove_var("CLANK_GREASE_SKILLS");
     }
 
     #[test]
@@ -185,10 +250,58 @@ mod tests {
     #[test]
     fn write_bin_stub_creates_readable_file() {
         with_temp_dirs(|| {
-            write_bin_stub("summarize", "usage: summarize [--file F]\n").unwrap();
+            write_bin_stub(&bin_dir(), "summarize", "usage: summarize [--file F]\n", "prompt").unwrap();
             let content = std::fs::read_to_string(bin_dir().join("summarize")).unwrap();
             assert!(content.contains("managed by `grease`"));
+            assert!(content.contains("clank prompt"));
             assert!(content.contains("usage: summarize"));
+        });
+    }
+
+    #[test]
+    fn script_stub_lands_in_the_script_bin_dir() {
+        with_temp_dirs(|| {
+            write_bin_stub(&script_bin_dir(), "deploy", "usage: deploy\n", "script").unwrap();
+            let content = std::fs::read_to_string(script_bin_dir().join("deploy")).unwrap();
+            assert!(content.contains("clank script"));
+            // It goes to the script bin dir, not the prompt bin dir.
+            assert!(!bin_dir().join("deploy").exists());
+        });
+    }
+
+    #[test]
+    fn materialize_skill_writes_docs_and_scripts_and_confines_paths() {
+        use crate::greasepkg::{SkillDocument, SkillPackage, SkillScript};
+        with_temp_dirs(|| {
+            let sk = SkillPackage {
+                name: "code-review".into(),
+                description: "d".into(),
+                intended_use: None,
+                documents: vec![
+                    SkillDocument { path: "SKILL.md".into(), content: "# how".into() },
+                    SkillDocument { path: "reference/api.md".into(), content: "api".into() },
+                    // Escaping paths are skipped.
+                    SkillDocument { path: "../escape.md".into(), content: "nope".into() },
+                    SkillDocument { path: "/abs.md".into(), content: "nope".into() },
+                ],
+                scripts: vec![SkillScript { name: "lint-all".into(), body: "echo lint".into() }],
+            };
+            materialize_skill(&sk).unwrap();
+            let root = skills_dir().join("code-review");
+            assert_eq!(std::fs::read_to_string(root.join("SKILL.md")).unwrap(), "# how");
+            assert_eq!(std::fs::read_to_string(root.join("reference/api.md")).unwrap(), "api");
+            assert_eq!(std::fs::read_to_string(root.join("bin/lint-all")).unwrap(), "echo lint");
+            // The escaping (`..`) doc was skipped — not written into the skills dir's parent.
+            assert!(!skills_dir().join("escape.md").exists());
+            // The absolute-path doc was skipped too — only the two confined docs and the bin script
+            // exist under the skill root.
+            let mut entries: Vec<String> = std::fs::read_dir(&root)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            entries.sort();
+            assert_eq!(entries, vec!["SKILL.md", "bin", "reference"]);
         });
     }
 }

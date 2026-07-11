@@ -152,6 +152,22 @@ pub fn build_system_prompt_with_capabilities(
             out.push_str(&format!("  {} — {}\n", t.name, t.description));
         }
     }
+    let skills = grease.skills();
+    if !skills.is_empty() {
+        out.push_str(
+            "\n\nInstalled skills (capability-context packages, not callable tools — consult the \
+             skill's documents under /usr/share/skills/<name>/ and use its bundled $PATH scripts when \
+             relevant):\n",
+        );
+        for s in &skills {
+            let intended = s
+                .intended_use
+                .as_deref()
+                .map(|u| format!(" (use when: {u})"))
+                .unwrap_or_default();
+            out.push_str(&format!("  {} — {}{intended}\n", s.name, s.description));
+        }
+    }
     out
 }
 

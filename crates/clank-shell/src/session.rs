@@ -448,8 +448,9 @@ impl Session {
             return self.finish_intercepted(pid, result);
         }
 
-        // `<prompt> --help` for an installed grease prompt: print its generated help (before the gate).
-        if let Some(help) = self.prompt_help_for(line) {
+        // `<name> --help` for an installed grease command package (prompt or script): print its
+        // generated help (before the gate).
+        if let Some(help) = self.pkg_help_for(line) {
             let result = LineResult::from_outcome(help.into_bytes(), Vec::new(), 0);
             return self.finish_intercepted(pid, result);
         }
@@ -561,6 +562,10 @@ impl Session {
             // A grease-installed prompt: fill its body from args and run it through the model (its
             // Confirm was resolved via the dynamic manifest at the gate; sudo pre-authorizes).
             self.run_prompt(line, blanket_authorized).await
+        } else if self.is_script_line(line) {
+            // A grease-installed script: fill its body from args and run the shell source locally
+            // (its Confirm was resolved via the dynamic manifest at the gate; sudo pre-authorizes).
+            self.run_script(line, blanket_authorized).await
         } else {
             match crate::httpcmd::classify(line) {
                 Some((crate::httpcmd::HttpCommand::Curl, args)) => {
@@ -1588,29 +1593,38 @@ impl Session {
         }
     }
 
-    /// `grease list`: installed prompt packages.
+    /// `grease list`: installed packages (all kinds), each tagged with its kind.
     fn grease_list(&self) -> LineResult {
-        let prompts = self.grease.prompts();
-        if prompts.is_empty() {
+        let packages = self.grease.packages();
+        if packages.is_empty() {
             return LineResult::continue_with_stdout(b"no packages installed\n".to_vec());
         }
         let mut out = String::new();
-        for p in prompts {
-            out.push_str(&format!("{}  {}\n", p.package.name, p.package.description));
+        for p in packages {
+            out.push_str(&format!(
+                "{}  [{}]  {}\n",
+                p.name(),
+                p.kind().label(),
+                p.payload.description()
+            ));
         }
         LineResult::continue_with_stdout(out.into_bytes())
     }
 
-    /// `grease info <name>`: an installed package's metadata (name, description, model, arguments).
+    /// `grease info <name>`: an installed package's metadata. Command packages (prompt/script) show
+    /// their generated help; skills (not commands) show the envelope + bundled documents/scripts.
     fn grease_info(&self, name: &str) -> LineResult {
-        match self.grease.prompt_help(name) {
-            Some(help) => LineResult::continue_with_stdout(help.into_bytes()),
-            None => LineResult::from_outcome(
-                Vec::new(),
-                format!("grease: '{name}' is not installed\n").into_bytes(),
-                1,
-            ),
+        if let Some(help) = self.grease.pkg_help(name) {
+            return LineResult::continue_with_stdout(help.into_bytes());
         }
+        if let Some(sk) = self.grease.skill(name) {
+            return LineResult::continue_with_stdout(skill_info_text(sk).into_bytes());
+        }
+        LineResult::from_outcome(
+            Vec::new(),
+            format!("grease: '{name}' is not installed\n").into_bytes(),
+            1,
+        )
     }
 
     /// `grease install <name>`: fetch the package from the first configured registry that has it,
@@ -1710,8 +1724,9 @@ impl Session {
         self.grease_finish_install(name, &registry, &body, actual, expected.is_some(), note)
     }
 
-    /// Verify + persist a fetched package payload and register it. `sha256` is the (already-computed)
-    /// digest of `body`; `verified` marks whether it matched the registry's advertised hash.
+    /// Verify + persist a fetched package payload and register it, dispatching on the payload's
+    /// declared `kind`. `sha256` is the (already-computed) digest of `body`; `verified` marks whether
+    /// it matched the registry's advertised hash.
     fn grease_finish_install(
         &mut self,
         name: &str,
@@ -1721,8 +1736,8 @@ impl Session {
         verified: bool,
         note: Vec<u8>,
     ) -> LineResult {
-        let package = match crate::greasepkg::PromptPackage::from_json(body) {
-            Ok(p) => p,
+        let kind = match crate::greasepkg::payload_kind(body) {
+            Ok(k) => k,
             Err(e) => {
                 return LineResult::from_outcome(
                     Vec::new(),
@@ -1731,88 +1746,167 @@ impl Session {
                 )
             }
         };
-        // The package's own `name` must match what was requested (guards a misconfigured registry).
-        if package.name != name {
-            return LineResult::from_outcome(
-                Vec::new(),
-                format!(
-                    "grease install: registry returned package '{}' for request '{name}'\n",
-                    package.name
-                )
-                .into_bytes(),
-                4,
-            );
-        }
-        // Persist: <store>/<name>/prompt.json + <etc>/<name>.toml marker + the bin stub.
-        let store = crate::greaseconfig::store_dir().join(name);
-        if let Err(e) = std::fs::create_dir_all(&store) {
-            return LineResult::from_outcome(
-                Vec::new(),
-                format!("grease install: cannot create store dir: {e}\n").into_bytes(),
-                1,
-            );
-        }
-        if let Err(e) = std::fs::write(store.join("prompt.json"), package.to_json()) {
-            return LineResult::from_outcome(
-                Vec::new(),
-                format!("grease install: cannot write payload: {e}\n").into_bytes(),
-                1,
-            );
+        // Parse the payload for this kind and confirm its own name matches the request (guards a
+        // misconfigured registry).
+        let payload = match self.parse_and_check_payload(name, kind, body) {
+            Ok(p) => p,
+            Err(msg) => return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 4),
+        };
+
+        // Persist the typed payload + write the marker + materialize the kind's on-disk surface.
+        if let Err(msg) = self.persist_package(name, kind, &payload) {
+            return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 1);
         }
         let marker = crate::greasestate::InstallMarker {
+            kind,
             registry: registry.to_string(),
             sha256: sha256.clone(),
             verified,
         };
-        let marker_toml = match toml::to_string_pretty(&marker) {
-            Ok(t) => t,
-            Err(e) => {
-                return LineResult::from_outcome(
-                    Vec::new(),
-                    format!("grease install: marker serialize error: {e}\n").into_bytes(),
-                    1,
-                )
-            }
-        };
-        let etc = crate::greaseconfig::etc_dir();
-        let _ = std::fs::create_dir_all(&etc);
-        if let Err(e) = std::fs::write(etc.join(format!("{name}.toml")), marker_toml) {
-            return LineResult::from_outcome(
-                Vec::new(),
-                format!("grease install: cannot write marker: {e}\n").into_bytes(),
-                1,
-            );
+        if let Err(msg) = write_install_marker(name, &marker) {
+            return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 1);
         }
-        let help = self
-            .grease
-            .prompt_help(name)
-            .unwrap_or_else(|| format!("{name} — installed prompt\n"));
-        let _ = crate::greaseconfig::write_bin_stub(name, &help);
-
-        // Register in the in-memory view.
-        self.grease.set_installed(crate::greasestate::InstalledPrompt { marker, package });
+        let installed = crate::greasestate::InstalledPackage { marker, payload };
+        // Materialize the kind's on-disk surface (bin stub / skill dir tree) — needs the help text,
+        // which is derived from the registered package, so register first.
+        self.grease.set_installed(installed);
+        self.materialize_package(name, kind);
 
         let status = if verified { "verified" } else { "unverified" };
         let mut out = note; // any record-only note first
+        let run_hint = match kind {
+            crate::greasepkg::PackageKind::Skill => {
+                format!("see it with `grease info {name}`")
+            }
+            _ => format!("run it with `{name}`"),
+        };
         out.extend_from_slice(
-            format!("installed {name} (sha256 {} — {status})\nrun it with `{name}`\n", &sha256[..12])
-                .as_bytes(),
+            format!(
+                "installed {name} [{}] (sha256 {} — {status})\n{run_hint}\n",
+                kind.label(),
+                &sha256[..12]
+            )
+            .as_bytes(),
         );
         LineResult::continue_with_stdout(out)
     }
 
-    /// `grease remove <name>`: delete the store, marker, and stub, and deregister.
+    /// Parse a fetched payload for `kind` into a [`crate::greasestate::Payload`], verifying the
+    /// package's own name matches the requested `name`. Returns an error string on parse/name mismatch.
+    fn parse_and_check_payload(
+        &self,
+        name: &str,
+        kind: crate::greasepkg::PackageKind,
+        body: &[u8],
+    ) -> Result<crate::greasestate::Payload, String> {
+        use crate::greasepkg::{PackageKind, PromptPackage, ScriptPackage, SkillPackage};
+        use crate::greasestate::Payload;
+        let (payload, pkg_name) = match kind {
+            PackageKind::Prompt => {
+                let p = PromptPackage::from_json(body).map_err(|e| format!("grease install: {e}\n"))?;
+                let n = p.name.clone();
+                (Payload::Prompt(p), n)
+            }
+            PackageKind::Script => {
+                let s = ScriptPackage::from_json(body).map_err(|e| format!("grease install: {e}\n"))?;
+                let n = s.name.clone();
+                (Payload::Script(s), n)
+            }
+            PackageKind::Skill => {
+                let s = SkillPackage::from_json(body).map_err(|e| format!("grease install: {e}\n"))?;
+                let n = s.name.clone();
+                (Payload::Skill(s), n)
+            }
+        };
+        if pkg_name != name {
+            return Err(format!(
+                "grease install: registry returned package '{pkg_name}' for request '{name}'\n"
+            ));
+        }
+        Ok(payload)
+    }
+
+    /// Persist a typed payload to `<store>/<name>/<kind>.json`.
+    fn persist_package(
+        &self,
+        name: &str,
+        kind: crate::greasepkg::PackageKind,
+        payload: &crate::greasestate::Payload,
+    ) -> Result<(), String> {
+        use crate::greasestate::Payload;
+        let store = crate::greaseconfig::store_dir().join(name);
+        std::fs::create_dir_all(&store)
+            .map_err(|e| format!("grease install: cannot create store dir: {e}\n"))?;
+        let json = match payload {
+            Payload::Prompt(p) => p.to_json(),
+            Payload::Script(s) => s.to_json(),
+            Payload::Skill(s) => s.to_json(),
+        };
+        std::fs::write(store.join(kind.payload_file()), json)
+            .map_err(|e| format!("grease install: cannot write payload: {e}\n"))
+    }
+
+    /// Materialize a kind's on-disk surface after registration: a bin stub for command packages
+    /// (prompt→`/usr/lib/prompts/bin`, script→`/usr/bin`) or the skill dir tree (docs + bundled
+    /// `bin/` scripts) for a skill. Best-effort — the durable payload is already persisted.
+    fn materialize_package(&self, name: &str, kind: crate::greasepkg::PackageKind) {
+        use crate::greasepkg::PackageKind;
+        match kind {
+            PackageKind::Prompt => {
+                let help = self
+                    .grease
+                    .pkg_help(name)
+                    .unwrap_or_else(|| format!("{name} — installed prompt\n"));
+                let _ = crate::greaseconfig::write_bin_stub(
+                    &crate::greaseconfig::bin_dir(),
+                    name,
+                    &help,
+                    "prompt",
+                );
+            }
+            PackageKind::Script => {
+                let help = self
+                    .grease
+                    .pkg_help(name)
+                    .unwrap_or_else(|| format!("{name} — installed script\n"));
+                let _ = crate::greaseconfig::write_bin_stub(
+                    &crate::greaseconfig::script_bin_dir(),
+                    name,
+                    &help,
+                    "script",
+                );
+            }
+            PackageKind::Skill => {
+                if let Some(sk) = self.grease.skill(name) {
+                    let _ = crate::greaseconfig::materialize_skill(sk);
+                }
+            }
+        }
+    }
+
+    /// `grease remove <name>`: delete the store, marker, and the kind's on-disk surface, and
+    /// deregister.
     fn grease_remove(&mut self, name: &str) -> LineResult {
-        if !self.grease.is_prompt(name) {
+        let Some(kind) = self.grease.kind_of(name) else {
             return LineResult::from_outcome(
                 Vec::new(),
                 format!("grease remove: '{name}' is not installed\n").into_bytes(),
                 1,
             );
-        }
+        };
         let _ = std::fs::remove_file(crate::greaseconfig::etc_dir().join(format!("{name}.toml")));
         let _ = std::fs::remove_dir_all(crate::greaseconfig::store_dir().join(name));
-        let _ = std::fs::remove_file(crate::greaseconfig::bin_dir().join(name));
+        match kind {
+            crate::greasepkg::PackageKind::Prompt => {
+                let _ = std::fs::remove_file(crate::greaseconfig::bin_dir().join(name));
+            }
+            crate::greasepkg::PackageKind::Script => {
+                let _ = std::fs::remove_file(crate::greaseconfig::script_bin_dir().join(name));
+            }
+            crate::greasepkg::PackageKind::Skill => {
+                let _ = std::fs::remove_dir_all(crate::greaseconfig::skills_dir().join(name));
+            }
+        }
         self.grease.remove(name);
         LineResult::continue_with_stdout(format!("removed {name}\n").into_bytes())
     }
@@ -1844,8 +1938,9 @@ impl Session {
                             for pkg in arr {
                                 let name = pkg.get("name").and_then(|n| n.as_str()).unwrap_or("");
                                 let desc = pkg.get("description").and_then(|d| d.as_str()).unwrap_or("");
+                                let kind = pkg.get("kind").and_then(|k| k.as_str()).unwrap_or("prompt");
                                 if name.contains(query) || desc.contains(query) {
-                                    hits.push(format!("{name}  {desc}"));
+                                    hits.push(format!("{name}  [{kind}]  {desc}"));
                                 }
                             }
                         }
@@ -1864,7 +1959,7 @@ impl Session {
     /// `grease update [<name>]`: re-fetch + re-verify + re-persist installed packages (all, or one).
     async fn grease_update(&mut self, name: Option<&str>) -> LineResult {
         let targets: Vec<String> = match name {
-            Some(n) if self.grease.is_prompt(n) => vec![n.to_string()],
+            Some(n) if self.grease.get(n).is_some() => vec![n.to_string()],
             Some(n) => {
                 return LineResult::from_outcome(
                     Vec::new(),
@@ -1872,7 +1967,7 @@ impl Session {
                     1,
                 )
             }
-            None => self.grease.prompts().iter().map(|p| p.package.name.clone()).collect(),
+            None => self.grease.packages().iter().map(|p| p.name().to_string()).collect(),
         };
         if targets.is_empty() {
             return LineResult::continue_with_stdout(b"nothing to update\n".to_vec());
@@ -2261,42 +2356,28 @@ impl Session {
         self.grease.is_prompt(&word)
     }
 
+    /// Whether `line`'s leading word is an installed grease script. Drives the `run_script` dispatch.
+    /// Like prompts, only top-level lines count (a script runs through the session's `execute`, which
+    /// isn't reachable from Brush's nested runtime).
+    fn is_script_line(&self, line: &str) -> bool {
+        let Some(word) = prompt_leading_word(line) else {
+            return false;
+        };
+        self.grease.is_script(&word)
+    }
+
     /// Run an installed grease prompt: parse `--arg value` flags against the package's declared
     /// arguments, fill the body's `{{arg}}` placeholders, and dispatch the filled prompt through
     /// `run_ask`. `--model` on the prompt line overrides the package model. Missing required args are
     /// an exit-2 usage error (no model call).
     async fn run_prompt(&mut self, line: &str, blanket_authorized: bool) -> LineResult {
-        let words = match crate::askcmd::dequote_words(line) {
-            Some(w) => w,
-            None => return LineResult::from_outcome(Vec::new(), b"grease: parse error\n".to_vec(), 2),
+        let (name, provided, model_override) = match parse_pkg_invocation(line) {
+            Ok(t) => t,
+            Err(e) => return e,
         };
-        let name = words[0].clone();
-        let Some(installed) = self.grease.get(&name) else {
+        let Some(package) = self.grease.prompt(&name).cloned() else {
             return LineResult::denied(); // shouldn't happen (is_prompt_line gated it)
         };
-        let package = installed.package.clone();
-
-        // Parse `--key value` pairs (and `--model <id>`) from the rest.
-        let mut provided: Vec<(String, String)> = Vec::new();
-        let mut model_override: Option<String> = None;
-        let mut iter = words[1..].iter();
-        while let Some(w) = iter.next() {
-            if let Some(key) = w.strip_prefix("--") {
-                let Some(val) = iter.next() else {
-                    return LineResult::from_outcome(
-                        Vec::new(),
-                        format!("{name}: --{key} needs a value\n").into_bytes(),
-                        2,
-                    );
-                };
-                if key == "model" {
-                    model_override = Some(val.clone());
-                } else {
-                    provided.push((key.to_string(), val.clone()));
-                }
-            }
-            // Bare positional words are ignored in v1 (args are named).
-        }
 
         // Fill the template; a missing required arg is a clean usage error.
         let filled = match package.fill(&provided) {
@@ -2321,16 +2402,42 @@ impl Session {
         self.run_ask(args, blanket_authorized).await
     }
 
-    /// Generated help for an installed prompt line ending in `--help` (or a bare prompt name with
-    /// `--help`). `None` if the line isn't an installed prompt or doesn't request help.
-    fn prompt_help_for(&self, line: &str) -> Option<String> {
+    /// Run an installed grease script: parse `--arg value` flags against the package's declared
+    /// arguments, fill the body's `{{arg}}` placeholders, and dispatch the filled **shell source**
+    /// through the session's `execute` (Brush `run_string`) — the local-shell path, no LLM call.
+    /// Missing required args are an exit-2 usage error. `blanket_authorized` is threaded for parity
+    /// with prompts but the authz gate already resolved before dispatch; the script itself runs its
+    /// filled body as ordinary shell.
+    async fn run_script(&mut self, line: &str, _blanket_authorized: bool) -> LineResult {
+        let (name, provided, _model) = match parse_pkg_invocation(line) {
+            Ok(t) => t,
+            Err(e) => return e,
+        };
+        let Some(package) = self.grease.script(&name).cloned() else {
+            return LineResult::denied(); // shouldn't happen (is_script_line gated it)
+        };
+        let filled = match package.fill(&provided) {
+            Ok(f) => f,
+            Err(e) => {
+                return LineResult::from_outcome(
+                    Vec::new(),
+                    format!("{name}: {e}\n").into_bytes(),
+                    2,
+                )
+            }
+        };
+        // Run the filled shell source through the local-shell path. `execute` adopts no jobs here
+        // (a script is a synthetic top-level invocation, not a backgrounded pipeline stage).
+        self.execute(&filled).await
+    }
+
+    /// Generated help for an installed command-package line ending in `--help` (prompt or script).
+    /// `None` if the line isn't an installed command package or doesn't request help.
+    fn pkg_help_for(&self, line: &str) -> Option<String> {
         let words = crate::askcmd::dequote_words(line)?;
         let name = words.first()?;
-        if !self.grease.is_prompt(name) {
-            return None;
-        }
         if words.iter().any(|w| w == "--help") {
-            return self.grease.prompt_help(name);
+            return self.grease.pkg_help(name);
         }
         None
     }
@@ -2525,9 +2632,14 @@ impl Session {
             registries.join(", ")
         };
         let tail = if sudo_grant { "(y)es, (n)o" } else { "(y)es, (n)o, (a)ll" };
+        // The disclosure fires before the fetch, so the package's kind isn't known yet — disclose the
+        // full capability an install can grant: a prompt runs via ask (outbound LLM); a script runs
+        // local shell commands; a skill installs model-facing context + `$PATH` scripts. Each is
+        // Confirm-gated per run.
         Some(format!(
-            "Install prompt package \"{name}\" from {from}? It runs via ask (outbound LLM; may invoke \
-             shell commands under per-command authorization). {tail}"
+            "Install package \"{name}\" from {from}? Depending on its kind it may run via ask \
+             (outbound LLM), execute local shell commands, or install a skill (model context + \
+             $PATH scripts); each is confirmed per run unless you use sudo. {tail}"
         ))
     }
 
@@ -2811,6 +2923,80 @@ fn prompt_leading_word(line: &str) -> Option<String> {
     } else {
         Some(first.clone())
     }
+}
+
+/// Parse an installed-package invocation line (`<name> --key value … [--model id]`) into its
+/// `(name, provided-args, model-override)`. Shared by `run_prompt` and `run_script`. The line is NOT
+/// `sudo`-prefixed here (the caller reaches this after the authz gate strips sudo). Returns a
+/// pre-built exit-2 `LineResult` on a parse error or a `--key` missing its value.
+#[allow(clippy::type_complexity)]
+fn parse_pkg_invocation(
+    line: &str,
+) -> Result<(String, Vec<(String, String)>, Option<String>), LineResult> {
+    let words = crate::askcmd::dequote_words(line)
+        .ok_or_else(|| LineResult::from_outcome(Vec::new(), b"grease: parse error\n".to_vec(), 2))?;
+    let name = words[0].clone();
+    let mut provided: Vec<(String, String)> = Vec::new();
+    let mut model_override: Option<String> = None;
+    let mut iter = words[1..].iter();
+    while let Some(w) = iter.next() {
+        if let Some(key) = w.strip_prefix("--") {
+            let Some(val) = iter.next() else {
+                return Err(LineResult::from_outcome(
+                    Vec::new(),
+                    format!("{name}: --{key} needs a value\n").into_bytes(),
+                    2,
+                ));
+            };
+            if key == "model" {
+                model_override = Some(val.clone());
+            } else {
+                provided.push((key.to_string(), val.clone()));
+            }
+        }
+        // Bare positional words are ignored in v1 (args are named).
+    }
+    Ok((name, provided, model_override))
+}
+
+/// Persist an install marker to `<etc>/<name>.toml`. Returns a user-facing error string on failure.
+fn write_install_marker(name: &str, marker: &crate::greasestate::InstallMarker) -> Result<(), String> {
+    let marker_toml = toml::to_string_pretty(marker)
+        .map_err(|e| format!("grease install: marker serialize error: {e}\n"))?;
+    let etc = crate::greaseconfig::etc_dir();
+    let _ = std::fs::create_dir_all(&etc);
+    std::fs::write(etc.join(format!("{name}.toml")), marker_toml)
+        .map_err(|e| format!("grease install: cannot write marker: {e}\n"))
+}
+
+/// `grease info <skill>` text: the skill is not a command, so we describe its envelope + the bundled
+/// documents/scripts rather than generated command help.
+fn skill_info_text(sk: &crate::greasepkg::SkillPackage) -> String {
+    let mut out = format!("{} — {} [skill]\n", sk.name, sk.description);
+    if let Some(use_) = &sk.intended_use {
+        out.push_str(&format!("\nIntended use: {use_}\n"));
+    }
+    if !sk.documents.is_empty() {
+        out.push_str("\nDocuments (under /usr/share/skills/");
+        out.push_str(&sk.name);
+        out.push_str("/):\n");
+        for d in &sk.documents {
+            out.push_str(&format!("  {}\n", d.path));
+        }
+    }
+    if !sk.scripts.is_empty() {
+        out.push_str("\nBundled scripts (on $PATH via /usr/share/skills/");
+        out.push_str(&sk.name);
+        out.push_str("/bin/):\n");
+        for s in &sk.scripts {
+            out.push_str(&format!("  {}\n", s.name));
+        }
+    }
+    out.push_str(
+        "\nA skill is a capability-context package, not a command; it is surfaced to the model \
+         when you run `ask`.\n",
+    );
+    out
 }
 
 /// Whether `line` is a top-level `context summarize` (optionally `sudo`-prefixed) — the one context
@@ -3369,6 +3555,8 @@ mod tests {
             std::env::remove_var("CLANK_GREASE_ETC");
             std::env::remove_var("CLANK_GREASE_STORE");
             std::env::remove_var("CLANK_GREASE_BIN");
+            std::env::remove_var("CLANK_GREASE_SCRIPT_BIN");
+            std::env::remove_var("CLANK_GREASE_SKILLS");
         }
     }
     fn set_grease_dirs() -> GreaseDirsGuard {
@@ -3376,12 +3564,14 @@ mod tests {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let base = std::env::temp_dir().join(format!("clank_grease_sess_{}_{n}", std::process::id()));
-        for sub in ["etc", "store", "bin"] {
+        for sub in ["etc", "store", "bin", "script-bin", "skills"] {
             std::fs::create_dir_all(base.join(sub)).unwrap();
         }
         std::env::set_var("CLANK_GREASE_ETC", base.join("etc"));
         std::env::set_var("CLANK_GREASE_STORE", base.join("store"));
         std::env::set_var("CLANK_GREASE_BIN", base.join("bin"));
+        std::env::set_var("CLANK_GREASE_SCRIPT_BIN", base.join("script-bin"));
+        std::env::set_var("CLANK_GREASE_SKILLS", base.join("skills"));
         GreaseDirsGuard { _lock: lock }
     }
 
@@ -3521,6 +3711,136 @@ mod tests {
         });
     }
 
+    /// End-to-end: `grease install` fetches a `kind:script` package, persists it to the store, writes
+    /// its bin stub to the SCRIPT bin dir (not the prompt dir), registers it as a Confirm command, and
+    /// running the installed name executes the FILLED shell body through Brush (`run_string`) — no LLM.
+    #[test]
+    fn grease_install_then_run_a_script() {
+        on_rt(async {
+            let _dirs = set_grease_dirs();
+            let mut session = Session::new().await.unwrap();
+
+            // A parameterized shell-script package.
+            let pkg = serde_json::json!({
+                "kind": "script",
+                "name": "greet",
+                "description": "print a greeting",
+                "arguments": [{"name":"who","required":true}],
+                "body": "echo hello {{who}}"
+            });
+            session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![("/packages/", grease_json(pkg))])));
+            session.run_line("grease registry add https://reg.example").await;
+
+            let inst = session.eval_line("sudo grease install greet").await;
+            assert_eq!(inst.exit_code, 0, "install stderr: {}", String::from_utf8_lossy(&inst.stderr));
+            let out = String::from_utf8(inst.stdout).unwrap();
+            assert!(out.contains("installed greet"), "install output: {out}");
+            assert!(out.contains("[script]"), "install output names the kind: {out}");
+
+            // It's an installed SCRIPT (not a prompt), and its stub is in the script bin dir.
+            assert!(session.grease.is_script("greet"));
+            assert!(!session.grease.is_prompt("greet"));
+            assert!(crate::greaseconfig::script_bin_dir().join("greet").exists());
+            assert!(!crate::greaseconfig::bin_dir().join("greet").exists());
+
+            // `grease list` shows it tagged as a script.
+            let list = String::from_utf8(session.eval_line("grease list").await.stdout).unwrap();
+            assert!(list.contains("greet") && list.contains("[script]"), "list: {list}");
+
+            // `greet --help` shows generated help disclosing the local-shell capability, no confirm.
+            let help = session.eval_line("greet --help").await;
+            assert_eq!(help.exit_code, 0);
+            let help_s = String::from_utf8(help.stdout).unwrap();
+            assert!(help_s.contains("--who"), "help: {help_s}");
+            assert!(help_s.contains("local shell"), "help discloses shell capability: {help_s}");
+
+            // Missing required arg → exit 2, no shell run.
+            let miss = session.eval_line("sudo greet").await;
+            assert_eq!(miss.exit_code, 2);
+            assert!(String::from_utf8(miss.stderr).unwrap().contains("missing required argument --who"));
+
+            // Run it (sudo pre-authorizes the Confirm) → the FILLED shell body runs locally.
+            let run = session.eval_line("sudo greet --who world").await;
+            assert_eq!(run.exit_code, 0, "run stderr: {}", String::from_utf8_lossy(&run.stderr));
+            assert_eq!(String::from_utf8(run.stdout).unwrap().trim_end(), "hello world");
+
+            // A bare (non-sudo) script run confirms (running local shell is a Confirm capability).
+            let confirm = session.eval_line("greet --who x").await;
+            assert!(confirm.pending_prompt.is_some(), "script run should confirm without sudo");
+            session.answer_prompt(Some("no".into())).await;
+
+            // Remove deregisters and deletes the script stub.
+            let rm = session.eval_line("sudo grease remove greet").await;
+            assert_eq!(rm.exit_code, 0);
+            assert!(!session.grease.is_script("greet"));
+            assert!(!crate::greaseconfig::script_bin_dir().join("greet").exists());
+        });
+    }
+
+    /// End-to-end: `grease install` fetches a `kind:skill` package, materializes its dir tree (docs +
+    /// bundled `bin/` scripts), and surfaces it to the model in the system prompt — but a skill is NOT
+    /// a command (no manifest, no `ask` tool, no `run_command` arm).
+    #[test]
+    fn grease_install_a_skill_materializes_and_surfaces_it() {
+        on_rt(async {
+            let _dirs = set_grease_dirs();
+            let mut session = Session::new().await.unwrap();
+
+            let pkg = serde_json::json!({
+                "kind": "skill",
+                "name": "code-review",
+                "description": "review code carefully",
+                "intended-use": "when the user asks for a code review",
+                "documents": [{"path": "SKILL.md", "content": "Review for correctness first."}],
+                "scripts": [{"name": "lint-all", "body": "echo linting"}]
+            });
+            session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![("/packages/", grease_json(pkg))])));
+            session.run_line("grease registry add https://reg.example").await;
+
+            let inst = session.eval_line("sudo grease install code-review").await;
+            assert_eq!(inst.exit_code, 0, "install stderr: {}", String::from_utf8_lossy(&inst.stderr));
+            let out = String::from_utf8(inst.stdout).unwrap();
+            assert!(out.contains("installed code-review") && out.contains("[skill]"), "out: {out}");
+
+            // The dir tree is materialized: doc + bundled bin script.
+            let skill_root = crate::greaseconfig::skills_dir().join("code-review");
+            assert_eq!(
+                std::fs::read_to_string(skill_root.join("SKILL.md")).unwrap(),
+                "Review for correctness first."
+            );
+            assert_eq!(
+                std::fs::read_to_string(skill_root.join("bin/lint-all")).unwrap(),
+                "echo linting"
+            );
+
+            // A skill is NOT a command: not a script/prompt, no manifest, no ask tool.
+            assert!(session.grease.is_skill("code-review"));
+            assert!(!session.grease.is_script("code-review"));
+            assert!(!session.grease.is_prompt("code-review"));
+            assert!(session.grease.manifest_for("code-review").is_none());
+            assert!(session.grease.ask_tool_definitions().is_empty());
+
+            // `grease info` describes the envelope + bundles.
+            let info = String::from_utf8(session.eval_line("grease info code-review").await.stdout).unwrap();
+            assert!(info.contains("[skill]") && info.contains("SKILL.md") && info.contains("lint-all"), "info: {info}");
+
+            // The skill is surfaced in the agentic system prompt (context, not a callable tool).
+            let sys = crate::askcmd::build_system_prompt_with_capabilities(
+                &session.registry,
+                &session.mcp,
+                &session.grease,
+            );
+            assert!(sys.contains("Installed skills"), "system prompt lists skills: …");
+            assert!(sys.contains("code-review") && sys.contains("when the user asks for a code review"));
+
+            // Remove deletes the dir tree and deregisters.
+            let rm = session.eval_line("sudo grease remove code-review").await;
+            assert_eq!(rm.exit_code, 0);
+            assert!(!session.grease.is_skill("code-review"));
+            assert!(!skill_root.exists());
+        });
+    }
+
     /// A bare `grease install` surfaces a capability-disclosure confirmation naming the package, its
     /// source registries, and the ask capability (README "discloses capability requests"). `sudo`
     /// pre-authorizes (no pause).
@@ -3535,7 +3855,8 @@ mod tests {
             let q = surface.pending_prompt.expect("install should confirm").question;
             assert!(q.contains("\"tldr\""), "discloses the package name: {q}");
             assert!(q.contains("https://reg.example/pkgs"), "discloses the source registry: {q}");
-            assert!(q.contains("runs via ask"), "discloses the ask capability: {q}");
+            assert!(q.contains("run via ask"), "discloses the ask capability: {q}");
+            assert!(q.contains("local shell"), "discloses the local-shell capability: {q}");
             // Deny to leave state clean.
             session.answer_prompt(Some("no".into())).await;
 
