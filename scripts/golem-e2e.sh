@@ -800,7 +800,8 @@ expect_eval "grease in \$() gives the honest pointer"  "$GREASE_SUBST"  '.stderr
 
 # --- Gated live-registry block: needs a registry serving /packages/<name>.json (+ /index.json for
 #     search). Set GREASE_TEST_URL + GREASE_TEST_PKG to run a real install; the installed prompt RUN
-#     also needs --with-llm (it calls the model). Gated because it needs an external registry.
+#     also needs --with-llm (it calls the model). If the package has REQUIRED arguments, set
+#     GREASE_TEST_ARGS to the flag string (e.g. "--file /etc/hostname"). Gated (needs an external registry).
 if [[ -n "${GREASE_TEST_URL:-}" && -n "${GREASE_TEST_PKG:-}" ]]; then
   note "GREASE_TEST_URL set — running live grease install against $GREASE_TEST_URL"
   run_line "grease registry add ${GREASE_TEST_URL}" >/dev/null
@@ -809,8 +810,10 @@ if [[ -n "${GREASE_TEST_URL:-}" && -n "${GREASE_TEST_PKG:-}" ]]; then
   expect_eval "live grease install reports installed"  "$GR_INST"  '.stdout | contains("installed")'  'true'
   expect_contains "installed package appears in list"  'grease list'  "${GREASE_TEST_PKG}"
   expect_contains "which finds the installed stub"     "which ${GREASE_TEST_PKG}"  "${GREASE_TEST_PKG}"
+  # The prompt's required args (if any) come from GREASE_TEST_ARGS; a bare run of an arg-less package
+  # works too. A missing required arg is (correctly) exit 2, so pass the args the package needs.
   if [[ $RUN_LLM -eq 1 ]]; then
-    GR_RUN="$(eval_json eval "\"sudo ${GREASE_TEST_PKG}\"")"
+    GR_RUN="$(eval_json eval "\"sudo ${GREASE_TEST_PKG} ${GREASE_TEST_ARGS:-}\"")"
     expect_eval "running the installed prompt exits 0" "$GR_RUN"  '.exit_code'  '0'
     expect_eval "the prompt produced a model reply"    "$GR_RUN"  '.stdout | length > 0'  'true'
   fi
