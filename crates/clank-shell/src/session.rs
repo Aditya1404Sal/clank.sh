@@ -585,6 +585,19 @@ impl Session {
             String::from_utf8_lossy(&self.transcript.lock().unwrap().render()).into_owned()
         };
 
+        // Resolve the model: `--model` > ask.toml default > built-in DEFAULT_MODEL. Strip the
+        // `anthropic/` prefix for the provider (it wants the bare id); an unknown provider prefix is
+        // an error before any model call.
+        let (model, model_warning) = match self.resolve_ask_model(args.model.as_deref()) {
+            Ok(pair) => pair,
+            Err(msg) => return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 2),
+        };
+
+        let mut trace = Vec::new();
+        if let Some(w) = model_warning {
+            trace.extend_from_slice(w.as_bytes());
+        }
+
         let state = AskLoopState {
             system: crate::askcmd::build_system_prompt(&self.registry),
             tools: crate::askcmd::build_ask_tools(&self.registry),
@@ -592,12 +605,55 @@ impl Session {
                 &base_transcript,
                 &args.prompt,
             ))],
-            model: args.model,
-            trace: Vec::new(),
+            model,
+            trace,
             blanket_authorized,
         };
         // `resume` is empty on a fresh loop; the pid carries the paused row on a resume.
         self.drive_ask_loop(state, Vec::new(), None).await
+    }
+
+    /// Resolve the model id `ask` should target: `--model` (if given) > the ask.toml default > the
+    /// built-in [`crate::askcmd::DEFAULT_MODEL`]. Returns `(bare_model_id, optional_warning)` — the
+    /// `anthropic/` prefix is stripped for the provider. An unknown `provider/` prefix is an `Err`
+    /// (surfaced before any model call). An ask.toml parse error is a non-fatal warning that falls
+    /// back to the built-in default.
+    fn resolve_ask_model(&self, cli_model: Option<&str>) -> Result<(String, Option<String>), String> {
+        let mut warning = None;
+        let chosen = if let Some(m) = cli_model {
+            m.to_string()
+        } else {
+            let home = self.shell_home();
+            match crate::askconfig::default_model(&home) {
+                Ok(Some(m)) => m,
+                Ok(None) => crate::askcmd::DEFAULT_MODEL.to_string(),
+                Err(e) => {
+                    warning = Some(format!("ask: {e}; using the built-in default\n"));
+                    crate::askcmd::DEFAULT_MODEL.to_string()
+                }
+            }
+        };
+
+        // Validate/strip the provider prefix. Only `anthropic/` is known; a bare id is anthropic.
+        let bare = match chosen.split_once('/') {
+            Some(("anthropic", model)) => model.to_string(),
+            Some((provider, _)) => {
+                return Err(format!(
+                    "ask: unknown provider '{provider}' (only anthropic is available)\n"
+                ))
+            }
+            None => chosen,
+        };
+        Ok((bare, warning))
+    }
+
+    /// The shell's `$HOME` (seeded to `/home/user` on the agent), for locating `~/.config/ask/ask.toml`.
+    fn shell_home(&self) -> String {
+        self.shell
+            .env()
+            .get_str("HOME", &self.shell)
+            .map(|h| h.into_owned())
+            .unwrap_or_else(|| DEFAULT_HOME.to_string())
     }
 
     /// Drive the `ask` agentic loop from `state` until it completes (model answers, transport error,
@@ -1322,6 +1378,10 @@ fn truncate_tool_output(bytes: &[u8]) -> String {
 const DEFAULT_PATH: &str =
     "/usr/local/bin:/usr/bin:/usr/lib/mcp/bin:/usr/lib/agents/bin:/usr/lib/prompts/bin:/usr/share/skills/*/bin";
 
+/// The README's home directory. Seeded as `$HOME` on the agent (empty env) so `~` expansion and
+/// `~/.config/ask/ask.toml` resolve; native keeps the host's real `$HOME`.
+const DEFAULT_HOME: &str = "/home/user";
+
 async fn build_shell() -> Result<Shell, brush_core::Error> {
     // NB: clank's builtins are registered here AND their manifests in `registry::build()`; the two
     // must stay in lockstep (the registry drift-guard test enforces it). Adding a builtin via
@@ -1336,6 +1396,7 @@ async fn build_shell() -> Result<Shell, brush_core::Error> {
         .builtins(crate::statcmd::builtins())
         .builtins(crate::findcmd::builtins())
         .builtins(crate::xargscmd::builtins())
+        .builtins(crate::modelcmd::builtins())
         .builtins(crate::contextcmd::builtins())
         .builtins(crate::interceptstub::builtins())
         .build()
@@ -1348,6 +1409,16 @@ async fn build_shell() -> Result<Shell, brush_core::Error> {
         "PATH",
         brush_core::variables::ShellVariable::new(DEFAULT_PATH),
     )?;
+
+    // Seed `$HOME` to the README layout (`/home/user`) only when unset — the agent's wasm env is
+    // empty, so `~` expansion and `~/.config/ask/ask.toml` need it; native keeps the host's real
+    // `$HOME` (ask.toml is a native location too, per the README).
+    if shell.env().get("HOME").is_none() {
+        shell.env_mut().set_global(
+            "HOME",
+            brush_core::variables::ShellVariable::new(DEFAULT_HOME),
+        )?;
+    }
 
     Ok(shell)
 }
@@ -1997,6 +2068,68 @@ mod tests {
             let aborted = session.answer_prompt(None).await;
             assert_eq!(aborted.exit_code, 130);
             assert!(session.pending.is_none(), "no pending after abort");
+        });
+    }
+
+    /// `model default X` (via the builtin) makes `ask` target X; an explicit `--model` overrides it.
+    /// Exercises the full ask.toml resolution chain through a real Session.
+    #[test]
+    fn ask_uses_model_default_and_flag_overrides() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+            session.set_ask_provider(Box::new(FakeProvider::scripted(
+                vec![
+                    crate::askcmd::AskResponse::text("a"),
+                    crate::askcmd::AskResponse::text("b"),
+                ],
+                seen.clone(),
+            )));
+            // Point HOME at a unique temp dir so ask.toml is hermetic (nanos avoids cross-test clash).
+            let home = std::env::temp_dir().join(format!(
+                "clank_ask_model_{}_{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&home).unwrap();
+            session
+                .run_line(&format!("export HOME={}", home.display()))
+                .await;
+
+            // Set the default, then a bare ask should use it (prefix stripped to the bare id).
+            session
+                .run_line("model default anthropic/claude-sonnet-4-5")
+                .await;
+            session.run_line(r#"sudo ask --fresh "hi""#).await;
+            assert_eq!(seen.lock().unwrap().last().unwrap().model, "claude-sonnet-4-5");
+
+            // An explicit --model overrides the default.
+            session
+                .run_line(r#"sudo ask --fresh --model claude-haiku-4-5 "hi""#)
+                .await;
+            assert_eq!(seen.lock().unwrap().last().unwrap().model, "claude-haiku-4-5");
+
+            std::fs::remove_dir_all(&home).ok();
+        });
+    }
+
+    /// An unknown provider prefix in `--model` fails before any model call (exit 2).
+    #[test]
+    fn ask_unknown_provider_prefix_errors() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+            session.set_ask_provider(Box::new(FakeProvider::reply("x", seen.clone())));
+            let result = session
+                .eval_line(r#"sudo ask --model openai/gpt-4o --fresh "hi""#)
+                .await;
+            assert_eq!(result.exit_code, 2);
+            assert!(String::from_utf8(result.stderr).unwrap().contains("unknown provider"));
+            // The provider was never called.
+            assert!(seen.lock().unwrap().is_empty());
         });
     }
 

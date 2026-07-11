@@ -605,6 +605,23 @@ else
 fi
 
 # ============================================================================
+# 2l-b. model — default model + ask.toml (no API key needed)
+# ============================================================================
+# `model` is a Brush builtin that reads/writes ~/.config/ask/ask.toml (agent HOME=/home/user). It
+# does no HTTP, so these run without a key. Proves HOME seeding + `~` expansion + ask.toml persistence.
+step "model (default model, ask.toml)"
+expect_contains "model list shows the catalog"        'model list'  'anthropic/claude-opus-4-8'
+expect_contains "fresh default is opus (built-in)"    'model list'  '* anthropic/claude-opus-4-8'
+expect_contains "model default sets sonnet"           'model default anthropic/claude-sonnet-4-5'  'set to anthropic/claude-sonnet-4-5'
+expect_contains "ask.toml persisted the default"      'cat ~/.config/ask/ask.toml'  'claude-sonnet-4-5'
+expect_contains "list now marks sonnet default"       'model list'  '* anthropic/claude-sonnet-4-5'
+expect_contains "model info reports default"          'model info claude-sonnet-4-5'  'default:   yes'
+expect_contains "model add is an honest key error"    'model add anthropic --key sk-fake'  'ANTHROPIC_API_KEY'
+expect_contains "unknown provider is rejected"        'model default openai/gpt-4o'  "unknown provider 'openai'"
+# Restore the built-in default so the gated ask block (which relies on it) is unaffected.
+expect_contains "restore opus default"                'model default anthropic/claude-opus-4-8'  'set to anthropic/claude-opus-4-8'
+
+# ============================================================================
 # 2m. Pipelines — internal `cmd | cmd` on the single-threaded wasm agent (Wall C)
 # ============================================================================
 # Internal pipelines used to WEDGE the agent: std::io::pipe() is unsupported on wasip2 and there is

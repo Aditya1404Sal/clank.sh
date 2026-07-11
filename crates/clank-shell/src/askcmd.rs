@@ -267,8 +267,9 @@ pub trait AskProvider {
 pub struct AskArgs {
     /// The prompt text (the non-flag words, space-joined).
     pub prompt: String,
-    /// The model id (`--model <id>`), or [`DEFAULT_MODEL`] if not given.
-    pub model: String,
+    /// The model id from `--model <id>`, or `None` to fall back to the ask.toml default / built-in.
+    /// The `Session` resolves the final id (`--model` > ask.toml > [`DEFAULT_MODEL`]).
+    pub model: Option<String>,
     /// `--fresh` / `--no-transcript`: send no transcript context.
     pub fresh: bool,
 }
@@ -285,7 +286,7 @@ pub fn classify(line: &str) -> Option<AskArgs> {
         return None;
     }
 
-    let mut model = DEFAULT_MODEL.to_string();
+    let mut model: Option<String> = None;
     let mut fresh = false;
     let mut prompt_words: Vec<String> = Vec::new();
     let mut iter = rest.iter();
@@ -295,7 +296,7 @@ pub fn classify(line: &str) -> Option<AskArgs> {
             "--inherit" => fresh = false,
             "--model" => {
                 if let Some(id) = iter.next() {
-                    model = id.clone();
+                    model = Some(id.clone());
                 }
             }
             other => prompt_words.push(other.to_string()),
@@ -359,7 +360,8 @@ mod tests {
     fn classifies_plain_ask_and_captures_prompt() {
         let args = classify(r#"ask "what is this repo?""#).unwrap();
         assert_eq!(args.prompt, "what is this repo?");
-        assert_eq!(args.model, DEFAULT_MODEL);
+        // No --model given: the Session resolves the default (ask.toml / built-in).
+        assert_eq!(args.model, None);
         assert!(!args.fresh);
     }
 
@@ -374,7 +376,7 @@ mod tests {
     #[test]
     fn parses_model_flag() {
         let args = classify("ask --model claude-sonnet-5 summarize this").unwrap();
-        assert_eq!(args.model, "claude-sonnet-5");
+        assert_eq!(args.model.as_deref(), Some("claude-sonnet-5"));
         assert_eq!(args.prompt, "summarize this");
     }
 
@@ -382,7 +384,7 @@ mod tests {
     fn flags_do_not_leak_into_the_prompt() {
         let args = classify("ask --fresh --model x tell me a joke").unwrap();
         assert_eq!(args.prompt, "tell me a joke");
-        assert_eq!(args.model, "x");
+        assert_eq!(args.model.as_deref(), Some("x"));
         assert!(args.fresh);
     }
 

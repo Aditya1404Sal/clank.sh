@@ -15,6 +15,7 @@
 //! on both targets through [`session::Session`].
 
 pub mod askcmd;
+pub mod askconfig;
 mod awkcmd;
 pub mod authz;
 pub mod binfs;
@@ -26,6 +27,7 @@ mod interceptstub;
 mod killcmd;
 mod mancmd;
 pub mod manifest;
+mod modelcmd;
 pub mod process;
 pub mod procfs;
 pub mod proctable;
