@@ -20,8 +20,9 @@ use brush_parser::{tokenize_str, unquote_str, Token};
 use crate::manifest::{AuthorizationPolicy, ExecutionScope, Manifest};
 use crate::registry::CommandRegistry;
 
-/// The default model `ask` targets when `--model` is not given.
-pub const DEFAULT_MODEL: &str = "claude-opus-4-8";
+/// The default model `ask` targets when `--model` is not given and no ask.toml default is set.
+/// Deliberately the lightest/cheapest model — callers opt into a bigger model explicitly.
+pub const DEFAULT_MODEL: &str = "claude-haiku-4-5-20251001";
 
 /// The fixed preamble of the `ask` system prompt: who the model is and how the shell context works.
 /// [`build_system_prompt`] appends the live command surface (rendered from the registry) after it.

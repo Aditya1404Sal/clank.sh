@@ -25,12 +25,14 @@ cd "$REPO_ROOT" || { echo "cannot cd to repo root $REPO_ROOT" >&2; exit 1; }
 
 KEEP=0
 TAKEOVER=0
+WITH_LLM=0
 for arg in "$@"; do
   case "$arg" in
     --keep)     KEEP=1 ;;
     --takeover) TAKEOVER=1 ;;
+    --with-llm) WITH_LLM=1 ;;
     -h|--help)  sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) echo "unknown option: $arg" >&2; echo "usage: $0 [--keep] [--takeover]" >&2; exit 2 ;;
+    *) echo "unknown option: $arg" >&2; echo "usage: $0 [--keep] [--takeover] [--with-llm]" >&2; exit 2 ;;
   esac
 done
 
@@ -41,13 +43,24 @@ ROUTER_PORT=9881
 
 # `ask` needs ANTHROPIC_API_KEY in the agent env (golem.yaml passes it through via Jinja
 # substitution, which is STRICT — a missing host var fails the deploy). So export an empty default
-# when it's unset, and remember whether a real key is present: the `ask` network assertions run only
-# when a real key is set; otherwise `ask` reports "not configured" (exit 4) and that block is skipped.
+# when it's unset.
+#
+# COST GUARD: the `ask` network assertions make REAL Anthropic API calls (the agentic loop can be
+# several calls each). To avoid spending credits on every run, they fire ONLY when BOTH a real key is
+# present AND `--with-llm` is passed. A normal `--takeover` run skips them (the no-key sanity path
+# still verifies clean exit-4 degradation). Set the model with `model default` on the agent; the
+# built-in default is the lightest model (claude-haiku-4-5-20251001).
 if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
   HAS_ANTHROPIC_KEY=1
 else
   HAS_ANTHROPIC_KEY=0
   export ANTHROPIC_API_KEY=""
+fi
+# Whether to actually exercise the live model (real API calls).
+if [[ $HAS_ANTHROPIC_KEY -eq 1 && $WITH_LLM -eq 1 ]]; then
+  RUN_LLM=1
+else
+  RUN_LLM=0
 fi
 
 # The agent is addressed by type + a constructor arg (its identity). One name for
@@ -551,8 +564,8 @@ expect_contains "ask --help prints help (no confirm)" 'ask --help'        'send 
 expect_contains "/proc/clank/system-prompt describes the shell tool" 'cat /proc/clank/system-prompt' '`shell`'
 expect_contains "/proc/clank/system-prompt lists the command surface" 'cat /proc/clank/system-prompt' '[confirm]'
 
-if [[ $HAS_ANTHROPIC_KEY -eq 1 ]]; then
-  note "ANTHROPIC_API_KEY present — running ask network assertions against the live model"
+if [[ $RUN_LLM -eq 1 ]]; then
+  note "--with-llm + key present — running ask network assertions against the live model (real API calls)"
   # 1. sudo ask pre-authorizes (no confirm); the model replies. Ask for an exact token so we can
   #    assert on it deterministically.
   ASK_PONG="$(eval_json eval '"sudo ask --fresh \"Reply with exactly the single word: pong . No punctuation, nothing else.\""')"
@@ -598,10 +611,14 @@ if [[ $HAS_ANTHROPIC_KEY -eq 1 ]]; then
   ASK_PU2="$(eval_json answer_prompt '"zebra-legend-first"')"
   expect_eval "the model echoes the human answer"      "$ASK_PU2"  '.stdout | contains("zebra-legend-first")'  'true'
 else
-  note "ANTHROPIC_API_KEY not set — skipping ask network assertions (set it to exercise the live model)"
-  # Sanity: with no key, sudo ask fails cleanly (exit 4 from the provider), never hangs or panics.
-  ASK_NOKEY="$(eval_json eval '"sudo ask --fresh \"hi\""')"
-  expect_eval "sudo ask without a key exits nonzero"   "$ASK_NOKEY"  '.exit_code != 0'  'true'
+  if [[ $HAS_ANTHROPIC_KEY -eq 1 ]]; then
+    note "ANTHROPIC_API_KEY present but --with-llm not passed — skipping live model asserts (no API cost). Re-run with --with-llm to exercise the model."
+  else
+    note "ANTHROPIC_API_KEY not set — skipping ask network assertions."
+    # Sanity (no-key only): sudo ask fails cleanly (exit 4 from the provider), never hangs or panics.
+    ASK_NOKEY="$(eval_json eval '"sudo ask --fresh \"hi\""')"
+    expect_eval "sudo ask without a key exits nonzero"   "$ASK_NOKEY"  '.exit_code != 0'  'true'
+  fi
 fi
 
 # ============================================================================
@@ -610,16 +627,37 @@ fi
 # `model` is a Brush builtin that reads/writes ~/.config/ask/ask.toml (agent HOME=/home/user). It
 # does no HTTP, so these run without a key. Proves HOME seeding + `~` expansion + ask.toml persistence.
 step "model (default model, ask.toml)"
-expect_contains "model list shows the catalog"        'model list'  'anthropic/claude-opus-4-8'
-expect_contains "fresh default is opus (built-in)"    'model list'  '* anthropic/claude-opus-4-8'
+expect_contains "model list shows the catalog"        'model list'  'anthropic/claude-haiku-4-5-20251001'
+expect_contains "fresh default is haiku (built-in)"   'model list'  '* anthropic/claude-haiku-4-5-20251001'
 expect_contains "model default sets sonnet"           'model default anthropic/claude-sonnet-4-5'  'set to anthropic/claude-sonnet-4-5'
 expect_contains "ask.toml persisted the default"      'cat ~/.config/ask/ask.toml'  'claude-sonnet-4-5'
 expect_contains "list now marks sonnet default"       'model list'  '* anthropic/claude-sonnet-4-5'
 expect_contains "model info reports default"          'model info claude-sonnet-4-5'  'default:   yes'
 expect_contains "model add is an honest key error"    'model add anthropic --key sk-fake'  'ANTHROPIC_API_KEY'
 expect_contains "unknown provider is rejected"        'model default openai/gpt-4o'  "unknown provider 'openai'"
-# Restore the built-in default so the gated ask block (which relies on it) is unaffected.
-expect_contains "restore opus default"                'model default anthropic/claude-opus-4-8'  'set to anthropic/claude-opus-4-8'
+# Restore the built-in default (haiku, the lightest model) so any later ask stays cheap.
+expect_contains "restore haiku default"               'model default anthropic/claude-haiku-4-5-20251001'  'set to anthropic/claude-haiku-4-5-20251001'
+
+# ============================================================================
+# 2l-c. mcp — MCP client config + surfaces (no live server needed)
+# ============================================================================
+# `mcp` manages HTTPS MCP servers. These asserts exercise the config/manifest/type surfaces without a
+# reachable server: adding an unreachable URL writes the config (state "not installed") and fails the
+# HTTP install; the config surfaces (list, /etc/mcp file, remove) all work. A live tools/call is only
+# exercised in the MCP_TEST_URL-gated block (C2/C3, added later).
+step "mcp (client config + surfaces)"
+expect_contains "type mcp is intercepted"             'type mcp'          'mcp'
+expect_contains "mcp --help documents subcommands"    'mcp --help'        'mcp add'
+expect_contains "mcp list is empty initially"         'mcp list'          'no MCP servers configured'
+expect_contains "mcp watch is honestly unsupported"   'mcp watch some://x'  'not supported'
+# `mcp add` is Confirm (outbound HTTP); `sudo mcp add` pre-authorizes. Unreachable URL → install fails
+# (exit 4) but the config is written.
+MCP_ADD="$(eval_json eval '"sudo mcp add unreachable https://127.0.0.1:9/mcp"')"
+expect_eval "mcp add to an unreachable URL fails"     "$MCP_ADD"  '.exit_code'  '4'
+expect_contains "the config file was written"         'cat /etc/mcp/unreachable.toml'  'https://127.0.0.1:9/mcp'
+expect_contains "mcp list shows it not installed"     'mcp list'          'not installed'
+expect_contains "mcp remove deletes it"               'sudo mcp remove unreachable'  "removed MCP server 'unreachable'"
+expect_contains "mcp list is empty again"             'mcp list'          'no MCP servers configured'
 
 # ============================================================================
 # 2m. Pipelines — internal `cmd | cmd` on the single-threaded wasm agent (Wall C)

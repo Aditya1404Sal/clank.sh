@@ -40,7 +40,7 @@ use crate::manifest::{AuthorizationPolicy, ExecutionScope, Manifest};
 ///   the bg-job mapping, proc table, and pending prompt; Brush's own kill is nix/unix-gated). See
 ///   `killcmd`.
 pub const MANUAL_MANIFESTS: &[&str] =
-    &["prompt-user", "type", "command", "curl", "wget", "context", "ask", "kill"];
+    &["prompt-user", "type", "command", "curl", "wget", "context", "ask", "kill", "mcp"];
 
 /// Hand-authored manifests for commands not backed by a clank `SimpleCommand` registration (see
 /// [`MANUAL_MANIFESTS`]).
@@ -160,6 +160,9 @@ pub fn build() -> CommandRegistry {
         registry.insert(manifest);
     }
     for manifest in crate::askcmd::manifests() {
+        registry.insert(manifest);
+    }
+    for manifest in crate::mcpcmd::manifests() {
         registry.insert(manifest);
     }
     for manifest in crate::killcmd::manifests() {

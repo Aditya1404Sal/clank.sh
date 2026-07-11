@@ -30,11 +30,12 @@ impl Model {
 const PROVIDER: &str = "anthropic";
 
 /// The built-in model catalog (an honest subset; the provider accepts any id, these are the vetted
-/// ones). The first entry is the built-in fallback default (matches [`crate::askcmd::DEFAULT_MODEL`]).
+/// ones). Haiku is the built-in default (matches [`crate::askcmd::DEFAULT_MODEL`]) — the lightest and
+/// cheapest; opt into a bigger model explicitly.
 const CATALOG: &[&str] = &[
-    "anthropic/claude-opus-4-8",
+    "anthropic/claude-haiku-4-5-20251001",
     "anthropic/claude-sonnet-4-5",
-    "anthropic/claude-haiku-4-5",
+    "anthropic/claude-opus-4-8",
 ];
 
 impl SimpleCommand for Model {
@@ -253,8 +254,8 @@ mod tests {
         let home = temp_home();
         let (out, _err, code) = run(&home, &args(&["list"]));
         assert_eq!(code, 0);
-        // Fresh home: the built-in default (opus) is marked with *.
-        assert!(out.contains("* anthropic/claude-opus-4-8"), "got: {out}");
+        // Fresh home: the built-in default (haiku) is marked with *.
+        assert!(out.contains("* anthropic/claude-haiku-4-5-20251001"), "got: {out}");
         assert!(out.contains("(from built-in)"), "got: {out}");
     }
 

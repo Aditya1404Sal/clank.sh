@@ -202,6 +202,11 @@ pub struct Session {
     /// provider); `None` on native and until injected, in which case `ask` degrades to a clean
     /// "not configured" error. See [`crate::askcmd`].
     ask_provider: Option<Box<dyn crate::askcmd::AskProvider>>,
+    /// Installed MCP servers + open sessions. Reconstructed deterministically under Golem replay.
+    mcp: crate::mcpstate::McpState,
+    /// The injected MCP HTTP transport. Installed by the agent build (a durable `wstd` client);
+    /// `None` on native, in which case MCP degrades to a clean "not configured" error.
+    mcp_http: Option<Box<dyn crate::mcpclient::McpHttp>>,
     source: SourceInfo,
     #[cfg(target_arch = "wasm32")]
     rt: tokio::runtime::Runtime,
@@ -224,6 +229,8 @@ impl Session {
                 authz: AuthzState::default(),
                 bg_jobs: Vec::new(),
                 ask_provider: None,
+                mcp: crate::mcpstate::McpState::default(),
+                mcp_http: None,
                 source: SourceInfo::default(),
                 rt,
             })
@@ -240,6 +247,8 @@ impl Session {
                 authz: AuthzState::default(),
                 bg_jobs: Vec::new(),
                 ask_provider: None,
+                mcp: crate::mcpstate::McpState::default(),
+                mcp_http: None,
                 source: SourceInfo::default(),
             })
         }
@@ -254,6 +263,12 @@ impl Session {
     /// provider here after constructing the session; without one, `ask` reports "not configured".
     pub fn set_ask_provider(&mut self, provider: Box<dyn crate::askcmd::AskProvider>) {
         self.ask_provider = Some(provider);
+    }
+
+    /// Install the MCP HTTP transport (a durable `wstd` client on the agent). Without one, MCP
+    /// commands report "not configured" (exit 4). Injected after construction like the ask provider.
+    pub fn set_mcp_http(&mut self, http: Box<dyn crate::mcpclient::McpHttp>) {
+        self.mcp_http = Some(http);
     }
 
     /// Evaluate one input line: record it, serve the clank-specific `context` builtin, otherwise
@@ -407,6 +422,13 @@ impl Session {
             // is awaited here, one level under the Golem SDK's `wstd::block_on` where the durable
             // context and the WASI-HTTP reactor are live. See `askcmd`.
             self.run_ask(args, blanket_authorized).await
+        } else if let Some(parsed) = crate::mcpcmd::classify(line) {
+            // `mcp` management runs at the Session layer — its add/reload/session subcommands do
+            // HTTP, which must await under the live reactor (same rule as curl/ask).
+            match parsed {
+                Ok(cmd) => self.run_mcp(cmd).await,
+                Err(e) => LineResult::from_outcome(Vec::new(), format!("{e}\n").into_bytes(), 2),
+            }
         } else {
             match crate::httpcmd::classify(line) {
                 Some((crate::httpcmd::HttpCommand::Curl, args)) => {
@@ -1040,6 +1062,326 @@ impl Session {
             id: call.id.clone(),
             name: call.name.clone(),
             outcome: Ok(payload.to_string()),
+        }
+    }
+
+    /// Dispatch a parsed `mcp` management command. HTTP-performing subcommands (`add`, `reload`,
+    /// `session open`/`close`) require the injected transport; the sync ones (`list`, `tools`,
+    /// `remove`, `session list`/`info`) work without it.
+    async fn run_mcp(&mut self, cmd: crate::mcpcmd::McpCommand) -> LineResult {
+        use crate::mcpcmd::McpCommand;
+        match cmd {
+            McpCommand::List => self.mcp_list(),
+            McpCommand::Tools { server } => self.mcp_tools(&server),
+            McpCommand::Remove { name } => self.mcp_remove(&name),
+            McpCommand::Watch => LineResult::from_outcome(
+                Vec::new(),
+                b"mcp watch: not supported in this build (MCP-lite covers tools only)\n".to_vec(),
+                1,
+            ),
+            McpCommand::Add {
+                name,
+                url,
+                auth_env,
+                auth_header,
+            } => self.mcp_add(&name, &url, auth_env, auth_header).await,
+            McpCommand::Reload { name } => self.mcp_reload(name.as_deref()).await,
+            McpCommand::SessionList => self.mcp_session_list(),
+            McpCommand::SessionInfo { id } => self.mcp_session_info(&id),
+            McpCommand::SessionOpen { server } => self.mcp_session_open(&server).await,
+            McpCommand::SessionClose { id } => self.mcp_session_close(&id).await,
+        }
+    }
+
+    /// `mcp list`: configured servers with url/enabled/install status/tool count or error.
+    fn mcp_list(&self) -> LineResult {
+        let names = crate::mcpconfig::list_names();
+        if names.is_empty() {
+            return LineResult::continue_with_stdout(b"no MCP servers configured\n".to_vec());
+        }
+        let mut out = String::new();
+        for name in &names {
+            match self.mcp.get(name) {
+                Some(s) if s.installed => out.push_str(&format!(
+                    "{name}  {}  enabled  {} tools\n",
+                    s.config.url,
+                    s.tools.len()
+                )),
+                Some(s) => out.push_str(&format!(
+                    "{name}  {}  not installed  ({})\n",
+                    s.config.url,
+                    s.last_error.as_deref().unwrap_or("unknown error")
+                )),
+                None => {
+                    // Configured on disk but not yet loaded into this session.
+                    let url = crate::mcpconfig::load(name)
+                        .ok()
+                        .flatten()
+                        .map(|c| c.url)
+                        .unwrap_or_default();
+                    out.push_str(&format!("{name}  {url}  not loaded (run `mcp reload {name}`)\n"));
+                }
+            }
+        }
+        LineResult::continue_with_stdout(out.into_bytes())
+    }
+
+    /// `mcp tools <server>`: list an installed server's tools.
+    fn mcp_tools(&self, server: &str) -> LineResult {
+        match self.mcp.get(server) {
+            Some(s) if s.installed => {
+                let mut out = String::new();
+                for t in &s.tools {
+                    out.push_str(&format!(
+                        "{}  {}\n",
+                        t.name,
+                        t.description.as_deref().unwrap_or("")
+                    ));
+                }
+                LineResult::continue_with_stdout(out.into_bytes())
+            }
+            Some(_) => LineResult::from_outcome(
+                Vec::new(),
+                format!("mcp tools: '{server}' is configured but not installed\n").into_bytes(),
+                1,
+            ),
+            None => LineResult::from_outcome(
+                Vec::new(),
+                format!("mcp tools: no such server '{server}'\n").into_bytes(),
+                1,
+            ),
+        }
+    }
+
+    /// `mcp remove <server>`: delete the config + stub and forget the server.
+    fn mcp_remove(&mut self, name: &str) -> LineResult {
+        match crate::mcpconfig::remove(name) {
+            Ok(()) => {
+                self.mcp.remove(name);
+                LineResult::continue_with_stdout(format!("removed MCP server '{name}'\n").into_bytes())
+            }
+            Err(e) => LineResult::from_outcome(Vec::new(), format!("mcp remove: {e}\n").into_bytes(), 1),
+        }
+    }
+
+    /// `mcp add <name> <url>`: write the config, then install (initialize + tools/list). An install
+    /// failure keeps the config as "configured, not installed" and exits 4.
+    async fn mcp_add(
+        &mut self,
+        name: &str,
+        url: &str,
+        auth_env: Option<String>,
+        auth_header: Option<String>,
+    ) -> LineResult {
+        if !crate::mcpconfig::is_valid_name(name) {
+            return LineResult::from_outcome(
+                Vec::new(),
+                format!("mcp add: invalid server name '{name}' (use kebab-case: [a-z0-9-])\n").into_bytes(),
+                2,
+            );
+        }
+        // Reject a name that collides with a built-in command (it would shadow it).
+        if self.registry.get(name).is_some() {
+            return LineResult::from_outcome(
+                Vec::new(),
+                format!("mcp add: '{name}' collides with a built-in command\n").into_bytes(),
+                2,
+            );
+        }
+        let mut config = crate::mcpconfig::McpServerConfig::new(url);
+        config.auth_env = auth_env;
+        config.auth_header = auth_header;
+        if let Err(e) = crate::mcpconfig::save(name, &config) {
+            return LineResult::from_outcome(Vec::new(), format!("mcp add: {e}\n").into_bytes(), 1);
+        }
+        self.mcp_install(name, config).await
+    }
+
+    /// `mcp reload [<name>]`: re-read config(s) and re-install the enabled ones.
+    async fn mcp_reload(&mut self, name: Option<&str>) -> LineResult {
+        let names: Vec<String> = match name {
+            Some(n) => vec![n.to_string()],
+            None => crate::mcpconfig::list_names(),
+        };
+        let mut out = String::new();
+        let mut any_err = false;
+        for n in names {
+            let config = match crate::mcpconfig::load(&n) {
+                Ok(Some(c)) => c,
+                Ok(None) => {
+                    out.push_str(&format!("mcp reload: no config for '{n}'\n"));
+                    any_err = true;
+                    continue;
+                }
+                Err(e) => {
+                    out.push_str(&format!("mcp reload: {e}\n"));
+                    any_err = true;
+                    continue;
+                }
+            };
+            if !config.enabled {
+                self.mcp.remove(&n);
+                out.push_str(&format!("{n}: disabled (skipped)\n"));
+                continue;
+            }
+            let result = self.mcp_install(&n, config).await;
+            out.push_str(&String::from_utf8_lossy(&result.terminal_output()));
+            if result.exit_code != 0 {
+                any_err = true;
+            }
+        }
+        LineResult::from_outcome(out.into_bytes(), Vec::new(), u8::from(any_err))
+    }
+
+    /// Shared install path: initialize + tools/list, record the result in `McpState`, write the
+    /// `/usr/lib/mcp/bin` stub on success. A transport/HTTP failure records "configured, not
+    /// installed" and exits 4.
+    async fn mcp_install(
+        &mut self,
+        name: &str,
+        config: crate::mcpconfig::McpServerConfig,
+    ) -> LineResult {
+        let Some(http) = self.mcp_http.as_deref() else {
+            self.mcp.set_failed(name, config, "no HTTP transport".into());
+            return LineResult::from_outcome(
+                Vec::new(),
+                b"mcp: no HTTP transport configured (available on the Golem agent)\n".to_vec(),
+                4,
+            );
+        };
+        let auth = config.resolve_auth();
+        let mut client = crate::mcpclient::McpClient::new(http, &config.url, auth);
+        let init = match client.initialize().await {
+            Ok(i) => i,
+            Err(e) => {
+                let msg = format!("mcp: {name}: {}\n", e.message);
+                self.mcp.set_failed(name, config, e.message);
+                return LineResult::from_outcome(Vec::new(), msg.into_bytes(), e.exit_code);
+            }
+        };
+        let tools = match client.list_tools(init.session_id.as_deref()).await {
+            Ok(t) => t,
+            Err(e) => {
+                let msg = format!("mcp: {name}: {}\n", e.message);
+                self.mcp.set_failed(name, config, e.message);
+                return LineResult::from_outcome(Vec::new(), msg.into_bytes(), e.exit_code);
+            }
+        };
+        let tool_count = tools.len();
+        let mcp_tools: Vec<crate::mcpstate::McpTool> = tools.into_iter().map(Into::into).collect();
+        self.mcp.set_installed(name, config, mcp_tools);
+        // Write the /usr/lib/mcp/bin stub so which/ls/type see the server as a $PATH command.
+        if let Some(help) = self.mcp.server_help(name) {
+            let _ = crate::mcpconfig::write_bin_stub(name, &help);
+        }
+        LineResult::continue_with_stdout(
+            format!("installed MCP server '{name}' ({tool_count} tools)\n").into_bytes(),
+        )
+    }
+
+    /// `mcp session list`: local id, server, server session id, protocol.
+    fn mcp_session_list(&self) -> LineResult {
+        let sessions = self.mcp.sessions();
+        if sessions.is_empty() {
+            return LineResult::continue_with_stdout(b"no open MCP sessions\n".to_vec());
+        }
+        let mut out = String::new();
+        for s in sessions {
+            out.push_str(&format!(
+                "{}  {}  {}  {}\n",
+                s.local_id,
+                s.server,
+                s.server_session_id.as_deref().unwrap_or("-"),
+                s.protocol_version
+            ));
+        }
+        LineResult::continue_with_stdout(out.into_bytes())
+    }
+
+    /// `mcp session info <id>`: server info, protocol, capabilities.
+    fn mcp_session_info(&self, id: &str) -> LineResult {
+        match self.mcp.session(id) {
+            Some(s) => {
+                let out = format!(
+                    "id:         {}\nserver:     {}\nserver info: {}\nprotocol:   {}\ncapabilities: {}\n",
+                    s.local_id, s.server, s.server_info, s.protocol_version, s.capabilities
+                );
+                LineResult::continue_with_stdout(out.into_bytes())
+            }
+            None => LineResult::from_outcome(
+                Vec::new(),
+                format!("mcp session info: no such session '{id}'\n").into_bytes(),
+                1,
+            ),
+        }
+    }
+
+    /// `mcp session open <server>`: explicit initialize, record the session, print its ids.
+    async fn mcp_session_open(&mut self, server: &str) -> LineResult {
+        let Some(config) = self.mcp.get(server).map(|s| s.config.clone()) else {
+            return LineResult::from_outcome(
+                Vec::new(),
+                format!("mcp session open: no such installed server '{server}'\n").into_bytes(),
+                1,
+            );
+        };
+        let Some(http) = self.mcp_http.as_deref() else {
+            return LineResult::from_outcome(
+                Vec::new(),
+                b"mcp: no HTTP transport configured (available on the Golem agent)\n".to_vec(),
+                4,
+            );
+        };
+        let auth = config.resolve_auth();
+        let mut client = crate::mcpclient::McpClient::new(http, &config.url, auth);
+        match client.initialize().await {
+            Ok(init) => {
+                let local_id = self.mcp.open_session(server, &init);
+                LineResult::continue_with_stdout(
+                    format!(
+                        "opened session {local_id} ({})\n",
+                        init.session_id.as_deref().unwrap_or("no server session id")
+                    )
+                    .into_bytes(),
+                )
+            }
+            Err(e) => LineResult::from_outcome(
+                Vec::new(),
+                format!("mcp session open: {}\n", e.message).into_bytes(),
+                e.exit_code,
+            ),
+        }
+    }
+
+    /// `mcp session close <id>`: DELETE the server session, remove it locally. A 405 refusal still
+    /// removes the local session (with a note).
+    async fn mcp_session_close(&mut self, id: &str) -> LineResult {
+        let Some((server, server_sid)) = self.mcp.close_session(id) else {
+            return LineResult::from_outcome(
+                Vec::new(),
+                format!("mcp session close: no such session '{id}'\n").into_bytes(),
+                1,
+            );
+        };
+        // If there's no server-issued session id, there's nothing to DELETE — local removal is enough.
+        let Some(server_sid) = server_sid else {
+            return LineResult::continue_with_stdout(format!("closed session {id}\n").into_bytes());
+        };
+        let config = self.mcp.get(&server).map(|s| s.config.clone());
+        let (Some(config), Some(http)) = (config, self.mcp_http.as_deref()) else {
+            return LineResult::continue_with_stdout(
+                format!("closed session {id} (locally; server not reachable)\n").into_bytes(),
+            );
+        };
+        let auth = config.resolve_auth();
+        let client = crate::mcpclient::McpClient::new(http, &config.url, auth);
+        match client.close_session(&server_sid).await {
+            Ok(()) => LineResult::continue_with_stdout(format!("closed session {id}\n").into_bytes()),
+            Err(e) => LineResult::from_outcome(
+                format!("closed session {id} locally\n").into_bytes(),
+                format!("mcp session close: {}\n", e.message).into_bytes(),
+                e.exit_code,
+            ),
         }
     }
 
@@ -1727,6 +2069,194 @@ mod tests {
                 .pop_front()
                 .unwrap_or_else(|| crate::askcmd::AskResponse::text(""))
         }
+    }
+
+    // ---- MCP core (C1) --------------------------------------------------------------------------
+
+    /// A scripted [`McpHttp`](crate::mcpclient::McpHttp) fake: replays JSON responses and records
+    /// requests. Shared by the MCP session tests.
+    struct FakeMcpHttp {
+        responses: std::sync::Arc<Mutex<std::collections::VecDeque<crate::mcpclient::HttpResponse>>>,
+        seen: std::sync::Arc<Mutex<Vec<(String, String)>>>,
+    }
+
+    impl FakeMcpHttp {
+        fn new(responses: Vec<crate::mcpclient::HttpResponse>) -> Self {
+            Self {
+                responses: std::sync::Arc::new(Mutex::new(responses.into())),
+                seen: std::sync::Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl crate::mcpclient::McpHttp for FakeMcpHttp {
+        async fn request(
+            &self,
+            method: &str,
+            url: &str,
+            _headers: &[(String, String)],
+            body: Option<Vec<u8>>,
+        ) -> Result<crate::mcpclient::HttpResponse, String> {
+            let method_and_body =
+                format!("{method} {}", String::from_utf8_lossy(&body.unwrap_or_default()));
+            self.seen.lock().unwrap().push((url.to_string(), method_and_body));
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| "no scripted response".to_string())
+        }
+    }
+
+    fn mcp_json(value: serde_json::Value) -> crate::mcpclient::HttpResponse {
+        crate::mcpclient::HttpResponse {
+            status: 200,
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: value.to_string().into_bytes(),
+        }
+    }
+
+    /// Process-global lock: MCP tests set `$CLANK_MCP_ETC/$CLANK_MCP_BIN`, so they must not run
+    /// concurrently. The returned guard holds the lock and restores/clears the vars on drop.
+    static MCP_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct McpDirsGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        bin: String,
+    }
+    impl Drop for McpDirsGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("CLANK_MCP_ETC");
+            std::env::remove_var("CLANK_MCP_BIN");
+        }
+    }
+
+    /// A fresh temp `$CLANK_MCP_ETC/$CLANK_MCP_BIN` pair, exported for the duration of the returned
+    /// guard (which serializes MCP tests and clears the vars on drop).
+    fn set_mcp_dirs() -> McpDirsGuard {
+        let lock = MCP_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let base = std::env::temp_dir().join(format!("clank_mcp_sess_{}_{n}", std::process::id()));
+        let etc = base.join("etc");
+        let bin = base.join("bin");
+        std::fs::create_dir_all(&etc).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+        std::env::set_var("CLANK_MCP_ETC", &etc);
+        std::env::set_var("CLANK_MCP_BIN", &bin);
+        McpDirsGuard {
+            _lock: lock,
+            bin: bin.to_str().unwrap().to_string(),
+        }
+    }
+
+    /// The initialize + initialized + tools/list responses for a server offering one `echo` tool.
+    fn mcp_install_script() -> Vec<crate::mcpclient::HttpResponse> {
+        let mut init = mcp_json(serde_json::json!({
+            "jsonrpc":"2.0","id":1,"result":{
+                "protocolVersion":"2025-03-26",
+                "serverInfo":{"name":"demo","version":"1.0"},
+                "capabilities":{"tools":{}}}}));
+        init.headers.push(("mcp-session-id".into(), "srv-1".into()));
+        vec![
+            init,
+            mcp_json(serde_json::json!({})), // initialized notification
+            mcp_json(serde_json::json!({"jsonrpc":"2.0","id":2,"result":{
+                "tools":[{"name":"echo","description":"echoes input",
+                          "inputSchema":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}]}})),
+        ]
+    }
+
+    /// `mcp add` installs a server: config written, tools fetched, `mcp list`/`mcp tools`/`which`
+    /// reflect it. Uses a scripted fake transport.
+    #[test]
+    fn mcp_add_installs_and_surfaces_the_server() {
+        on_rt(async {
+            let dirs = set_mcp_dirs();
+            let mut session = Session::new().await.unwrap();
+            // Put the mcp bin dir on PATH so `which` finds the stub.
+            session.run_line(&format!("export PATH={}:$PATH", dirs.bin)).await;
+            session.set_mcp_http(Box::new(FakeMcpHttp::new(mcp_install_script())));
+
+            let add = session.eval_line("sudo mcp add demo https://x.example/mcp").await;
+            assert_eq!(add.exit_code, 0, "add failed: {}", String::from_utf8_lossy(&add.stderr));
+            assert!(String::from_utf8(add.stdout).unwrap().contains("1 tools"));
+
+            let (list, _) = session.run_line("mcp list").await;
+            let list = String::from_utf8(list).unwrap();
+            assert!(list.contains("demo") && list.contains("1 tools"), "got: {list}");
+
+            let (tools, _) = session.run_line("mcp tools demo").await;
+            assert!(String::from_utf8(tools).unwrap().contains("echo"));
+
+            // The /usr/lib/mcp/bin stub is a real file, so `which` finds it.
+            let (which, _) = session.run_line("which demo").await;
+            assert!(String::from_utf8(which).unwrap().contains("demo"), "which should find the stub");
+        });
+    }
+
+    /// `mcp add` against an erroring transport keeps the config as "not installed" and exits 4.
+    #[test]
+    fn mcp_add_transport_failure_is_configured_not_installed() {
+        on_rt(async {
+            let _dirs = set_mcp_dirs();
+            let mut session = Session::new().await.unwrap();
+            // initialize returns a 500.
+            let bad = crate::mcpclient::HttpResponse { status: 500, headers: vec![], body: vec![] };
+            session.set_mcp_http(Box::new(FakeMcpHttp::new(vec![bad])));
+
+            let add = session.eval_line("sudo mcp add demo https://x.example/mcp").await;
+            assert_eq!(add.exit_code, 4);
+            let (list, _) = session.run_line("mcp list").await;
+            assert!(String::from_utf8(list).unwrap().contains("not installed"));
+        });
+    }
+
+    /// A server name colliding with a built-in command is rejected.
+    #[test]
+    fn mcp_add_rejects_a_builtin_name_collision() {
+        on_rt(async {
+            let _dirs = set_mcp_dirs();
+            let mut session = Session::new().await.unwrap();
+            session.set_mcp_http(Box::new(FakeMcpHttp::new(vec![])));
+            let add = session.eval_line("sudo mcp add grep https://x/mcp").await;
+            assert_eq!(add.exit_code, 2);
+            assert!(String::from_utf8(add.stderr).unwrap().contains("collides"));
+        });
+    }
+
+    /// `mcp add` is `Confirm`-policy (outbound HTTP): a bare `mcp add` surfaces a confirmation, while
+    /// `mcp list` (Allow subcommand) does not.
+    #[test]
+    fn mcp_add_confirms_but_list_does_not() {
+        on_rt(async {
+            let _dirs = set_mcp_dirs();
+            let mut session = Session::new().await.unwrap();
+            session.set_mcp_http(Box::new(FakeMcpHttp::new(mcp_install_script())));
+
+            // `mcp list` (subcommand Allow) runs without a confirm.
+            let list = session.eval_line("mcp list").await;
+            assert!(list.pending_prompt.is_none(), "mcp list should not confirm");
+
+            // Bare `mcp add` (subcommand Confirm) surfaces a confirmation.
+            let add = session.eval_line("mcp add demo https://x/mcp").await;
+            assert!(add.pending_prompt.is_some(), "mcp add should confirm");
+            // Approve → the install runs.
+            let done = session.answer_prompt(Some("yes".to_string())).await;
+            assert_eq!(done.exit_code, 0);
+        });
+    }
+
+    /// `mcp watch` is an honest not-supported error in MCP-lite.
+    #[test]
+    fn mcp_watch_is_not_supported() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let result = session.eval_line("mcp watch some://uri").await;
+            assert_eq!(result.exit_code, 1);
+            assert!(String::from_utf8(result.stderr).unwrap().contains("not supported"));
+        });
     }
 
     /// With a provider installed, `ask` returns the model's reply on stdout (exit 0), and the request

@@ -91,14 +91,44 @@ pub fn decide(policy: AuthorizationPolicy, elevated: bool, allow_all: bool) -> D
 /// Resolve the effective policy for the leading command of `line`, plus whether the line is
 /// `sudo`-elevated and the command word. Commands with no manifest default to [`Allow`] (Brush's own
 /// builtins — `cd`, `export`, … — aren't in the clank registry yet).
+///
+/// **Subcommand-aware:** if the resolved manifest has subcommands and the line's *second* word names
+/// one, that subcommand's policy wins (so `mcp list` is `Allow` while `mcp add` is `Confirm`). This
+/// keeps a coarse top-level policy from over-gating read-only subcommands.
 pub fn resolve(registry: &CommandRegistry, line: &str) -> (AuthorizationPolicy, bool, Option<String>) {
-    let (command, elevated) = leading_command(line);
+    let words = command_words(line);
+    let elevated = words.first().map(|w| w == "sudo").unwrap_or(false);
+    let rest = if elevated { &words[1..] } else { &words[..] };
+    let command = rest.first().cloned();
+    let subword = rest.get(1);
+
     let policy = command
         .as_deref()
         .and_then(|name| registry.get(name))
-        .map(|m| m.authorization_policy)
+        .map(|m| {
+            // Prefer a matching subcommand's policy, else the command's own.
+            subword
+                .and_then(|sub| m.subcommands.iter().find(|s| &s.name == sub))
+                .map(|s| s.authorization_policy)
+                .unwrap_or(m.authorization_policy)
+        })
         .unwrap_or(AuthorizationPolicy::Allow);
     (policy, elevated, command)
+}
+
+/// The dequoted `Word` tokens of `line` (operators dropped). Shared by [`resolve`] and
+/// [`leading_command`] for subcommand-aware policy resolution.
+fn command_words(line: &str) -> Vec<String> {
+    let Ok(tokens) = tokenize_str(line) else {
+        return Vec::new();
+    };
+    tokens
+        .into_iter()
+        .filter_map(|t| match t {
+            Token::Word(s, _) => Some(unquote_str(&s)),
+            Token::Operator(_, _) => None,
+        })
+        .collect()
 }
 
 /// The confirmation prompt text for a gated command, matching the README's example phrasing

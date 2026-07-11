@@ -6,3 +6,4 @@
 
 mod ask_provider;
 mod clank_agent;
+mod mcp_http;
