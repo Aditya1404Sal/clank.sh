@@ -181,6 +181,31 @@ impl McpState {
             .collect()
     }
 
+    /// Every installed MCP tool as an [`crate::askcmd::AskTool`], for the agentic `ask` tool surface.
+    /// The tool name is namespaced `mcp__<server>__<tool>` (the executor decodes it back to a
+    /// `<server> <tool>` call); the parameters schema is the raw inputSchema string.
+    pub fn ask_tool_definitions(&self) -> Vec<crate::askcmd::AskTool> {
+        let mut tools = Vec::new();
+        for server in &self.servers {
+            if !server.installed {
+                continue;
+            }
+            for t in &server.tools {
+                let desc = format!(
+                    "[MCP: {}] {}",
+                    server.name,
+                    t.description.as_deref().unwrap_or("")
+                );
+                tools.push(crate::askcmd::AskTool {
+                    name: format!("mcp__{}__{}", server.name, t.name),
+                    description: desc,
+                    parameters_schema: t.input_schema.to_string(),
+                });
+            }
+        }
+        tools
+    }
+
     /// Human-facing help for a server: its tools and their synopses.
     pub fn server_help(&self, name: &str) -> Option<String> {
         let server = self.get(name)?;

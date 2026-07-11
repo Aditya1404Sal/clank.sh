@@ -639,9 +639,14 @@ impl Session {
             trace.extend_from_slice(w.as_bytes());
         }
 
+        // The tool surface = the generic shell/prompt_user tools plus one ToolDefinition per installed
+        // MCP tool (namespaced mcp__<server>__<tool>, with its real inputSchema).
+        let mut tools = crate::askcmd::build_ask_tools(&self.registry);
+        tools.extend(self.mcp.ask_tool_definitions());
+
         let state = AskLoopState {
-            system: crate::askcmd::build_system_prompt(&self.registry),
-            tools: crate::askcmd::build_ask_tools(&self.registry),
+            system: crate::askcmd::build_system_prompt_with_mcp(&self.registry, &self.mcp),
+            tools,
             history: vec![AskTurn::User(crate::askcmd::user_content(
                 &base_transcript,
                 &args.prompt,
@@ -1036,19 +1041,42 @@ impl Session {
             return ToolStep::Pause(AskPauseKind::PromptUser);
         }
 
-        if call.name != crate::askcmd::SHELL_TOOL {
-            return done_err(format!("unknown tool '{}'", call.name));
-        }
-
-        // Extract the `command` string from the tool arguments.
-        let command = match serde_json::from_str::<serde_json::Value>(&call.arguments_json) {
-            Ok(v) => match v.get("command").and_then(|c| c.as_str()) {
-                Some(s) => s.to_string(),
-                None => {
-                    return done_err("malformed arguments: missing string field 'command'".into())
+        // An MCP tool (name `mcp__<server>__<tool>`): decode to a `<server> <tool> --args '<json>'`
+        // command line and route it through the same shell-tool machinery below (so its Confirm authz
+        // pauses under a plain ask, or runs under `sudo ask`). The arguments_json is validated so the
+        // `--args` payload is always well-formed JSON.
+        let command = if let Some(rest) = call.name.strip_prefix("mcp__") {
+            let Some((server, tool)) = rest.split_once("__") else {
+                return done_err(format!("malformed MCP tool name '{}'", call.name));
+            };
+            // The whole arguments object is the tool's arguments (validate it's an object).
+            let args_str = if call.arguments_json.trim().is_empty() {
+                "{}".to_string()
+            } else {
+                match serde_json::from_str::<serde_json::Value>(&call.arguments_json) {
+                    Ok(serde_json::Value::Object(_)) => call.arguments_json.clone(),
+                    Ok(_) => return done_err("MCP tool arguments must be a JSON object".into()),
+                    Err(e) => return done_err(format!("malformed arguments: {e}")),
                 }
-            },
-            Err(e) => return done_err(format!("malformed arguments: {e}")),
+            };
+            // Single-quote the JSON so the shell tokenizer preserves it (inner double-quotes survive
+            // via the outer-quote-only handling in parse_tool_invocation).
+            format!("{server} {tool} --args '{args_str}'")
+        } else if call.name == crate::askcmd::SHELL_TOOL {
+            // Extract the `command` string from the tool arguments.
+            match serde_json::from_str::<serde_json::Value>(&call.arguments_json) {
+                Ok(v) => match v.get("command").and_then(|c| c.as_str()) {
+                    Some(s) => s.to_string(),
+                    None => {
+                        return done_err(
+                            "malformed arguments: missing string field 'command'".into(),
+                        )
+                    }
+                },
+                Err(e) => return done_err(format!("malformed arguments: {e}")),
+            }
+        } else {
+            return done_err(format!("unknown tool '{}'", call.name));
         };
 
         // Guard: `ask` cannot call itself.
@@ -1076,9 +1104,10 @@ impl Session {
             }
         }
 
-        // Authorization pre-check. `command` has no leading `sudo` (a model line won't carry it), so
-        // elevation is driven entirely by `blanket_authorized` (confirm-tier only).
-        let (policy, elevated, _) = authz::resolve(&self.registry, &command);
+        // Authorization pre-check (MCP-aware — an MCP tool line resolves to its Confirm manifest).
+        // `command` has no leading `sudo` (a model line won't carry it), so elevation is driven
+        // entirely by `blanket_authorized` (confirm-tier only).
+        let (policy, elevated, _) = self.resolve_authz(&command);
         match authz::decide(policy, elevated, blanket_authorized) {
             Decision::Allow => {}
             Decision::Confirm { sudo_grant } => {
@@ -2618,6 +2647,94 @@ mod tests {
             assert!(combined.contains("405") || combined.contains("locally"), "got: {combined}");
             let (list, _) = session.run_line("mcp session list").await;
             assert!(String::from_utf8(list).unwrap().contains("no open MCP sessions"));
+        });
+    }
+
+    /// C4: an installed MCP tool becomes an ask ToolDefinition. Under `sudo ask`, the model calling
+    /// `mcp__demo__echo` runs the tool (blanket confirm-tier) and the FakeMcpHttp sees the tools/call.
+    #[test]
+    fn ask_can_call_an_mcp_tool() {
+        on_rt(async {
+            let _dirs = set_mcp_dirs();
+            let mut session = Session::new().await.unwrap();
+            let mut script = mcp_install_script();
+            script.push(mcp_call_response("echoed by mcp"));
+            let http = FakeMcpHttp::new(script);
+            let seen = http.seen.clone();
+            session.set_mcp_http(Box::new(http));
+            session.eval_line("sudo mcp add demo https://x/mcp").await;
+
+            // The model calls the MCP tool by its namespaced name.
+            let ask_seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+            session.set_ask_provider(Box::new(FakeProvider::scripted(
+                vec![
+                    crate::askcmd::AskResponse {
+                        text: String::new(),
+                        tool_calls: vec![crate::askcmd::AskToolCall {
+                            id: "m1".into(),
+                            name: "mcp__demo__echo".into(),
+                            arguments_json: serde_json::json!({ "text": "hi mcp" }).to_string(),
+                        }],
+                        finished_for_tools: true,
+                        error: None,
+                    },
+                    crate::askcmd::AskResponse::text("done, the tool ran"),
+                ],
+                ask_seen.clone(),
+            )));
+
+            let result = session.eval_line(r#"sudo ask "use the demo echo tool""#).await;
+            assert_eq!(result.exit_code, 0, "stderr: {}", String::from_utf8_lossy(&result.stderr));
+            assert_eq!(String::from_utf8(result.stdout).unwrap(), "done, the tool ran");
+            // The MCP server saw a tools/call carrying the tool's arguments.
+            let calls = seen.lock().unwrap();
+            let tool_call = calls.iter().find(|(_url, body)| body.contains("tools/call"));
+            assert!(tool_call.is_some(), "expected a tools/call, saw: {calls:?}");
+            assert!(tool_call.unwrap().1.contains("hi mcp"), "args should reach the server");
+            // The tool surface the model saw included the MCP tool definition.
+            let ask_turns = ask_seen.lock().unwrap();
+            assert!(
+                ask_turns[0].tools.iter().any(|t| t.name == "mcp__demo__echo"),
+                "the MCP tool should be in the ask tool surface"
+            );
+        });
+    }
+
+    /// Under a plain (non-sudo) ask, an MCP tool call pauses for authorization (MCP calls are Confirm).
+    #[test]
+    fn ask_mcp_tool_pauses_without_sudo() {
+        on_rt(async {
+            let _dirs = set_mcp_dirs();
+            let mut session = Session::new().await.unwrap();
+            let mut script = mcp_install_script();
+            script.push(mcp_call_response("ran after approval"));
+            session.set_mcp_http(Box::new(FakeMcpHttp::new(script)));
+            session.eval_line("sudo mcp add demo https://x/mcp").await;
+
+            session.set_ask_provider(Box::new(FakeProvider::scripted(
+                vec![
+                    crate::askcmd::AskResponse {
+                        text: String::new(),
+                        tool_calls: vec![crate::askcmd::AskToolCall {
+                            id: "m1".into(),
+                            name: "mcp__demo__echo".into(),
+                            arguments_json: serde_json::json!({ "text": "x" }).to_string(),
+                        }],
+                        finished_for_tools: true,
+                        error: None,
+                    },
+                    crate::askcmd::AskResponse::text("finished"),
+                ],
+                std::sync::Arc::new(Mutex::new(Vec::new())),
+            )));
+
+            // Plain ask: approve the ask, then the MCP tool call pauses for its own authz.
+            session.eval_line(r#"ask "use the tool""#).await;
+            let after_ask = session.answer_prompt(Some("yes".to_string())).await;
+            assert!(after_ask.pending_prompt.is_some(), "MCP tool call should pause under plain ask");
+            let done = session.answer_prompt(Some("yes".to_string())).await;
+            assert_eq!(done.exit_code, 0);
+            assert_eq!(String::from_utf8(done.stdout).unwrap(), "finished");
         });
     }
 

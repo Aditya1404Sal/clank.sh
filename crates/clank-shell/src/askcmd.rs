@@ -113,6 +113,26 @@ pub fn build_system_prompt(registry: &CommandRegistry) -> String {
     out
 }
 
+/// Like [`build_system_prompt`] but also lists installed MCP tools (each exposed as its own
+/// `mcp__<server>__<tool>` tool). `mcp_tools` is [`crate::mcpstate::McpState::ask_tool_definitions`].
+pub fn build_system_prompt_with_mcp(
+    registry: &CommandRegistry,
+    mcp: &crate::mcpstate::McpState,
+) -> String {
+    let mut out = build_system_prompt(registry);
+    let mcp_tools = mcp.ask_tool_definitions();
+    if !mcp_tools.is_empty() {
+        out.push_str(
+            "\n\nInstalled MCP tools (call them by their exact tool name; they run over HTTP and \
+             require confirmation unless the user ran `sudo ask`):\n",
+        );
+        for t in &mcp_tools {
+            out.push_str(&format!("  {} — {}\n", t.name, t.description));
+        }
+    }
+    out
+}
+
 /// One tool the model may call, rendered from the manifest registry. The clank-neutral mirror of
 /// `golem-ai-llm`'s `ToolDefinition` — the `clank-agent` provider converts it at the seam so
 /// `clank-shell` need not link the golem crates.
