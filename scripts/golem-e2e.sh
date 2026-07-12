@@ -825,6 +825,16 @@ if [[ -n "${GREASE_SIGNED_URL:-}" && -n "${GREASE_SIGNED_PKG:-}" && -n "${GREASE
   expect_eval "signed install exits 0"                "$GSG_INST"  '.exit_code'  '0'
   expect_eval "signed install reports signed"          "$GSG_INST"  '.stdout | contains("signed")'  'true'
   expect_contains "grease info shows the signer"       "grease info ${GREASE_SIGNED_PKG}"  'signed by'
+  # If the fixture index carries an RFC-6962 inclusion proof, install verifies it (GREASE_SIGNED_LOG=1).
+  if [[ "${GREASE_SIGNED_LOG:-}" == "1" ]]; then
+    expect_eval "signed install verifies the transparency log" "$GSG_INST"  '.stdout | contains("in log")'  'true'
+    expect_contains "grease info shows the log index"  "grease info ${GREASE_SIGNED_PKG}"  'transparency log'
+  fi
+  # The live /proc/clank/system-prompt reflects the just-installed package (a prompt appears as a
+  # prompt__<name> tool; other kinds appear via their surfaces). Only meaningful for a prompt pkg.
+  if [[ "${GREASE_SIGNED_KIND:-prompt}" == "prompt" ]]; then
+    expect_contains "system-prompt lists the installed prompt" 'cat /proc/clank/system-prompt'  "prompt__${GREASE_SIGNED_PKG}"
+  fi
   run_line "sudo grease remove ${GREASE_SIGNED_PKG}" >/dev/null
   run_line "grease registry remove ${GREASE_SIGNED_URL}" >/dev/null
 else

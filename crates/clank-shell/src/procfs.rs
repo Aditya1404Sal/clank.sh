@@ -144,12 +144,16 @@ pub fn list_children(dir: &str) -> Option<Vec<String>> {
     None
 }
 
-/// `/proc/clank/system-prompt` — the live `ask` system prompt, computed on read from the current
-/// command surface. Delegates to [`crate::askcmd::build_system_prompt`] over the static registry
-/// snapshot, so this path and the model see the same bytes (README: "always inspectable"). Per the
-/// README the path lives in the virtual-fs layer, not owned by `ask` specifically.
+/// `/proc/clank/system-prompt` — the live `ask` system prompt, so this path and the model see the same
+/// bytes (README: "always inspectable"). When a line is executing, the `Session` has installed the
+/// fully-rendered prompt (command surface + installed MCP tools + grease prompts/skills) into the
+/// [`crate::sysprompt`] slot; we serve that. Off-session (native tests, a bare read with no live
+/// Session), fall back to the static base prompt over the registry snapshot.
 pub fn system_prompt_stub() -> String {
-    crate::askcmd::build_system_prompt(crate::binfs::registry())
+    match crate::sysprompt::active() {
+        Some(prompt) => (*prompt).clone(),
+        None => crate::askcmd::build_system_prompt(crate::binfs::registry()),
+    }
 }
 
 #[cfg(test)]

@@ -404,6 +404,16 @@ impl Session {
         // the virtual resource tree for this line.
         let _install_mcpfs =
             crate::mcpfs::install(std::sync::Arc::new(self.grease.mcp_resource_index()));
+        // Render + install the live system prompt (command surface + installed MCP tools + grease
+        // prompts + skills) so `cat /proc/clank/system-prompt` shows exactly what the model sees — the
+        // procfs resolver can't reach the live Session state, so we hand it the rendered string.
+        let _install_sysprompt = crate::sysprompt::install(std::sync::Arc::new(
+            crate::askcmd::build_system_prompt_with_capabilities(
+                &self.registry,
+                &self.mcp,
+                &self.grease,
+            ),
+        ));
 
         // Record this line as a process (one PID per executed line). Blank lines get no row, matching
         // the "empty line re-prompts" behavior. `context` lines DO get a row — they're real typed
@@ -4835,6 +4845,40 @@ mod tests {
             let rm = session.eval_line("sudo grease remove tldr").await;
             assert_eq!(rm.exit_code, 0);
             assert!(!session.grease.is_prompt("tldr"));
+        });
+    }
+
+    /// `cat /proc/clank/system-prompt` reflects LIVE state: after installing a grease prompt, the proc
+    /// file lists it as a `prompt__<name>` tool (the exact prompt the model sees), not just the static
+    /// base surface.
+    #[test]
+    fn proc_system_prompt_reflects_installed_prompts() {
+        on_rt(async {
+            let _dirs = set_grease_dirs();
+            let mut session = Session::new().await.unwrap();
+
+            // Before install: the proc file has the base surface but NOT our prompt.
+            let before = String::from_utf8(
+                session.eval_line("cat /proc/clank/system-prompt").await.stdout,
+            )
+            .unwrap();
+            assert!(!before.contains("prompt__hello"), "not installed yet");
+
+            let pkg = serde_json::json!({
+                "kind": "prompt", "name": "hello", "description": "say hi", "body": "Say hi."
+            });
+            session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![("/packages/", grease_json(pkg))])));
+            session.run_line("grease registry add https://reg.example").await;
+            session.eval_line("sudo grease install hello").await;
+
+            // After install: the proc file lists the installed prompt tool + the "Installed prompt
+            // tools" heading from build_system_prompt_with_capabilities.
+            let after = String::from_utf8(
+                session.eval_line("cat /proc/clank/system-prompt").await.stdout,
+            )
+            .unwrap();
+            assert!(after.contains("prompt__hello"), "system prompt lists the installed prompt: {after}");
+            assert!(after.contains("Installed prompt tools"), "and its heading: {after}");
         });
     }
 

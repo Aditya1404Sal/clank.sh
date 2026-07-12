@@ -47,6 +47,7 @@ mod ps;
 pub mod registry;
 pub mod session;
 mod statcmd;
+pub mod sysprompt;
 mod texttools;
 pub mod typecmd;
 mod which;
