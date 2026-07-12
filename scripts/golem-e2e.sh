@@ -814,6 +814,45 @@ expect_eval "grease install discloses the shell capability" "$GREASE_DISCLOSE"  
 eval_json abort_prompt >/dev/null   # clear the pending confirm
 run_line 'grease registry remove https://reg.example/pkgs' >/dev/null
 
+# --- Gated: a SIGNED registry install (kind-agnostic). Set GREASE_SIGNED_URL + GREASE_SIGNED_PKG +
+#     GREASE_SIGNED_KEY (base64 ed25519 pubkey) — the registry's index.json must carry each package's
+#     `sig` (base64 detached signature over the payload body). Assistant-runnable (no LLM/cluster):
+#     asserts the install verifies the signature and records the signer.
+if [[ -n "${GREASE_SIGNED_URL:-}" && -n "${GREASE_SIGNED_PKG:-}" && -n "${GREASE_SIGNED_KEY:-}" ]]; then
+  note "GREASE_SIGNED_URL set — running live SIGNED grease install against $GREASE_SIGNED_URL"
+  run_line "grease registry add ${GREASE_SIGNED_URL} --key ${GREASE_SIGNED_KEY}" >/dev/null
+  GSG_INST="$(eval_json eval "\"sudo grease install ${GREASE_SIGNED_PKG}\"")"
+  expect_eval "signed install exits 0"                "$GSG_INST"  '.exit_code'  '0'
+  expect_eval "signed install reports signed"          "$GSG_INST"  '.stdout | contains("signed")'  'true'
+  expect_contains "grease info shows the signer"       "grease info ${GREASE_SIGNED_PKG}"  'signed by'
+  run_line "sudo grease remove ${GREASE_SIGNED_PKG}" >/dev/null
+  run_line "grease registry remove ${GREASE_SIGNED_URL}" >/dev/null
+else
+  note "GREASE_SIGNED_URL/PKG/KEY not set — skipping live signed install (native tests cover it)"
+fi
+
+# --- Gated: a Golem-AGENT package install (kind:agent). Set GREASE_AGENT_URL + GREASE_AGENT_PKG. The
+#     install + the no-cluster honest error are assistant-runnable (no key/cluster). A real wRPC
+#     round-trip needs a deployed second agent type (out of this harness's scope).
+if [[ -n "${GREASE_AGENT_URL:-}" && -n "${GREASE_AGENT_PKG:-}" ]]; then
+  note "GREASE_AGENT_URL set — running live agent install against $GREASE_AGENT_URL"
+  run_line "grease registry add ${GREASE_AGENT_URL}" >/dev/null
+  GAG_INST="$(eval_json eval "\"sudo grease install ${GREASE_AGENT_PKG}\"")"
+  expect_eval "agent install exits 0"                 "$GAG_INST"  '.exit_code'  '0'
+  expect_eval "agent install reports the kind"         "$GAG_INST"  '.stdout | contains("[agent]")'  'true'
+  expect_contains "type finds the installed agent"     "type ${GREASE_AGENT_PKG}"  "${GREASE_AGENT_PKG}"
+  expect_contains "the agent stub is in /usr/lib/agents/bin"  "cat /usr/lib/agents/bin/${GREASE_AGENT_PKG}"  'clank agent'
+  # Invoking it on the agent (which has a WasmRpc invoker) reaches the cluster; with no deployed target
+  # agent type it errors — but NOT with the "requires a cluster" message (the invoker IS configured).
+  # We only assert it doesn't crash the shell (exit is nonzero-or-zero, shell survives).
+  GAG_HELP="$(eval_json eval "\"${GREASE_AGENT_PKG} --help\"")"
+  expect_eval "agent --help describes the type"        "$GAG_HELP"  '.stdout | contains("Agent type")'  'true'
+  run_line "sudo grease remove ${GREASE_AGENT_PKG}" >/dev/null
+  run_line "grease registry remove ${GREASE_AGENT_URL}" >/dev/null
+else
+  note "GREASE_AGENT_URL/PKG not set — skipping live agent install (native tests cover it)"
+fi
+
 # --- Gated live-registry block: needs a registry serving /packages/<name>.json (+ /index.json for
 #     search). Set GREASE_TEST_URL + GREASE_TEST_PKG to run a real install; the installed prompt RUN
 #     also needs --with-llm (it calls the model). If the package has REQUIRED arguments, set
