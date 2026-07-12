@@ -388,6 +388,10 @@ impl Session {
         dynamic.extend(self.grease.all_manifests());
         let _install_dynreg =
             crate::dynreg::install(std::sync::Arc::new(std::sync::Mutex::new(dynamic)));
+        // Install the MCP resource index so `ls /mnt/mcp/...` (a Brush-registered coreutil) can list
+        // the virtual resource tree for this line.
+        let _install_mcpfs =
+            crate::mcpfs::install(std::sync::Arc::new(self.grease.mcp_resource_index()));
 
         // Record this line as a process (one PID per executed line). Blank lines get no row, matching
         // the "empty line re-prompts" behavior. `context` lines DO get a row — they're real typed
@@ -603,6 +607,12 @@ impl Session {
             // A grease-installed script: fill its body from args and run the shell source locally
             // (its Confirm was resolved via the dynamic manifest at the gate; sudo pre-authorizes).
             self.run_script(line, blanket_authorized).await
+        } else if let Some((server, uri)) = self.dynamic_mcp_read_target(line) {
+            // A top-level `cat /mnt/mcp/<server>/<dynamic>`: fetch the resource live via
+            // `resources/read` (the read can't run in Brush's synchronous `cat` — the Wall-C wall — so
+            // it's served here at the Session layer for top-level lines only; inside $()/pipes it falls
+            // through to Brush and hits the honest "no such file").
+            self.run_mcp_resource_read(&server, &uri).await
         } else {
             match crate::httpcmd::classify(line) {
                 Some((crate::httpcmd::HttpCommand::Curl, args)) => {
@@ -1946,10 +1956,10 @@ impl Session {
 
         // Materialize selected resources (static files under /mnt/mcp/<server>/). Best-effort; the
         // full resource surface (dynamic reads, templates) lands in a later increment.
-        let mut resource_count = 0usize;
         if pkg.artifacts.resources {
-            resource_count = materialize_mcp_resources(name, &mut client, session.as_deref()).await;
+            pkg.resources = materialize_mcp_resources(name, &mut client, session.as_deref()).await;
         }
+        let resource_count = pkg.resources.len();
 
         // Persist the enriched payload + marker.
         let payload = crate::greasestate::Payload::Mcp(pkg.clone());
@@ -2712,6 +2722,64 @@ impl Session {
         }
     }
 
+    /// If `line` is a top-level `cat /mnt/mcp/<server>/<path>` (optionally `sudo`-prefixed, one
+    /// operand, no operators) naming a DYNAMIC MCP resource, return its `(server, uri)`. Static
+    /// resources are real files that Brush's `cat` reads directly, so they return `None` here.
+    fn dynamic_mcp_read_target(&self, line: &str) -> Option<(String, String)> {
+        // Reject anything with shell operators (the Wall-C wall — a live read can't run in a pipe).
+        if line.chars().any(|c| "|&;<>`$".contains(c)) {
+            return None;
+        }
+        let words = crate::askcmd::dequote_words(line)?;
+        let mut it = words.iter();
+        let mut first = it.next()?.as_str();
+        if first == "sudo" {
+            first = it.next()?.as_str();
+        }
+        if first != "cat" {
+            return None;
+        }
+        // Exactly one non-flag operand, and it must be an /mnt/mcp path.
+        let operands: Vec<&String> = it.filter(|w| !w.starts_with('-')).collect();
+        if operands.len() != 1 {
+            return None;
+        }
+        let path = operands[0];
+        if !crate::mcpfs::is_mcp_path(path) {
+            return None;
+        }
+        let index = self.grease.mcp_resource_index();
+        match crate::mcpfs::classify(path, &index) {
+            crate::mcpfs::McpPathKind::Dynamic { server, uri } => Some((server, uri)),
+            _ => None,
+        }
+    }
+
+    /// Fetch a dynamic MCP resource live (`resources/read`) and print its content. Reuses the server's
+    /// stored config for the endpoint + auth.
+    async fn run_mcp_resource_read(&mut self, server: &str, uri: &str) -> LineResult {
+        let Some(m) = self.grease.mcp(server) else {
+            return LineResult::from_outcome(Vec::new(), b"cat: mcp resource: server not installed\n".to_vec(), 1);
+        };
+        let url = m.url.clone();
+        let auth_env = m.auth_env.clone();
+        let Some(http) = self.mcp_http.as_deref() else {
+            return LineResult::from_outcome(
+                Vec::new(),
+                b"cat: mcp resource: no HTTP transport configured (available on the Golem agent)\n".to_vec(),
+                4,
+            );
+        };
+        let config = crate::mcpconfig::McpServerConfig { url: url.clone(), enabled: true, auth_env, auth_header: None };
+        let auth = config.resolve_auth();
+        let mut client = crate::mcpclient::McpClient::new(http, &url, auth);
+        let session = client.initialize().await.ok().and_then(|i| i.session_id);
+        match client.read_resource(uri, session.as_deref()).await {
+            Ok(content) => LineResult::continue_with_stdout(content.into_bytes()),
+            Err(e) => LineResult::from_outcome(Vec::new(), format!("cat: {uri}: {}\n", e.message).into_bytes(), e.exit_code),
+        }
+    }
+
     /// Whether `line`'s leading word is an installed grease prompt. Drives the `run_prompt` dispatch.
     /// Only top-level lines (no operators) count — a prompt makes an LLM call and can't run in Brush's
     /// nested runtime (the Wall-C wall), so a nested use falls through to the stub honest error.
@@ -3298,36 +3366,41 @@ async fn fetch_index_entry(
     IndexEntry { sha256: s("sha256"), sig: s("sig"), signer: s("signer") }
 }
 
-/// Materialize an MCP server's resources under `/mnt/mcp/<server>/` (static files). Returns the count
-/// materialized. Fetches `resources/list` and writes each readable resource as a real file at its
-/// mount path (path-confined). A read failure skips that resource (best-effort). Free fn (no `self`)
-/// so it can run while `client` borrows `self.mcp_http`.
+/// Materialize an MCP server's resources under `/mnt/mcp/<server>/` and return the cache entries that
+/// drive the virtual-fs listing. Fetches `resources/list`; each resource whose `resources/read`
+/// succeeds at install is written as a real STATIC file (composes in pipes); a resource that can't be
+/// read now is recorded as DYNAMIC (served live on a top-level `cat` interception). Path-confined.
+/// Free fn (no `self`) so it can run while `client` borrows `self.mcp_http`.
 async fn materialize_mcp_resources(
     server: &str,
     client: &mut crate::mcpclient::McpClient<'_>,
     session: Option<&str>,
-) -> usize {
+) -> Vec<crate::greasepkg::McpResourceCache> {
     let Ok(resources) = client.list_resources(session).await else {
-        return 0;
+        return Vec::new();
     };
     let root = crate::greaseconfig::mcp_mount_dir().join(server);
-    let mut count = 0;
+    let mut cache = Vec::new();
     for res in &resources {
-        let Ok(contents) = client.read_resource(&res.uri, session).await else {
-            continue;
-        };
         let rel = mcp_resource_rel_path(&res.uri);
-        let Some(dest) = crate::greaseconfig::mcp_safe_join(&root, &rel) else {
-            continue;
-        };
-        if let Some(parent) = dest.parent() {
-            let _ = std::fs::create_dir_all(parent);
+        let mut is_static = false;
+        if let Some(dest) = crate::greaseconfig::mcp_safe_join(&root, &rel) {
+            if let Ok(contents) = client.read_resource(&res.uri, session).await {
+                if let Some(parent) = dest.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                is_static = std::fs::write(&dest, contents.as_bytes()).is_ok();
+            }
         }
-        if std::fs::write(&dest, contents.as_bytes()).is_ok() {
-            count += 1;
-        }
+        cache.push(crate::greasepkg::McpResourceCache {
+            uri: res.uri.clone(),
+            rel_path: rel,
+            description: res.description.clone().unwrap_or_default(),
+            mime_type: res.mime_type.clone(),
+            is_static,
+        });
     }
-    count
+    cache
 }
 
 /// Convert an MCP resource URI to a relative path under `/mnt/mcp/<server>/`. Strips a `<scheme>://`
@@ -4122,10 +4195,22 @@ mod tests {
                     return Ok(resp.clone());
                 }
             }
-            // Otherwise it's an MCP JSON-RPC POST — route by the `method` field in the body.
+            // Otherwise it's an MCP JSON-RPC POST — route by the `method` field in the body. For
+            // `resources/read`, a more specific `resources/read:<uri>` route wins (lets a test make one
+            // resource's read fail → dynamic while another succeeds → static).
             let body = body.unwrap_or_default();
             let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(serde_json::json!({}));
             let m = v.get("method").and_then(|x| x.as_str()).unwrap_or("");
+            if m == "resources/read" {
+                if let Some(uri) = v.get("params").and_then(|p| p.get("uri")).and_then(|u| u.as_str()) {
+                    let keyed = format!("resources/read:{uri}");
+                    for (pat, resp) in &self.routes {
+                        if *pat == keyed {
+                            return Ok(resp.clone());
+                        }
+                    }
+                }
+            }
             for (pat, resp) in &self.routes {
                 if pat == m {
                     return Ok(resp.clone());
@@ -4214,6 +4299,77 @@ mod tests {
             assert_eq!(rm.exit_code, 0);
             assert!(!session.grease.is_mcp("demo"));
             assert!(!session.is_mcp_tool_line("demo echo --text hi"));
+        });
+    }
+
+    /// The /mnt/mcp virtual-fs: an MCP server with one STATIC resource (readable at install → real
+    /// file) and one DYNAMIC resource (install read fails → served live). `ls /mnt/mcp/<server>/` lists
+    /// both; a top-level `cat` of the dynamic resource fetches it live via resources/read; the same cat
+    /// inside `$()` hits the honest Wall-C stub.
+    #[test]
+    fn mcp_resources_virtual_fs_static_and_dynamic() {
+        on_rt(async {
+            let _dirs = set_grease_dirs();
+            let _mcp = set_mcp_dirs();
+            let mut session = Session::new().await.unwrap();
+
+            let pkg = serde_json::json!({
+                "kind": "mcp", "name": "srv", "description": "s", "url": "https://mcp.srv/x"
+            });
+            let mut init = mcp_json(serde_json::json!({
+                "jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26",
+                "serverInfo":{"name":"srv","version":"1"},"capabilities":{"resources":{}}}}));
+            init.headers.push(("mcp-session-id".into(), "s-1".into()));
+            let res_list = mcp_json(serde_json::json!({"jsonrpc":"2.0","id":2,"result":{"resources":[
+                {"uri":"file:///docs/guide.md","name":"guide"},
+                {"uri":"live://metrics/cpu","name":"cpu"}]}}));
+            // Static resource: install read succeeds → materialized as a real file.
+            let static_read = mcp_json(serde_json::json!({"jsonrpc":"2.0","id":3,"result":{
+                "contents":[{"uri":"file:///docs/guide.md","text":"static guide body"}]}}));
+            // Dynamic resource: install read FAILS (500) → recorded dynamic; a later live read succeeds.
+            let dyn_read_fail = crate::mcpclient::HttpResponse { status: 500, headers: vec![], body: Vec::new() };
+            let dyn_read_ok = mcp_json(serde_json::json!({"jsonrpc":"2.0","id":9,"result":{
+                "contents":[{"uri":"live://metrics/cpu","text":"cpu: 42%"}]}}));
+
+            // Two calls to the dynamic URI: first (install) fails, second (live cat) succeeds. The fake
+            // routes by exact key, so use a queue-per-URI via two separate installs of the session http.
+            session.set_mcp_http(Box::new(FakeMcpArtifactHttp::new(vec![
+                ("/packages/", grease_json(pkg)),
+                ("initialize", init.clone()),
+                ("resources/list", res_list.clone()),
+                ("resources/read:file:///docs/guide.md", static_read),
+                ("resources/read:live://metrics/cpu", dyn_read_fail),
+            ])));
+            session.run_line("grease registry add https://reg.example").await;
+
+            let inst = session.eval_line("sudo grease install srv --resources").await;
+            assert_eq!(inst.exit_code, 0, "install stderr: {}", String::from_utf8_lossy(&inst.stderr));
+
+            // The static resource is a real file.
+            let static_path = crate::greaseconfig::mcp_mount_dir().join("srv/docs/guide.md");
+            assert_eq!(std::fs::read_to_string(&static_path).unwrap(), "static guide body");
+
+            // `ls /mnt/mcp/srv/` lists both the static dir (docs) and the dynamic dir (metrics).
+            let ls = String::from_utf8(session.eval_line("ls /mnt/mcp/srv").await.stdout).unwrap();
+            assert!(ls.contains("docs") && ls.contains("metrics"), "ls: {ls}");
+            // `ls /mnt/mcp` lists the server.
+            let ls_root = String::from_utf8(session.eval_line("ls /mnt/mcp").await.stdout).unwrap();
+            assert!(ls_root.contains("srv"), "ls root: {ls_root}");
+
+            // Now point the dynamic URI at a SUCCESSFUL read for the live `cat`.
+            session.set_mcp_http(Box::new(FakeMcpArtifactHttp::new(vec![
+                ("initialize", init),
+                ("resources/read:live://metrics/cpu", dyn_read_ok),
+            ])));
+            // Top-level `cat` of the dynamic resource fetches it live.
+            let cat = session.eval_line("cat /mnt/mcp/srv/metrics/cpu").await;
+            assert_eq!(cat.exit_code, 0, "dynamic cat stderr: {}", String::from_utf8_lossy(&cat.stderr));
+            assert_eq!(String::from_utf8(cat.stdout).unwrap(), "cpu: 42%");
+
+            // The same read inside `$()` does NOT do the live fetch (Wall-C) — Brush's cat finds no
+            // real file → nonzero. (We only assert it doesn't crash / doesn't print the live body.)
+            let subst = session.eval_line("echo $(cat /mnt/mcp/srv/metrics/cpu)").await;
+            assert!(!String::from_utf8_lossy(&subst.stdout).contains("cpu: 42%"), "dynamic read must not run in $()");
         });
     }
 

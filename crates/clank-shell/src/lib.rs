@@ -35,6 +35,7 @@ pub mod manifest;
 pub mod mcpclient;
 mod mcpcmd;
 pub mod mcpconfig;
+pub mod mcpfs;
 pub mod mcpstate;
 mod modelcmd;
 pub mod process;

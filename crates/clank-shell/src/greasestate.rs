@@ -231,6 +231,23 @@ impl GreaseState {
             .collect()
     }
 
+    /// The flattened MCP resource index (all installed servers' resources) for the `/mnt/mcp`
+    /// virtual-fs ([`crate::mcpfs`]).
+    pub fn mcp_resource_index(&self) -> Vec<crate::mcpfs::ResourceEntry> {
+        let mut out = Vec::new();
+        for m in self.mcp_packages() {
+            for r in &m.resources {
+                out.push(crate::mcpfs::ResourceEntry {
+                    server: m.name.clone(),
+                    rel_path: r.rel_path.clone(),
+                    uri: r.uri.clone(),
+                    is_static: r.is_static,
+                });
+            }
+        }
+        out
+    }
+
     /// The dynamic manifest for an installed command package (prompt or script). Both are
     /// `Subprocess`/`Confirm` (a prompt makes an outbound LLM call; a script runs local shell), with
     /// the declared arguments as the input schema. **Skills return `None`** — they are not commands.

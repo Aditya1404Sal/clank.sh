@@ -297,6 +297,25 @@ pub struct McpPromptCache {
     pub description: String,
 }
 
+/// One resource cached in an installed MCP package's payload — the info needed to serve the
+/// `/mnt/mcp/<server>/` virtual filesystem (listing + dynamic reads) without a live `resources/list`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct McpResourceCache {
+    /// The MCP resource URI (`resources/read` target).
+    pub uri: String,
+    /// The relative path under `/mnt/mcp/<server>/` this resource is mounted at.
+    pub rel_path: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    /// `true` if the resource was materialized as a real static file at install; `false` if it is
+    /// dynamic (read live on each access via a top-level `cat` interception).
+    #[serde(default)]
+    pub is_static: bool,
+}
+
 /// An installed MCP-server package (grease type 2). The durable payload carries the server URL +
 /// auth-env + which artifacts are exposed + the cached tool/prompt listings, so `GreaseState::load()`
 /// rebuilds the surface on boot without a live re-fetch (MCP's own state is replay-only, not FS-backed).
@@ -322,6 +341,10 @@ pub struct McpPackage {
     /// Cached prompt listing (populated at install from `prompts/list`).
     #[serde(default)]
     pub prompts: Vec<McpPromptCache>,
+    /// Cached resource listing (populated at install from `resources/list`), driving the
+    /// `/mnt/mcp/<server>/` virtual-fs listing + dynamic reads.
+    #[serde(default)]
+    pub resources: Vec<McpResourceCache>,
 }
 
 impl McpPackage {

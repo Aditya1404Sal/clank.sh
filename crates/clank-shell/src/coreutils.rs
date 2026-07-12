@@ -463,6 +463,34 @@ impl SimpleCommand for Ls {
             return Ok(ExecutionResult::new(1));
         }
 
+        // `/mnt/mcp/...` (the MCP resource mount): list the virtual tree from the per-line index,
+        // which includes dynamic resources that have no real file on disk (static ones are real files
+        // but listing them here keeps the view uniform).
+        let mcp_operand = argv
+            .iter()
+            .skip(1)
+            .find(|a| !is_flag(a) && crate::mcpfs::is_mcp_path(a))
+            .cloned();
+        if let Some(op) = mcp_operand {
+            let index = crate::mcpfs::active().unwrap_or_default();
+            let mut out = context.stdout();
+            match crate::mcpfs::classify(&op, &index) {
+                crate::mcpfs::McpPathKind::Directory(children) => {
+                    let _ = writeln!(out, "{}", children.join("\n"));
+                    return Ok(ExecutionResult::new(0));
+                }
+                crate::mcpfs::McpPathKind::Static | crate::mcpfs::McpPathKind::Dynamic { .. } => {
+                    // A file (not a dir): `ls <file>` names it, like real `ls`.
+                    let _ = writeln!(out, "{op}");
+                    return Ok(ExecutionResult::new(0));
+                }
+                crate::mcpfs::McpPathKind::NotFound => {
+                    let _ = writeln!(context.stderr(), "ls: {op}: No such file or directory");
+                    return Ok(ExecutionResult::new(1));
+                }
+            }
+        }
+
         let proc_operand = argv
             .iter()
             .skip(1)
