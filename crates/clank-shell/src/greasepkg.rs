@@ -304,7 +304,7 @@ pub struct McpPromptCache {
 
 /// One resource cached in an installed MCP package's payload — the info needed to serve the
 /// `/mnt/mcp/<server>/` virtual filesystem (listing + dynamic reads) without a live `resources/list`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct McpResourceCache {
     /// The MCP resource URI (`resources/read` target).
@@ -319,12 +319,37 @@ pub struct McpResourceCache {
     /// dynamic (read live on each access via a top-level `cat` interception).
     #[serde(default)]
     pub is_static: bool,
+    /// `annotations.lastModified` (ISO-8601), for `stat`/`mcp resource info`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_modified: Option<String>,
+    /// `annotations.audience`, joined (for `mcp resource info`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
+    /// `annotations.priority`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<f64>,
+    /// Byte size, if advertised.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+}
+
+/// One resource TEMPLATE cached in an installed MCP package — a parameterized URI installed as a
+/// `/usr/lib/mcp/bin/<server>-<name>` executable (README:767).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct McpTemplateCache {
+    /// The template's command name (the `<server>-<name>` executable, kebab-case).
+    pub name: String,
+    /// The RFC-6570 URI template (`{param}` placeholders become command args).
+    pub uri_template: String,
+    #[serde(default)]
+    pub description: String,
 }
 
 /// An installed MCP-server package (grease type 2). The durable payload carries the server URL +
 /// auth-env + which artifacts are exposed + the cached tool/prompt listings, so `GreaseState::load()`
 /// rebuilds the surface on boot without a live re-fetch (MCP's own state is replay-only, not FS-backed).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct McpPackage {
     /// The kebab-case server/command name (the `/usr/lib/mcp/bin/<name>` command).
@@ -350,6 +375,10 @@ pub struct McpPackage {
     /// `/mnt/mcp/<server>/` virtual-fs listing + dynamic reads.
     #[serde(default)]
     pub resources: Vec<McpResourceCache>,
+    /// Cached resource-template listing (populated at install from `resources/templates/list`); each
+    /// becomes a `<server>-<name>` executable that reads the parameterized URI.
+    #[serde(default)]
+    pub templates: Vec<McpTemplateCache>,
 }
 
 impl McpPackage {

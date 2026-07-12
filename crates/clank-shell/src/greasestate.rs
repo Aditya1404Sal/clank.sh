@@ -246,6 +246,31 @@ impl GreaseState {
         }
     }
 
+    /// Find an installed MCP resource-template executable by its `<server>-<name>` command name,
+    /// returning `(server_url, auth_env, uri_template)` for running it.
+    pub fn mcp_template(&self, cmd: &str) -> Option<(String, Option<String>, String)> {
+        for m in self.mcp_packages() {
+            if let Some(t) = m.templates.iter().find(|t| t.name == cmd) {
+                return Some((m.url.clone(), m.auth_env.clone(), t.uri_template.clone()));
+            }
+        }
+        None
+    }
+
+    /// Whether `cmd` is an installed MCP resource-template executable.
+    pub fn is_mcp_template(&self, cmd: &str) -> bool {
+        self.mcp_packages().iter().any(|m| m.templates.iter().any(|t| t.name == cmd))
+    }
+
+    /// Look up a resource entry by its `/mnt/mcp/<server>/<rel_path>` — for `mcp resource info`/`stat`.
+    pub fn mcp_resource_entry(
+        &self,
+        server: &str,
+        rel_path: &str,
+    ) -> Option<&crate::greasepkg::McpResourceCache> {
+        self.mcp(server)?.resources.iter().find(|r| r.rel_path == rel_path)
+    }
+
     /// All installed MCP-server packages (for boot reconstruction into `McpState`).
     pub fn mcp_packages(&self) -> Vec<&McpPackage> {
         self.packages
@@ -263,12 +288,22 @@ impl GreaseState {
         let mut out = Vec::new();
         for m in self.mcp_packages() {
             for r in &m.resources {
-                out.push(crate::mcpfs::ResourceEntry {
-                    server: m.name.clone(),
-                    rel_path: r.rel_path.clone(),
-                    uri: r.uri.clone(),
-                    is_static: r.is_static,
-                });
+                let mut e =
+                    crate::mcpfs::ResourceEntry::plain(&m.name, &r.rel_path, &r.uri, r.is_static);
+                e.last_modified = r.last_modified.clone();
+                e.audience = r.audience.clone();
+                e.priority = r.priority;
+                e.size = r.size;
+                e.description = r.description.clone();
+                out.push(e);
+            }
+            // Templates appear as stubs in `/mnt/mcp/<server>/` (README:774) — rel_path is the
+            // `<server>-<name>` executable name; the URI carries the template for display.
+            for t in &m.templates {
+                let mut e = crate::mcpfs::ResourceEntry::plain(&m.name, &t.name, &t.uri_template, false);
+                e.is_template = true;
+                e.description = t.description.clone();
+                out.push(e);
             }
         }
         out

@@ -479,8 +479,10 @@ impl SimpleCommand for Ls {
                     let _ = writeln!(out, "{}", children.join("\n"));
                     return Ok(ExecutionResult::new(0));
                 }
-                crate::mcpfs::McpPathKind::Static | crate::mcpfs::McpPathKind::Dynamic { .. } => {
-                    // A file (not a dir): `ls <file>` names it, like real `ls`.
+                crate::mcpfs::McpPathKind::Static
+                | crate::mcpfs::McpPathKind::Dynamic { .. }
+                | crate::mcpfs::McpPathKind::Template => {
+                    // A file/executable (not a dir): `ls <path>` names it, like real `ls`.
                     let _ = writeln!(out, "{op}");
                     return Ok(ExecutionResult::new(0));
                 }

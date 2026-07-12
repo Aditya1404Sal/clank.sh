@@ -132,9 +132,28 @@ pub struct PromptSpec {
 }
 
 /// One resource advertised by a server (`resources/list`).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ResourceSpec {
     pub uri: String,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub mime_type: Option<String>,
+    /// Byte size, if the server advertises it.
+    pub size: Option<u64>,
+    /// `annotations.lastModified` (ISO-8601), surfaced by `stat`/`mcp resource info`.
+    pub last_modified: Option<String>,
+    /// `annotations.audience` (e.g. `["user","assistant"]`), joined for display.
+    pub audience: Option<String>,
+    /// `annotations.priority` (0.0–1.0).
+    pub priority: Option<f64>,
+}
+
+/// One resource TEMPLATE advertised by a server (`resources/templates/list`) — a parameterized URI
+/// pattern that can't be enumerated. Installed as an executable in `/usr/lib/mcp/bin/` (README:767).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResourceTemplateSpec {
+    /// The RFC-6570 URI template, e.g. `github://repo/{path}`.
+    pub uri_template: String,
     pub name: Option<String>,
     pub description: Option<String>,
     pub mime_type: Option<String>,
@@ -487,11 +506,28 @@ impl<'a> McpClient<'a> {
             if let Some(arr) = result.get("resources").and_then(Value::as_array) {
                 for r in arr {
                     let Some(uri) = r.get("uri").and_then(Value::as_str) else { continue };
+                    let ann = r.get("annotations");
+                    let audience = ann
+                        .and_then(|a| a.get("audience"))
+                        .and_then(Value::as_array)
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_str())
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        });
                     resources.push(ResourceSpec {
                         uri: uri.to_string(),
                         name: r.get("name").and_then(Value::as_str).map(String::from),
                         description: r.get("description").and_then(Value::as_str).map(String::from),
                         mime_type: r.get("mimeType").and_then(Value::as_str).map(String::from),
+                        size: r.get("size").and_then(Value::as_u64),
+                        last_modified: ann
+                            .and_then(|a| a.get("lastModified"))
+                            .and_then(Value::as_str)
+                            .map(String::from),
+                        audience,
+                        priority: ann.and_then(|a| a.get("priority")).and_then(Value::as_f64),
                     });
                 }
             }
@@ -501,6 +537,46 @@ impl<'a> McpClient<'a> {
             }
         }
         Ok(resources)
+    }
+
+    /// `resources/templates/list` — the server's parameterized-URI resource templates. Paginated like
+    /// `resources/list`. A server without templates returns an empty list or method-not-found.
+    pub async fn list_resource_templates(
+        &mut self,
+        session_id: Option<&str>,
+    ) -> McpResult<Vec<ResourceTemplateSpec>> {
+        let mut templates = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..MAX_TOOL_PAGES {
+            let params = cursor.as_ref().map(|c| serde_json::json!({ "cursor": c }));
+            let result = self.call("resources/templates/list", params, session_id).await?;
+            if let Some(arr) = result.get("resourceTemplates").and_then(Value::as_array) {
+                for t in arr {
+                    let Some(uri_template) = t.get("uriTemplate").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    templates.push(ResourceTemplateSpec {
+                        uri_template: uri_template.to_string(),
+                        name: t.get("name").and_then(Value::as_str).map(String::from),
+                        description: t.get("description").and_then(Value::as_str).map(String::from),
+                        mime_type: t.get("mimeType").and_then(Value::as_str).map(String::from),
+                    });
+                }
+            }
+            match result.get("nextCursor").and_then(Value::as_str) {
+                Some(next) if !next.is_empty() => cursor = Some(next.to_string()),
+                _ => return Ok(templates),
+            }
+        }
+        Ok(templates)
+    }
+
+    /// `resources/subscribe` — subscribe to change notifications for a resource URI. Best-effort (a
+    /// server may not support it); `mcp watch` uses this before its poll loop.
+    pub async fn subscribe_resource(&mut self, uri: &str, session_id: Option<&str>) -> McpResult<()> {
+        let params = serde_json::json!({ "uri": uri });
+        self.call("resources/subscribe", Some(params), session_id).await?;
+        Ok(())
     }
 
     /// `resources/read` — read a resource's contents by URI. Joins the text of each returned content

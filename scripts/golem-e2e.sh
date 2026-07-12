@@ -732,7 +732,7 @@ step "mcp (client config + surfaces)"
 expect_contains "type mcp is intercepted"             'type mcp'          'mcp'
 expect_contains "mcp --help documents subcommands"    'mcp --help'        'mcp add'
 expect_contains "mcp list is empty initially"         'mcp list'          'no MCP servers configured'
-expect_contains "mcp watch is honestly unsupported"   'mcp watch some://x'  'not supported'
+expect_contains "mcp watch on an unowned uri errors"  'mcp watch some://x'  'no installed server owns'
 # `mcp add` is Confirm (outbound HTTP); `sudo mcp add` pre-authorizes. Unreachable URL → install fails
 # (exit 4) but the config is written.
 MCP_ADD="$(eval_json eval '"sudo mcp add unreachable https://127.0.0.1:9/mcp"')"

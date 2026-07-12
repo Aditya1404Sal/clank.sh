@@ -33,6 +33,38 @@ pub struct ResourceEntry {
     pub uri: String,
     /// `true` = a real static file already on disk; `false` = dynamic (read live).
     pub is_static: bool,
+    /// `true` = a resource-template stub (a `<server>-<name>` executable; shown in `ls` but not
+    /// readable by `cat` — you run the executable with args instead, README:774).
+    pub is_template: bool,
+    /// `annotations.lastModified` (for `stat`/`mcp resource info`).
+    pub last_modified: Option<String>,
+    /// `annotations.audience`.
+    pub audience: Option<String>,
+    /// `annotations.priority`.
+    pub priority: Option<f64>,
+    /// Byte size, if advertised.
+    pub size: Option<u64>,
+    /// The resource description (for `mcp resource info`).
+    pub description: String,
+}
+
+impl ResourceEntry {
+    /// A plain resource entry (static or dynamic) with no annotations — the common constructor;
+    /// callers set annotation fields afterward when present.
+    pub fn plain(server: &str, rel_path: &str, uri: &str, is_static: bool) -> Self {
+        Self {
+            server: server.to_string(),
+            rel_path: rel_path.to_string(),
+            uri: uri.to_string(),
+            is_static,
+            is_template: false,
+            last_modified: None,
+            audience: None,
+            priority: None,
+            size: None,
+            description: String::new(),
+        }
+    }
 }
 
 /// The classification of a `/mnt/mcp` path against the index.
@@ -44,6 +76,8 @@ pub enum McpPathKind {
     Dynamic { server: String, uri: String },
     /// A static resource file: it's a real file on disk (the caller delegates to uutils).
     Static,
+    /// A resource-template stub — an executable, not a readable file (README:774).
+    Template,
     /// No such path in the index.
     NotFound,
 }
@@ -78,9 +112,11 @@ pub fn classify(path: &str, index: &[ResourceEntry]) -> McpPathKind {
         return McpPathKind::NotFound;
     }
 
-    // An exact resource match → static file or dynamic resource.
+    // An exact resource match → template stub, static file, or dynamic resource.
     if let Some(entry) = under_server.iter().find(|e| e.rel_path == subpath) {
-        return if entry.is_static {
+        return if entry.is_template {
+            McpPathKind::Template
+        } else if entry.is_static {
             McpPathKind::Static
         } else {
             McpPathKind::Dynamic { server, uri: entry.uri.clone() }
@@ -146,18 +182,8 @@ mod tests {
 
     fn idx() -> Vec<ResourceEntry> {
         vec![
-            ResourceEntry {
-                server: "github".into(),
-                rel_path: "repo/README.md".into(),
-                uri: "file:///repo/README.md".into(),
-                is_static: true,
-            },
-            ResourceEntry {
-                server: "metrics".into(),
-                rel_path: "current/cpu-usage".into(),
-                uri: "metrics://current/cpu-usage".into(),
-                is_static: false,
-            },
+            ResourceEntry::plain("github", "repo/README.md", "file:///repo/README.md", true),
+            ResourceEntry::plain("metrics", "current/cpu-usage", "metrics://current/cpu-usage", false),
         ]
     }
 
@@ -188,6 +214,21 @@ mod tests {
                 uri: "metrics://current/cpu-usage".into()
             }
         );
+    }
+
+    #[test]
+    fn template_stubs_classify_as_template_and_list() {
+        let mut index = idx();
+        let mut t = ResourceEntry::plain("github", "github-file-lookup", "github://repo/{path}", false);
+        t.is_template = true;
+        index.push(t);
+        // The template appears in the server dir listing (README:774) …
+        assert_eq!(
+            classify("/mnt/mcp/github", &index),
+            McpPathKind::Directory(vec!["github-file-lookup".into(), "repo".into()])
+        );
+        // … and classifies as a Template stub (an executable, not a readable file).
+        assert_eq!(classify("/mnt/mcp/github/github-file-lookup", &index), McpPathKind::Template);
     }
 
     #[test]

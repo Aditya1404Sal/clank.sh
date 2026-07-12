@@ -77,6 +77,21 @@ fn resolve(path: &str, follow: bool) -> Result<StatInfo, String> {
             .ok_or_else(not_found)?;
         return Ok(StatInfo::virtual_file(path, content.len() as u64));
     }
+    // `/mnt/mcp/...`: a mounted MCP resource. Static resources are real files (fall through to the fs);
+    // directories, dynamic resources, and template stubs are virtual — serve them from the index so
+    // `stat` reflects MCP metadata (README:784) even when there's no real file on disk.
+    if crate::mcpfs::is_mcp_path(path) {
+        if let Some(index) = crate::mcpfs::active() {
+            match crate::mcpfs::classify(path, &index) {
+                crate::mcpfs::McpPathKind::Directory(_) => return Ok(StatInfo::virtual_dir(path)),
+                crate::mcpfs::McpPathKind::Dynamic { .. } | crate::mcpfs::McpPathKind::Template => {
+                    return Ok(StatInfo::virtual_file(path, 0));
+                }
+                // Static → a real file on disk; fall through. NotFound → fall through (→ "No such file").
+                crate::mcpfs::McpPathKind::Static | crate::mcpfs::McpPathKind::NotFound => {}
+            }
+        }
+    }
 
     let md = if follow {
         std::fs::metadata(path)

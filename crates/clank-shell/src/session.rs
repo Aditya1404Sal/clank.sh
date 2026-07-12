@@ -633,6 +633,10 @@ impl Session {
             // A grease-installed Golem agent: parse the ctor/method/args and invoke it via wRPC in the
             // cluster (Confirm resolved at the gate; sudo pre-authorizes). Await mode only in v1.
             self.run_agent(line).await
+        } else if self.is_mcp_template_line(line) {
+            // A grease-installed MCP resource-template executable: substitute the args into the URI
+            // template and read the constructed resource live (top-level only, Wall-C).
+            self.run_mcp_template(line).await
         } else if let Some((server, uri)) = self.dynamic_mcp_read_target(line) {
             // A top-level `cat /mnt/mcp/<server>/<dynamic>`: fetch the resource live via
             // `resources/read` (the read can't run in Brush's synchronous `cat` — the Wall-C wall — so
@@ -1991,12 +1995,30 @@ impl Session {
             installed_prompts.push((p.clone(), body_text));
         }
 
-        // Materialize selected resources (static files under /mnt/mcp/<server>/). Best-effort; the
-        // full resource surface (dynamic reads, templates) lands in a later increment.
+        // Materialize selected resources (static files under /mnt/mcp/<server>/) + resource templates
+        // (executables in /usr/lib/mcp/bin). Best-effort.
         if pkg.artifacts.resources {
             pkg.resources = materialize_mcp_resources(name, &mut client, session.as_deref()).await;
+            // Templates: fetch `resources/templates/list` and cache as `<server>-<tname>` executables.
+            let templates = client.list_resource_templates(session.as_deref()).await.unwrap_or_default();
+            pkg.templates = templates
+                .iter()
+                .filter_map(|t| {
+                    let tname = t.name.clone()?;
+                    let cmd = format!("{name}-{tname}");
+                    if !crate::greaseconfig::is_valid_name(&cmd) {
+                        return None;
+                    }
+                    Some(crate::greasepkg::McpTemplateCache {
+                        name: cmd,
+                        uri_template: t.uri_template.clone(),
+                        description: t.description.clone().unwrap_or_default(),
+                    })
+                })
+                .collect();
         }
         let resource_count = pkg.resources.len();
+        let template_count = pkg.templates.len();
 
         // Persist the enriched payload + marker.
         let payload = crate::greasestate::Payload::Mcp(pkg.clone());
@@ -2025,13 +2047,23 @@ impl Session {
             self.install_mcp_prompt(&spec, &body_text, registry);
         }
 
+        // Write a /usr/lib/mcp/bin stub for each resource-template executable (so which/type/ls see it).
+        for t in &pkg.templates {
+            let help = format!(
+                "{} — MCP resource template ({}). Run `{} <arg…>` to read the constructed URI.\n",
+                t.name, t.uri_template, t.name
+            );
+            let _ = crate::mcpconfig::write_bin_stub(&t.name, &help);
+        }
+
         // Register the grease package view.
         self.grease.set_installed(crate::greasestate::InstalledPackage { marker, payload });
 
         note.extend_from_slice(
             format!(
                 "installed {name} [mcp] ({})\n\
-                 {tool_count} tools, {prompt_count} prompts, {resource_count} resources\n\
+                 {tool_count} tools, {prompt_count} prompts, {resource_count} resources, \
+                 {template_count} templates\n\
                  tools run as `{name} <tool>`\n",
                 integrity.summary()
             )
@@ -2442,11 +2474,8 @@ impl Session {
             McpCommand::List => self.mcp_list(),
             McpCommand::Tools { server } => self.mcp_tools(&server),
             McpCommand::Remove { name } => self.mcp_remove(&name),
-            McpCommand::Watch => LineResult::from_outcome(
-                Vec::new(),
-                b"mcp watch: not supported in this build (MCP-lite covers tools only)\n".to_vec(),
-                1,
-            ),
+            McpCommand::Watch { uri } => self.run_mcp_watch(&uri).await,
+            McpCommand::ResourceInfo { path } => self.run_mcp_resource_info(&path),
             McpCommand::Add {
                 name,
                 url,
@@ -2817,6 +2846,163 @@ impl Session {
         match client.read_resource(uri, session.as_deref()).await {
             Ok(content) => LineResult::continue_with_stdout(content.into_bytes()),
             Err(e) => LineResult::from_outcome(Vec::new(), format!("cat: {uri}: {}\n", e.message).into_bytes(), e.exit_code),
+        }
+    }
+
+    /// `mcp resource info <path>` — print the full MCP annotation set for a mounted resource. Reads
+    /// from the cached resource index (no live fetch); an unknown path is an error.
+    fn run_mcp_resource_info(&self, path: &str) -> LineResult {
+        if !crate::mcpfs::is_mcp_path(path) {
+            return LineResult::from_outcome(
+                Vec::new(),
+                format!("mcp resource info: '{path}' is not a /mnt/mcp resource\n").into_bytes(),
+                2,
+            );
+        }
+        // Split `/mnt/mcp/<server>/<rel>`.
+        let rel = path.trim_start_matches("/mnt/mcp").trim_start_matches('/');
+        let Some((server, sub)) = rel.split_once('/') else {
+            return LineResult::from_outcome(
+                Vec::new(),
+                format!("mcp resource info: '{path}' names a server, not a resource\n").into_bytes(),
+                2,
+            );
+        };
+        let Some(res) = self.grease.mcp_resource_entry(server, sub) else {
+            return LineResult::from_outcome(
+                Vec::new(),
+                format!("mcp resource info: no such resource '{path}'\n").into_bytes(),
+                1,
+            );
+        };
+        let mut out = format!("uri: {}\n", res.uri);
+        out.push_str(&format!("kind: {}\n", if res.is_static { "static" } else { "dynamic" }));
+        if !res.description.is_empty() {
+            out.push_str(&format!("description: {}\n", res.description));
+        }
+        if let Some(m) = &res.mime_type {
+            out.push_str(&format!("mime-type: {m}\n"));
+        }
+        if let Some(s) = res.size {
+            out.push_str(&format!("size: {s}\n"));
+        }
+        if let Some(lm) = &res.last_modified {
+            out.push_str(&format!("last-modified: {lm}\n"));
+        }
+        if let Some(a) = &res.audience {
+            out.push_str(&format!("audience: {a}\n"));
+        }
+        if let Some(p) = res.priority {
+            out.push_str(&format!("priority: {p}\n"));
+        }
+        LineResult::continue_with_stdout(out.into_bytes())
+    }
+
+    /// `mcp watch <uri>` — a BOUNDED poll-based subscription (the durable agent can't hold a long-lived
+    /// push stream across serialized invocations, and the transport is one-shot request/response). We
+    /// `resources/subscribe` then poll `resources/read` a fixed number of times, printing the content
+    /// each time it changes. Honest about being polling, not push.
+    async fn run_mcp_watch(&mut self, uri: &str) -> LineResult {
+        // Resolve which installed server owns this URI (by scheme/prefix match against its resources).
+        let server = self.grease.mcp_packages().iter().find_map(|m| {
+            let owns = m.resources.iter().any(|r| r.uri == uri)
+                || uri.split_once("://").map(|(s, _)| s) == Some(m.name.as_str());
+            if owns {
+                Some((m.name.clone(), m.url.clone(), m.auth_env.clone()))
+            } else {
+                None
+            }
+        });
+        let Some((_name, url, auth_env)) = server else {
+            return LineResult::from_outcome(
+                Vec::new(),
+                format!("mcp watch: no installed server owns '{uri}'\n").into_bytes(),
+                1,
+            );
+        };
+        let Some(http) = self.mcp_http.as_deref() else {
+            return LineResult::from_outcome(
+                Vec::new(),
+                b"mcp watch: no HTTP transport configured (available on the Golem agent)\n".to_vec(),
+                4,
+            );
+        };
+        let config = crate::mcpconfig::McpServerConfig { url: url.clone(), enabled: true, auth_env, auth_header: None };
+        let auth = config.resolve_auth();
+        let mut client = crate::mcpclient::McpClient::new(http, &url, auth);
+        let session = client.initialize().await.ok().and_then(|i| i.session_id);
+        let _ = client.subscribe_resource(uri, session.as_deref()).await; // best-effort
+
+        // Bounded poll loop: read the resource a fixed number of times, printing on change.
+        const POLLS: usize = 3;
+        let mut out = format!(
+            "mcp watch {uri}: polling {POLLS}× (the durable agent can't hold a push stream; this is a \
+             bounded poll, not a live subscription)\n"
+        );
+        let mut last: Option<String> = None;
+        for i in 0..POLLS {
+            match client.read_resource(uri, session.as_deref()).await {
+                Ok(content) => {
+                    if last.as_deref() != Some(content.as_str()) {
+                        out.push_str(&format!("[poll {}] {}\n", i + 1, content.trim_end()));
+                        last = Some(content);
+                    } else {
+                        out.push_str(&format!("[poll {}] (unchanged)\n", i + 1));
+                    }
+                }
+                Err(e) => {
+                    out.push_str(&format!("[poll {}] error: {}\n", i + 1, e.message));
+                }
+            }
+        }
+        out.push_str("mcp watch: done (bounded poll complete)\n");
+        LineResult::continue_with_stdout(out.into_bytes())
+    }
+
+    /// Whether `line`'s leading word is an installed MCP resource-template executable
+    /// (`<server>-<template>`). Top-level only (Wall-C — the read awaits under the reactor).
+    fn is_mcp_template_line(&self, line: &str) -> bool {
+        let Some(word) = prompt_leading_word(line) else {
+            return false;
+        };
+        self.grease.is_mcp_template(&word)
+    }
+
+    /// Run an installed MCP resource template: substitute the CLI args into the `{param}` placeholders
+    /// of the stored URI template, then read the constructed resource live and print it (README:767).
+    /// Positional args fill the template's `{param}` placeholders in order; `--param value` fills by
+    /// name. The read awaits under the reactor (top-level only).
+    async fn run_mcp_template(&mut self, line: &str) -> LineResult {
+        let words = match crate::askcmd::dequote_words(line) {
+            Some(w) => w,
+            None => return LineResult::from_outcome(Vec::new(), b"mcp template: parse error\n".to_vec(), 2),
+        };
+        // Strip a leading sudo (the gate already resolved authz).
+        let rest = if words.first().map(String::as_str) == Some("sudo") { &words[1..] } else { &words[..] };
+        let cmd = rest[0].clone();
+        let Some((url, auth_env, template)) = self.grease.mcp_template(&cmd) else {
+            return LineResult::denied(); // is_mcp_template_line gated it
+        };
+        // Build the concrete URI: fill `{param}` placeholders. `--name value` fills by name; bare
+        // positionals fill the remaining `{…}` slots left-to-right.
+        let uri = match fill_uri_template(&template, &rest[1..]) {
+            Ok(u) => u,
+            Err(e) => return LineResult::from_outcome(Vec::new(), format!("{cmd}: {e}\n").into_bytes(), 2),
+        };
+        let Some(http) = self.mcp_http.as_deref() else {
+            return LineResult::from_outcome(
+                Vec::new(),
+                format!("{cmd}: no HTTP transport configured (available on the Golem agent)\n").into_bytes(),
+                4,
+            );
+        };
+        let config = crate::mcpconfig::McpServerConfig { url: url.clone(), enabled: true, auth_env, auth_header: None };
+        let auth = config.resolve_auth();
+        let mut client = crate::mcpclient::McpClient::new(http, &url, auth);
+        let session = client.initialize().await.ok().and_then(|i| i.session_id);
+        match client.read_resource(&uri, session.as_deref()).await {
+            Ok(content) => LineResult::continue_with_stdout(content.into_bytes()),
+            Err(e) => LineResult::from_outcome(Vec::new(), format!("{cmd}: {uri}: {}\n", e.message).into_bytes(), e.exit_code),
         }
     }
 
@@ -3610,9 +3796,59 @@ async fn materialize_mcp_resources(
             description: res.description.clone().unwrap_or_default(),
             mime_type: res.mime_type.clone(),
             is_static,
+            last_modified: res.last_modified.clone(),
+            audience: res.audience.clone(),
+            priority: res.priority,
+            size: res.size,
         });
     }
     cache
+}
+
+/// Fill an RFC-6570-lite URI template's `{param}` placeholders from CLI `args`. `--name value` fills
+/// the placeholder named `name`; bare positional args fill the remaining placeholders left-to-right.
+/// Values are inserted verbatim (MCP servers accept literal path segments). An unfilled placeholder is
+/// an error. Walks the template once, resolving each placeholder as it's encountered.
+fn fill_uri_template(template: &str, args: &[String]) -> Result<String, String> {
+    // Parse args: `--name value` pairs + positionals.
+    let mut named: Vec<(String, String)> = Vec::new();
+    let mut positionals: Vec<String> = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if let Some(key) = a.strip_prefix("--") {
+            let val = it.next().ok_or_else(|| format!("--{key} needs a value"))?;
+            named.push((key.to_string(), val.clone()));
+        } else {
+            positionals.push(a.clone());
+        }
+    }
+    let mut pos_iter = positionals.into_iter();
+
+    // Walk the template, replacing each `{…}` with its resolved value in order.
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let Some(close_rel) = rest[open..].find('}') else {
+            // Unbalanced brace — emit verbatim and stop.
+            out.push_str(&rest[open..]);
+            return Ok(out);
+        };
+        let raw = &rest[open + 1..open + close_rel];
+        let name = raw
+            .trim_start_matches(['+', '#', '.', '/', ';', '?', '&'])
+            .trim_end_matches('*');
+        let value = named
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+            .or_else(|| pos_iter.next())
+            .ok_or_else(|| format!("missing value for template parameter '{name}'"))?;
+        out.push_str(&value);
+        rest = &rest[open + close_rel + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
 }
 
 /// Convert an MCP resource URI to a relative path under `/mnt/mcp/<server>/`. Strips a `<scheme>://`
@@ -4651,6 +4887,114 @@ mod tests {
             // real file → nonzero. (We only assert it doesn't crash / doesn't print the live body.)
             let subst = session.eval_line("echo $(cat /mnt/mcp/srv/metrics/cpu)").await;
             assert!(!String::from_utf8_lossy(&subst.stdout).contains("cpu: 42%"), "dynamic read must not run in $()");
+        });
+    }
+
+    /// MCP resource templates + `mcp resource info` + `stat`. Install a server with a resource template
+    /// (`resources/templates/list`) → a `<server>-<name>` executable; running it substitutes the arg
+    /// into the URI template and reads the constructed resource. `mcp resource info` shows annotations;
+    /// `ls /mnt/mcp/<server>` lists the template stub.
+    #[test]
+    fn mcp_templates_and_resource_info() {
+        on_rt(async {
+            let _dirs = set_grease_dirs();
+            let _mcp = set_mcp_dirs();
+            let mut session = Session::new().await.unwrap();
+
+            let pkg = serde_json::json!({
+                "kind": "mcp", "name": "gh", "description": "github", "url": "https://mcp.gh/x"
+            });
+            let mut init = mcp_json(serde_json::json!({
+                "jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26",
+                "serverInfo":{"name":"gh","version":"1"},"capabilities":{"resources":{}}}}));
+            init.headers.push(("mcp-session-id".into(), "s-1".into()));
+            // One static resource (with annotations) + one template.
+            let res_list = mcp_json(serde_json::json!({"jsonrpc":"2.0","id":2,"result":{"resources":[
+                {"uri":"file:///repo/README.md","name":"readme","mimeType":"text/markdown",
+                 "size":42,"annotations":{"lastModified":"2026-01-01T00:00:00Z","priority":0.8,
+                 "audience":["user","assistant"]}}]}}));
+            let static_read = mcp_json(serde_json::json!({"jsonrpc":"2.0","id":3,"result":{
+                "contents":[{"uri":"file:///repo/README.md","text":"readme body"}]}}));
+            let tmpl_list = mcp_json(serde_json::json!({"jsonrpc":"2.0","id":4,"result":{
+                "resourceTemplates":[{"uriTemplate":"github://repo/{path}","name":"file-lookup",
+                 "description":"look up a repo file"}]}}));
+            // The template read: constructed URI github://repo/src/main.rs.
+            let tmpl_read = mcp_json(serde_json::json!({"jsonrpc":"2.0","id":5,"result":{
+                "contents":[{"uri":"github://repo/src/main.rs","text":"fn main() {}"}]}}));
+
+            session.set_mcp_http(Box::new(FakeMcpArtifactHttp::new(vec![
+                ("/packages/", grease_json(pkg)),
+                ("initialize", init.clone()),
+                ("resources/list", res_list),
+                ("resources/templates/list", tmpl_list),
+                ("resources/read:file:///repo/README.md", static_read),
+                ("resources/read:github://repo/src/main.rs", tmpl_read),
+            ])));
+            session.run_line("grease registry add https://reg.example").await;
+
+            let inst = session.eval_line("sudo grease install gh --resources").await;
+            assert_eq!(inst.exit_code, 0, "install stderr: {}", String::from_utf8_lossy(&inst.stderr));
+            assert!(String::from_utf8(inst.stdout).unwrap().contains("1 templates"), "reports templates");
+
+            // The template executable exists (`type`/`ls` see it).
+            let ls = String::from_utf8(session.eval_line("ls /mnt/mcp/gh").await.stdout).unwrap();
+            assert!(ls.contains("gh-file-lookup"), "template stub listed: {ls}");
+
+            // Running the template with a positional arg substitutes {path} and reads the URI.
+            let run = session.eval_line("gh-file-lookup src/main.rs").await;
+            assert_eq!(run.exit_code, 0, "template run stderr: {}", String::from_utf8_lossy(&run.stderr));
+            assert_eq!(String::from_utf8(run.stdout).unwrap(), "fn main() {}");
+
+            // `mcp resource info` shows the annotations.
+            let info = String::from_utf8(
+                session.eval_line("mcp resource info /mnt/mcp/gh/repo/README.md").await.stdout,
+            )
+            .unwrap();
+            assert!(info.contains("2026-01-01"), "info shows lastModified: {info}");
+            assert!(info.contains("priority: 0.8"), "info shows priority: {info}");
+            assert!(info.contains("user,assistant"), "info shows audience: {info}");
+        });
+    }
+
+    /// `mcp watch <uri>` is a bounded poll (not a push stream) — it reads the resource N times and
+    /// stops, honest about the limitation.
+    #[test]
+    fn mcp_watch_is_a_bounded_poll() {
+        on_rt(async {
+            let _dirs = set_grease_dirs();
+            let _mcp = set_mcp_dirs();
+            let mut session = Session::new().await.unwrap();
+            let pkg = serde_json::json!({
+                "kind": "mcp", "name": "metrics", "description": "m", "url": "https://mcp.m/x"
+            });
+            let mut init = mcp_json(serde_json::json!({
+                "jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26",
+                "serverInfo":{"name":"metrics","version":"1"},"capabilities":{"resources":{}}}}));
+            init.headers.push(("mcp-session-id".into(), "s-1".into()));
+            // resources/list makes the server own the metrics:// uri.
+            let res_list = mcp_json(serde_json::json!({"jsonrpc":"2.0","id":2,"result":{"resources":[
+                {"uri":"metrics://cpu","name":"cpu"}]}}));
+            // resources/read for the dynamic uri (install read fails → dynamic; watch reads succeed).
+            let read_ok = mcp_json(serde_json::json!({"jsonrpc":"2.0","id":9,"result":{
+                "contents":[{"uri":"metrics://cpu","text":"cpu: 10%"}]}}));
+
+            session.set_mcp_http(Box::new(FakeMcpArtifactHttp::new(vec![
+                ("/packages/", grease_json(pkg)),
+                ("initialize", init),
+                ("resources/list", res_list),
+                ("resources/templates/list", mcp_json(serde_json::json!({"jsonrpc":"2.0","id":3,"result":{"resourceTemplates":[]}}))),
+                ("resources/read:metrics://cpu", read_ok),
+                ("resources/subscribe", mcp_json(serde_json::json!({"jsonrpc":"2.0","id":4,"result":{}}))),
+            ])));
+            session.run_line("grease registry add https://reg.example").await;
+            session.eval_line("sudo grease install metrics --resources").await;
+
+            let watch = session.eval_line("mcp watch metrics://cpu").await;
+            assert_eq!(watch.exit_code, 0);
+            let out = String::from_utf8(watch.stdout).unwrap();
+            assert!(out.contains("bounded poll"), "honest about polling: {out}");
+            assert!(out.contains("cpu: 10%"), "prints the resource content: {out}");
+            assert!(out.contains("done"), "terminates: {out}");
         });
     }
 
@@ -5842,14 +6186,15 @@ mod tests {
         });
     }
 
-    /// `mcp watch` is an honest not-supported error in MCP-lite.
+    /// `mcp watch` on a URI no installed server owns is an honest error (the bounded-poll happy path is
+    /// covered by `mcp_watch_is_a_bounded_poll`).
     #[test]
-    fn mcp_watch_is_not_supported() {
+    fn mcp_watch_unknown_uri_errors() {
         on_rt(async {
             let mut session = Session::new().await.unwrap();
             let result = session.eval_line("mcp watch some://uri").await;
             assert_eq!(result.exit_code, 1);
-            assert!(String::from_utf8(result.stderr).unwrap().contains("not supported"));
+            assert!(String::from_utf8(result.stderr).unwrap().contains("no installed server owns"));
         });
     }
 

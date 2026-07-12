@@ -48,7 +48,14 @@ pub(crate) enum McpCommand {
     SessionInfo {
         id: String,
     },
-    Watch,
+    /// `mcp watch <uri>` — poll-based subscription to a resource's changes.
+    Watch {
+        uri: String,
+    },
+    /// `mcp resource info <path>` — the full annotation set for a mounted `/mnt/mcp/...` resource.
+    ResourceInfo {
+        path: String,
+    },
 }
 
 /// Recognize an `mcp` line. `None` when it isn't one; `Some(Err)` when it is but doesn't parse.
@@ -89,9 +96,24 @@ fn parse(args: &[String]) -> Result<McpCommand, String> {
             Ok(McpCommand::Tools { server: server.clone() })
         }
         "session" => parse_session(&args[1..]),
-        "watch" => Ok(McpCommand::Watch),
+        "watch" => {
+            let uri = args.get(1).ok_or("mcp watch: needs a resource uri")?;
+            Ok(McpCommand::Watch { uri: uri.clone() })
+        }
+        "resource" => {
+            // `mcp resource info <path>`.
+            match args.get(1).map(String::as_str) {
+                Some("info") => {
+                    let path = args.get(2).ok_or("mcp resource info: needs a /mnt/mcp path")?;
+                    Ok(McpCommand::ResourceInfo { path: path.clone() })
+                }
+                Some(other) => Err(format!("mcp resource: unknown subcommand '{other}' (try: info)")),
+                None => Err("mcp resource: needs a subcommand (try: info)".to_string()),
+            }
+        }
         other => Err(format!(
-            "mcp: unknown subcommand '{other}' (try: list, add, remove, reload, tools, session, watch)"
+            "mcp: unknown subcommand '{other}' \
+             (try: list, add, remove, reload, tools, session, watch, resource)"
         )),
     }
 }
@@ -313,7 +335,13 @@ mod tests {
         assert_eq!(c("mcp remove github"), McpCommand::Remove { name: "github".into() });
         assert_eq!(c("mcp reload"), McpCommand::Reload { name: None });
         assert_eq!(c("mcp tools github"), McpCommand::Tools { server: "github".into() });
-        assert_eq!(c("mcp watch x"), McpCommand::Watch);
+        assert_eq!(c("mcp watch github://repo/issues"), McpCommand::Watch { uri: "github://repo/issues".into() });
+        assert_eq!(
+            c("mcp resource info /mnt/mcp/x/y"),
+            McpCommand::ResourceInfo { path: "/mnt/mcp/x/y".into() }
+        );
+        // `mcp watch` without a uri errors.
+        assert!(classify("mcp watch").unwrap().is_err());
     }
 
     #[test]
