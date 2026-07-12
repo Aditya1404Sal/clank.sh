@@ -126,6 +126,13 @@ struct BgJob {
     pid: u32,
 }
 
+/// A triggered/scheduled agent invocation awaiting a possible `kill`-cancel: its proc-table PID and
+/// the opaque cancel token the invoker understands (README:850). `None` token = not cancelable.
+struct PendingInvocation {
+    pid: u32,
+    cancel_token: Option<String>,
+}
+
 /// The result of evaluating one shell line.
 pub struct LineResult {
     pub stdout: Vec<u8>,
@@ -223,6 +230,12 @@ pub struct Session {
     /// native / until injected, in which case an agent invocation degrades to a clean "needs a cluster"
     /// error. See [`crate::agentcmd`].
     agent_invoker: Option<Box<dyn crate::agentcmd::AgentInvoker>>,
+    /// The injected Golem cluster interface backing the `golem` command + agent oplog/status (durable
+    /// `golem:api` bindings on the agent). `None` on native / until injected → the honest no-cluster
+    /// error. See [`crate::golemcmd`].
+    golem_cluster: Option<Box<dyn crate::golemcmd::GolemCluster>>,
+    /// Triggered/scheduled agent invocations awaiting a possible `kill`-cancel: PID → cancel token.
+    pending_invocations: Vec<PendingInvocation>,
     /// Out-of-band stdin for the next `ask` dispatch: the captured stdout of an upstream pipeline
     /// stage (`cat x | ask "…"`). Set by the pipe pre-extraction in `eval_line` (or restored on a
     /// deferred-confirm resume) and `take()`n by `run_ask`. `None` for an ordinary `ask` line.
@@ -263,6 +276,8 @@ impl Session {
                 bg_jobs: Vec::new(),
                 ask_provider: None,
                 agent_invoker: None,
+                golem_cluster: None,
+                pending_invocations: Vec::new(),
                 next_ask_stdin: None,
                 repl: None,
                 mcp: crate::mcpstate::McpState::default(),
@@ -287,6 +302,8 @@ impl Session {
                 bg_jobs: Vec::new(),
                 ask_provider: None,
                 agent_invoker: None,
+                golem_cluster: None,
+                pending_invocations: Vec::new(),
                 next_ask_stdin: None,
                 repl: None,
                 mcp: crate::mcpstate::McpState::default(),
@@ -347,6 +364,12 @@ impl Session {
     /// installed agent command reports "needs a cluster" (README:895). Injected after construction.
     pub fn set_agent_invoker(&mut self, invoker: Box<dyn crate::agentcmd::AgentInvoker>) {
         self.agent_invoker = Some(invoker);
+    }
+
+    /// Install the Golem cluster interface backing the `golem` command + agent oplog/status (durable
+    /// `golem:api` bindings on the agent). Without one, `golem` reports "needs a cluster".
+    pub fn set_golem_cluster(&mut self, cluster: Box<dyn crate::golemcmd::GolemCluster>) {
+        self.golem_cluster = Some(cluster);
     }
 
     /// Install the MCP HTTP transport (a durable `wstd` client on the agent). Without one, MCP
@@ -617,6 +640,12 @@ impl Session {
                 Ok(cmd) => self.run_grease(cmd).await,
                 Err(e) => LineResult::from_outcome(Vec::new(), format!("{e}\n").into_bytes(), 2),
             }
+        } else if let Some(parsed) = crate::golemcmd::classify(line) {
+            // `golem` cluster command — runtime API calls await under the reactor (like mcp/ask).
+            match parsed {
+                Ok(cmd) => self.run_golem(cmd).await,
+                Err(e) => LineResult::from_outcome(Vec::new(), format!("{e}\n").into_bytes(), 2),
+            }
         } else if self.is_mcp_tool_line(line) {
             // `<server> <tool> …` for an installed MCP server: an outbound HTTP tool call (its authz
             // Confirm was already resolved via the dynamic manifest at the gate).
@@ -743,6 +772,26 @@ impl Session {
                             format!("kill: ({pid}) - Operation not permitted\n").as_bytes(),
                         );
                         any_missed = true;
+                        continue;
+                    }
+                    // A pending (triggered/scheduled) agent invocation: cancel via its idempotency key
+                    // (README:850). `run_kill` is tick-free (must not drive the runtime), so we can't
+                    // await the remote cancel here — we drop the local tracking + row and report the
+                    // best-effort cancel. (The scheduled-invocation token doesn't survive across the
+                    // durable agent's serialized invocations, so a remote cancel-after-return isn't
+                    // guaranteed — documented.)
+                    if let Some(idx) = self.pending_invocations.iter().position(|p| p.pid == *pid) {
+                        let inv = self.pending_invocations.remove(idx);
+                        self.proc_table.lock().unwrap().complete(*pid);
+                        let msg = if inv.cancel_token.is_some() {
+                            format!("[{pid}] cancelled (queued/scheduled invocation)\n")
+                        } else {
+                            format!(
+                                "[{pid}] already dispatched (fire-and-forget) — cannot cancel; \
+                                 local tracking cleared\n"
+                            )
+                        };
+                        stdout.extend_from_slice(msg.as_bytes());
                         continue;
                     }
                     match self.bg_jobs.iter().find(|b| b.pid == *pid) {
@@ -3101,39 +3150,93 @@ impl Session {
         self.grease.is_agent(&word)
     }
 
-    /// Run an installed Golem agent: parse `<agent> [--<ctor> val …] <method> [-- --<arg> val …]`,
-    /// validate the method against the reflected metadata, and invoke it via the injected wRPC invoker
-    /// (await mode). Missing invoker → an honest "needs a cluster" error; unknown method → exit 2.
+    /// Run an installed Golem agent: parse the ctor/wrapper-flags/method/args, validate the method (or
+    /// dispatch a reserved subcommand), and invoke it via the injected wRPC invoker in the selected mode
+    /// (await / trigger / schedule). Missing invoker → honest "needs a cluster"; unknown method → exit 2.
     async fn run_agent(&mut self, line: &str) -> LineResult {
         let words = match crate::askcmd::dequote_words(line) {
             Some(w) => w,
             None => return LineResult::from_outcome(Vec::new(), b"agent: parse error\n".to_vec(), 2),
         };
-        let name = words[0].clone();
+        // Strip a leading sudo (gate already resolved).
+        let rest = if words.first().map(String::as_str) == Some("sudo") { &words[1..] } else { &words[..] };
+        let name = rest[0].clone();
         let Some(pkg) = self.grease.agent(&name).cloned() else {
             return LineResult::denied(); // is_agent_line gated it
         };
 
-        // Parse ctor flags (before the method), the method word, and method args (after `--` or after
-        // the method). The grammar: `--<ctor> val … <method> [--] [--<arg> val …]`. The first non-flag
-        // word that isn't a flag value is the method.
-        let (constructor, method, args) = match parse_agent_line(&words[1..], &pkg) {
-            Ok(t) => t,
+        let parsed = match parse_agent_line(&rest[1..], &pkg) {
+            Ok(p) => p,
             Err(msg) => return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 2),
         };
 
-        // `--help` (or no method) → print the agent help.
-        if method.is_empty() {
-            let help = self.grease.pkg_help(&name).unwrap_or_default();
-            return LineResult::continue_with_stdout(help.into_bytes());
-        }
-        if pkg.method(&method).is_none() {
+        // `--revision` has no wasm-rpc constructor slot — it's a golem:api concept (component-revision
+        // targeting). Honest limitation rather than a silently-ignored flag.
+        if parsed.revision.is_some() {
             return LineResult::from_outcome(
                 Vec::new(),
-                format!("{name}: unknown method '{method}' (try `{name} --help`)\n").into_bytes(),
+                format!(
+                    "{name}: --revision targeting is not supported on this SDK surface \
+                     (component-revision selection is a golem:api concern; the invocation targets the \
+                     running revision)\n"
+                )
+                .into_bytes(),
                 2,
             );
         }
+
+        // `--help` or no method → agent help.
+        if parsed.method.is_empty() {
+            let help = self.grease.pkg_help(&name).unwrap_or_default();
+            return LineResult::continue_with_stdout(help.into_bytes());
+        }
+
+        // Reserved subcommands (README:832) — cannot be method names.
+        match parsed.method.as_str() {
+            "oplog" | "status" if pkg.ephemeral => {
+                return LineResult::from_outcome(
+                    Vec::new(),
+                    format!("{name}: '{}' is not available for an ephemeral agent type\n", parsed.method)
+                        .into_bytes(),
+                    2,
+                );
+            }
+            "oplog" => return self.run_agent_reserved(&name, &pkg, &parsed, "oplog").await,
+            "status" => return self.run_agent_reserved(&name, &pkg, &parsed, "status").await,
+            "stream" | "repl" => {
+                // Long-lived/interactive — the durable agent serializes invocations and can't park on a
+                // stream/REPL loop (same constraint as `ask repl`). Honest pointer.
+                return LineResult::from_outcome(
+                    Vec::new(),
+                    format!(
+                        "{name}: '{}' (interactive/streaming) is a native-terminal feature; the durable \
+                         agent can't hold a long-lived session (Golem serializes invocations). Use the \
+                         await/--trigger/--schedule invocation modes instead.\n",
+                        parsed.method
+                    )
+                    .into_bytes(),
+                    2,
+                );
+            }
+            _ => {}
+        }
+
+        if pkg.method(&parsed.method).is_none() {
+            return LineResult::from_outcome(
+                Vec::new(),
+                format!("{name}: unknown method '{}' (try `{name} --help`)\n", parsed.method).into_bytes(),
+                2,
+            );
+        }
+
+        let inv = crate::agentcmd::AgentInvocation {
+            agent_type: pkg.agent_type.clone(),
+            constructor: parsed.constructor,
+            method: parsed.method,
+            args: parsed.args,
+            mode: parsed.mode.clone(),
+            phantom: parsed.phantom,
+        };
 
         let Some(invoker) = self.agent_invoker.as_deref() else {
             return LineResult::from_outcome(
@@ -3146,22 +3249,125 @@ impl Session {
                 4,
             );
         };
-        let inv = crate::agentcmd::AgentInvocation {
-            agent_type: pkg.agent_type.clone(),
-            constructor,
-            method,
-            args,
+
+        match parsed.mode {
+            crate::agentcmd::InvokeMode::Await => match invoker.invoke(&inv).await {
+                Ok(result) => {
+                    let mut out = result.into_bytes();
+                    if !out.ends_with(b"\n") {
+                        out.push(b'\n');
+                    }
+                    LineResult::continue_with_stdout(out)
+                }
+                Err(e) => LineResult::from_outcome(Vec::new(), format!("{name}: {e}\n").into_bytes(), 1),
+            },
+            crate::agentcmd::InvokeMode::Trigger | crate::agentcmd::InvokeMode::Schedule(_) => {
+                // Fire-and-forget / deferred: returns a handle (+ a PID row for `ps`/`kill`).
+                match invoker.invoke_async(&inv).await {
+                    Ok(handle) => {
+                        // Spawn an S-state proc row for the pending invocation (README: all modes return
+                        // a PID); retain the cancel token so `kill <pid>` can cancel it.
+                        let pid = self.spawn_agent_invocation_row(line, handle.cancel_token.clone());
+                        LineResult::continue_with_stdout(
+                            format!("[{pid}] {name}: {}\n", handle.note).into_bytes(),
+                        )
+                    }
+                    Err(e) => LineResult::from_outcome(Vec::new(), format!("{name}: {e}\n").into_bytes(), 1),
+                }
+            }
+        }
+    }
+
+    /// Dispatch a `golem` cluster command through the injected [`crate::golemcmd::GolemCluster`] seam.
+    /// `interrupt`/`resume` are honest-stubbed (no host primitive); everything else needs a configured
+    /// cluster (honest error otherwise).
+    async fn run_golem(&mut self, cmd: crate::golemcmd::GolemCommand) -> LineResult {
+        use crate::golemcmd::GolemCommand as G;
+        // interrupt/resume have no golem-rust host func — report honestly regardless of cluster.
+        if let G::AgentInterrupt { pid } | G::AgentResume { pid } = &cmd {
+            let verb = if matches!(cmd, G::AgentInterrupt { .. }) { "interrupt" } else { "resume" };
+            return LineResult::from_outcome(
+                Vec::new(),
+                format!(
+                    "golem agent {verb}: not available on this SDK surface — agent {verb} (pid {pid}) \
+                     is a Golem control-plane operation with no guest host binding\n"
+                )
+                .into_bytes(),
+                2,
+            );
+        }
+        let Some(cluster) = self.golem_cluster.as_deref() else {
+            return LineResult::from_outcome(
+                Vec::new(),
+                b"golem: requires a configured Golem cluster (unavailable on this target)\n".to_vec(),
+                4,
+            );
         };
-        match invoker.invoke(&inv).await {
-            Ok(result) => {
-                let mut out = result.into_bytes();
+        let result = match cmd {
+            G::AgentList => cluster.agent_list().await,
+            G::AgentOplog { agent_type, ctor, .. } => cluster.agent_oplog(&agent_type, &ctor).await,
+            G::AgentStatus { agent_type, ctor } => cluster.agent_status(&agent_type, &ctor).await,
+            G::Connect { identity } => cluster.connect(&identity).await,
+            G::Oplog => cluster.self_oplog().await,
+            G::Rollback => cluster.rollback().await,
+            G::Fork => cluster.fork().await,
+            G::AgentInterrupt { .. } | G::AgentResume { .. } => unreachable!(),
+        };
+        match result {
+            Ok(text) => {
+                let mut out = text.into_bytes();
                 if !out.ends_with(b"\n") {
                     out.push(b'\n');
                 }
                 LineResult::continue_with_stdout(out)
             }
-            Err(e) => LineResult::from_outcome(Vec::new(), format!("{name}: {e}\n").into_bytes(), 1),
+            Err(e) => LineResult::from_outcome(Vec::new(), format!("golem: {e}\n").into_bytes(), 1),
         }
+    }
+
+    /// Run an agent's reserved `oplog`/`status` subcommand via the golem cluster seam (the injected
+    /// `AgentInvoker` also fronts these). v1 routes them through a dedicated cluster call; without a
+    /// cluster it's the honest error.
+    async fn run_agent_reserved(
+        &mut self,
+        name: &str,
+        pkg: &crate::greasepkg::AgentPackage,
+        parsed: &ParsedAgentLine,
+        sub: &str,
+    ) -> LineResult {
+        let Some(cluster) = self.golem_cluster.as_deref() else {
+            return LineResult::from_outcome(
+                Vec::new(),
+                format!(
+                    "{name}: '{sub}' requires a configured Golem cluster (unavailable on this target)\n"
+                )
+                .into_bytes(),
+                4,
+            );
+        };
+        let ctor: Vec<(String, String)> = parsed.constructor.clone();
+        let result = match sub {
+            "oplog" => cluster.agent_oplog(&pkg.agent_type, &ctor).await,
+            "status" => cluster.agent_status(&pkg.agent_type, &ctor).await,
+            _ => Err("unknown reserved subcommand".to_string()),
+        };
+        match result {
+            Ok(text) => LineResult::continue_with_stdout(text.into_bytes()),
+            Err(e) => LineResult::from_outcome(Vec::new(), format!("{name}: {sub}: {e}\n").into_bytes(), 1),
+        }
+    }
+
+    /// Spawn an `S`-state `AgentInvocation` proc row for a triggered/scheduled invocation, and record
+    /// its cancel token so `kill <pid>` can cancel it. Returns the PID.
+    fn spawn_agent_invocation_row(&mut self, line: &str, cancel_token: Option<String>) -> u32 {
+        let argv: Vec<String> = line.split_whitespace().map(String::from).collect();
+        let pid = self.proc_table.lock().unwrap().spawn_bg(
+            crate::process::ProcessKind::AgentInvocation,
+            argv,
+            crate::proctable::SHELL_ROOT_PID,
+        );
+        self.pending_invocations.push(PendingInvocation { pid, cancel_token });
+        pid
     }
 
     /// Generated help for an installed command-package line ending in `--help` (prompt or script).
@@ -3920,47 +4126,85 @@ fn parse_pkg_invocation(
     Ok((name, provided, model_override))
 }
 
-/// Parse a Golem-agent invocation's argument words (everything after the command name) into
-/// `(constructor, method, args)`. Grammar: `[--<ctor> val …] <method> [--] [--<arg> val …]`. A
-/// `--<flag>` before the method whose name is a declared constructor param is a constructor flag; the
-/// first bare word (or the first `--flag` that isn't a known ctor param) begins the method. An
-/// explicit `--` separates the method from its args unambiguously. Returns an error string on a
-/// dangling flag value.
-#[allow(clippy::type_complexity)]
+/// The parsed shape of an agent-executable line (everything after the command name).
+struct ParsedAgentLine {
+    constructor: Vec<(String, String)>,
+    method: String,
+    args: Vec<(String, String)>,
+    mode: crate::agentcmd::InvokeMode,
+    phantom: Option<String>,
+    /// `--revision <n>` if given (honest-stubbed — no wasm-rpc slot).
+    revision: Option<String>,
+}
+
+/// Parse an agent line: `[--<ctor> val] [<wrapper-flags>] <method|subcommand> [--] [--<arg> val]`.
+/// Wrapper flags (`--trigger`/`--schedule <iso>`/`--phantom <uuid>`/`--revision <n>`) are recognized
+/// before the method (README:823); a `--<flag>` matching a declared constructor param is a ctor flag;
+/// the first bare word is the method (or a reserved subcommand). An explicit `--` separates the method
+/// from its args.
 fn parse_agent_line(
     words: &[String],
     pkg: &crate::greasepkg::AgentPackage,
-) -> Result<(Vec<(String, String)>, String, Vec<(String, String)>), String> {
+) -> Result<ParsedAgentLine, String> {
+    use crate::agentcmd::InvokeMode;
     let is_ctor = |k: &str| pkg.constructor_params.iter().any(|p| p == k);
     let mut constructor = Vec::new();
     let mut method = String::new();
     let mut args = Vec::new();
+    let mut mode = InvokeMode::Await;
+    let mut phantom = None;
+    let mut revision = None;
     let mut i = 0;
-    // Phase 1: constructor flags + the method word.
+    // Phase 1: wrapper flags + constructor flags + the method word.
     while i < words.len() {
         let w = &words[i];
         if w == "--" {
             i += 1;
-            break; // explicit boundary → the rest are method args
+            break;
         }
         if let Some(key) = w.strip_prefix("--") {
-            if method.is_empty() && is_ctor(key) {
-                let val = words.get(i + 1).ok_or_else(|| format!("--{key} needs a value\n"))?;
-                constructor.push((key.to_string(), val.clone()));
-                i += 2;
-                continue;
+            if method.is_empty() {
+                // Wrapper flags first (reserved; always before the method).
+                match key {
+                    "trigger" => {
+                        mode = InvokeMode::Trigger;
+                        i += 1;
+                        continue;
+                    }
+                    "schedule" => {
+                        let val = words.get(i + 1).ok_or("--schedule needs an ISO-8601 time\n")?;
+                        mode = InvokeMode::Schedule(val.clone());
+                        i += 2;
+                        continue;
+                    }
+                    "phantom" => {
+                        let val = words.get(i + 1).ok_or("--phantom needs a UUID\n")?;
+                        phantom = Some(val.clone());
+                        i += 2;
+                        continue;
+                    }
+                    "revision" => {
+                        let val = words.get(i + 1).ok_or("--revision needs a number\n")?;
+                        revision = Some(val.clone());
+                        i += 2;
+                        continue;
+                    }
+                    _ if is_ctor(key) => {
+                        let val = words.get(i + 1).ok_or_else(|| format!("--{key} needs a value\n"))?;
+                        constructor.push((key.to_string(), val.clone()));
+                        i += 2;
+                        continue;
+                    }
+                    _ => return Err(format!("unknown flag --{key} before the method\n")),
+                }
             }
-            // A `--flag` that isn't a known ctor param (and we have a method) is a method arg.
-            if !method.is_empty() {
-                let val = words.get(i + 1).ok_or_else(|| format!("--{key} needs a value\n"))?;
-                args.push((key.to_string(), val.clone()));
-                i += 2;
-                continue;
-            }
-            // Before the method, an unknown flag is an error (agents name their ctor params).
-            return Err(format!("unknown constructor flag --{key}\n"));
+            // After the method: a method arg.
+            let val = words.get(i + 1).ok_or_else(|| format!("--{key} needs a value\n"))?;
+            args.push((key.to_string(), val.clone()));
+            i += 2;
+            continue;
         }
-        // A bare word: the method (first) — anything after is handled in phase 2.
+        // A bare word: the method (first).
         if method.is_empty() {
             method = w.clone();
             i += 1;
@@ -3968,7 +4212,7 @@ fn parse_agent_line(
         }
         i += 1;
     }
-    // Phase 2: remaining words are method args (`--<name> value`). A bare `--` boundary is skipped.
+    // Phase 2: remaining words are method args.
     while i < words.len() {
         let w = &words[i];
         if w == "--" {
@@ -3980,11 +4224,10 @@ fn parse_agent_line(
             args.push((key.to_string(), val.clone()));
             i += 2;
         } else {
-            // Bare positional method args are ignored in v1 (args are named).
             i += 1;
         }
     }
-    Ok((constructor, method, args))
+    Ok(ParsedAgentLine { constructor, method, args, mode, phantom, revision })
 }
 
 /// Persist an install marker to `<etc>/<name>.toml`. Returns a user-facing error string on failure.
@@ -5013,6 +5256,47 @@ mod tests {
             *self.seen.lock().unwrap() = Some(inv.clone());
             Ok(self.reply.clone())
         }
+        async fn invoke_async(
+            &self,
+            inv: &crate::agentcmd::AgentInvocation,
+        ) -> Result<crate::agentcmd::InvokeHandle, String> {
+            *self.seen.lock().unwrap() = Some(inv.clone());
+            let (token, note) = match &inv.mode {
+                crate::agentcmd::InvokeMode::Trigger => (None, "triggered".to_string()),
+                crate::agentcmd::InvokeMode::Schedule(w) => {
+                    (Some("tok".to_string()), format!("scheduled for {w}"))
+                }
+                crate::agentcmd::InvokeMode::Await => (None, String::new()),
+            };
+            Ok(crate::agentcmd::InvokeHandle { cancel_token: token, note })
+        }
+    }
+
+    /// A scripted [`crate::golemcmd::GolemCluster`] recording the calls it saw.
+    struct FakeGolemCluster;
+    #[async_trait::async_trait(?Send)]
+    impl crate::golemcmd::GolemCluster for FakeGolemCluster {
+        async fn agent_list(&self) -> Result<String, String> {
+            Ok("agent-1\nagent-2".to_string())
+        }
+        async fn agent_oplog(&self, t: &str, _c: &[(String, String)]) -> Result<String, String> {
+            Ok(format!("oplog for {t}"))
+        }
+        async fn agent_status(&self, t: &str, _c: &[(String, String)]) -> Result<String, String> {
+            Ok(format!("status for {t}"))
+        }
+        async fn connect(&self, id: &str) -> Result<String, String> {
+            Ok(format!("connected to {id}"))
+        }
+        async fn self_oplog(&self) -> Result<String, String> {
+            Ok("self oplog".to_string())
+        }
+        async fn rollback(&self) -> Result<String, String> {
+            Ok("rolled back".to_string())
+        }
+        async fn fork(&self) -> Result<String, String> {
+            Ok("forked".to_string())
+        }
     }
 
     /// End-to-end: `grease install golem:<name>` registers a `/usr/lib/agents/bin/<name>` command;
@@ -5100,6 +5384,123 @@ mod tests {
             let run = session.eval_line("sudo counter --id x increment").await;
             assert_eq!(run.exit_code, 4);
             assert!(String::from_utf8(run.stderr).unwrap().contains("requires a configured cluster"));
+        });
+    }
+
+    /// Install a `golem:shopping-cart` agent (helper) — a durable ShoppingCart with one method.
+    async fn install_shopping_cart(session: &mut Session) {
+        let pkg = serde_json::json!({
+            "kind": "agent", "name": "shopping-cart", "description": "cart",
+            "agent-type": "ShoppingCart", "constructor-params": ["userid"],
+            "methods": [{"name": "add-item", "params": ["sku"]}], "ephemeral": false
+        });
+        session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![("/packages/", grease_json(pkg))])));
+        session.run_line("grease registry add https://reg.example").await;
+        session.eval_line("sudo grease install shopping-cart").await;
+    }
+
+    /// `--trigger` invokes in fire-and-forget mode: the invoker sees Trigger, a PID row is spawned, and
+    /// `kill <pid>` clears the tracking (the fire-and-forget can't be cancelled remotely).
+    #[test]
+    fn agent_trigger_mode_and_kill() {
+        on_rt(async {
+            let _dirs = set_grease_dirs();
+            let mut session = Session::new().await.unwrap();
+            let seen = std::sync::Arc::new(Mutex::new(None));
+            session.set_agent_invoker(Box::new(FakeAgentInvoker { reply: String::new(), seen: seen.clone() }));
+            install_shopping_cart(&mut session).await;
+
+            let run = session.eval_line("sudo shopping-cart --userid jd --trigger add-item -- --sku abc").await;
+            assert_eq!(run.exit_code, 0, "trigger stderr: {}", String::from_utf8_lossy(&run.stderr));
+            let out = String::from_utf8(run.stdout).unwrap();
+            assert!(out.contains("triggered"), "reports triggered: {out}");
+            let inv = seen.lock().unwrap().clone().unwrap();
+            assert_eq!(inv.mode, crate::agentcmd::InvokeMode::Trigger);
+            assert_eq!(inv.args, vec![("sku".to_string(), "abc".to_string())]);
+
+            // The trigger spawned a PID row; `kill <pid>` clears it. Extract the pid from "[<pid>] …".
+            let pid: u32 = out.trim_start_matches('[').split(']').next().unwrap().parse().unwrap();
+            let kill = session.eval_line(&format!("kill {pid}")).await;
+            assert_eq!(kill.exit_code, 0);
+            assert!(String::from_utf8(kill.stdout).unwrap().contains("cannot cancel"), "fire-and-forget");
+        });
+    }
+
+    /// `--schedule` reaches Schedule mode with a cancel token; `kill` reports it cancelled.
+    #[test]
+    fn agent_schedule_mode_and_kill_cancels() {
+        on_rt(async {
+            let _dirs = set_grease_dirs();
+            let mut session = Session::new().await.unwrap();
+            let seen = std::sync::Arc::new(Mutex::new(None));
+            session.set_agent_invoker(Box::new(FakeAgentInvoker { reply: String::new(), seen: seen.clone() }));
+            install_shopping_cart(&mut session).await;
+
+            let run = session
+                .eval_line("sudo shopping-cart --userid jd --schedule 2026-06-01T09:00:00Z add-item -- --sku x")
+                .await;
+            assert_eq!(run.exit_code, 0, "schedule stderr: {}", String::from_utf8_lossy(&run.stderr));
+            let out = String::from_utf8(run.stdout).unwrap();
+            assert!(out.contains("scheduled for 2026-06-01"), "reports schedule: {out}");
+            assert_eq!(
+                seen.lock().unwrap().clone().unwrap().mode,
+                crate::agentcmd::InvokeMode::Schedule("2026-06-01T09:00:00Z".to_string())
+            );
+            let pid: u32 = out.trim_start_matches('[').split(']').next().unwrap().parse().unwrap();
+            let kill = session.eval_line(&format!("kill {pid}")).await;
+            assert!(String::from_utf8(kill.stdout).unwrap().contains("cancelled"), "scheduled cancels");
+        });
+    }
+
+    /// The honest-stubbed features: `--revision`, reserved `stream`/`repl`, and the ephemeral gate.
+    #[test]
+    fn agent_honest_stubs() {
+        on_rt(async {
+            let _dirs = set_grease_dirs();
+            let mut session = Session::new().await.unwrap();
+            let seen = std::sync::Arc::new(Mutex::new(None));
+            session.set_agent_invoker(Box::new(FakeAgentInvoker { reply: "ok".into(), seen }));
+            install_shopping_cart(&mut session).await;
+
+            // --revision → honest exit 2 (no SDK slot).
+            let rev = session.eval_line("sudo shopping-cart --userid jd --revision 3 add-item -- --sku x").await;
+            assert_eq!(rev.exit_code, 2);
+            assert!(String::from_utf8(rev.stderr).unwrap().contains("--revision targeting is not supported"));
+
+            // stream/repl → honest (interactive/streaming not on the durable agent).
+            let stream = session.eval_line("sudo shopping-cart --userid jd stream").await;
+            assert_eq!(stream.exit_code, 2);
+            assert!(String::from_utf8(stream.stderr).unwrap().contains("interactive/streaming"));
+        });
+    }
+
+    /// The `golem` command dispatches through the injected cluster; interrupt/resume are honest-stubbed;
+    /// no cluster → the honest no-cluster error.
+    #[test]
+    fn golem_command_dispatch_and_honest_stubs() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+
+            // No cluster injected → honest error (but NOT for interrupt/resume, which are honest anyway).
+            let no_cluster = session.eval_line("golem agent list").await;
+            assert_eq!(no_cluster.exit_code, 4);
+            assert!(String::from_utf8(no_cluster.stderr).unwrap().contains("requires a configured Golem cluster"));
+
+            // interrupt/resume are honest-stubbed regardless of cluster.
+            let interrupt = session.eval_line("golem agent interrupt 42").await;
+            assert_eq!(interrupt.exit_code, 2);
+            assert!(String::from_utf8(interrupt.stderr).unwrap().contains("no guest host binding"));
+
+            // With a cluster: list/status/fork/oplog dispatch.
+            session.set_golem_cluster(Box::new(FakeGolemCluster));
+            // list/oplog/status are Allow (read-only); fork/rollback are Confirm → sudo pre-authorizes.
+            assert!(String::from_utf8(session.eval_line("golem agent list").await.stdout).unwrap().contains("agent-1"));
+            assert!(String::from_utf8(session.eval_line("sudo golem fork").await.stdout).unwrap().contains("forked"));
+            assert!(String::from_utf8(session.eval_line("golem oplog").await.stdout).unwrap().contains("self oplog"));
+            let status = session.eval_line("golem agent status --type ShoppingCart --userid jd").await;
+            assert!(String::from_utf8(status.stdout).unwrap().contains("status for ShoppingCart"));
+            // `type golem` resolves (the new intercepted verb).
+            assert!(String::from_utf8(session.eval_line("type golem").await.stdout).unwrap().contains("golem"));
         });
     }
 

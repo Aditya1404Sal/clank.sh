@@ -114,6 +114,8 @@ impl ClankAgentImpl {
                     // Install the durable WasmRpc invoker so grease-installed Golem agents can be
                     // invoked in the cluster.
                     s.set_agent_invoker(Box::new(crate::agent_invoker::WasmRpcInvoker));
+                    // Install the durable Golem cluster interface backing the `golem` command.
+                    s.set_golem_cluster(Box::new(crate::golem_cluster::GolemApiCluster));
                     self.session = Some(s);
                 }
                 Err(e) => {

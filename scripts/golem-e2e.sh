@@ -857,11 +857,39 @@ if [[ -n "${GREASE_AGENT_URL:-}" && -n "${GREASE_AGENT_PKG:-}" ]]; then
   # We only assert it doesn't crash the shell (exit is nonzero-or-zero, shell survives).
   GAG_HELP="$(eval_json eval "\"${GREASE_AGENT_PKG} --help\"")"
   expect_eval "agent --help describes the type"        "$GAG_HELP"  '.stdout | contains("Agent type")'  'true'
+  # --revision is honest-stubbed (no wasm-rpc slot). Uses the agent's first method name if known;
+  # the parse fires before any invocation, so any method works — reuse the help to find one is overkill,
+  # assert on a bogus method too (unknown-method also exits 2). We only need the --revision error path.
+  GAG_REV="$(eval_json eval "\"sudo ${GREASE_AGENT_PKG} --revision 3 nonexistent-method\"")"
+  expect_eval "agent --revision is honestly unsupported" "$GAG_REV"  '.stderr | contains("--revision targeting is not supported")'  'true'
   run_line "sudo grease remove ${GREASE_AGENT_PKG}" >/dev/null
   run_line "grease registry remove ${GREASE_AGENT_URL}" >/dev/null
 else
   note "GREASE_AGENT_URL/PKG not set — skipping live agent install (native tests cover it)"
 fi
+
+# ============================================================================
+# 2l-e. golem — the cluster command (runtime API subset)
+# ============================================================================
+# `golem` is a Session-interception command (like mcp/grease). type/--help resolve it; interrupt/resume
+# are honestly unsupported (no host primitive); list/oplog/status reach the injected cluster on the
+# agent. On this agent the golem:api cluster IS wired, so list/fork/oplog actually run — but they anchor
+# on this instance's own metadata. We assert the honest-stub + the intercept surfaces (no cluster
+# mutation needed).
+step "golem (cluster command: intercept surface + honest stubs)"
+expect_contains "type golem is intercepted"           'type golem'        'golem is a shell builtin'
+expect_contains "golem --help documents subcommands"  'golem --help'      'golem agent list'
+expect_contains "golem --help notes the exclusions"   'golem --help'      'Excludes build/push/deploy'
+GLM_INT="$(eval_json eval '"golem agent interrupt 42"')"
+expect_eval "golem agent interrupt is honestly unsupported" "$GLM_INT"  '.stderr | contains("no guest host binding")'  'true'
+GLM_RES="$(eval_json eval '"golem agent resume 42"')"
+expect_eval "golem agent resume is honestly unsupported"    "$GLM_RES"  '.stderr | contains("no guest host binding")'  'true'
+# `golem oplog` anchors on this instance's own metadata (the cluster IS wired on the agent) → exits 0.
+GLM_OPL="$(eval_json eval '"golem oplog"')"
+expect_eval "golem oplog runs on the agent"           "$GLM_OPL"  '.exit_code'  '0'
+# `golem` in a substitution hits the honest stub (it runs at the session layer).
+GLM_SUBST="$(eval_json eval '"echo $(golem agent list)"')"
+expect_eval "golem in \$() gives the honest pointer"  "$GLM_SUBST"  '.stderr | contains("top-level command")'  'true'
 
 # --- Gated live-registry block: needs a registry serving /packages/<name>.json (+ /index.json for
 #     search). Set GREASE_TEST_URL + GREASE_TEST_PKG to run a real install; the installed prompt RUN

@@ -39,8 +39,10 @@ use crate::manifest::{AuthorizationPolicy, ExecutionScope, Manifest};
 /// - `kill` — the synthetic kill, intercepted in `Session::run_command` (it mutates Session state:
 ///   the bg-job mapping, proc table, and pending prompt; Brush's own kill is nix/unix-gated). See
 ///   `killcmd`.
-pub const MANUAL_MANIFESTS: &[&str] =
-    &["prompt-user", "type", "command", "curl", "wget", "context", "ask", "kill", "mcp", "grease"];
+pub const MANUAL_MANIFESTS: &[&str] = &[
+    "prompt-user", "type", "command", "curl", "wget", "context", "ask", "kill", "mcp", "grease",
+    "golem",
+];
 
 /// Hand-authored manifests for commands not backed by a clank `SimpleCommand` registration (see
 /// [`MANUAL_MANIFESTS`]).
@@ -169,6 +171,9 @@ pub fn build() -> CommandRegistry {
         registry.insert(manifest);
     }
     for manifest in crate::greasecmd::manifests() {
+        registry.insert(manifest);
+    }
+    for manifest in crate::golemcmd::manifests() {
         registry.insert(manifest);
     }
     for manifest in crate::killcmd::manifests() {

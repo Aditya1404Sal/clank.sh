@@ -24,6 +24,7 @@ mod contextcmd;
 mod coreutils;
 pub mod dynreg;
 mod findcmd;
+pub mod golemcmd;
 pub mod greaseconfig;
 mod greasecmd;
 pub mod greasepkg;

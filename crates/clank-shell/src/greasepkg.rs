@@ -422,6 +422,10 @@ pub struct AgentPackage {
     /// The agent's methods (from reflected metadata).
     #[serde(default)]
     pub methods: Vec<AgentMethod>,
+    /// Whether the agent TYPE is ephemeral (no persistent identity). Ephemeral agents omit the
+    /// durable-only reserved subcommands (`oplog`/`status`/`repl`) per README:807/836.
+    #[serde(default)]
+    pub ephemeral: bool,
 }
 
 impl AgentPackage {
