@@ -469,6 +469,82 @@ pub fn validate_public_key(key_b64: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The RFC-6962 leaf hash of `data`: `sha256(0x00 ‖ data)`. Domain-separated from interior nodes so a
+/// leaf can never be confused with a node (second-preimage safety).
+fn rfc6962_leaf_hash(data: &[u8]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update([0x00]);
+    h.update(data);
+    h.finalize().into()
+}
+
+/// The RFC-6962 interior-node hash: `sha256(0x01 ‖ left ‖ right)`.
+fn rfc6962_node_hash(left: &[u8], right: &[u8]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update([0x01]);
+    h.update(left);
+    h.update(right);
+    h.finalize().into()
+}
+
+/// Verify an RFC-6962 (Certificate-Transparency) Merkle **inclusion proof** that `leaf` is the entry at
+/// `leaf_index` in a log of `tree_size` entries whose Merkle root is `root_hash`. `proof` is the audit
+/// path (sibling hashes, bottom-up). Pure chained-SHA-256 (no new dependency — reuses the in-tree
+/// `sha2`); the transparency half of README:647. Trust is rooted in the registry's advertised root
+/// (verified alongside the ed25519 signature), not a public witnessed log — see [[clank-grease]].
+///
+/// Algorithm: RFC 6962 §2.1.1. Returns `Ok(())` iff the recomputed root equals `root_hash`.
+pub fn verify_inclusion_proof(
+    leaf: &[u8],
+    leaf_index: u64,
+    tree_size: u64,
+    root_hash: &[u8],
+    proof: &[Vec<u8>],
+) -> Result<(), String> {
+    if leaf_index >= tree_size {
+        return Err(format!("leaf index {leaf_index} out of range for tree size {tree_size}"));
+    }
+    if root_hash.len() != 32 {
+        return Err(format!("root hash must be 32 bytes, got {}", root_hash.len()));
+    }
+    // The canonical RFC-6962 §2.1.1 inclusion-proof walk (Trillian's `VerifyInclusion` shape):
+    // fold the leaf hash up the tree, consuming one sibling per proof step. `fn` = index within the
+    // current subtree, `sn` = size of the current subtree minus one (the max index).
+    let mut hash = rfc6962_leaf_hash(leaf);
+    let mut fnode = leaf_index;
+    let mut snode = tree_size - 1;
+    for sib in proof {
+        if sib.len() != 32 {
+            return Err("proof node must be 32 bytes".to_string());
+        }
+        if snode == 0 {
+            return Err("inclusion proof too long".to_string());
+        }
+        if fnode & 1 == 1 || fnode == snode {
+            // Right child (or the last node at this level whose left sibling is in the proof).
+            hash = rfc6962_node_hash(sib, &hash);
+            // Ascend to the parent: shift down until `fnode` is a left child.
+            while fnode & 1 == 0 && snode != 0 {
+                fnode >>= 1;
+                snode >>= 1;
+            }
+        } else {
+            // Left child: the sibling is on the right.
+            hash = rfc6962_node_hash(&hash, sib);
+        }
+        fnode >>= 1;
+        snode >>= 1;
+    }
+    if snode != 0 {
+        return Err("inclusion proof too short".to_string());
+    }
+    if hash.as_slice() == root_hash {
+        Ok(())
+    } else {
+        Err("inclusion proof does not verify against the advertised root".to_string())
+    }
+}
+
 /// Read the `kind` field of a raw registry payload without committing to a full parse (so
 /// `grease install` can route to the right typed parser). Defaults to `Prompt` when the payload
 /// carries no `kind` (a grease-v1 prompt payload).
@@ -575,6 +651,84 @@ mod tests {
         // Malformed base64 / wrong lengths are clean errors, not panics.
         assert!(verify_signature(RFC8032_MSG, "not-base64!!", RFC8032_PUB).is_err());
         assert!(verify_signature(RFC8032_MSG, RFC8032_SIG, "AAAA").is_err()); // key too short
+    }
+
+    // A reference RFC-6962 Merkle tree over `leaves`, used to generate known-good roots + inclusion
+    // proofs to test `verify_inclusion_proof` against. Straightforward recursive definition (RFC 6962
+    // §2.1): MTH([]) is undefined here (we only test non-empty), MTH([d]) = leaf_hash(d), else split
+    // at the largest power of two < n.
+    fn ref_root(leaves: &[Vec<u8>]) -> [u8; 32] {
+        match leaves.len() {
+            1 => super::rfc6962_leaf_hash(&leaves[0]),
+            n => {
+                let k = largest_pow2_below(n);
+                super::rfc6962_node_hash(&ref_root(&leaves[..k]), &ref_root(&leaves[k..]))
+            }
+        }
+    }
+
+    fn ref_proof(leaves: &[Vec<u8>], index: usize) -> Vec<Vec<u8>> {
+        if leaves.len() == 1 {
+            return Vec::new();
+        }
+        let k = largest_pow2_below(leaves.len());
+        if index < k {
+            let mut p = ref_proof(&leaves[..k], index);
+            p.push(ref_root(&leaves[k..]).to_vec());
+            p
+        } else {
+            let mut p = ref_proof(&leaves[k..], index - k);
+            p.push(ref_root(&leaves[..k]).to_vec());
+            p
+        }
+    }
+
+    fn largest_pow2_below(n: usize) -> usize {
+        let mut k = 1;
+        while k < n {
+            k <<= 1;
+        }
+        k >> 1
+    }
+
+    #[test]
+    fn inclusion_proof_verifies_every_leaf_for_various_tree_sizes() {
+        // Cover balanced (4) and unbalanced (5, 7) trees — the unbalanced cases exercise the
+        // split-point / ascend logic.
+        for size in [1usize, 2, 3, 4, 5, 7, 8] {
+            let leaves: Vec<Vec<u8>> = (0..size).map(|i| format!("leaf-{i}").into_bytes()).collect();
+            let root = ref_root(&leaves);
+            for (i, leaf) in leaves.iter().enumerate() {
+                let proof = ref_proof(&leaves, i);
+                assert!(
+                    verify_inclusion_proof(leaf, i as u64, size as u64, &root, &proof).is_ok(),
+                    "leaf {i} of {size} should verify"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn inclusion_proof_rejects_tampering() {
+        let leaves: Vec<Vec<u8>> = (0..5).map(|i| format!("leaf-{i}").into_bytes()).collect();
+        let root = ref_root(&leaves);
+        let proof = ref_proof(&leaves, 2);
+        // Correct proof verifies.
+        assert!(verify_inclusion_proof(&leaves[2], 2, 5, &root, &proof).is_ok());
+        // Wrong leaf → reject.
+        assert!(verify_inclusion_proof(b"not-a-leaf", 2, 5, &root, &proof).is_err());
+        // Wrong index → reject.
+        assert!(verify_inclusion_proof(&leaves[2], 3, 5, &root, &proof).is_err());
+        // Wrong root → reject.
+        assert!(verify_inclusion_proof(&leaves[2], 2, 5, &[0u8; 32], &proof).is_err());
+        // Tampered proof node → reject.
+        let mut bad = proof.clone();
+        bad[0][0] ^= 0xff;
+        assert!(verify_inclusion_proof(&leaves[2], 2, 5, &root, &bad).is_err());
+        // Truncated proof → reject.
+        assert!(verify_inclusion_proof(&leaves[2], 2, 5, &root, &proof[..1]).is_err());
+        // Index out of range → reject.
+        assert!(verify_inclusion_proof(&leaves[2], 5, 5, &root, &proof).is_err());
     }
 
     #[test]

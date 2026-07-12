@@ -1830,35 +1830,50 @@ impl Session {
             );
         }
 
+        // Transparency-log auditing (the other half of README:647): if the registry advertises an
+        // RFC-6962 inclusion proof for this package AND the registry is signed (trust is rooted in the
+        // same registry key), verify the payload's inclusion in the log against the advertised root. A
+        // present-but-invalid proof is a HARD reject; an absent proof leaves the package
+        // not-log-audited (as unsigned leaves it unsigned). The root is registry-advertised (not a
+        // public witnessed log) — see [[clank-grease]].
+        let mut log_verified = false;
+        let mut log_index: Option<u64> = None;
+        if signature_verified {
+            if let Some(log) = &entry.log {
+                match verify_log_inclusion(&actual, log) {
+                    Ok(()) => {
+                        log_verified = true;
+                        log_index = Some(log.leaf_index);
+                    }
+                    Err(e) => {
+                        return LineResult::from_outcome(
+                            Vec::new(),
+                            format!("grease install: transparency-log check failed for '{name}': {e}\n")
+                                .into_bytes(),
+                            4,
+                        );
+                    }
+                }
+            }
+        }
+
         // An MCP-server package needs a live step (initialize + tools/list + prompts/list +
         // resources/list) to enrich its cached surface before persistence — done async here. Other
         // kinds persist synchronously.
-        if crate::greasepkg::payload_kind(&body) == Ok(crate::greasepkg::PackageKind::Mcp) {
-            return self
-                .grease_finish_install_mcp(
-                    name,
-                    &registry,
-                    &body,
-                    actual,
-                    entry.sha256.is_some(),
-                    signature_verified,
-                    signer,
-                    artifacts,
-                    note,
-                )
-                .await;
-        }
-
-        self.grease_finish_install(
-            name,
-            &registry,
-            &body,
-            actual,
-            entry.sha256.is_some(),
+        let integrity = InstallIntegrity {
+            sha256: actual,
+            verified: entry.sha256.is_some(),
             signature_verified,
             signer,
-            note,
-        )
+            log_verified,
+            log_index,
+        };
+
+        if crate::greasepkg::payload_kind(&body) == Ok(crate::greasepkg::PackageKind::Mcp) {
+            return self.grease_finish_install_mcp(name, &registry, &body, integrity, artifacts, note).await;
+        }
+
+        self.grease_finish_install(name, &registry, &body, integrity, note)
     }
 
     /// The MCP-server install path: parse the minimal payload, fetch the live artifact surface
@@ -1866,16 +1881,12 @@ impl Session {
     /// persist it, register the server into `McpState` (so its tools become `<server> <tool>`
     /// commands), materialize any prompts as standalone prompt packages, materialize static resources,
     /// and write the marker. Reuses the existing `mcp_install` machinery for tool registration.
-    #[allow(clippy::too_many_arguments)]
     async fn grease_finish_install_mcp(
         &mut self,
         name: &str,
         registry: &str,
         body: &[u8],
-        sha256: String,
-        verified: bool,
-        signature_verified: bool,
-        signer: Option<String>,
+        integrity: InstallIntegrity,
         artifacts: crate::greasecmd::ArtifactFlags,
         mut note: Vec<u8>,
     ) -> LineResult {
@@ -1982,14 +1993,7 @@ impl Session {
         if let Err(msg) = self.persist_package(name, crate::greasepkg::PackageKind::Mcp, &payload) {
             return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 1);
         }
-        let marker = crate::greasestate::InstallMarker {
-            kind: crate::greasepkg::PackageKind::Mcp,
-            registry: registry.to_string(),
-            sha256: sha256.clone(),
-            verified,
-            signature_verified,
-            signer,
-        };
+        let marker = integrity.to_marker(crate::greasepkg::PackageKind::Mcp, registry);
         if let Err(msg) = write_install_marker(name, &marker) {
             return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 1);
         }
@@ -2014,14 +2018,12 @@ impl Session {
         // Register the grease package view.
         self.grease.set_installed(crate::greasestate::InstalledPackage { marker, payload });
 
-        let sig_status = if signature_verified { ", signed" } else { "" };
-        let status = if verified { "verified" } else { "unverified" };
         note.extend_from_slice(
             format!(
-                "installed {name} [mcp] (sha256 {} — {status}{sig_status})\n\
+                "installed {name} [mcp] ({})\n\
                  {tool_count} tools, {prompt_count} prompts, {resource_count} resources\n\
                  tools run as `{name} <tool>`\n",
-                &sha256[..12]
+                integrity.summary()
             )
             .as_bytes(),
         );
@@ -2032,16 +2034,12 @@ impl Session {
     /// declared `kind`. `sha256` is the (already-computed) digest of `body`; `verified` marks whether
     /// it matched the registry's advertised hash; `signature_verified`/`signer` record the ed25519
     /// signing status resolved in `grease_install`.
-    #[allow(clippy::too_many_arguments)]
     fn grease_finish_install(
         &mut self,
         name: &str,
         registry: &str,
         body: &[u8],
-        sha256: String,
-        verified: bool,
-        signature_verified: bool,
-        signer: Option<String>,
+        integrity: InstallIntegrity,
         note: Vec<u8>,
     ) -> LineResult {
         let kind = match crate::greasepkg::payload_kind(body) {
@@ -2065,14 +2063,7 @@ impl Session {
         if let Err(msg) = self.persist_package(name, kind, &payload) {
             return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 1);
         }
-        let marker = crate::greasestate::InstallMarker {
-            kind,
-            registry: registry.to_string(),
-            sha256: sha256.clone(),
-            verified,
-            signature_verified,
-            signer,
-        };
+        let marker = integrity.to_marker(kind, registry);
         if let Err(msg) = write_install_marker(name, &marker) {
             return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 1);
         }
@@ -2082,20 +2073,18 @@ impl Session {
         self.grease.set_installed(installed);
         self.materialize_package(name, kind);
 
-        let status = if verified { "verified" } else { "unverified" };
-        let sig_status = if signature_verified { ", signed" } else { "" };
-        let mut out = note; // any record-only/unsigned note first
         let run_hint = match kind {
             crate::greasepkg::PackageKind::Skill => {
                 format!("see it with `grease info {name}`")
             }
             _ => format!("run it with `{name}`"),
         };
+        let mut out = note; // any record-only/unsigned note first
         out.extend_from_slice(
             format!(
-                "installed {name} [{}] (sha256 {} — {status}{sig_status})\n{run_hint}\n",
+                "installed {name} [{}] ({})\n{run_hint}\n",
                 kind.label(),
-                &sha256[..12]
+                integrity.summary()
             )
             .as_bytes(),
         );
@@ -2128,6 +2117,8 @@ impl Session {
             verified: false,
             signature_verified: false,
             signer: None,
+            log_verified: false,
+            log_index: None,
         };
         if write_install_marker(&spec.name, &marker).is_err() {
             return;
@@ -3437,6 +3428,63 @@ fn strip_sudo_prefix(line: &str) -> String {
     }
 }
 
+/// The resolved integrity status of a fetched package, threaded from `grease_install` into the
+/// finish/persist path. Bundles the content-hash + signature + transparency-log results so the marker
+/// construction has one source of truth.
+struct InstallIntegrity {
+    /// The computed sha256 of the payload body.
+    sha256: String,
+    /// Whether the sha256 matched the registry's advertised hash.
+    verified: bool,
+    /// Whether the ed25519 signature verified against the registry's trusted key.
+    signature_verified: bool,
+    /// The signer identity (when signature-verified).
+    signer: Option<String>,
+    /// Whether the RFC-6962 inclusion proof verified against the advertised root.
+    log_verified: bool,
+    /// The transparency-log leaf index (when log-verified).
+    log_index: Option<u64>,
+}
+
+impl InstallIntegrity {
+    /// Build the on-disk install marker for a given kind + registry.
+    fn to_marker(&self, kind: crate::greasepkg::PackageKind, registry: &str) -> crate::greasestate::InstallMarker {
+        crate::greasestate::InstallMarker {
+            kind,
+            registry: registry.to_string(),
+            sha256: self.sha256.clone(),
+            verified: self.verified,
+            signature_verified: self.signature_verified,
+            signer: self.signer.clone(),
+            log_verified: self.log_verified,
+            log_index: self.log_index,
+        }
+    }
+
+    /// The `sha256 … — verified, signed[, in log]` summary for the install output.
+    fn summary(&self) -> String {
+        let status = if self.verified { "verified" } else { "unverified" };
+        let mut s = format!("sha256 {} — {status}", &self.sha256[..self.sha256.len().min(12)]);
+        if self.signature_verified {
+            s.push_str(", signed");
+        }
+        if self.log_verified {
+            s.push_str(", in log");
+        }
+        s
+    }
+}
+
+/// A package's advertised transparency-log inclusion proof (RFC-6962), from the index `log` object.
+struct LogProof {
+    leaf_index: u64,
+    tree_size: u64,
+    /// The tree's Merkle root (base64, 32 bytes).
+    root: String,
+    /// The audit path — sibling hashes bottom-up (base64, 32 bytes each).
+    proof: Vec<String>,
+}
+
 /// A package's advertised integrity metadata from a registry's `index.json` entry.
 #[derive(Default)]
 struct IndexEntry {
@@ -3446,6 +3494,8 @@ struct IndexEntry {
     sig: Option<String>,
     /// The advertised signer identity (surfaced in `info`/`list`).
     signer: Option<String>,
+    /// The advertised RFC-6962 inclusion proof, if the registry runs a transparency log.
+    log: Option<LogProof>,
 }
 
 /// Best-effort lookup of a package's index entry (`sha256` + `sig` + `signer`). GETs
@@ -3475,7 +3525,47 @@ async fn fetch_index_entry(
         return IndexEntry::default();
     };
     let s = |k: &str| entry.get(k).and_then(|x| x.as_str()).map(String::from);
-    IndexEntry { sha256: s("sha256"), sig: s("sig"), signer: s("signer") }
+    // The optional RFC-6962 transparency-log inclusion proof.
+    let log = entry.get("log").and_then(|l| {
+        let leaf_index = l.get("leaf-index").or_else(|| l.get("leaf_index"))?.as_u64()?;
+        let tree_size = l.get("tree-size").or_else(|| l.get("tree_size"))?.as_u64()?;
+        let root = l.get("root")?.as_str()?.to_string();
+        let proof = l
+            .get("proof")?
+            .as_array()?
+            .iter()
+            .filter_map(|h| h.as_str().map(String::from))
+            .collect();
+        Some(LogProof { leaf_index, tree_size, root, proof })
+    });
+    IndexEntry { sha256: s("sha256"), sig: s("sig"), signer: s("signer"), log }
+}
+
+/// Verify a package's RFC-6962 inclusion proof: the log leaf is the payload's hex sha256 string (the
+/// content-address), so the proof witnesses that this exact content was logged. Decodes the base64
+/// root + proof nodes and delegates to [`crate::greasepkg::verify_inclusion_proof`].
+fn verify_log_inclusion(payload_sha256_hex: &str, log: &LogProof) -> Result<(), String> {
+    use base64::Engine;
+    let root = base64::engine::general_purpose::STANDARD
+        .decode(log.root.trim())
+        .map_err(|e| format!("invalid log root (base64): {e}"))?;
+    let proof: Result<Vec<Vec<u8>>, String> = log
+        .proof
+        .iter()
+        .map(|h| {
+            base64::engine::general_purpose::STANDARD
+                .decode(h.trim())
+                .map_err(|e| format!("invalid proof node (base64): {e}"))
+        })
+        .collect();
+    let proof = proof?;
+    crate::greasepkg::verify_inclusion_proof(
+        payload_sha256_hex.as_bytes(),
+        log.leaf_index,
+        log.tree_size,
+        &root,
+        &proof,
+    )
 }
 
 /// Materialize an MCP server's resources under `/mnt/mcp/<server>/` and return the cache entries that
@@ -5021,6 +5111,113 @@ mod tests {
             assert!(session.grease.is_prompt("plain"));
             let info = String::from_utf8(session.eval_line("grease info plain").await.stdout).unwrap();
             assert!(info.contains("unsigned"), "info shows unsigned: {info}");
+        });
+    }
+
+    /// RFC-6962 leaf/node hashers for building a fixture transparency log in tests.
+    fn rfc_leaf(data: &[u8]) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update([0x00]);
+        h.update(data);
+        h.finalize().into()
+    }
+    fn rfc_node(l: &[u8], r: &[u8]) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update([0x01]);
+        h.update(l);
+        h.update(r);
+        h.finalize().into()
+    }
+
+    /// A signed registry whose index carries a valid RFC-6962 inclusion proof installs, records
+    /// `log_verified`, and `grease info` shows the transparency-log index. Uses a 2-leaf tree; our
+    /// package's content-hash is leaf 0, some other entry is leaf 1.
+    #[test]
+    fn grease_install_verifies_transparency_log_inclusion() {
+        on_rt(async {
+            use base64::Engine;
+            let _dirs = set_grease_dirs();
+            let mut session = Session::new().await.unwrap();
+            let pkg = serde_json::json!({
+                "kind": "prompt", "name": "logged", "description": "d", "body": "hi"
+            });
+            let body = grease_json(pkg.clone()).body;
+            let (pubkey, sig) = sign_payload(&body);
+            // Build a 2-leaf tree: leaf 0 = our package's sha256-hex string (the log leaf), leaf 1 = a
+            // sibling. Proof for leaf 0 is [leaf_hash(sibling)]; root = node(leaf0, leaf1).
+            let leaf0 = crate::greasepkg::sha256_hex(&body);
+            let sibling = b"another-package-digest".to_vec();
+            let h0 = rfc_leaf(leaf0.as_bytes());
+            let h1 = rfc_leaf(&sibling);
+            let root = rfc_node(&h0, &h1);
+            let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+            let index = serde_json::json!({
+                "packages": [{
+                    "name": "logged", "description": "d",
+                    "sha256": leaf0, "sig": sig, "signer": "alice",
+                    "log": {
+                        "leaf-index": 0, "tree-size": 2,
+                        "root": b64(&root), "proof": [b64(&h1)]
+                    }
+                }]
+            });
+            session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![
+                ("/index.json", grease_json(index)),
+                ("/packages/", crate::mcpclient::HttpResponse {
+                    status: 200,
+                    headers: vec![("content-type".into(), "application/json".into())],
+                    body,
+                }),
+            ])));
+            session.run_line(&format!("grease registry add https://reg.example --key {pubkey}")).await;
+
+            let inst = session.eval_line("sudo grease install logged").await;
+            assert_eq!(inst.exit_code, 0, "install stderr: {}", String::from_utf8_lossy(&inst.stderr));
+            assert!(String::from_utf8(inst.stdout).unwrap().contains("in log"), "reports in-log");
+            let info = String::from_utf8(session.eval_line("grease info logged").await.stdout).unwrap();
+            assert!(info.contains("transparency log @0"), "info shows log index: {info}");
+        });
+    }
+
+    /// A tampered inclusion proof (wrong root) is a HARD reject (exit 4, nothing installed).
+    #[test]
+    fn grease_install_rejects_bad_transparency_log_proof() {
+        on_rt(async {
+            use base64::Engine;
+            let _dirs = set_grease_dirs();
+            let mut session = Session::new().await.unwrap();
+            let pkg = serde_json::json!({
+                "kind": "prompt", "name": "badlog", "description": "d", "body": "hi"
+            });
+            let body = grease_json(pkg.clone()).body;
+            let (pubkey, sig) = sign_payload(&body);
+            let leaf0 = crate::greasepkg::sha256_hex(&body);
+            let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+            // A bogus root that won't match the recomputed one.
+            let index = serde_json::json!({
+                "packages": [{
+                    "name": "badlog", "description": "d",
+                    "sha256": leaf0, "sig": sig, "signer": "alice",
+                    "log": { "leaf-index": 0, "tree-size": 2,
+                        "root": b64(&[0u8; 32]), "proof": [b64(&[1u8; 32])] }
+                }]
+            });
+            session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![
+                ("/index.json", grease_json(index)),
+                ("/packages/", crate::mcpclient::HttpResponse {
+                    status: 200,
+                    headers: vec![("content-type".into(), "application/json".into())],
+                    body,
+                }),
+            ])));
+            session.run_line(&format!("grease registry add https://reg.example --key {pubkey}")).await;
+
+            let inst = session.eval_line("sudo grease install badlog").await;
+            assert_eq!(inst.exit_code, 4, "a bad log proof must reject");
+            assert!(String::from_utf8(inst.stderr).unwrap().contains("transparency-log check failed"));
+            assert!(!session.grease.is_prompt("badlog"), "nothing installed on log failure");
         });
     }
 

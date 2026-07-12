@@ -43,6 +43,13 @@ pub struct InstallMarker {
     /// for `info`/`list` when the signature verified. `None` = unsigned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signer: Option<String>,
+    /// Whether the payload's RFC-6962 transparency-log inclusion proof verified against the registry's
+    /// advertised Merkle root. `false` = the registry runs no log, or the marker predates this field.
+    #[serde(default)]
+    pub log_verified: bool,
+    /// The transparency-log leaf index the package was recorded at (when log-verified).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_index: Option<u64>,
 }
 
 /// The typed payload of an installed package, tagged by kind.
@@ -446,16 +453,24 @@ fn fallback_synopsis(name: &str, description: &str, kind: &str) -> String {
     }
 }
 
-/// The integrity note used in help text: the sha256 status plus, when signed, the signer identity.
+/// The integrity note used in help text: the sha256 status, the signer (when signed), and the
+/// transparency-log leaf index (when log-audited).
 fn integrity_note(marker: &InstallMarker) -> String {
     let status = if marker.verified { "verified" } else { "unverified" };
     let sha = format!("sha256 {} ({status})", &marker.sha256[..marker.sha256.len().min(12)]);
-    if marker.signature_verified {
+    let mut out = if marker.signature_verified {
         let signer = marker.signer.as_deref().unwrap_or("registry key");
         format!("{sha}, signed by {signer}")
     } else {
         format!("{sha}, unsigned")
+    };
+    if marker.log_verified {
+        match marker.log_index {
+            Some(idx) => out.push_str(&format!(", in transparency log @{idx}")),
+            None => out.push_str(", in transparency log"),
+        }
     }
+    out
 }
 
 /// Load one installed package (`<etc>/<name>.toml` marker + `<store>/<name>/<kind>.json` payload).
@@ -504,6 +519,8 @@ mod tests {
             verified: true,
             signature_verified: false,
             signer: None,
+            log_verified: false,
+            log_index: None,
         }
     }
 
