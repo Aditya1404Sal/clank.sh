@@ -390,7 +390,10 @@ run_line 'echo alpha' >/dev/null
 run_line 'echo bravo' >/dev/null
 run_line 'echo charlie' >/dev/null
 run_line 'echo delta' >/dev/null
-expect_contains "window inserts a drop marker"   'context show'  'earlier entries dropped'
+# The leading marker reads "[N earlier entries dropped]" ungated, or (with a provider, --with-llm)
+# "[summary of N earlier entries]" once auto-compaction summarizes the dropped span — both contain
+# "earlier entries", so assert on that common substring.
+expect_contains "window inserts a drop marker"   'context show'  'earlier entries'
 expect_contains "window keeps the newest entry"  'context show'  'echo delta'
 # restore a roomy budget so it doesn't interfere with anything after
 run_line 'context budget 24000' >/dev/null
