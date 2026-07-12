@@ -7,12 +7,17 @@
 # asserts each returns the expected output, then tears the server down and
 # wipes its data dir. Exits non-zero on the first failed assertion.
 #
-# Usage:   scripts/golem-e2e.sh [--keep] [--takeover]
-#   --keep       leave the server running and the data dir on disk after the run
-#                (handy for poking at the deployed agent manually afterwards).
-#   --takeover   if a golem server is already bound to the default port, kill it
-#                first instead of refusing. Without this, the script bails so it
-#                never clobbers a server you deliberately left running.
+# Usage:   scripts/golem-e2e.sh [--keep] [--takeover] [--with-llm] [--with-grease]
+#   --keep         leave the server running and the data dir on disk after the run
+#                  (handy for poking at the deployed agent manually afterwards).
+#   --takeover     if a golem server is already bound to the default port, kill it
+#                  first instead of refusing. Without this, the script bails so it
+#                  never clobbers a server you deliberately left running.
+#   --with-llm     run the live-model assertions (real Anthropic calls; needs ANTHROPIC_API_KEY).
+#   --with-grease  build + serve a local grease registry (signed + transparency-logged) and run the
+#                  full grease install surface (signing, log, prompt/script/skill/mcp/agent install).
+#                  No python/env-var juggling — the script generates + serves everything. The
+#                  model-invoking prompt RUN still needs --with-llm.
 #
 # Requires: golem (>=1.5), cargo, jq. Run from anywhere inside the repo.
 
@@ -26,13 +31,15 @@ cd "$REPO_ROOT" || { echo "cannot cd to repo root $REPO_ROOT" >&2; exit 1; }
 KEEP=0
 TAKEOVER=0
 WITH_LLM=0
+WITH_GREASE=0
 for arg in "$@"; do
   case "$arg" in
-    --keep)     KEEP=1 ;;
-    --takeover) TAKEOVER=1 ;;
-    --with-llm) WITH_LLM=1 ;;
-    -h|--help)  sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) echo "unknown option: $arg" >&2; echo "usage: $0 [--keep] [--takeover] [--with-llm]" >&2; exit 2 ;;
+    --keep)        KEEP=1 ;;
+    --takeover)    TAKEOVER=1 ;;
+    --with-llm)    WITH_LLM=1 ;;
+    --with-grease) WITH_GREASE=1 ;;
+    -h|--help)  sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "unknown option: $arg" >&2; echo "usage: $0 [--keep] [--takeover] [--with-llm] [--with-grease]" >&2; exit 2 ;;
   esac
 done
 
@@ -74,6 +81,13 @@ DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/clank-golem-e2e.XXXXXX")"
 PORTS_FILE="$DATA_DIR/ports.json"
 SERVER_LOG="$DATA_DIR/server.log"
 SERVER_PID=""
+# The local grease fixture registry (only started under --with-grease). The agent reaches it over
+# host localhost.
+FIXTURE_PID=""
+FIXTURE_PORT=8823
+FIXTURE_DIR="$DATA_DIR/grease-registry"
+FIXTURE_URL="http://127.0.0.1:${FIXTURE_PORT}"
+FIXTURE_KEY=""
 
 # --- pretty output ---
 PASS=0; FAIL=0
@@ -99,13 +113,18 @@ cleanup() {
   if [[ $KEEP -eq 1 ]]; then
     echo
     note "--keep: leaving server (pid ${SERVER_PID:-?}) and data dir $DATA_DIR"
-    note "AGENTS.md restored; stop the server later with:  kill ${SERVER_PID:-<pid>}"
+    [[ -n "$FIXTURE_PID" ]] && note "--keep: grease fixture registry left running (pid $FIXTURE_PID) at $FIXTURE_URL"
+    note "AGENTS.md restored; stop the server later with:  kill ${SERVER_PID:-<pid>} ${FIXTURE_PID}"
     # copy the backup somewhere it survives, since we're not wiping DATA_DIR
     # `exit` (not `return`) inside an EXIT trap is what actually sets the script's final status;
     # `return` leaves the status as whatever the last trap command produced, masking a real failure.
     exit $ec
   fi
   step "Tearing down"
+  if [[ -n "$FIXTURE_PID" ]] && kill -0 "$FIXTURE_PID" 2>/dev/null; then
+    kill "$FIXTURE_PID" 2>/dev/null
+    note "grease fixture registry stopped"
+  fi
   if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
     kill "$SERVER_PID" 2>/dev/null
     # give it a moment to exit, then hard-kill any survivors in its process group
@@ -252,6 +271,41 @@ for i in $(seq 1 60); do
   sleep 1
   [[ $i -eq 60 ]] && { echo "${c_red}server did not become ready in 60s${c_rst}" >&2; tail -20 "$SERVER_LOG" >&2; exit 1; }
 done
+
+# --- --with-grease: build + serve a local, SIGNED, transparency-logged grease registry, and wire every
+#     gated grease block's env vars at it. The Rust `grease-fixture` generator reuses the agent's own
+#     sha256/ed25519/leaf-hash code, so the fixture can never drift from what the agent verifies. ---
+if [[ $WITH_GREASE -eq 1 ]]; then
+  step "Building the grease fixture registry (--with-grease)"
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "${c_red}--with-grease needs python3 (to serve the fixture registry)${c_rst}" >&2; exit 1
+  fi
+  # Generate packages/*.json + a signed+logged index.json; capture the printed PUBKEY.
+  FIXTURE_GEN_OUT="$(cargo run -q --example grease-fixture -- "$FIXTURE_DIR" 2>"$DATA_DIR/fixture-gen.log")" || {
+    echo "${c_red}grease-fixture generator failed${c_rst}" >&2; cat "$DATA_DIR/fixture-gen.log" >&2; exit 1;
+  }
+  FIXTURE_KEY="$(printf '%s\n' "$FIXTURE_GEN_OUT" | sed -n 's/^PUBKEY=//p')"
+  [[ -n "$FIXTURE_KEY" ]] || { echo "${c_red}grease-fixture did not emit a PUBKEY${c_rst}" >&2; exit 1; }
+  note "fixture registry generated at $FIXTURE_DIR (signer key ${FIXTURE_KEY:0:12}…)"
+  # Serve it (host localhost — the agent reaches it via http://127.0.0.1).
+  ( cd "$FIXTURE_DIR" && exec python3 -m http.server "$FIXTURE_PORT" ) >"$DATA_DIR/fixture-http.log" 2>&1 &
+  FIXTURE_PID=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    curl -fsS "$FIXTURE_URL/index.json" >/dev/null 2>&1 && break
+    sleep 0.3
+  done
+  curl -fsS "$FIXTURE_URL/index.json" >/dev/null 2>&1 || {
+    echo "${c_red}fixture registry did not come up on $FIXTURE_URL${c_rst}" >&2; cat "$DATA_DIR/fixture-http.log" >&2; exit 1;
+  }
+  note "fixture registry serving on $FIXTURE_URL (pid $FIXTURE_PID)"
+  # Wire every gated grease block at the one fixture registry. The generator signs EVERY package, so a
+  # single keyed registry satisfies the signed block AND the script/skill/agent/prompt blocks.
+  export GREASE_SIGNED_URL="$FIXTURE_URL" GREASE_SIGNED_PKG="hello" GREASE_SIGNED_KEY="$FIXTURE_KEY" GREASE_SIGNED_LOG=1 GREASE_SIGNED_KIND="prompt"
+  export GREASE_AGENT_URL="$FIXTURE_URL"  GREASE_AGENT_PKG="cart"
+  export GREASE_TEST_URL="$FIXTURE_URL"   GREASE_TEST_PKG="hello"   GREASE_TEST_VERIFIED=1
+  export GREASE_TEST_SCRIPT_URL="$FIXTURE_URL" GREASE_TEST_SCRIPT_PKG="hostinfo" GREASE_TEST_SCRIPT_ARGS="--label host" GREASE_TEST_SCRIPT_EXPECT="host:"
+  export GREASE_TEST_SKILL_URL="$FIXTURE_URL"  GREASE_TEST_SKILL_PKG="reviewing" GREASE_TEST_SKILL_DOC="SKILL.md"
+fi
 
 step "Deploying clank:agent (golem deploy)"
 if ! golem -Y deploy 2>&1 | tail -5; then
