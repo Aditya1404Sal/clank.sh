@@ -587,6 +587,9 @@ impl Session {
         let blanket = elevated || self.authz.allow_all;
         let result = self.run_command(&effective, pid, blanket).await;
         self.transcript.lock().unwrap().record_output(&result.terminal_output());
+        // If recording just evicted old entries to stay under budget, upgrade the leading count marker
+        // into a model-generated summary block (no-op when nothing was dropped or no provider exists).
+        self.compact_dropped_span().await;
         result
     }
 
@@ -1085,8 +1088,6 @@ impl Session {
     /// (like `ask`), so it's only reachable from a top-level `context summarize` line — a nested one
     /// (`$(...)`/pipe) hits the honest error in `apply_context`.
     async fn run_context_summarize(&mut self) -> LineResult {
-        use crate::askcmd::AskTurn;
-
         // Render before awaiting so the transcript lock is never held across the model call.
         let rendered = String::from_utf8_lossy(&self.transcript.lock().unwrap().render()).into_owned();
         if rendered.trim().is_empty() {
@@ -1098,32 +1099,72 @@ impl Session {
             Err(msg) => return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 2),
         };
 
-        let Some(provider) = self.ask_provider.take() else {
-            return LineResult::from_outcome(
+        match self.summarize_text(&rendered, &model).await {
+            Ok(None) => LineResult::from_outcome(
                 Vec::new(),
                 b"context summarize: no model provider configured (available on the Golem agent)\n"
                     .to_vec(),
                 4,
-            );
+            ),
+            Ok(Some(summary)) => {
+                let mut text = summary.into_bytes();
+                if !text.ends_with(b"\n") {
+                    text.push(b'\n');
+                }
+                LineResult::from_outcome(text, Vec::new(), 0)
+            }
+            Err(err) => LineResult::from_outcome(Vec::new(), err.into_bytes(), 4),
+        }
+    }
+
+    /// One tool-less provider `turn` that summarizes `text` and returns the model's reply. `Ok(None)`
+    /// when no provider is configured (native), `Err` on a model error. The shared mechanic behind both
+    /// `context summarize` and the auto-compaction step: render/text is prepared by the caller (so the
+    /// transcript lock is never held across the await), the provider is `take()`n and restored, and a
+    /// single `SUMMARIZE_SYSTEM_PROMPT` turn is sent with no tools.
+    async fn summarize_text(&mut self, text: &str, model: &str) -> Result<Option<String>, String> {
+        use crate::askcmd::AskTurn;
+
+        let Some(provider) = self.ask_provider.take() else {
+            return Ok(None);
         };
         let resp = provider
             .turn(
                 Some(crate::askcmd::SUMMARIZE_SYSTEM_PROMPT),
-                &[AskTurn::User(rendered)],
+                &[AskTurn::User(text.to_string())],
                 &[],
-                &model,
+                model,
             )
             .await;
         self.ask_provider = Some(provider); // restore before returning
 
-        if let Some(err) = resp.error {
-            return LineResult::from_outcome(Vec::new(), err.into_bytes(), 4);
+        match resp.error {
+            Some(err) => Err(err),
+            None => Ok(Some(resp.text)),
         }
-        let mut text = resp.text.into_bytes();
-        if !text.ends_with(b"\n") {
-            text.push(b'\n');
+    }
+
+    /// The auto-compaction step: after a line's output is recorded and the window may have evicted old
+    /// entries, upgrade the leading `[N earlier entries dropped]` count marker into a model-generated
+    /// summary block. Runs at most once per line, only when eviction actually happened AND a provider is
+    /// configured (agent, or a Fake in tests). On native / no provider / model error, the count marker is
+    /// left as-is — the decided fallback, so recording never blocks or fails.
+    async fn compact_dropped_span(&mut self) {
+        // Snapshot the pending dropped span without holding the lock across the await.
+        let pending = self.transcript.lock().unwrap().pending_summary();
+        let Some((_count, dropped_text)) = pending else {
+            return;
+        };
+        if dropped_text.trim().is_empty() {
+            return;
         }
-        LineResult::from_outcome(text, Vec::new(), 0)
+        let model = match self.resolve_ask_model(None) {
+            Ok((model, _warning)) => model,
+            Err(_) => return, // no valid model → keep the count marker
+        };
+        if let Ok(Some(summary)) = self.summarize_text(&dropped_text, &model).await {
+            self.transcript.lock().unwrap().set_marker_summary(summary);
+        }
     }
 
     /// Resolve the model id `ask` should target: `--model` (if given) > the ask.toml default > the
@@ -6637,6 +6678,65 @@ mod tests {
                 content.contains("marker_abc"),
                 "transcript context should include the prior echo, got: {content}"
             );
+        });
+    }
+
+    /// When recording a command evicts old entries to stay under budget, the leading count marker is
+    /// upgraded into a model-generated summary block (the README's summarize-at-leading-edge compaction).
+    #[test]
+    fn auto_compaction_summarizes_the_dropped_span() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+            // Several identical summaries: each eviction re-opens the pending span and re-summarizes,
+            // so more than one summarize turn can fire across the run (the last one wins the marker).
+            session.set_ask_provider(Box::new(FakeProvider::scripted(
+                vec![crate::askcmd::AskResponse::text("SUMMARY: earlier work happened"); 8],
+                seen.clone(),
+            )));
+
+            // Shrink the window so the next few commands force an eviction.
+            session.eval_line("context budget 4").await;
+            session.run_line("echo marker_one").await;
+            session.run_line("echo marker_two").await;
+            session.run_line("echo marker_three").await;
+
+            let shown = String::from_utf8(session.eval_line("context show").await.stdout).unwrap();
+            // The leading marker is a summary block carrying the model's text, not a bare count.
+            assert!(
+                shown.contains("[summary of") && shown.contains("SUMMARY: earlier work happened"),
+                "expected a summary block at the leading edge, got:\n{shown}"
+            );
+            assert!(!shown.contains("earlier entries dropped"), "count marker should be upgraded");
+
+            // The provider was asked to summarize the DROPPED span (system = SUMMARIZE_SYSTEM_PROMPT),
+            // not the whole transcript.
+            let turns = seen.lock().unwrap().clone();
+            assert!(
+                turns.iter().any(|t| t.system.as_deref() == Some(crate::askcmd::SUMMARIZE_SYSTEM_PROMPT)),
+                "a summarize turn should have fired"
+            );
+        });
+    }
+
+    /// With no provider (native), auto-compaction leaves the bare `[N earlier entries dropped]` count
+    /// marker — the decided fallback: eviction never blocks or fails on the summary being unavailable.
+    #[test]
+    fn auto_compaction_falls_back_to_count_marker_without_a_provider() {
+        on_rt(async {
+            let mut session = Session::new().await.unwrap();
+            // No ask_provider injected.
+            session.eval_line("context budget 4").await;
+            session.run_line("echo marker_one").await;
+            session.run_line("echo marker_two").await;
+            session.run_line("echo marker_three").await;
+
+            let shown = String::from_utf8(session.eval_line("context show").await.stdout).unwrap();
+            assert!(
+                shown.contains("earlier entries dropped"),
+                "without a provider the count marker stays, got:\n{shown}"
+            );
+            assert!(!shown.contains("[summary of"), "no summary block without a provider");
         });
     }
 

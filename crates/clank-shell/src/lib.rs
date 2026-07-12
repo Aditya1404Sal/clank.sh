@@ -96,6 +96,10 @@ pub const DEFAULT_TOKEN_BUDGET: usize = 24_000;
 pub struct Transcript {
     entries: Vec<Entry>,
     token_budget: usize,
+    /// Rendered text of entries dropped by the most recent eviction, awaiting an async summary.
+    /// Populated as `enforce_budget`/`trim` remove entries; drained by [`pending_summary`](Self::pending_summary)
+    /// once the Session layer has summarized it. Transient — never part of the window, never serialized.
+    last_dropped: Vec<u8>,
 }
 
 impl Default for Transcript {
@@ -103,6 +107,7 @@ impl Default for Transcript {
         Self {
             entries: Vec::new(),
             token_budget: DEFAULT_TOKEN_BUDGET,
+            last_dropped: Vec::new(),
         }
     }
 }
@@ -111,9 +116,14 @@ impl Default for Transcript {
 enum Entry {
     /// A command line and the output it produced.
     Command { command: String, output: Vec<u8> },
-    /// A leading marker standing in for `count` older entries dropped to stay under budget.
-    /// (Future: carries a generated summary of the dropped span.)
-    Elided { count: usize },
+    /// A leading marker standing in for `count` older entries dropped to stay under budget. Once the
+    /// Session's async compaction step has summarized the dropped span, `summary` holds that text and
+    /// `render` prints it as a visible summary block; until then (or on native / model error) it stays
+    /// `None` and renders as a bare `[N earlier entries dropped]` count marker.
+    Elided {
+        count: usize,
+        summary: Option<String>,
+    },
 }
 
 /// Estimate the token cost of `byte_len` bytes of text. A deliberately crude heuristic
@@ -133,6 +143,7 @@ impl Transcript {
         Self {
             entries: Vec::new(),
             token_budget,
+            last_dropped: Vec::new(),
         }
     }
 
@@ -169,9 +180,10 @@ impl Transcript {
     fn entry_tokens(entry: &Entry) -> usize {
         match entry {
             Entry::Command { command, output } => est_tokens(command.len() + output.len()),
-            // The marker's own text is tiny and bounded; count it as negligible so a run of
-            // drops doesn't itself push the window over budget.
-            Entry::Elided { .. } => 0,
+            // A bare count marker is tiny and bounded; count it as negligible so a run of drops
+            // doesn't itself push the window over budget. A marker carrying a generated summary is
+            // costed by its summary text so a summarized window is honestly budgeted.
+            Entry::Elided { summary, .. } => summary.as_ref().map_or(0, |s| est_tokens(s.len())),
         }
     }
 
@@ -195,12 +207,35 @@ impl Transcript {
                 break;
             }
 
-            self.entries.remove(oldest_cmd);
-            if let Some(Entry::Elided { count }) = self.entries.first_mut() {
-                *count += 1;
-            } else {
-                self.entries.insert(0, Entry::Elided { count: 1 });
+            let dropped = self.entries.remove(oldest_cmd);
+            self.stash_dropped(&dropped);
+            match self.entries.first_mut() {
+                // A fresh eviction supersedes any prior summary — bump the count and clear it so the
+                // Session layer re-summarizes the (now larger) dropped span.
+                Some(Entry::Elided { count, summary }) => {
+                    *count += 1;
+                    *summary = None;
+                }
+                _ => self.entries.insert(
+                    0,
+                    Entry::Elided {
+                        count: 1,
+                        summary: None,
+                    },
+                ),
             }
+        }
+    }
+
+    /// Append a just-dropped entry's rendered text to the transient [`last_dropped`](Self::last_dropped)
+    /// buffer so the Session's async compaction step can summarize it. `Elided` markers carry no body
+    /// worth summarizing, so only `Command` entries contribute.
+    fn stash_dropped(&mut self, entry: &Entry) {
+        if let Entry::Command { command, output } = entry {
+            self.last_dropped.extend_from_slice(PROMPT);
+            self.last_dropped.extend_from_slice(command.as_bytes());
+            self.last_dropped.push(b'\n');
+            self.last_dropped.extend_from_slice(output);
         }
     }
 
@@ -210,11 +245,20 @@ impl Transcript {
         let mut out = Vec::new();
         for e in &self.entries {
             match e {
-                Entry::Elided { count } => {
-                    out.extend_from_slice(
+                Entry::Elided { count, summary } => match summary {
+                    Some(text) => {
+                        out.extend_from_slice(
+                            format!("[summary of {count} earlier entries]\n").as_bytes(),
+                        );
+                        out.extend_from_slice(text.as_bytes());
+                        if !text.ends_with('\n') {
+                            out.push(b'\n');
+                        }
+                    }
+                    None => out.extend_from_slice(
                         format!("[{count} earlier entries dropped]\n").as_bytes(),
-                    );
-                }
+                    ),
+                },
                 Entry::Command { command, output } => {
                     out.extend_from_slice(PROMPT);
                     out.extend_from_slice(command.as_bytes());
@@ -246,15 +290,54 @@ impl Transcript {
             if oldest_cmd >= self.entries.len() || oldest_cmd == self.entries.len() - 1 {
                 break;
             }
-            self.entries.remove(oldest_cmd);
-            if let Some(Entry::Elided { count }) = self.entries.first_mut() {
-                *count += 1;
-            } else {
-                self.entries.insert(0, Entry::Elided { count: 1 });
+            let removed = self.entries.remove(oldest_cmd);
+            self.stash_dropped(&removed);
+            match self.entries.first_mut() {
+                Some(Entry::Elided { count, summary }) => {
+                    *count += 1;
+                    *summary = None;
+                }
+                _ => self.entries.insert(
+                    0,
+                    Entry::Elided {
+                        count: 1,
+                        summary: None,
+                    },
+                ),
             }
             dropped += 1;
         }
         dropped
+    }
+
+    /// The dropped span awaiting a summary: `Some((count, rendered_text))` when the leading marker
+    /// exists, has no summary yet, and there is captured dropped text — else `None`. Draining is the
+    /// Session layer's job: it renders this, sends it to the model, and writes the result back via
+    /// [`set_marker_summary`](Self::set_marker_summary). Inspection-only; does not mutate the window.
+    pub fn pending_summary(&self) -> Option<(usize, String)> {
+        match self.entries.first() {
+            Some(Entry::Elided {
+                count,
+                summary: None,
+            }) if !self.last_dropped.is_empty() => Some((
+                *count,
+                String::from_utf8_lossy(&self.last_dropped).into_owned(),
+            )),
+            _ => None,
+        }
+    }
+
+    /// Write a generated `summary` into the leading [`Entry::Elided`] marker and drain the transient
+    /// dropped-text buffer. No-op if there is no leading marker (the window was cleared/changed between
+    /// the async summary starting and finishing). Does NOT re-enforce the budget here: enforcing would
+    /// risk immediately evicting the entry that folds into this very marker and clearing the summary we
+    /// just set. The marker's summary tokens ([`entry_tokens`](Self::entry_tokens)) are honestly costed
+    /// on the next [`record_output`](Self::record_output) eviction pass instead.
+    pub fn set_marker_summary(&mut self, summary: String) {
+        if let Some(Entry::Elided { summary: slot, .. }) = self.entries.first_mut() {
+            *slot = Some(summary);
+            self.last_dropped.clear();
+        }
     }
 }
 
@@ -559,6 +642,80 @@ mod tests {
             .unwrap();
         let surviving = rendered.matches("clank$ cmd").count();
         assert_eq!(count + surviving, 6);
+    }
+
+    #[test]
+    fn pending_summary_exposes_the_dropped_span_then_clears() {
+        // Eviction stashes the dropped entry's rendered text; pending_summary surfaces it.
+        let mut t = Transcript::with_budget(4);
+        record(&mut t, "aaaa", b"aaaa");
+        record(&mut t, "bbbb", b"bbbb");
+        record(&mut t, "cccc", b"cccc"); // evicts "aaaa"
+        let (count, dropped) = t.pending_summary().expect("a span is pending");
+        assert_eq!(count, 1);
+        assert!(dropped.contains("clank$ aaaa"));
+        assert!(dropped.contains("aaaa"));
+        // Writing a summary drains the pending span — no re-summarize.
+        t.set_marker_summary("did aaaa".to_string());
+        assert!(t.pending_summary().is_none());
+    }
+
+    #[test]
+    fn set_marker_summary_renders_a_visible_summary_block() {
+        let mut t = Transcript::with_budget(4);
+        record(&mut t, "aaaa", b"aaaa");
+        record(&mut t, "bbbb", b"bbbb");
+        record(&mut t, "cccc", b"cccc"); // evicts "aaaa"
+        t.set_marker_summary("the user ran aaaa".to_string());
+        let rendered = String::from_utf8(t.render()).unwrap();
+        // Summary block replaces the bare count marker.
+        assert!(rendered.starts_with("[summary of 1 earlier entries]\n"));
+        assert!(rendered.contains("the user ran aaaa"));
+        assert!(!rendered.contains("earlier entries dropped"));
+        assert!(rendered.contains("cccc"));
+    }
+
+    #[test]
+    fn no_pending_summary_without_eviction() {
+        let mut t = Transcript::with_budget(10_000);
+        record(&mut t, "echo a", b"a\n");
+        assert!(t.pending_summary().is_none());
+    }
+
+    #[test]
+    fn a_summarized_marker_costs_its_summary_tokens() {
+        // A bare marker costs 0; once it carries a summary, entry_tokens counts the summary text — so
+        // the summarized window is honestly larger than the same window with a bare count marker.
+        let mut t = Transcript::with_budget(10_000); // generous: control eviction manually
+        record(&mut t, "aaaa", b"aaaa");
+        record(&mut t, "bbbb", b"bbbb"); // a second entry so trim can drop the first
+        assert_eq!(t.trim(1), 1); // fold "aaaa" into a bare marker (count 1, no summary)
+        let before = t.total_tokens();
+        t.set_marker_summary("x".repeat(40)); // ~10 tokens of summary
+        let after = t.total_tokens();
+        assert!(
+            after >= before + 10,
+            "a summarized marker must cost its summary tokens (before={before}, after={after})"
+        );
+    }
+
+    #[test]
+    fn a_fresh_eviction_clears_a_prior_summary() {
+        let mut t = Transcript::with_budget(4);
+        record(&mut t, "aaaa", b"aaaa");
+        record(&mut t, "bbbb", b"bbbb");
+        record(&mut t, "cccc", b"cccc"); // evicts "aaaa"
+        t.set_marker_summary("summary of aaaa".to_string());
+        assert!(t.pending_summary().is_none());
+        // A further eviction supersedes the summary: count bumps, summary clears, span pends again.
+        record(&mut t, "dddd", b"dddd");
+        record(&mut t, "eeee", b"eeee");
+        let pending = t.pending_summary();
+        assert!(pending.is_some(), "a fresh eviction re-opens the pending span");
+        let rendered = String::from_utf8(t.render()).unwrap();
+        // Back to the bare count marker until the Session re-summarizes.
+        assert!(rendered.contains("earlier entries dropped"));
+        assert!(!rendered.contains("summary of aaaa"));
     }
 
     #[test]
