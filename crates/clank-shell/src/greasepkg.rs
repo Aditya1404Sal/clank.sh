@@ -115,6 +115,56 @@ fn fill_body(body: &str, args: &[PackageArg], provided: &[(String, String)]) -> 
     Ok(out)
 }
 
+/// Split a Markdown prompt into `(frontmatter, body)` when it opens with a `---` fence. The first line
+/// must be exactly `---`; the frontmatter runs until the next `---` line; everything after (minus a
+/// single leading newline) is the body. Returns `None` when there is no opening/closing fence.
+fn split_frontmatter(text: &str) -> Option<(&str, &str)> {
+    // Tolerate a leading BOM/whitespace-free `---` on the very first line only.
+    let rest = text.strip_prefix("---\n").or_else(|| text.strip_prefix("---\r\n"))?;
+    // Find the closing fence: a line that is exactly `---`.
+    let mut idx = 0;
+    for line in rest.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches(['\n', '\r']);
+        if trimmed == "---" {
+            let frontmatter = &rest[..idx];
+            let after = &rest[idx + line.len()..];
+            return Some((frontmatter, after));
+        }
+        idx += line.len();
+    }
+    None
+}
+
+/// Split a `key: value` line into `(key, value)`, trimming both and stripping matching surrounding
+/// quotes from the value. Returns `None` if there is no colon.
+fn split_key_value(line: &str) -> Option<(String, String)> {
+    let (key, value) = line.split_once(':')?;
+    Some((key.trim().to_string(), unquote(value.trim()).to_string()))
+}
+
+/// Strip one layer of matching single or double quotes from a scalar value.
+fn unquote(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2 && (s.starts_with('"') && s.ends_with('"') || s.starts_with('\'') && s.ends_with('\'')) {
+        &s[1..s.len() - 1]
+    } else {
+        s
+    }
+}
+
+/// Apply one `key: value` field to an argument being built. `required` parses as a bool (`true`/`false`,
+/// default false on anything else); unknown keys are ignored (forgiving).
+fn apply_arg_field(arg: &mut PackageArg, key: &str, value: String) -> Result<(), String> {
+    match key {
+        "name" => arg.name = value,
+        "description" => arg.description = value,
+        "required" => arg.required = value.eq_ignore_ascii_case("true"),
+        "default" => arg.default = if value.is_empty() { None } else { Some(value) },
+        _ => {} // ignore unknown argument keys
+    }
+    Ok(())
+}
+
 /// A prompt package as fetched from a registry (and persisted to the store as JSON).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -138,6 +188,108 @@ impl PromptPackage {
     /// Parse a package from registry JSON.
     pub fn from_json(bytes: &[u8]) -> Result<Self, String> {
         serde_json::from_slice(bytes).map_err(|e| format!("invalid package JSON: {e}"))
+    }
+
+    /// Parse a prompt authored as a Markdown file with a leading `---` YAML frontmatter block
+    /// (README's prompt authoring format). The frontmatter declares `name`/`description`/`model` and an
+    /// `arguments:` list; everything after the closing `---` is the prompt `body` (with its `{{var}}`
+    /// tokens intact). A body with no frontmatter fence is a non-parameterized prompt whose `name` the
+    /// caller must supply (there's no header to read it from) — so this requires the fence.
+    ///
+    /// Deliberately a tiny hand-rolled subset parser (no YAML crate — clank-shell keeps its dependency
+    /// set pure-Rust/wasm-clean), covering exactly the scalar keys and the `arguments` list shape
+    /// [`PromptPackage`]/[`PackageArg`] need. Unknown frontmatter keys are ignored (forgiving, like the
+    /// `#[serde(default)]` JSON path).
+    pub fn from_markdown(bytes: &[u8]) -> Result<Self, String> {
+        let text = std::str::from_utf8(bytes).map_err(|_| "prompt .md is not valid UTF-8".to_string())?;
+        let (frontmatter, body) = split_frontmatter(text)
+            .ok_or_else(|| "prompt .md: missing leading `---` frontmatter block".to_string())?;
+
+        let mut name = None;
+        let mut description = String::new();
+        let mut model = None;
+        let mut arguments: Vec<PackageArg> = Vec::new();
+        // `arguments:` is a list of `- key: value` items; we track the item currently being built.
+        let mut in_arguments = false;
+        let mut current: Option<PackageArg> = None;
+
+        for raw in frontmatter.lines() {
+            let line = raw.trim_end();
+            if line.trim().is_empty() {
+                continue;
+            }
+            let indented = line.starts_with(char::is_whitespace);
+
+            // A top-level (non-indented) key ends the arguments list.
+            if !indented && !line.trim_start().starts_with('-') {
+                if let Some(arg) = current.take() {
+                    arguments.push(arg);
+                }
+                in_arguments = false;
+                let (key, value) = split_key_value(line)
+                    .ok_or_else(|| format!("prompt .md frontmatter: expected `key: value`, got `{line}`"))?;
+                match key.as_str() {
+                    "name" => name = Some(value),
+                    "description" => description = value,
+                    "model" => model = if value.is_empty() { None } else { Some(value) },
+                    "arguments" => in_arguments = true,
+                    _ => {} // ignore unknown keys (forgiving)
+                }
+                continue;
+            }
+
+            if !in_arguments {
+                return Err(format!("prompt .md frontmatter: unexpected indented line `{line}`"));
+            }
+
+            let stripped = line.trim_start();
+            if let Some(rest) = stripped.strip_prefix('-') {
+                // A new list item begins; flush the previous one.
+                if let Some(arg) = current.take() {
+                    arguments.push(arg);
+                }
+                let mut arg = PackageArg {
+                    name: String::new(),
+                    description: String::new(),
+                    required: false,
+                    default: None,
+                };
+                // `- name: file` puts the first key on the same line as the dash.
+                let rest = rest.trim();
+                if !rest.is_empty() {
+                    let (key, value) = split_key_value(rest)
+                        .ok_or_else(|| format!("prompt .md frontmatter: bad argument line `{line}`"))?;
+                    apply_arg_field(&mut arg, &key, value)?;
+                }
+                current = Some(arg);
+            } else {
+                // A continuation key of the current argument item.
+                let arg = current
+                    .as_mut()
+                    .ok_or_else(|| format!("prompt .md frontmatter: argument field before any `-`: `{line}`"))?;
+                let (key, value) = split_key_value(stripped)
+                    .ok_or_else(|| format!("prompt .md frontmatter: bad argument field `{line}`"))?;
+                apply_arg_field(arg, &key, value)?;
+            }
+        }
+        if let Some(arg) = current.take() {
+            arguments.push(arg);
+        }
+
+        let name = name.ok_or_else(|| "prompt .md frontmatter: missing required `name`".to_string())?;
+        for arg in &arguments {
+            if arg.name.is_empty() {
+                return Err("prompt .md frontmatter: an argument is missing its `name`".to_string());
+            }
+        }
+
+        Ok(PromptPackage {
+            name,
+            description,
+            model,
+            arguments,
+            body: body.to_string(),
+        })
     }
 
     /// Serialize the package to pretty JSON (for the store).
@@ -629,6 +781,87 @@ mod tests {
         // Missing required `file` errors.
         let err = p.fill(&[]).unwrap_err();
         assert!(err.contains("missing required argument --file"));
+    }
+
+    #[test]
+    fn markdown_non_parameterized() {
+        // A prompt authored as `.md`: frontmatter + body, no arguments.
+        let md = "---\nname: tldr\ndescription: summarize the transcript\n---\nSummarize the transcript clearly.\n";
+        let p = PromptPackage::from_markdown(md.as_bytes()).unwrap();
+        assert_eq!(p.name, "tldr");
+        assert_eq!(p.description, "summarize the transcript");
+        assert_eq!(p.model, None);
+        assert!(p.arguments.is_empty());
+        assert_eq!(p.body, "Summarize the transcript clearly.\n");
+    }
+
+    #[test]
+    fn markdown_parameterized_matches_the_readme_shape() {
+        // The exact frontmatter shape from the README prompt-authoring section.
+        let md = "---\n\
+                  name: summarize\n\
+                  description: Summarize a file with configurable output length\n\
+                  model: anthropic/claude-sonnet-5\n\
+                  arguments:\n\
+                  \x20 - name: file\n\
+                  \x20   description: Path to the file to summarize\n\
+                  \x20   required: true\n\
+                  \x20 - name: length\n\
+                  \x20   description: \"short | medium | long\"\n\
+                  \x20   required: false\n\
+                  \x20   default: medium\n\
+                  ---\n\
+                  Please summarize {{file}}.\nTarget length: {{length}}.\n";
+        let p = PromptPackage::from_markdown(md.as_bytes()).unwrap();
+        assert_eq!(p.name, "summarize");
+        assert_eq!(p.model.as_deref(), Some("anthropic/claude-sonnet-5"));
+        assert_eq!(p.arguments.len(), 2);
+
+        let file = p.arguments.iter().find(|a| a.name == "file").unwrap();
+        assert!(file.required);
+        assert_eq!(file.description, "Path to the file to summarize");
+        assert_eq!(file.default, None);
+
+        let length = p.arguments.iter().find(|a| a.name == "length").unwrap();
+        assert!(!length.required);
+        assert_eq!(length.description, "short | medium | long"); // quotes stripped
+        assert_eq!(length.default.as_deref(), Some("medium"));
+
+        // The body (past the closing fence) fills like any prompt.
+        let filled = p.fill(&[("file".into(), "a.md".into())]).unwrap();
+        assert_eq!(filled, "Please summarize a.md.\nTarget length: medium.\n");
+    }
+
+    #[test]
+    fn markdown_inline_argument_fields() {
+        // `- name: x` (first key inline with the dash) and continuation keys both parse.
+        let md = "---\nname: p\narguments:\n  - name: a\n    required: true\n---\n{{a}}\n";
+        let p = PromptPackage::from_markdown(md.as_bytes()).unwrap();
+        assert_eq!(p.arguments.len(), 1);
+        assert_eq!(p.arguments[0].name, "a");
+        assert!(p.arguments[0].required);
+    }
+
+    #[test]
+    fn markdown_missing_frontmatter_errors() {
+        let err = PromptPackage::from_markdown(b"no fence here\njust body\n").unwrap_err();
+        assert!(err.contains("missing leading `---` frontmatter"));
+    }
+
+    #[test]
+    fn markdown_missing_name_errors() {
+        let md = "---\ndescription: no name\n---\nbody\n";
+        let err = PromptPackage::from_markdown(md.as_bytes()).unwrap_err();
+        assert!(err.contains("missing required `name`"));
+    }
+
+    #[test]
+    fn markdown_converts_to_the_same_json_shape() {
+        // The install path converts .md -> canonical JSON; the round-trip must be lossless.
+        let md = "---\nname: p\ndescription: d\narguments:\n  - name: a\n    required: true\n---\nUse {{a}}.\n";
+        let from_md = PromptPackage::from_markdown(md.as_bytes()).unwrap();
+        let via_json = PromptPackage::from_json(from_md.to_json().as_bytes()).unwrap();
+        assert_eq!(from_md, via_json);
     }
 
     #[test]

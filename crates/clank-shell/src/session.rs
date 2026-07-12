@@ -1845,23 +1845,27 @@ impl Session {
         let mut last_err = String::from("package not found in any configured registry");
         // (registry, body, index-entry) captured from the first registry that has the package.
         let mut fetched: Option<(String, Vec<u8>, IndexEntry)> = None;
-        for base in &registries {
+        'registries: for base in &registries {
             // Integrity metadata from the index (best-effort — a loose registry may omit it).
             let entry = fetch_index_entry(http.as_ref(), base, name).await;
-            let url = format!("{}/packages/{name}.json", base.trim_end_matches('/'));
-            match http.request("GET", &url, &[], None).await {
-                Ok(resp) if resp.status == 200 => {
-                    fetched = Some((base.clone(), resp.body, entry));
-                    break;
-                }
-                Ok(resp) if resp.status == 404 => {
-                    last_err = format!("package '{name}' not found (404) at {base}");
-                }
-                Ok(resp) => {
-                    last_err = format!("registry {base} returned HTTP {}", resp.status);
-                }
-                Err(e) => {
-                    last_err = format!("registry {base}: {e}");
+            // Try the JSON payload first, then the `.md` prompt-authoring form. Whichever the registry
+            // serves, the raw bytes returned are exactly what integrity is verified over below.
+            for ext in ["json", "md"] {
+                let url = format!("{}/packages/{name}.{ext}", base.trim_end_matches('/'));
+                match http.request("GET", &url, &[], None).await {
+                    Ok(resp) if resp.status == 200 => {
+                        fetched = Some((base.clone(), resp.body, entry));
+                        break 'registries;
+                    }
+                    Ok(resp) if resp.status == 404 => {
+                        last_err = format!("package '{name}' not found (404) at {base}");
+                    }
+                    Ok(resp) => {
+                        last_err = format!("registry {base} returned HTTP {}", resp.status);
+                    }
+                    Err(e) => {
+                        last_err = format!("registry {base}: {e}");
+                    }
                 }
             }
         }
@@ -1971,6 +1975,26 @@ impl Session {
             signer,
             log_verified,
             log_index,
+        };
+
+        // A prompt authored as Markdown (leading `---` frontmatter) is converted to the canonical prompt
+        // JSON shape here — AFTER integrity was verified over the raw `.md` bytes (above), so the store
+        // and boot path (`load_one`) stay JSON-uniform and never need `.md` awareness. Integrity is NOT
+        // re-checked against the converted JSON: the served `.md` bytes are what the registry signed/
+        // logged. A JSON body passes through untouched.
+        let body = if is_markdown_frontmatter(&body) {
+            match crate::greasepkg::PromptPackage::from_markdown(&body) {
+                Ok(p) => p.to_json().into_bytes(),
+                Err(e) => {
+                    return LineResult::from_outcome(
+                        Vec::new(),
+                        format!("grease install: {e}\n").into_bytes(),
+                        4,
+                    )
+                }
+            }
+        } else {
+            body
         };
 
         if crate::greasepkg::payload_kind(&body) == Ok(crate::greasepkg::PackageKind::Mcp) {
@@ -3941,6 +3965,14 @@ struct IndexEntry {
     log: Option<LogProof>,
 }
 
+/// Whether a fetched package body is a Markdown prompt with a leading `---` frontmatter fence (as
+/// opposed to the JSON payload shape). Used to route `.md`-authored prompts through the frontmatter
+/// converter after integrity verification.
+fn is_markdown_frontmatter(body: &[u8]) -> bool {
+    let head = &body[..body.len().min(8)];
+    matches!(std::str::from_utf8(head), Ok(s) if s.starts_with("---\n") || s.starts_with("---\r\n"))
+}
+
 /// Best-effort lookup of a package's index entry (`sha256` + `sig` + `signer`). GETs
 /// `<base>/index.json` and returns the fields of the entry whose `name` matches. Empty (`None`s) if the
 /// index is unreachable, unparseable, or has no entry for `name` — the caller then falls back to
@@ -4888,6 +4920,15 @@ mod tests {
         }
     }
 
+    /// A 200 text response (for a `.md` prompt body served by `FakeGreaseHttp`).
+    fn grease_text(body: &str) -> crate::mcpclient::HttpResponse {
+        crate::mcpclient::HttpResponse {
+            status: 200,
+            headers: vec![("content-type".into(), "text/markdown".into())],
+            body: body.as_bytes().to_vec(),
+        }
+    }
+
     /// A fresh temp `$CLANK_GREASE_*` triple, exported for the duration of the guard (serializes grease
     /// tests via the shared lock, clears the vars on drop).
     struct GreaseDirsGuard {
@@ -5631,6 +5672,51 @@ mod tests {
             let rm = session.eval_line("sudo grease remove tldr").await;
             assert_eq!(rm.exit_code, 0);
             assert!(!session.grease.is_prompt("tldr"));
+        });
+    }
+
+    /// A prompt authored as a `.md` file with YAML frontmatter installs identically to a JSON prompt:
+    /// grease fetches `/packages/<name>.md`, converts the frontmatter → the canonical PromptPackage,
+    /// and the installed command fills `{{var}}` and dispatches to the model.
+    #[test]
+    fn grease_install_then_run_a_markdown_prompt() {
+        on_rt(async {
+            let _dirs = set_grease_dirs();
+            let mut session = Session::new().await.unwrap();
+            let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+            session.set_ask_provider(Box::new(FakeProvider::reply("the summary", seen.clone())));
+
+            // The registry serves the prompt as a Markdown file (no `.json`), routed on the `.md` suffix
+            // so the `.json` fetch 404s first and the `.md` fetch succeeds.
+            let md = "---\n\
+                      name: tldr\n\
+                      description: summarize a file\n\
+                      arguments:\n\
+                      \x20 - name: file\n\
+                      \x20   required: true\n\
+                      ---\n\
+                      Summarize the file {{file}} concisely.\n";
+            session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![(
+                "/packages/tldr.md",
+                grease_text(md),
+            )])));
+            session.run_line("grease registry add https://reg.example").await;
+
+            let inst = session.eval_line("sudo grease install tldr").await;
+            assert_eq!(inst.exit_code, 0, "install stderr: {}", String::from_utf8_lossy(&inst.stderr));
+            assert!(String::from_utf8(inst.stdout).unwrap().contains("installed tldr"));
+
+            // Installed as a prompt with the declared arg (from the frontmatter).
+            let help = session.eval_line("tldr --help").await;
+            assert_eq!(help.exit_code, 0);
+            assert!(String::from_utf8(help.stdout).unwrap().contains("--file"));
+
+            // Running fills the body (converted from the `.md` body) and dispatches to the model.
+            let run = session.eval_line("sudo tldr --file report.md").await;
+            assert_eq!(run.exit_code, 0);
+            assert_eq!(String::from_utf8(run.stdout).unwrap(), "the summary");
+            let content = seen.lock().unwrap()[0].user_content();
+            assert!(content.contains("Summarize the file report.md concisely."), "got: {content}");
         });
     }
 

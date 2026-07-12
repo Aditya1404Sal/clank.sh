@@ -305,6 +305,7 @@ if [[ $WITH_GREASE -eq 1 ]]; then
   export GREASE_TEST_URL="$FIXTURE_URL"   GREASE_TEST_PKG="hello"   GREASE_TEST_VERIFIED=1
   export GREASE_TEST_SCRIPT_URL="$FIXTURE_URL" GREASE_TEST_SCRIPT_PKG="hostinfo" GREASE_TEST_SCRIPT_ARGS="--label host" GREASE_TEST_SCRIPT_EXPECT="host:"
   export GREASE_TEST_SKILL_URL="$FIXTURE_URL"  GREASE_TEST_SKILL_PKG="reviewing" GREASE_TEST_SKILL_DOC="SKILL.md"
+  export GREASE_TEST_MD_URL="$FIXTURE_URL"     GREASE_TEST_MD_PKG="greeting"  GREASE_TEST_MD_ARG="--who world"
 fi
 
 step "Deploying clank:agent (golem deploy)"
@@ -1034,6 +1035,34 @@ if [[ -n "${GREASE_TEST_SKILL_URL:-}" && -n "${GREASE_TEST_SKILL_PKG:-}" ]]; the
   expect_eval "removing the skill deregisters it"      "$GK_GONE"  '.stderr | contains("not installed")'  'true'
 else
   note "GREASE_TEST_SKILL_URL/PKG not set — skipping live grease skill install (native tests cover it)"
+fi
+
+# --- Gated live-registry block for a MARKDOWN-authored PROMPT (frontmatter → PromptPackage). The
+#     registry serves `<pkg>.md`; grease verifies integrity over the raw `.md` bytes, then converts the
+#     `---` YAML frontmatter to the canonical prompt. Install + `--help` (which shows the converted arg)
+#     need NO key; the actual model RUN is gated on --with-llm. Set GREASE_TEST_MD_URL + GREASE_TEST_MD_PKG;
+#     GREASE_TEST_MD_ARG carries the required-arg flag the frontmatter declared.
+if [[ -n "${GREASE_TEST_MD_URL:-}" && -n "${GREASE_TEST_MD_PKG:-}" ]]; then
+  note "GREASE_TEST_MD_URL set — running live grease .md-prompt install against $GREASE_TEST_MD_URL"
+  run_line "grease registry add ${GREASE_TEST_MD_URL}" >/dev/null
+  GM_INST="$(eval_json eval "\"sudo grease install ${GREASE_TEST_MD_PKG}\"")"
+  expect_eval "live .md prompt install exits 0"          "$GM_INST"  '.exit_code'  '0'
+  expect_eval "live .md prompt install reports the kind" "$GM_INST"  '.stdout | contains("[prompt]")'  'true'
+  # The frontmatter's declared argument survived conversion: `--help` shows it.
+  GM_ARG_NAME="$(printf '%s' "${GREASE_TEST_MD_ARG:-}" | sed -n 's/^--\([a-z-]*\).*/\1/p')"
+  if [[ -n "$GM_ARG_NAME" ]]; then
+    expect_contains ".md prompt --help shows the frontmatter arg" "${GREASE_TEST_MD_PKG} --help"  "--${GM_ARG_NAME}"
+  fi
+  if [[ "$WITH_LLM" == "1" ]]; then
+    GM_RUN="$(eval_json eval "\"sudo ${GREASE_TEST_MD_PKG} ${GREASE_TEST_MD_ARG:-}\"")"
+    expect_eval "running the .md prompt exits 0"          "$GM_RUN"  '.exit_code'  '0'
+    expect_eval "the .md prompt produced a model reply"   "$GM_RUN"  '.stdout | length > 0'  'true'
+  else
+    note "  (.md prompt model-run assert needs --with-llm; install + --help checked ungated)"
+  fi
+  run_line "sudo grease remove ${GREASE_TEST_MD_PKG}" >/dev/null
+else
+  note "GREASE_TEST_MD_URL/PKG not set — skipping live grease .md-prompt install (native tests cover it)"
 fi
 
 # ============================================================================

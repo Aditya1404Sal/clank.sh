@@ -27,11 +27,13 @@ fn leaf_hash(data: &[u8]) -> [u8; 32] {
     h.finalize().into()
 }
 
-/// One fixture package: its file name, the JSON body served at `/packages/<name>.json`, and whether it
+/// One fixture package: its file name, the body served at `/packages/<name>.<ext>`, its extension
+/// (`json` for the canonical payload shape, `md` for a frontmatter-authored prompt), and whether it
 /// carries a transparency-log proof in the index.
 struct Pkg {
     name: &'static str,
     kind: &'static str,
+    ext: &'static str,
     body: String,
     with_log: bool,
 }
@@ -49,24 +51,37 @@ fn main() {
         Pkg {
             name: "hello",
             kind: "prompt",
+            ext: "json",
             body: r#"{"kind":"prompt","name":"hello","description":"a signed+logged prompt","body":"Say hello."}"#.to_string(),
             with_log: true,
+        },
+        // A prompt authored as a Markdown file with YAML frontmatter — grease fetches `<name>.md`,
+        // verifies integrity over the RAW `.md` bytes, then converts the frontmatter to a PromptPackage.
+        Pkg {
+            name: "greeting",
+            kind: "prompt",
+            ext: "md",
+            body: "---\nname: greeting\ndescription: a frontmatter-authored prompt\narguments:\n  - name: who\n    required: true\n---\nSay hello to {{who}}.\n".to_string(),
+            with_log: false,
         },
         Pkg {
             name: "hostinfo",
             kind: "script",
+            ext: "json",
             body: r#"{"kind":"script","name":"hostinfo","description":"print a labelled hostname","arguments":[{"name":"label","required":true,"description":"a label"}],"body":"echo {{label}}: $(cat /etc/hostname)"}"#.to_string(),
             with_log: false,
         },
         Pkg {
             name: "reviewing",
             kind: "skill",
+            ext: "json",
             body: r#"{"kind":"skill","name":"reviewing","description":"how to review code","intended-use":"when reviewing code","documents":[{"path":"SKILL.md","content":"Review for correctness first."}],"scripts":[{"name":"review-note","body":"echo check error paths"}]}"#.to_string(),
             with_log: false,
         },
         Pkg {
             name: "cart",
             kind: "agent",
+            ext: "json",
             body: r#"{"kind":"agent","name":"cart","description":"a cart agent","agent-type":"ShoppingCart","constructor-params":["userid"],"methods":[{"name":"add-item","description":"add an item","params":["sku"]}],"ephemeral":false}"#.to_string(),
             with_log: false,
         },
@@ -74,7 +89,7 @@ fn main() {
 
     let mut entries = Vec::new();
     for p in &packages {
-        std::fs::write(pkgdir.join(format!("{}.json", p.name)), &p.body).expect("write package");
+        std::fs::write(pkgdir.join(format!("{}.{}", p.name, p.ext)), &p.body).expect("write package");
         let body = p.body.as_bytes();
         let sha = clank_shell::greasepkg::sha256_hex(body);
         let sig = b64(&sk.sign(body).to_bytes());
