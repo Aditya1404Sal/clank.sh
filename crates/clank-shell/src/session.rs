@@ -219,6 +219,10 @@ pub struct Session {
     /// provider); `None` on native and until injected, in which case `ask` degrades to a clean
     /// "not configured" error. See [`crate::askcmd`].
     ask_provider: Option<Box<dyn crate::askcmd::AskProvider>>,
+    /// The injected Golem-agent invoker (durable `WasmRpc` on the agent; a fake in tests). `None` on
+    /// native / until injected, in which case an agent invocation degrades to a clean "needs a cluster"
+    /// error. See [`crate::agentcmd`].
+    agent_invoker: Option<Box<dyn crate::agentcmd::AgentInvoker>>,
     /// Out-of-band stdin for the next `ask` dispatch: the captured stdout of an upstream pipeline
     /// stage (`cat x | ask "…"`). Set by the pipe pre-extraction in `eval_line` (or restored on a
     /// deferred-confirm resume) and `take()`n by `run_ask`. `None` for an ordinary `ask` line.
@@ -258,6 +262,7 @@ impl Session {
                 authz: AuthzState::default(),
                 bg_jobs: Vec::new(),
                 ask_provider: None,
+                agent_invoker: None,
                 next_ask_stdin: None,
                 repl: None,
                 mcp: crate::mcpstate::McpState::default(),
@@ -281,6 +286,7 @@ impl Session {
                 authz: AuthzState::default(),
                 bg_jobs: Vec::new(),
                 ask_provider: None,
+                agent_invoker: None,
                 next_ask_stdin: None,
                 repl: None,
                 mcp: crate::mcpstate::McpState::default(),
@@ -335,6 +341,12 @@ impl Session {
     /// provider here after constructing the session; without one, `ask` reports "not configured".
     pub fn set_ask_provider(&mut self, provider: Box<dyn crate::askcmd::AskProvider>) {
         self.ask_provider = Some(provider);
+    }
+
+    /// Install the Golem-agent invoker (a durable `WasmRpc` binding on the agent). Without one, an
+    /// installed agent command reports "needs a cluster" (README:895). Injected after construction.
+    pub fn set_agent_invoker(&mut self, invoker: Box<dyn crate::agentcmd::AgentInvoker>) {
+        self.agent_invoker = Some(invoker);
     }
 
     /// Install the MCP HTTP transport (a durable `wstd` client on the agent). Without one, MCP
@@ -607,6 +619,10 @@ impl Session {
             // A grease-installed script: fill its body from args and run the shell source locally
             // (its Confirm was resolved via the dynamic manifest at the gate; sudo pre-authorizes).
             self.run_script(line, blanket_authorized).await
+        } else if self.is_agent_line(line) {
+            // A grease-installed Golem agent: parse the ctor/method/args and invoke it via wRPC in the
+            // cluster (Confirm resolved at the gate; sudo pre-authorizes). Await mode only in v1.
+            self.run_agent(line).await
         } else if let Some((server, uri)) = self.dynamic_mcp_read_target(line) {
             // A top-level `cat /mnt/mcp/<server>/<dynamic>`: fetch the resource live via
             // `resources/read` (the read can't run in Brush's synchronous `cat` — the Wall-C wall — so
@@ -2128,7 +2144,9 @@ impl Session {
         kind: crate::greasepkg::PackageKind,
         body: &[u8],
     ) -> Result<crate::greasestate::Payload, String> {
-        use crate::greasepkg::{McpPackage, PackageKind, PromptPackage, ScriptPackage, SkillPackage};
+        use crate::greasepkg::{
+            AgentPackage, McpPackage, PackageKind, PromptPackage, ScriptPackage, SkillPackage,
+        };
         use crate::greasestate::Payload;
         let (payload, pkg_name) = match kind {
             PackageKind::Prompt => {
@@ -2150,6 +2168,11 @@ impl Session {
                 let m = McpPackage::from_json(body).map_err(|e| format!("grease install: {e}\n"))?;
                 let n = m.name.clone();
                 (Payload::Mcp(m), n)
+            }
+            PackageKind::Agent => {
+                let a = AgentPackage::from_json(body).map_err(|e| format!("grease install: {e}\n"))?;
+                let n = a.name.clone();
+                (Payload::Agent(a), n)
             }
         };
         if pkg_name != name {
@@ -2176,6 +2199,7 @@ impl Session {
             Payload::Script(s) => s.to_json(),
             Payload::Skill(s) => s.to_json(),
             Payload::Mcp(m) => m.to_json(),
+            Payload::Agent(a) => a.to_json(),
         };
         std::fs::write(store.join(kind.payload_file()), json)
             .map_err(|e| format!("grease install: cannot write payload: {e}\n"))
@@ -2221,6 +2245,18 @@ impl Session {
                 // async `grease_finish_install_mcp` path (it needs the live server); nothing to do
                 // synchronously here.
             }
+            PackageKind::Agent => {
+                let help = self
+                    .grease
+                    .pkg_help(name)
+                    .unwrap_or_else(|| format!("{name} — installed agent\n"));
+                let _ = crate::greaseconfig::write_bin_stub(
+                    &crate::greaseconfig::agent_bin_dir(),
+                    name,
+                    &help,
+                    "agent",
+                );
+            }
         }
     }
 
@@ -2252,6 +2288,9 @@ impl Session {
                 let _ = crate::mcpconfig::remove(name);
                 self.mcp.remove(name);
                 let _ = std::fs::remove_dir_all(crate::greaseconfig::mcp_mount_dir().join(name));
+            }
+            crate::greasepkg::PackageKind::Agent => {
+                let _ = std::fs::remove_file(crate::greaseconfig::agent_bin_dir().join(name));
             }
         }
         self.grease.remove(name);
@@ -2865,6 +2904,79 @@ impl Session {
         self.execute(&filled).await
     }
 
+    /// Whether `line`'s leading word is an installed Golem agent. Drives the `run_agent` dispatch.
+    /// Top-level only (a remote invocation awaits under the Session reactor; not reachable from Brush's
+    /// nested runtime — the Wall-C wall).
+    fn is_agent_line(&self, line: &str) -> bool {
+        let Some(word) = prompt_leading_word(line) else {
+            return false;
+        };
+        self.grease.is_agent(&word)
+    }
+
+    /// Run an installed Golem agent: parse `<agent> [--<ctor> val …] <method> [-- --<arg> val …]`,
+    /// validate the method against the reflected metadata, and invoke it via the injected wRPC invoker
+    /// (await mode). Missing invoker → an honest "needs a cluster" error; unknown method → exit 2.
+    async fn run_agent(&mut self, line: &str) -> LineResult {
+        let words = match crate::askcmd::dequote_words(line) {
+            Some(w) => w,
+            None => return LineResult::from_outcome(Vec::new(), b"agent: parse error\n".to_vec(), 2),
+        };
+        let name = words[0].clone();
+        let Some(pkg) = self.grease.agent(&name).cloned() else {
+            return LineResult::denied(); // is_agent_line gated it
+        };
+
+        // Parse ctor flags (before the method), the method word, and method args (after `--` or after
+        // the method). The grammar: `--<ctor> val … <method> [--] [--<arg> val …]`. The first non-flag
+        // word that isn't a flag value is the method.
+        let (constructor, method, args) = match parse_agent_line(&words[1..], &pkg) {
+            Ok(t) => t,
+            Err(msg) => return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 2),
+        };
+
+        // `--help` (or no method) → print the agent help.
+        if method.is_empty() {
+            let help = self.grease.pkg_help(&name).unwrap_or_default();
+            return LineResult::continue_with_stdout(help.into_bytes());
+        }
+        if pkg.method(&method).is_none() {
+            return LineResult::from_outcome(
+                Vec::new(),
+                format!("{name}: unknown method '{method}' (try `{name} --help`)\n").into_bytes(),
+                2,
+            );
+        }
+
+        let Some(invoker) = self.agent_invoker.as_deref() else {
+            return LineResult::from_outcome(
+                Vec::new(),
+                format!(
+                    "{name}: Golem agent invocation requires a configured cluster \
+                     (unavailable on this target)\n"
+                )
+                .into_bytes(),
+                4,
+            );
+        };
+        let inv = crate::agentcmd::AgentInvocation {
+            agent_type: pkg.agent_type.clone(),
+            constructor,
+            method,
+            args,
+        };
+        match invoker.invoke(&inv).await {
+            Ok(result) => {
+                let mut out = result.into_bytes();
+                if !out.ends_with(b"\n") {
+                    out.push(b'\n');
+                }
+                LineResult::continue_with_stdout(out)
+            }
+            Err(e) => LineResult::from_outcome(Vec::new(), format!("{name}: {e}\n").into_bytes(), 1),
+        }
+    }
+
     /// Generated help for an installed command-package line ending in `--help` (prompt or script).
     /// `None` if the line isn't an installed command package or doesn't request help.
     fn pkg_help_for(&self, line: &str) -> Option<String> {
@@ -3470,6 +3582,73 @@ fn parse_pkg_invocation(
         // Bare positional words are ignored in v1 (args are named).
     }
     Ok((name, provided, model_override))
+}
+
+/// Parse a Golem-agent invocation's argument words (everything after the command name) into
+/// `(constructor, method, args)`. Grammar: `[--<ctor> val …] <method> [--] [--<arg> val …]`. A
+/// `--<flag>` before the method whose name is a declared constructor param is a constructor flag; the
+/// first bare word (or the first `--flag` that isn't a known ctor param) begins the method. An
+/// explicit `--` separates the method from its args unambiguously. Returns an error string on a
+/// dangling flag value.
+#[allow(clippy::type_complexity)]
+fn parse_agent_line(
+    words: &[String],
+    pkg: &crate::greasepkg::AgentPackage,
+) -> Result<(Vec<(String, String)>, String, Vec<(String, String)>), String> {
+    let is_ctor = |k: &str| pkg.constructor_params.iter().any(|p| p == k);
+    let mut constructor = Vec::new();
+    let mut method = String::new();
+    let mut args = Vec::new();
+    let mut i = 0;
+    // Phase 1: constructor flags + the method word.
+    while i < words.len() {
+        let w = &words[i];
+        if w == "--" {
+            i += 1;
+            break; // explicit boundary → the rest are method args
+        }
+        if let Some(key) = w.strip_prefix("--") {
+            if method.is_empty() && is_ctor(key) {
+                let val = words.get(i + 1).ok_or_else(|| format!("--{key} needs a value\n"))?;
+                constructor.push((key.to_string(), val.clone()));
+                i += 2;
+                continue;
+            }
+            // A `--flag` that isn't a known ctor param (and we have a method) is a method arg.
+            if !method.is_empty() {
+                let val = words.get(i + 1).ok_or_else(|| format!("--{key} needs a value\n"))?;
+                args.push((key.to_string(), val.clone()));
+                i += 2;
+                continue;
+            }
+            // Before the method, an unknown flag is an error (agents name their ctor params).
+            return Err(format!("unknown constructor flag --{key}\n"));
+        }
+        // A bare word: the method (first) — anything after is handled in phase 2.
+        if method.is_empty() {
+            method = w.clone();
+            i += 1;
+            break;
+        }
+        i += 1;
+    }
+    // Phase 2: remaining words are method args (`--<name> value`). A bare `--` boundary is skipped.
+    while i < words.len() {
+        let w = &words[i];
+        if w == "--" {
+            i += 1;
+            continue;
+        }
+        if let Some(key) = w.strip_prefix("--") {
+            let val = words.get(i + 1).ok_or_else(|| format!("--{key} needs a value\n"))?;
+            args.push((key.to_string(), val.clone()));
+            i += 2;
+        } else {
+            // Bare positional method args are ignored in v1 (args are named).
+            i += 1;
+        }
+    }
+    Ok((constructor, method, args))
 }
 
 /// Persist an install marker to `<etc>/<name>.toml`. Returns a user-facing error string on failure.
@@ -4102,6 +4281,7 @@ mod tests {
             std::env::remove_var("CLANK_GREASE_SCRIPT_BIN");
             std::env::remove_var("CLANK_GREASE_SKILLS");
             std::env::remove_var("CLANK_GREASE_MCP_MOUNT");
+            std::env::remove_var("CLANK_GREASE_AGENT_BIN");
         }
     }
     fn set_grease_dirs() -> GreaseDirsGuard {
@@ -4109,13 +4289,14 @@ mod tests {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let base = std::env::temp_dir().join(format!("clank_grease_sess_{}_{n}", std::process::id()));
-        for sub in ["etc", "store", "bin", "script-bin", "skills", "mnt-mcp"] {
+        for sub in ["etc", "store", "bin", "script-bin", "skills", "mnt-mcp", "agent-bin"] {
             std::fs::create_dir_all(base.join(sub)).unwrap();
         }
         std::env::set_var("CLANK_GREASE_ETC", base.join("etc"));
         std::env::set_var("CLANK_GREASE_STORE", base.join("store"));
         std::env::set_var("CLANK_GREASE_BIN", base.join("bin"));
         std::env::set_var("CLANK_GREASE_MCP_MOUNT", base.join("mnt-mcp"));
+        std::env::set_var("CLANK_GREASE_AGENT_BIN", base.join("agent-bin"));
         std::env::set_var("CLANK_GREASE_SCRIPT_BIN", base.join("script-bin"));
         std::env::set_var("CLANK_GREASE_SKILLS", base.join("skills"));
         GreaseDirsGuard { _lock: lock }
@@ -4370,6 +4551,111 @@ mod tests {
             // real file → nonzero. (We only assert it doesn't crash / doesn't print the live body.)
             let subst = session.eval_line("echo $(cat /mnt/mcp/srv/metrics/cpu)").await;
             assert!(!String::from_utf8_lossy(&subst.stdout).contains("cpu: 42%"), "dynamic read must not run in $()");
+        });
+    }
+
+    /// A scripted [`crate::agentcmd::AgentInvoker`]: records the invocation it saw and returns a fixed
+    /// reply (the native stand-in for the durable `WasmRpc` binding, which needs a cluster).
+    struct FakeAgentInvoker {
+        reply: String,
+        seen: std::sync::Arc<Mutex<Option<crate::agentcmd::AgentInvocation>>>,
+    }
+    #[async_trait::async_trait(?Send)]
+    impl crate::agentcmd::AgentInvoker for FakeAgentInvoker {
+        async fn invoke(
+            &self,
+            inv: &crate::agentcmd::AgentInvocation,
+        ) -> Result<String, String> {
+            *self.seen.lock().unwrap() = Some(inv.clone());
+            Ok(self.reply.clone())
+        }
+    }
+
+    /// End-to-end: `grease install golem:<name>` registers a `/usr/lib/agents/bin/<name>` command;
+    /// running `<agent> --<ctor> v <method> -- --<arg> v` parses the invocation and dispatches it
+    /// through the injected invoker (await mode), printing the result. Missing method → exit 2; no
+    /// invoker → honest "needs a cluster".
+    #[test]
+    fn grease_install_then_invoke_a_golem_agent() {
+        on_rt(async {
+            let _dirs = set_grease_dirs();
+            let mut session = Session::new().await.unwrap();
+            let seen = std::sync::Arc::new(Mutex::new(None));
+            session.set_agent_invoker(Box::new(FakeAgentInvoker {
+                reply: "added sku abc123".into(),
+                seen: seen.clone(),
+            }));
+
+            let pkg = serde_json::json!({
+                "kind": "agent", "name": "shopping-cart",
+                "description": "a shopping cart", "agent-type": "ShoppingCart",
+                "constructor-params": ["userid"],
+                "methods": [{"name": "add-item", "description": "add an item", "params": ["sku"]}]
+            });
+            session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![("/packages/", grease_json(pkg))])));
+            session.run_line("grease registry add https://reg.example").await;
+
+            let inst = session.eval_line("sudo grease install shopping-cart").await;
+            assert_eq!(inst.exit_code, 0, "install stderr: {}", String::from_utf8_lossy(&inst.stderr));
+            assert!(String::from_utf8(inst.stdout).unwrap().contains("[agent]"));
+            assert!(session.grease.is_agent("shopping-cart"));
+            // The agent bin stub landed in the agents bin dir.
+            assert!(crate::greaseconfig::agent_bin_dir().join("shopping-cart").exists());
+
+            // `--help` describes the type + methods (no invocation).
+            let help = session.eval_line("shopping-cart --help").await;
+            assert_eq!(help.exit_code, 0);
+            let help_s = String::from_utf8(help.stdout).unwrap();
+            assert!(help_s.contains("ShoppingCart") && help_s.contains("add-item"), "help: {help_s}");
+
+            // An unknown method → exit 2 (no invocation).
+            let bad = session.eval_line("sudo shopping-cart --userid jd frobnicate").await;
+            assert_eq!(bad.exit_code, 2);
+            assert!(String::from_utf8(bad.stderr).unwrap().contains("unknown method"));
+            assert!(seen.lock().unwrap().is_none(), "no invocation on unknown method");
+
+            // Invoke it (sudo pre-authorizes the Confirm) → the invoker sees the parsed invocation.
+            let run = session.eval_line("sudo shopping-cart --userid jd add-item -- --sku abc123").await;
+            assert_eq!(run.exit_code, 0, "run stderr: {}", String::from_utf8_lossy(&run.stderr));
+            assert_eq!(String::from_utf8(run.stdout).unwrap().trim_end(), "added sku abc123");
+            let inv = seen.lock().unwrap().clone().unwrap();
+            assert_eq!(inv.agent_type, "ShoppingCart");
+            assert_eq!(inv.constructor, vec![("userid".to_string(), "jd".to_string())]);
+            assert_eq!(inv.method, "add-item");
+            assert_eq!(inv.args, vec![("sku".to_string(), "abc123".to_string())]);
+
+            // A bare (non-sudo) agent run confirms (remote invocation is a Confirm capability).
+            let confirm = session.eval_line("shopping-cart --userid jd add-item -- --sku x").await;
+            assert!(confirm.pending_prompt.is_some(), "agent run should confirm without sudo");
+            session.answer_prompt(Some("no".into())).await;
+
+            // Remove deregisters + deletes the stub.
+            let rm = session.eval_line("sudo grease remove shopping-cart").await;
+            assert_eq!(rm.exit_code, 0);
+            assert!(!session.grease.is_agent("shopping-cart"));
+            assert!(!crate::greaseconfig::agent_bin_dir().join("shopping-cart").exists());
+        });
+    }
+
+    /// Without an injected invoker (the native default), an installed agent command reports an honest
+    /// "needs a cluster" error (exit 4) rather than crashing.
+    #[test]
+    fn agent_invocation_without_a_cluster_errors_honestly() {
+        on_rt(async {
+            let _dirs = set_grease_dirs();
+            let mut session = Session::new().await.unwrap(); // no set_agent_invoker
+            let pkg = serde_json::json!({
+                "kind": "agent", "name": "counter", "description": "c", "agent-type": "Counter",
+                "constructor-params": ["id"],
+                "methods": [{"name": "increment", "params": []}]
+            });
+            session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![("/packages/", grease_json(pkg))])));
+            session.run_line("grease registry add https://reg.example").await;
+            session.eval_line("sudo grease install counter").await;
+
+            let run = session.eval_line("sudo counter --id x increment").await;
+            assert_eq!(run.exit_code, 4);
+            assert!(String::from_utf8(run.stderr).unwrap().contains("requires a configured cluster"));
         });
     }
 

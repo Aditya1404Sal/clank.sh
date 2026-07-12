@@ -12,7 +12,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::greasepkg::{McpPackage, PackageKind, PromptPackage, ScriptPackage, SkillPackage};
+use crate::greasepkg::{
+    AgentPackage, McpPackage, PackageKind, PromptPackage, ScriptPackage, SkillPackage,
+};
 use crate::manifest::{AuthorizationPolicy, ExecutionScope, Manifest};
 
 /// The on-disk install marker (`<etc>/<name>.toml`) — the package kind + the registry it came from +
@@ -50,6 +52,7 @@ pub enum Payload {
     Script(ScriptPackage),
     Skill(SkillPackage),
     Mcp(McpPackage),
+    Agent(AgentPackage),
 }
 
 impl Payload {
@@ -59,6 +62,7 @@ impl Payload {
             Payload::Script(_) => PackageKind::Script,
             Payload::Skill(_) => PackageKind::Skill,
             Payload::Mcp(_) => PackageKind::Mcp,
+            Payload::Agent(_) => PackageKind::Agent,
         }
     }
 
@@ -68,6 +72,7 @@ impl Payload {
             Payload::Script(s) => &s.name,
             Payload::Skill(s) => &s.name,
             Payload::Mcp(m) => &m.name,
+            Payload::Agent(a) => &a.name,
         }
     }
 
@@ -77,6 +82,7 @@ impl Payload {
             Payload::Script(s) => &s.description,
             Payload::Skill(s) => &s.description,
             Payload::Mcp(m) => &m.description,
+            Payload::Agent(a) => &a.description,
         }
     }
 }
@@ -177,6 +183,19 @@ impl GreaseState {
         self.kind_of(name) == Some(PackageKind::Mcp)
     }
 
+    /// Whether `name` is an installed Golem-agent package (drives the `run_agent` dispatch).
+    pub fn is_agent(&self, name: &str) -> bool {
+        self.kind_of(name) == Some(PackageKind::Agent)
+    }
+
+    /// The installed Golem-agent payload, if `name` is an agent.
+    pub fn agent(&self, name: &str) -> Option<&AgentPackage> {
+        match self.get(name).map(|p| &p.payload) {
+            Some(Payload::Agent(a)) => Some(a),
+            _ => None,
+        }
+    }
+
     /// The installed prompt payload, if `name` is a prompt.
     pub fn prompt(&self, name: &str) -> Option<&PromptPackage> {
         match self.get(name).map(|p| &p.payload) {
@@ -256,6 +275,21 @@ impl GreaseState {
         let (synopsis, params): (String, Vec<crate::manifest::ParamSpec>) = match &pkg.payload {
             Payload::Prompt(p) => (fallback_synopsis(name, &p.description, "prompt"), p.param_specs()),
             Payload::Script(s) => (fallback_synopsis(name, &s.description, "script"), s.param_specs()),
+            Payload::Agent(a) => {
+                // An agent IS a command (remote wRPC invocation → Confirm). Its input schema is the
+                // constructor params (the instance-identifying flags); method args are per-method.
+                let params = a
+                    .constructor_params
+                    .iter()
+                    .map(|n| crate::manifest::ParamSpec {
+                        name: n.clone(),
+                        ty: crate::manifest::ParamType::String,
+                        required: false,
+                        default: None,
+                    })
+                    .collect();
+                (fallback_synopsis(name, &a.description, "agent"), params)
+            }
             // A skill isn't a command; an MCP server's command surface lives in `McpState` (the server
             // + its tool subcommands are registered there at install, with their own bin stub) — grease
             // is only the durable-persistence layer, so it contributes no dynreg manifest here.
@@ -320,10 +354,43 @@ impl GreaseState {
         match &pkg.payload {
             Payload::Prompt(p) => Some(self.prompt_help_text(name, p, &pkg.marker)),
             Payload::Script(s) => Some(self.script_help_text(name, s, &pkg.marker)),
+            Payload::Agent(a) => Some(self.agent_help_text(name, a, &pkg.marker)),
             // A skill isn't a command; an MCP server's help comes from the `mcp` server bin stub —
             // `grease info` handles these via their own describers.
             Payload::Skill(_) | Payload::Mcp(_) => None,
         }
+    }
+
+    fn agent_help_text(&self, name: &str, a: &AgentPackage, marker: &InstallMarker) -> String {
+        let mut out = format!("{name} — {} [agent]\n", a.description);
+        out.push_str(&format!("\nAgent type: {}\n", a.agent_type));
+        if !a.constructor_params.is_empty() {
+            out.push_str(&format!(
+                "\nConstructor flags (identify the instance): {}\n",
+                a.constructor_params.iter().map(|p| format!("--{p}")).collect::<Vec<_>>().join(" ")
+            ));
+        }
+        if a.methods.is_empty() {
+            out.push_str("\nNo methods declared.\n");
+        } else {
+            out.push_str("\nMethods:\n");
+            for m in &a.methods {
+                let params = if m.params.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", m.params.iter().map(|p| format!("--{p}")).collect::<Vec<_>>().join(" "))
+                };
+                out.push_str(&format!("  {} — {}{params}\n", m.name, m.description));
+            }
+        }
+        out.push_str(&format!(
+            "\nUsage: {name} [--<ctor> val …] <method> [-- --<arg> val …]\n\
+             Running `{name}` invokes the agent in the Golem cluster (confirms unless run with sudo; \
+             requires a cluster). Installed by grease from {} [{}].\n",
+            marker.registry,
+            integrity_note(marker),
+        ));
+        out
     }
 
     fn prompt_help_text(&self, name: &str, p: &PromptPackage, marker: &InstallMarker) -> String {
@@ -404,6 +471,7 @@ fn load_one(name: &str) -> Option<InstalledPackage> {
         PackageKind::Script => Payload::Script(ScriptPackage::from_json(&bytes).ok()?),
         PackageKind::Skill => Payload::Skill(SkillPackage::from_json(&bytes).ok()?),
         PackageKind::Mcp => Payload::Mcp(McpPackage::from_json(&bytes).ok()?),
+        PackageKind::Agent => Payload::Agent(AgentPackage::from_json(&bytes).ok()?),
     };
     Some(InstalledPackage { marker, payload })
 }

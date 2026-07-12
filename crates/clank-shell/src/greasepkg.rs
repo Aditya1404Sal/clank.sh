@@ -30,6 +30,9 @@ pub enum PackageKind {
     /// An MCP server's artifacts (tools/prompts/resources) — the server name becomes a command whose
     /// tools are subcommands (README:657).
     Mcp,
+    /// A Golem agent type — becomes a `/usr/lib/agents/bin/<name>` command that invokes the agent via
+    /// wRPC (README:671).
+    Agent,
 }
 
 impl PackageKind {
@@ -40,6 +43,7 @@ impl PackageKind {
             PackageKind::Script => "script.json",
             PackageKind::Skill => "skill.json",
             PackageKind::Mcp => "mcp.json",
+            PackageKind::Agent => "agent.json",
         }
     }
 
@@ -50,6 +54,7 @@ impl PackageKind {
             PackageKind::Script => "script",
             PackageKind::Skill => "skill",
             PackageKind::Mcp => "mcp",
+            PackageKind::Agent => "agent",
         }
     }
 }
@@ -357,6 +362,54 @@ impl McpPackage {
     }
 }
 
+/// One method of a Golem agent, from its reflected metadata (name + declared parameter names). Drives
+/// `--help`, arg validation, and the unknown-method error.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct AgentMethod {
+    /// The kebab-case method name (the invocation subcommand).
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// Declared parameter names (the `--<name> value` args this method accepts).
+    #[serde(default)]
+    pub params: Vec<String>,
+}
+
+/// A Golem-agent package (grease type 3). Registers the reflected metadata + creates a
+/// `/usr/lib/agents/bin/<name>` command that invokes the agent type via wRPC (README:795).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct AgentPackage {
+    /// The kebab-case command name (the `/usr/lib/agents/bin/<name>` command).
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// The Golem agent **type** name to invoke (the reflected type; may differ from the command name).
+    pub agent_type: String,
+    /// The declared constructor parameter names (the `--<name> value` flags that identify an instance).
+    #[serde(default)]
+    pub constructor_params: Vec<String>,
+    /// The agent's methods (from reflected metadata).
+    #[serde(default)]
+    pub methods: Vec<AgentMethod>,
+}
+
+impl AgentPackage {
+    pub fn from_json(bytes: &[u8]) -> Result<Self, String> {
+        serde_json::from_slice(bytes).map_err(|e| format!("invalid agent package JSON: {e}"))
+    }
+
+    pub fn to_json(&self) -> String {
+        serde_json::to_string_pretty(self).unwrap_or_default()
+    }
+
+    /// Look up a method by name.
+    pub fn method(&self, name: &str) -> Option<&AgentMethod> {
+        self.methods.iter().find(|m| m.name == name)
+    }
+}
+
 /// The lowercase hex sha256 of `bytes` — for content integrity verification.
 pub fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
@@ -427,6 +480,7 @@ pub fn payload_kind(bytes: &[u8]) -> Result<PackageKind, String> {
         Some("script") => Ok(PackageKind::Script),
         Some("skill") => Ok(PackageKind::Skill),
         Some("mcp") => Ok(PackageKind::Mcp),
+        Some("agent") => Ok(PackageKind::Agent),
         Some(other) => Err(format!("unknown package kind '{other}'")),
     }
 }

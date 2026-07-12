@@ -27,6 +27,8 @@ pub const DEFAULT_SKILLS: &str = "/usr/share/skills";
 /// Default MCP resource mount root (`/mnt/mcp/<server>/`) — where an MCP server's resources are
 /// materialized (static files) and its dynamic/template stubs are surfaced (README:669).
 pub const DEFAULT_MCP_MOUNT: &str = "/mnt/mcp";
+/// Default Golem-agent bin directory (`/usr/lib/agents/bin/<name>`), already on `$PATH` (README:671).
+pub const DEFAULT_AGENT_BIN: &str = "/usr/lib/agents/bin";
 
 /// The registry list — configured registry URLs `grease install`/`search` fetch from, in order.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,6 +85,13 @@ pub fn skills_dir() -> PathBuf {
 pub fn mcp_mount_dir() -> PathBuf {
     PathBuf::from(
         std::env::var("CLANK_GREASE_MCP_MOUNT").unwrap_or_else(|_| DEFAULT_MCP_MOUNT.to_string()),
+    )
+}
+
+/// The Golem-agent bin directory (`/usr/lib/agents/bin`), honoring `$CLANK_GREASE_AGENT_BIN`.
+pub fn agent_bin_dir() -> PathBuf {
+    PathBuf::from(
+        std::env::var("CLANK_GREASE_AGENT_BIN").unwrap_or_else(|_| DEFAULT_AGENT_BIN.to_string()),
     )
 }
 

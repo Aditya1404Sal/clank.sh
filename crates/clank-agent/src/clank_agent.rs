@@ -111,6 +111,9 @@ impl ClankAgentImpl {
                     s.set_ask_provider(Box::new(crate::ask_provider::DurableAnthropicProvider));
                     // Install the durable wstd HTTP transport so `mcp` can reach servers.
                     s.set_mcp_http(Box::new(crate::mcp_http::WstdMcpHttp));
+                    // Install the durable WasmRpc invoker so grease-installed Golem agents can be
+                    // invoked in the cluster.
+                    s.set_agent_invoker(Box::new(crate::agent_invoker::WasmRpcInvoker));
                     self.session = Some(s);
                 }
                 Err(e) => {
