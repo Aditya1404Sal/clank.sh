@@ -116,6 +116,9 @@ impl ClankAgentImpl {
                     s.set_agent_invoker(Box::new(crate::agent_invoker::WasmRpcInvoker));
                     // Install the durable Golem cluster interface backing the `golem` command.
                     s.set_golem_cluster(Box::new(crate::golem_cluster::GolemApiCluster));
+                    // Install the replay-safe /var/log sink (whole-file rewrite of an in-memory buffer,
+                    // so oplog replay never duplicates lines — see crate::log_sink).
+                    s.set_log_sink(std::sync::Arc::new(crate::log_sink::DurableLogSink::new()));
                     self.session = Some(s);
                 }
                 Err(e) => {

@@ -411,6 +411,21 @@ expect_contains "context trim without a count errors" 'context trim'  'expects a
 run_line 'context clear' >/dev/null
 
 # ============================================================================
+# 2c2. Observability — the /var/log logging layer (README:613-634)
+# ============================================================================
+# Every command line writes start/end events to /var/log/shell.log; a destructive (sudo-only) op writes
+# /var/log/ops.log. On the durable agent these go through the replay-safe DurableLogSink (in-memory
+# buffer + idempotent whole-file rewrite), so the files are readable with plain `cat`.
+run_line 'echo audit_probe_xyz' >/dev/null
+expect_contains "shell.log records the command"   'cat /var/log/shell.log'  'audit_probe_xyz'
+expect_contains "shell.log records an exit code"   'cat /var/log/shell.log'  'exit=0'
+# A destructive op (bare rm confirms) is recorded in ops.log with its outcome — abort the confirm after.
+LOG_RM="$(eval_json eval '"rm /tmp/audit_probe_rm"')"
+expect_eval "a destructive op confirms"            "$LOG_RM"  '.pending_prompt != null'  'true'
+eval_json abort_prompt >/dev/null
+expect_contains "ops.log records the destructive op" 'cat /var/log/ops.log'  'cmd=rm'
+
+# ============================================================================
 # 2d. Command manifests — `help <cmd>` surfaces the manifest synopsis, not the old stub
 # ============================================================================
 # Each clank builtin now carries a real Manifest; its synopsis feeds get_content, which Brush's

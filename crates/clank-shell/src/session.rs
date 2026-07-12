@@ -253,6 +253,10 @@ pub struct Session {
     mcp_http: Option<Box<dyn crate::mcpclient::McpHttp>>,
     /// Installed grease packages (prompts). Reconstructed from the durable agent FS on boot.
     grease: crate::greasestate::GreaseState,
+    /// The log sink installed per-line (the `/var/log` observability layer). Defaults to the direct
+    /// append sink (correct on native); the agent injects a durability-gated sink that appends only when
+    /// the durable execution state is live (avoiding replay duplication — see `logging`).
+    log_sink: std::sync::Arc<dyn crate::logging::LogSink>,
     source: SourceInfo,
     #[cfg(target_arch = "wasm32")]
     rt: tokio::runtime::Runtime,
@@ -283,6 +287,7 @@ impl Session {
                 mcp: crate::mcpstate::McpState::default(),
                 mcp_http: None,
                 grease: crate::greasestate::GreaseState::load(),
+                log_sink: std::sync::Arc::new(crate::logging::DefaultLogSink),
                 source: SourceInfo::default(),
                 rt,
             };
@@ -309,6 +314,7 @@ impl Session {
                 mcp: crate::mcpstate::McpState::default(),
                 mcp_http: None,
                 grease: crate::greasestate::GreaseState::load(),
+                log_sink: std::sync::Arc::new(crate::logging::DefaultLogSink),
                 source: SourceInfo::default(),
             };
             session.reconstruct_mcp_from_grease();
@@ -357,7 +363,8 @@ impl Session {
     /// Install the LLM provider that backs `ask`. The agent build injects a durable Anthropic
     /// provider here after constructing the session; without one, `ask` reports "not configured".
     pub fn set_ask_provider(&mut self, provider: Box<dyn crate::askcmd::AskProvider>) {
-        self.ask_provider = Some(provider);
+        // Wrap so each LLM turn is logged to http.log (the outbound Anthropic call).
+        self.ask_provider = Some(Box::new(crate::askcmd::LoggingAskProvider::new(provider)));
     }
 
     /// Install the Golem-agent invoker (a durable `WasmRpc` binding on the agent). Without one, an
@@ -375,12 +382,48 @@ impl Session {
     /// Install the MCP HTTP transport (a durable `wstd` client on the agent). Without one, MCP
     /// commands report "not configured" (exit 4). Injected after construction like the ask provider.
     pub fn set_mcp_http(&mut self, http: Box<dyn crate::mcpclient::McpHttp>) {
-        self.mcp_http = Some(http);
+        // Wrap the transport so every MCP + grease-registry request is logged to http.log (redacted).
+        self.mcp_http = Some(Box::new(crate::mcpclient::LoggingMcpHttp::new(http)));
+    }
+
+    /// Install the `/var/log` log sink. The agent injects a durability-gated sink (append only when
+    /// live) so oplog replay doesn't duplicate log lines; native keeps the default direct-append sink.
+    pub fn set_log_sink(&mut self, sink: std::sync::Arc<dyn crate::logging::LogSink>) {
+        self.log_sink = sink;
     }
 
     /// Evaluate one input line: record it, serve the clank-specific `context` builtin, otherwise
     /// execute it through Brush.
+    /// Evaluate one command line, logging its lifecycle to `shell.log`: a `start` event as the line
+    /// begins and an `end` (with exit code) when it finishes — or a `pause` when it stops for a
+    /// `prompt-user`/authorization question (the eventual `end` is logged when `answer_prompt` resolves
+    /// it). The actual command dispatch lives in [`eval_line_inner`](Self::eval_line_inner).
     pub async fn eval_line(&mut self, line: &str) -> LineResult {
+        // Install this session's log sink for the whole line so every logging call site (shell/http/mcp/
+        // ops, deep in run_command / McpClient::call / coreutils) routes through it.
+        let _log = crate::logging::install(self.log_sink.clone());
+        if !line.trim().is_empty() {
+            crate::logging::Record::new("start").field("line", line).emit(crate::logging::LogFile::Shell);
+        }
+        let result = self.eval_line_inner(line).await;
+        self.log_line_outcome(line, &result);
+        result
+    }
+
+    /// Emit the shell.log terminal event for a finished (or paused) line.
+    fn log_line_outcome(&self, line: &str, result: &LineResult) {
+        if line.trim().is_empty() {
+            return;
+        }
+        let event = if result.pending_prompt.is_some() { "pause" } else { "end" };
+        let mut rec = crate::logging::Record::new(event).field("line", line);
+        if result.pending_prompt.is_none() {
+            rec = rec.field("exit", result.exit_code.to_string());
+        }
+        rec.emit(crate::logging::LogFile::Shell);
+    }
+
+    async fn eval_line_inner(&mut self, line: &str) -> LineResult {
         // A prompt is already outstanding: the caller must answer it (via `answer_prompt`), not run
         // a new command. The shell never blocks, so it's the caller's job to notice `pending_prompt`
         // and respond. Reject the command with a clear message rather than silently interleaving.
@@ -569,6 +612,22 @@ impl Session {
         // name resolves to its Confirm-policy manifest — MCP tool calls are outbound HTTP).
         let (policy, elevated, command) = self.resolve_authz(line);
         let effective = strip_sudo_prefix(line);
+        // ops.log: a `sudo-only` command is the destructive tier (rm / overwrite). Log the attempt with
+        // its authorization outcome, before `decide` short-circuits — so a denied destructive op is
+        // recorded too.
+        if policy == crate::manifest::AuthorizationPolicy::SudoOnly {
+            let decision = authz::decide(policy, elevated, self.authz.allow_all);
+            let outcome = match decision {
+                Decision::Allow => "authorized",
+                Decision::Deny => "denied",
+                Decision::Confirm { .. } => "confirm-required",
+            };
+            crate::logging::Record::new("destructive")
+                .field("cmd", command.as_deref().unwrap_or(""))
+                .field("line", &effective)
+                .field("outcome", outcome)
+                .emit(crate::logging::LogFile::Ops);
+        }
         match authz::decide(policy, elevated, self.authz.allow_all) {
             Decision::Allow => {}
             Decision::Deny => {
@@ -679,10 +738,12 @@ impl Session {
             match crate::httpcmd::classify(line) {
                 Some((crate::httpcmd::HttpCommand::Curl, args)) => {
                     let o = wcurl::run(&args).await;
+                    log_http_tool("curl", &args, o.exit_code);
                     LineResult::from_outcome(o.stdout, o.stderr, o.exit_code)
                 }
                 Some((crate::httpcmd::HttpCommand::Wget, args)) => {
                     let o = waget::run(&args).await;
+                    log_http_tool("wget", &args, o.exit_code);
                     LineResult::from_outcome(o.stdout, o.stderr, o.exit_code)
                 }
                 None => {
@@ -3315,6 +3376,29 @@ impl Session {
             );
         };
 
+        // Structured audit event for the Golem invocation (README:627): agent type, ordered constructor
+        // params, method, mode, and phantom UUID. Logged to mcp.log (the outbound-call log) with the
+        // agent identity so it correlates with Golem cluster logs. (revision + await-mode idempotency-key
+        // have no fields yet — honest-stubbed / not surfaced by the SDK on this path.)
+        let ctor = inv
+            .constructor
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mode = match &inv.mode {
+            crate::agentcmd::InvokeMode::Await => "await".to_string(),
+            crate::agentcmd::InvokeMode::Trigger => "trigger".to_string(),
+            crate::agentcmd::InvokeMode::Schedule(when) => format!("schedule:{when}"),
+        };
+        crate::logging::Record::new("agent-invoke")
+            .field("type", &inv.agent_type)
+            .field("ctor", &ctor)
+            .field("method", &inv.method)
+            .field("mode", &mode)
+            .field("phantom", inv.phantom.as_deref().unwrap_or(""))
+            .emit(crate::logging::LogFile::Mcp);
+
         match parsed.mode {
             crate::agentcmd::InvokeMode::Await => match invoker.invoke(&inv).await {
                 Ok(result) => {
@@ -3685,7 +3769,27 @@ impl Session {
     ///
     /// For an authorization confirmation: `yes` (or `all`) → runs the gated command; `all` also
     /// grants blanket `confirm` approval for the session; `no`/abort → exit `5` (denied).
+    /// Answer (or abort) the outstanding `prompt-user`/authorization question. Logs the resolved line's
+    /// terminal `end` event to shell.log once it finishes (a resolution can itself re-pause — an approved
+    /// `ask` whose tool call prompts again — in which case the `end` is deferred to the next resolution).
     pub async fn answer_prompt(&mut self, response: Option<String>) -> LineResult {
+        let _log = crate::logging::install(self.log_sink.clone());
+        // The paused row's PID, for the shell.log end event (its `start` was logged under this PID).
+        let paused_pid = self.pending.as_ref().and_then(|p| p.pid);
+        let result = self.answer_prompt_inner(response).await;
+        // Only a truly-resolved line (no longer pending) gets its terminal event; a re-pause defers.
+        if paused_pid.is_some() && result.pending_prompt.is_none() {
+            let mut rec = crate::logging::Record::new("end");
+            if let Some(pid) = paused_pid {
+                rec = rec.field("pid", pid.to_string());
+            }
+            rec.field("exit", result.exit_code.to_string())
+                .emit(crate::logging::LogFile::Shell);
+        }
+        result
+    }
+
+    async fn answer_prompt_inner(&mut self, response: Option<String>) -> LineResult {
         let Some(pending) = self.pending.take() else {
             self.pending = None;
             return LineResult::stderr("clank: no prompt-user question is awaiting a response\n");
@@ -3963,6 +4067,18 @@ struct IndexEntry {
     signer: Option<String>,
     /// The advertised RFC-6962 inclusion proof, if the registry runs a transparency log.
     log: Option<LogProof>,
+}
+
+/// Log a curl/wget invocation to http.log: the tool, its target URL (the first non-flag argument), and
+/// the exit code. curl/wget bypass the `McpHttp` seam (their own `wstd`/`reqwest` fetch), so they're
+/// logged here at the dispatch site rather than by the `LoggingMcpHttp` decorator.
+fn log_http_tool(tool: &str, args: &[String], exit_code: u8) {
+    let url = args.iter().find(|a| !a.starts_with('-')).map(String::as_str).unwrap_or("");
+    crate::logging::Record::new("http")
+        .field("tool", tool)
+        .field("url", url)
+        .field("exit", exit_code.to_string())
+        .emit(crate::logging::LogFile::Http);
 }
 
 /// Whether a fetched package body is a Markdown prompt with a leading `---` frontmatter fence (as
@@ -6823,6 +6939,80 @@ mod tests {
                 "without a provider the count marker stays, got:\n{shown}"
             );
             assert!(!shown.contains("[summary of"), "no summary block without a provider");
+        });
+    }
+
+    /// Points `CLANK_LOG_DIR` at a fresh temp dir for a Session logging test, restoring the env on drop.
+    /// Serializes via a process-wide lock (env is global). The default `DefaultLogSink` (installed by
+    /// `eval_line`) then writes real files under this dir.
+    struct LogCapture {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        dir: std::path::PathBuf,
+    }
+    impl LogCapture {
+        fn new(tag: &str) -> Self {
+            let lock = crate::logging::test_env_lock();
+            let dir = std::env::temp_dir().join(format!("clank-sesslog-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::env::set_var(crate::logging::LOG_DIR_ENV, &dir);
+            Self { _lock: lock, dir }
+        }
+        fn read(&self, file: crate::logging::LogFile) -> String {
+            std::fs::read_to_string(self.dir.join(file.filename())).unwrap_or_default()
+        }
+    }
+    impl Drop for LogCapture {
+        fn drop(&mut self) {
+            std::env::remove_var(crate::logging::LOG_DIR_ENV);
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// A normal command writes start + end (with exit code) events to shell.log.
+    #[test]
+    fn shell_log_records_start_and_end() {
+        on_rt(async {
+            let cap = LogCapture::new("shell");
+            let mut session = Session::new().await.unwrap();
+            session.eval_line("echo hi").await;
+            session.eval_line("false").await;
+            let log = cap.read(crate::logging::LogFile::Shell);
+            assert!(log.contains(r#"start line="echo hi""#), "got:\n{log}");
+            assert!(log.contains(r#"end line="echo hi" exit=0"#), "got:\n{log}");
+            assert!(log.contains("exit=1"), "the failing command's exit code is logged, got:\n{log}");
+        });
+    }
+
+    /// A destructive (`sudo-only`) command is recorded in ops.log with its authorization outcome, even
+    /// when denied (a bare `rm` is `sudo-only` → confirm-required without sudo).
+    #[test]
+    fn ops_log_records_destructive_ops() {
+        on_rt(async {
+            let cap = LogCapture::new("ops");
+            let mut session = Session::new().await.unwrap();
+            // A bare `rm` is the destructive tier; without sudo it needs confirmation.
+            let r = session.eval_line("rm /tmp/whatever").await;
+            assert!(r.pending_prompt.is_some(), "rm should confirm");
+            session.answer_prompt(Some("no".into())).await;
+            let log = cap.read(crate::logging::LogFile::Ops);
+            assert!(log.contains("destructive"), "ops.log should record the destructive op, got:\n{log}");
+            assert!(log.contains("cmd=rm"), "got:\n{log}");
+            assert!(log.contains("confirm-required"), "got:\n{log}");
+        });
+    }
+
+    /// An `ask` LLM turn is recorded in http.log (via the LoggingAskProvider wrapper).
+    #[test]
+    fn http_log_records_the_llm_turn() {
+        on_rt(async {
+            let cap = LogCapture::new("http");
+            let mut session = Session::new().await.unwrap();
+            let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+            session.set_ask_provider(Box::new(FakeProvider::reply("reply", seen)));
+            session.eval_line(r#"sudo ask "hello""#).await;
+            let log = cap.read(crate::logging::LogFile::Http);
+            assert!(log.contains("kind=llm"), "http.log should record the LLM call, got:\n{log}");
+            assert!(log.contains("status=ok"), "got:\n{log}");
         });
     }
 

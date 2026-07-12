@@ -32,6 +32,7 @@ pub mod greasestate;
 mod httpcmd;
 mod interceptstub;
 mod killcmd;
+pub mod logging;
 mod mancmd;
 pub mod manifest;
 pub mod mcpclient;

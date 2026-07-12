@@ -64,6 +64,42 @@ pub trait McpHttp {
     ) -> Result<HttpResponse, String>;
 }
 
+/// A decorator that logs every outbound request to `http.log` (secret headers redacted) then delegates
+/// to the wrapped transport. Wrapping the injected `McpHttp` in the portable core means http.log covers
+/// ALL MCP + grease-registry traffic uniformly and stays testable with the native fakes — the emission
+/// lives here, not in the wasm-only impl. `ask`'s LLM call and curl/wget are logged at their own sites.
+pub struct LoggingMcpHttp {
+    inner: Box<dyn McpHttp>,
+}
+
+impl LoggingMcpHttp {
+    pub fn new(inner: Box<dyn McpHttp>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl McpHttp for LoggingMcpHttp {
+    async fn request(
+        &self,
+        method: &str,
+        url: &str,
+        headers: &[(String, String)],
+        body: Option<Vec<u8>>,
+    ) -> Result<HttpResponse, String> {
+        let result = self.inner.request(method, url, headers, body).await;
+        let rec = crate::logging::Record::new("http")
+            .field("method", method)
+            .field("url", url);
+        let rec = match &result {
+            Ok(resp) => rec.field("status", resp.status.to_string()),
+            Err(e) => rec.field("status", "error").field("error", e),
+        };
+        rec.emit(crate::logging::LogFile::Http);
+        result
+    }
+}
+
 // ---- JSON-RPC + MCP types -------------------------------------------------------------------------
 
 #[derive(Serialize)]
@@ -290,6 +326,21 @@ impl<'a> McpClient<'a> {
         let id = self.id();
         let req = JsonRpcRequest { jsonrpc: "2.0", id, method, params };
         let body = serde_json::to_vec(&req).map_err(|e| McpError::usage(format!("encode: {e}")))?;
+        let result = self.send_call(method, session_id, body).await;
+        // mcp.log: every JSON-RPC method + its outcome (the single funnel all MCP ops pass through).
+        let rec = crate::logging::Record::new("rpc")
+            .field("method", method)
+            .field("url", &self.url);
+        match &result {
+            Ok(_) => rec.field("status", "ok"),
+            Err(e) => rec.field("status", "error").field("error", &e.message),
+        }
+        .emit(crate::logging::LogFile::Mcp);
+        result
+    }
+
+    /// The transport half of [`call`](Self::call), split out so `call` can log the outcome around it.
+    async fn send_call(&mut self, _method: &str, session_id: Option<&str>, body: Vec<u8>) -> McpResult<Value> {
         let resp = self
             .http
             .request("POST", &self.url, &self.headers(session_id), Some(body))

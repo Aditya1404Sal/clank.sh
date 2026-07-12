@@ -335,6 +335,43 @@ pub trait AskProvider {
     ) -> AskResponse;
 }
 
+/// A decorator that logs each LLM turn to `http.log` (the outbound Anthropic call) then delegates. The
+/// prompt/response bodies are NOT logged (they can be large and carry user content already in the
+/// transcript); only the model, tool count, and outcome are recorded. Wrapping the injected provider in
+/// the portable core keeps emission testable with the native fake and out of the wasm-only impl.
+pub struct LoggingAskProvider {
+    inner: Box<dyn AskProvider>,
+}
+
+impl LoggingAskProvider {
+    pub fn new(inner: Box<dyn AskProvider>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl AskProvider for LoggingAskProvider {
+    async fn turn(
+        &self,
+        system: Option<&str>,
+        history: &[AskTurn],
+        tools: &[AskTool],
+        model: &str,
+    ) -> AskResponse {
+        let resp = self.inner.turn(system, history, tools, model).await;
+        let rec = crate::logging::Record::new("http")
+            .field("kind", "llm")
+            .field("model", model)
+            .field("tools", tools.len().to_string());
+        let rec = match &resp.error {
+            Some(e) => rec.field("status", "error").field("error", e),
+            None => rec.field("status", "ok"),
+        };
+        rec.emit(crate::logging::LogFile::Http);
+        resp
+    }
+}
+
 /// A parsed `ask` invocation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AskArgs {

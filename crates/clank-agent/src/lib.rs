@@ -8,4 +8,5 @@ mod agent_invoker;
 mod ask_provider;
 mod clank_agent;
 mod golem_cluster;
+mod log_sink;
 mod mcp_http;
