@@ -791,6 +791,11 @@ expect_contains "grease registry add records a URL"   'grease registry add https
 expect_contains "grease registry list shows it"       'grease registry list'  'https://reg.example/pkgs'
 expect_contains "the registries file was written"     'cat /etc/grease/registries.toml'  'reg.example'
 expect_contains "grease registry remove drops it"     'grease registry remove https://reg.example/pkgs'  'removed registry'
+# A registry can carry a trusted ed25519 signing key (base64 32-byte). A valid key is accepted and the
+# registry is marked signed; a malformed key is rejected at add time (no fetch needed).
+expect_contains "grease registry add --key accepts a valid key"  'grease registry add https://signed.example --key 6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw='  '(signed)'
+expect_contains "grease registry add --key rejects a bad key"    'grease registry add https://bad.example --key not-a-key'  'invalid public key'
+run_line 'grease registry remove https://signed.example' >/dev/null
 expect_contains "grease registry list empty again"    'grease registry list'  'no registries configured'
 expect_contains "grease list is empty initially"      'grease list'       'no packages installed'
 # install with no registry configured errors honestly (no panic, no hang). sudo pre-authorizes.

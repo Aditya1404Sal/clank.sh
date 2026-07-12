@@ -20,7 +20,7 @@ use brush_parser::{tokenize_str, unquote_str, Token};
 /// A parsed `grease` command.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum GreaseCommand {
-    RegistryAdd { url: String },
+    RegistryAdd { url: String, key: Option<String> },
     RegistryList,
     RegistryRemove { url: String },
     Install { name: String },
@@ -84,8 +84,22 @@ fn parse_registry(args: &[String]) -> Result<GreaseCommand, String> {
     match args.first().map(String::as_str) {
         Some("list") | None => Ok(GreaseCommand::RegistryList),
         Some("add") => {
-            let url = args.get(1).ok_or("grease registry add: needs a <url>")?;
-            Ok(GreaseCommand::RegistryAdd { url: url.clone() })
+            // `grease registry add <url> [--key <base64-ed25519-pubkey>]`.
+            let rest = &args[1..];
+            let mut url: Option<String> = None;
+            let mut key: Option<String> = None;
+            let mut it = rest.iter();
+            while let Some(a) = it.next() {
+                if a == "--key" {
+                    key = Some(it.next().ok_or("grease registry add: --key needs a value")?.clone());
+                } else if url.is_none() {
+                    url = Some(a.clone());
+                } else {
+                    return Err(format!("grease registry add: unexpected argument '{a}'"));
+                }
+            }
+            let url = url.ok_or("grease registry add: needs a <url>")?;
+            Ok(GreaseCommand::RegistryAdd { url, key })
         }
         Some("remove") | Some("rm") => {
             let url = args.get(1).ok_or("grease registry remove: needs a <url>")?;
@@ -113,7 +127,7 @@ pub(crate) fn manifests() -> Vec<crate::manifest::Manifest> {
     let mut m = Manifest::builtin("grease", "install and manage capability packages")
         .with_scope(ExecutionScope::Subprocess)
         .with_help(
-            "grease registry add <url> | list | remove <url> — manage package registries\n\
+            "grease registry add <url> [--key <ed25519-pubkey>] | list | remove <url> — registries\n\
              grease install <name> — install a package (outbound HTTP); the registry declares its kind\n\
              grease remove <name> — uninstall a package\n\
              grease list — installed packages\n\
@@ -150,7 +164,12 @@ mod tests {
     fn classifies_registry_subcommands() {
         assert_eq!(
             c("grease registry add https://reg.example"),
-            GreaseCommand::RegistryAdd { url: "https://reg.example".into() }
+            GreaseCommand::RegistryAdd { url: "https://reg.example".into(), key: None }
+        );
+        // `--key` attaches a trusted signing key.
+        assert_eq!(
+            c("grease registry add https://reg.example --key AAAA"),
+            GreaseCommand::RegistryAdd { url: "https://reg.example".into(), key: Some("AAAA".into()) }
         );
         assert_eq!(c("grease registry list"), GreaseCommand::RegistryList);
         assert_eq!(c("grease registry"), GreaseCommand::RegistryList); // bare = list
@@ -158,6 +177,8 @@ mod tests {
             c("grease registry remove https://reg.example"),
             GreaseCommand::RegistryRemove { url: "https://reg.example".into() }
         );
+        // `--key` without a value is an error.
+        assert!(classify("grease registry add https://r --key").unwrap().is_err());
     }
 
     #[test]

@@ -36,6 +36,12 @@ pub struct Registries {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegistryEntry {
     pub url: String,
+    /// The registry's trusted ed25519 public key (base64), if configured via `grease registry add
+    /// --key`. When present, `grease install` verifies each package's detached signature against it;
+    /// absent ⇒ the registry is unsigned (record-only integrity). Defaults `None` for entries written
+    /// before signing existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 /// A process-global lock serializing tests that set `$CLANK_GREASE_*` (process-global env vars, so
@@ -101,15 +107,29 @@ fn save_registries(regs: &Registries) -> Result<(), String> {
     std::fs::write(registries_path(), text).map_err(|e| format!("write error: {e}"))
 }
 
-/// Add a registry URL (idempotent — a duplicate URL is a no-op). Returns whether it was newly added.
-pub fn add_registry(url: &str) -> Result<bool, String> {
+/// Add a registry URL with an optional trusted signing key (base64 ed25519 public key). Idempotent on
+/// the URL, but re-adding a known URL WITH a `key` updates its key (so `grease registry add <url>
+/// --key <k>` can attach a key to an existing entry). Returns whether the list changed.
+pub fn add_registry(url: &str, key: Option<&str>) -> Result<bool, String> {
     let mut regs = load_registries()?;
-    if regs.registry.iter().any(|r| r.url == url) {
+    if let Some(existing) = regs.registry.iter_mut().find(|r| r.url == url) {
+        // Known URL: update the key if one was supplied and it differs; otherwise a no-op.
+        let new_key = key.map(|k| k.to_string());
+        if key.is_some() && existing.key != new_key {
+            existing.key = new_key;
+            save_registries(&regs)?;
+            return Ok(true);
+        }
         return Ok(false);
     }
-    regs.registry.push(RegistryEntry { url: url.to_string() });
+    regs.registry.push(RegistryEntry { url: url.to_string(), key: key.map(|k| k.to_string()) });
     save_registries(&regs)?;
     Ok(true)
+}
+
+/// The trusted signing key (base64 ed25519 public key) configured for `url`, if any.
+pub fn registry_key(url: &str) -> Option<String> {
+    load_registries().ok()?.registry.into_iter().find(|r| r.url == url).and_then(|r| r.key)
 }
 
 /// Remove a registry URL. Returns whether it was present.
@@ -233,14 +253,18 @@ mod tests {
     fn registry_add_list_remove_round_trip() {
         with_temp_dirs(|| {
             assert!(list_registries().is_empty());
-            assert!(add_registry("https://reg.example").unwrap());
-            // Duplicate is a no-op.
-            assert!(!add_registry("https://reg.example").unwrap());
-            assert!(add_registry("https://other.example").unwrap());
+            assert!(add_registry("https://reg.example", None).unwrap());
+            // Duplicate (no key) is a no-op.
+            assert!(!add_registry("https://reg.example", None).unwrap());
+            assert!(add_registry("https://other.example", None).unwrap());
             assert_eq!(
                 list_registries(),
                 vec!["https://reg.example".to_string(), "https://other.example".to_string()]
             );
+            // Re-adding a known URL WITH a key updates it (returns changed=true); the key is readable.
+            assert!(add_registry("https://reg.example", Some("KEYDATA")).unwrap());
+            assert_eq!(registry_key("https://reg.example").as_deref(), Some("KEYDATA"));
+            assert_eq!(registry_key("https://other.example"), None);
             assert!(remove_registry("https://reg.example").unwrap());
             assert!(!remove_registry("https://reg.example").unwrap()); // already gone
             assert_eq!(list_registries(), vec!["https://other.example".to_string()]);

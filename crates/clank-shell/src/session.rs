@@ -1581,7 +1581,7 @@ impl Session {
     async fn run_grease(&mut self, cmd: crate::greasecmd::GreaseCommand) -> LineResult {
         use crate::greasecmd::GreaseCommand;
         match cmd {
-            GreaseCommand::RegistryAdd { url } => self.grease_registry_add(&url),
+            GreaseCommand::RegistryAdd { url, key } => self.grease_registry_add(&url, key.as_deref()),
             GreaseCommand::RegistryList => self.grease_registry_list(),
             GreaseCommand::RegistryRemove { url } => self.grease_registry_remove(&url),
             GreaseCommand::List => self.grease_list(),
@@ -1667,14 +1667,15 @@ impl Session {
         // done here (while `http` is borrowed); persistence happens in `grease_finish_install` (which
         // needs `&mut self`), so we capture the results and drop the borrow first.
         let mut last_err = String::from("package not found in any configured registry");
-        let mut fetched: Option<(String, Vec<u8>, Option<String>)> = None; // (registry, body, expected)
+        // (registry, body, index-entry) captured from the first registry that has the package.
+        let mut fetched: Option<(String, Vec<u8>, IndexEntry)> = None;
         for base in &registries {
-            // Expected hash from the index (best-effort — a loose registry may omit it).
-            let expected = fetch_index_sha256(http.as_ref(), base, name).await;
+            // Integrity metadata from the index (best-effort — a loose registry may omit it).
+            let entry = fetch_index_entry(http.as_ref(), base, name).await;
             let url = format!("{}/packages/{name}.json", base.trim_end_matches('/'));
             match http.request("GET", &url, &[], None).await {
                 Ok(resp) if resp.status == 200 => {
-                    fetched = Some((base.clone(), resp.body, expected));
+                    fetched = Some((base.clone(), resp.body, entry));
                     break;
                 }
                 Ok(resp) if resp.status == 404 => {
@@ -1688,7 +1689,7 @@ impl Session {
                 }
             }
         }
-        let Some((registry, body, expected)) = fetched else {
+        let Some((registry, body, entry)) = fetched else {
             return LineResult::from_outcome(
                 Vec::new(),
                 format!("grease install: {last_err}\n").into_bytes(),
@@ -1701,7 +1702,7 @@ impl Session {
         // record-only (older/loose registries still work), with a stderr note.
         let actual = crate::greasepkg::sha256_hex(&body);
         let mut note = Vec::new();
-        match &expected {
+        match &entry.sha256 {
             Some(exp) if exp.eq_ignore_ascii_case(&actual) => {} // verified
             Some(exp) => {
                 return LineResult::from_outcome(
@@ -1721,12 +1722,59 @@ impl Session {
                 );
             }
         }
-        self.grease_finish_install(name, &registry, &body, actual, expected.is_some(), note)
+
+        // Signature verification: if the registry was configured with a trusted key (`grease registry
+        // add --key`), the payload's detached ed25519 signature MUST verify against it. A configured
+        // key with a missing/invalid signature is a HARD reject (a signed registry must sign its
+        // packages). No configured key ⇒ unsigned registry (record-only, as before), with a note.
+        let mut signature_verified = false;
+        let mut signer: Option<String> = None;
+        if let Some(trusted_key) = crate::greaseconfig::registry_key(&registry) {
+            let Some(sig) = entry.sig.as_deref() else {
+                return LineResult::from_outcome(
+                    Vec::new(),
+                    format!(
+                        "grease install: '{name}' has no signature but {registry} is a signed \
+                         registry — refusing to install\n"
+                    )
+                    .into_bytes(),
+                    4,
+                );
+            };
+            if let Err(e) = crate::greasepkg::verify_signature(&body, sig, &trusted_key) {
+                return LineResult::from_outcome(
+                    Vec::new(),
+                    format!("grease install: signature verification failed for '{name}': {e}\n")
+                        .into_bytes(),
+                    4,
+                );
+            }
+            signature_verified = true;
+            signer = entry.signer.clone().or(Some("registry key".to_string()));
+        } else {
+            note.extend_from_slice(
+                format!("grease: {registry} is unsigned (no trusted key) — installing unsigned\n")
+                    .as_bytes(),
+            );
+        }
+
+        self.grease_finish_install(
+            name,
+            &registry,
+            &body,
+            actual,
+            entry.sha256.is_some(),
+            signature_verified,
+            signer,
+            note,
+        )
     }
 
     /// Verify + persist a fetched package payload and register it, dispatching on the payload's
     /// declared `kind`. `sha256` is the (already-computed) digest of `body`; `verified` marks whether
-    /// it matched the registry's advertised hash.
+    /// it matched the registry's advertised hash; `signature_verified`/`signer` record the ed25519
+    /// signing status resolved in `grease_install`.
+    #[allow(clippy::too_many_arguments)]
     fn grease_finish_install(
         &mut self,
         name: &str,
@@ -1734,6 +1782,8 @@ impl Session {
         body: &[u8],
         sha256: String,
         verified: bool,
+        signature_verified: bool,
+        signer: Option<String>,
         note: Vec<u8>,
     ) -> LineResult {
         let kind = match crate::greasepkg::payload_kind(body) {
@@ -1762,6 +1812,8 @@ impl Session {
             registry: registry.to_string(),
             sha256: sha256.clone(),
             verified,
+            signature_verified,
+            signer,
         };
         if let Err(msg) = write_install_marker(name, &marker) {
             return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 1);
@@ -1773,7 +1825,8 @@ impl Session {
         self.materialize_package(name, kind);
 
         let status = if verified { "verified" } else { "unverified" };
-        let mut out = note; // any record-only note first
+        let sig_status = if signature_verified { ", signed" } else { "" };
+        let mut out = note; // any record-only/unsigned note first
         let run_hint = match kind {
             crate::greasepkg::PackageKind::Skill => {
                 format!("see it with `grease info {name}`")
@@ -1782,7 +1835,7 @@ impl Session {
         };
         out.extend_from_slice(
             format!(
-                "installed {name} [{}] (sha256 {} — {status})\n{run_hint}\n",
+                "installed {name} [{}] (sha256 {} — {status}{sig_status})\n{run_hint}\n",
                 kind.label(),
                 &sha256[..12]
             )
@@ -1980,8 +2033,10 @@ impl Session {
         LineResult::continue_with_stdout(out.into_bytes())
     }
 
-    /// `grease registry add <url>`: record a registry URL.
-    fn grease_registry_add(&self, url: &str) -> LineResult {
+    /// `grease registry add <url> [--key <base64-ed25519-pubkey>]`: record a registry URL and, if
+    /// given, its trusted signing key. The key is validated (must decode to a 32-byte ed25519 key)
+    /// before it's stored, so a typo is caught at `add` time, not at install time.
+    fn grease_registry_add(&self, url: &str, key: Option<&str>) -> LineResult {
         if !(url.starts_with("https://") || url.starts_with("http://")) {
             return LineResult::from_outcome(
                 Vec::new(),
@@ -1989,8 +2044,24 @@ impl Session {
                 2,
             );
         }
-        match crate::greaseconfig::add_registry(url) {
-            Ok(true) => LineResult::continue_with_stdout(format!("added registry {url}\n").into_bytes()),
+        if let Some(k) = key {
+            if let Err(e) = crate::greasepkg::validate_public_key(k) {
+                return LineResult::from_outcome(
+                    Vec::new(),
+                    format!("grease registry add: {e}\n").into_bytes(),
+                    2,
+                );
+            }
+        }
+        match crate::greaseconfig::add_registry(url, key) {
+            Ok(true) => {
+                let msg = if key.is_some() {
+                    format!("added registry {url} (signed)\n")
+                } else {
+                    format!("added registry {url}\n")
+                };
+                LineResult::continue_with_stdout(msg.into_bytes())
+            }
             Ok(false) => {
                 LineResult::continue_with_stdout(format!("registry {url} already present\n").into_bytes())
             }
@@ -2891,26 +2962,45 @@ fn strip_sudo_prefix(line: &str) -> String {
     }
 }
 
-/// Best-effort lookup of a package's advertised sha256 from a registry's `index.json`. GETs
-/// `<base>/index.json` and returns the `sha256` field of the entry whose `name` matches. `None` if the
-/// index is unreachable, unparseable, has no entry for `name`, or the entry carries no hash (a loose
-/// registry) — the caller then falls back to record-only integrity.
-async fn fetch_index_sha256(
+/// A package's advertised integrity metadata from a registry's `index.json` entry.
+#[derive(Default)]
+struct IndexEntry {
+    /// The advertised sha256 of the payload (content-addressing).
+    sha256: Option<String>,
+    /// The advertised base64 detached ed25519 signature over the payload body.
+    sig: Option<String>,
+    /// The advertised signer identity (surfaced in `info`/`list`).
+    signer: Option<String>,
+}
+
+/// Best-effort lookup of a package's index entry (`sha256` + `sig` + `signer`). GETs
+/// `<base>/index.json` and returns the fields of the entry whose `name` matches. Empty (`None`s) if the
+/// index is unreachable, unparseable, or has no entry for `name` — the caller then falls back to
+/// record-only integrity (and unsigned).
+async fn fetch_index_entry(
     http: &dyn crate::mcpclient::McpHttp,
     base: &str,
     name: &str,
-) -> Option<String> {
+) -> IndexEntry {
     let url = format!("{}/index.json", base.trim_end_matches('/'));
-    let resp = http.request("GET", &url, &[], None).await.ok()?;
+    let Ok(resp) = http.request("GET", &url, &[], None).await else {
+        return IndexEntry::default();
+    };
     if resp.status != 200 {
-        return None;
+        return IndexEntry::default();
     }
-    let v: serde_json::Value = serde_json::from_slice(&resp.body).ok()?;
-    let arr = v.get("packages")?.as_array()?;
-    arr.iter()
-        .find(|p| p.get("name").and_then(|n| n.as_str()) == Some(name))
-        .and_then(|p| p.get("sha256").and_then(|s| s.as_str()))
-        .map(String::from)
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&resp.body) else {
+        return IndexEntry::default();
+    };
+    let entry = v
+        .get("packages")
+        .and_then(|p| p.as_array())
+        .and_then(|arr| arr.iter().find(|p| p.get("name").and_then(|n| n.as_str()) == Some(name)));
+    let Some(entry) = entry else {
+        return IndexEntry::default();
+    };
+    let s = |k: &str| entry.get(k).and_then(|x| x.as_str()).map(String::from);
+    IndexEntry { sha256: s("sha256"), sig: s("sig"), signer: s("signer") }
 }
 
 /// The leading command word of a top-level (operator-free) `line`, with any `sudo` prefix stripped —
@@ -3838,6 +3928,152 @@ mod tests {
             assert_eq!(rm.exit_code, 0);
             assert!(!session.grease.is_skill("code-review"));
             assert!(!skill_root.exists());
+        });
+    }
+
+    /// A deterministic ed25519 keypair (from a fixed 32-byte seed) + a signer over `body`. Returns
+    /// `(pubkey_b64, sig_b64)`. Dev-only (native `ed25519-dalek` signing side), no RNG.
+    fn sign_payload(body: &[u8]) -> (String, String) {
+        use base64::Engine;
+        use ed25519_dalek::{Signer, SigningKey};
+        let seed = [7u8; 32]; // fixed seed → deterministic key across runs
+        let sk = SigningKey::from_bytes(&seed);
+        let pk_b64 = base64::engine::general_purpose::STANDARD.encode(sk.verifying_key().to_bytes());
+        let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sk.sign(body).to_bytes());
+        (pk_b64, sig_b64)
+    }
+
+    /// A signed registry (configured with `--key`) installs a package whose ed25519 signature verifies,
+    /// records the signer, and surfaces "signed" in the output. The signature is over the EXACT bytes
+    /// the fake registry serves.
+    #[test]
+    fn grease_install_verifies_a_valid_signature() {
+        on_rt(async {
+            let _dirs = set_grease_dirs();
+            let mut session = Session::new().await.unwrap();
+
+            let pkg = serde_json::json!({
+                "kind": "prompt", "name": "signed-pkg", "description": "d", "body": "hi"
+            });
+            let body = grease_json(pkg.clone()).body; // the exact bytes the registry serves
+            let (pubkey, sig) = sign_payload(&body);
+            let index = serde_json::json!({
+                "packages": [{
+                    "name": "signed-pkg", "description": "d",
+                    "sha256": crate::greasepkg::sha256_hex(&body),
+                    "sig": sig, "signer": "alice"
+                }]
+            });
+            session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![
+                ("/index.json", grease_json(index)),
+                ("/packages/", crate::mcpclient::HttpResponse {
+                    status: 200,
+                    headers: vec![("content-type".into(), "application/json".into())],
+                    body,
+                }),
+            ])));
+            session.run_line(&format!("grease registry add https://reg.example --key {pubkey}")).await;
+
+            let inst = session.eval_line("sudo grease install signed-pkg").await;
+            assert_eq!(inst.exit_code, 0, "install stderr: {}", String::from_utf8_lossy(&inst.stderr));
+            let out = String::from_utf8(inst.stdout).unwrap();
+            assert!(out.contains("signed"), "install reports signed: {out}");
+            assert!(session.grease.is_prompt("signed-pkg"));
+            // `grease info` shows the signer.
+            let info = String::from_utf8(session.eval_line("grease info signed-pkg").await.stdout).unwrap();
+            assert!(info.contains("signed by alice"), "info shows signer: {info}");
+        });
+    }
+
+    /// A signed registry REJECTS a package whose signature does not verify (wrong signature) — hard
+    /// exit 4, nothing installed.
+    #[test]
+    fn grease_install_rejects_a_bad_signature() {
+        on_rt(async {
+            let _dirs = set_grease_dirs();
+            let mut session = Session::new().await.unwrap();
+
+            let pkg = serde_json::json!({
+                "kind": "prompt", "name": "bad-sig", "description": "d", "body": "hi"
+            });
+            let body = grease_json(pkg.clone()).body;
+            let (pubkey, _good_sig) = sign_payload(&body);
+            // A signature over DIFFERENT bytes → verify fails against `body`.
+            let (_pk2, wrong_sig) = sign_payload(b"some other content");
+            let index = serde_json::json!({
+                "packages": [{
+                    "name": "bad-sig", "description": "d",
+                    "sha256": crate::greasepkg::sha256_hex(&body),
+                    "sig": wrong_sig, "signer": "mallory"
+                }]
+            });
+            session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![
+                ("/index.json", grease_json(index)),
+                ("/packages/", crate::mcpclient::HttpResponse {
+                    status: 200,
+                    headers: vec![("content-type".into(), "application/json".into())],
+                    body,
+                }),
+            ])));
+            session.run_line(&format!("grease registry add https://reg.example --key {pubkey}")).await;
+
+            let inst = session.eval_line("sudo grease install bad-sig").await;
+            assert_eq!(inst.exit_code, 4, "a bad signature must reject");
+            assert!(String::from_utf8(inst.stderr).unwrap().contains("signature verification failed"));
+            assert!(!session.grease.is_prompt("bad-sig"), "nothing installed on sig failure");
+        });
+    }
+
+    /// A signed registry REJECTS a package that carries NO signature (a signed registry must sign its
+    /// packages) — hard exit 4.
+    #[test]
+    fn grease_install_rejects_unsigned_package_from_signed_registry() {
+        on_rt(async {
+            let _dirs = set_grease_dirs();
+            let mut session = Session::new().await.unwrap();
+            let pkg = serde_json::json!({
+                "kind": "prompt", "name": "nosig", "description": "d", "body": "hi"
+            });
+            let body = grease_json(pkg.clone()).body;
+            let (pubkey, _sig) = sign_payload(&body);
+            let index = serde_json::json!({
+                "packages": [{ "name": "nosig", "description": "d",
+                    "sha256": crate::greasepkg::sha256_hex(&body) }] // NO sig field
+            });
+            session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![
+                ("/index.json", grease_json(index)),
+                ("/packages/", crate::mcpclient::HttpResponse {
+                    status: 200,
+                    headers: vec![("content-type".into(), "application/json".into())],
+                    body,
+                }),
+            ])));
+            session.run_line(&format!("grease registry add https://reg.example --key {pubkey}")).await;
+
+            let inst = session.eval_line("sudo grease install nosig").await;
+            assert_eq!(inst.exit_code, 4);
+            assert!(String::from_utf8(inst.stderr).unwrap().contains("no signature"));
+            assert!(!session.grease.is_prompt("nosig"));
+        });
+    }
+
+    /// An UNsigned registry (no `--key`) still installs, marked unsigned (record-only signing).
+    #[test]
+    fn grease_install_from_unsigned_registry_is_record_only() {
+        on_rt(async {
+            let _dirs = set_grease_dirs();
+            let mut session = Session::new().await.unwrap();
+            let pkg = serde_json::json!({
+                "kind": "prompt", "name": "plain", "description": "d", "body": "hi"
+            });
+            session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![("/packages/", grease_json(pkg))])));
+            session.run_line("grease registry add https://reg.example").await; // no --key
+
+            let inst = session.eval_line("sudo grease install plain").await;
+            assert_eq!(inst.exit_code, 0, "install stderr: {}", String::from_utf8_lossy(&inst.stderr));
+            assert!(session.grease.is_prompt("plain"));
+            let info = String::from_utf8(session.eval_line("grease info plain").await.stdout).unwrap();
+            assert!(info.contains("unsigned"), "info shows unsigned: {info}");
         });
     }
 

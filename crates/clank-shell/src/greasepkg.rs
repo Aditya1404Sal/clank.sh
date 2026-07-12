@@ -244,6 +244,53 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     s
 }
 
+/// Verify a detached ed25519 signature over `body`. `sig_b64` is the base64 (standard alphabet)
+/// detached signature the registry index advertises; `key_b64` is the base64 32-byte ed25519 public
+/// key the registry was configured with (`grease registry add --key`). Uses `verify_strict` (rejects
+/// weak/malleable keys). Returns `Ok(())` on a valid signature, `Err(reason)` otherwise — verify-only,
+/// so no RNG and clean on wasm32-wasip2. See [[clank-grease]].
+pub fn verify_signature(body: &[u8], sig_b64: &str, key_b64: &str) -> Result<(), String> {
+    use base64::Engine;
+    use ed25519_dalek::{Signature, VerifyingKey};
+
+    let key_bytes = base64::engine::general_purpose::STANDARD
+        .decode(key_b64.trim())
+        .map_err(|e| format!("invalid public key (base64): {e}"))?;
+    let key_arr: [u8; 32] = key_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| format!("public key must be 32 bytes, got {}", key_bytes.len()))?;
+    let key =
+        VerifyingKey::from_bytes(&key_arr).map_err(|e| format!("invalid ed25519 public key: {e}"))?;
+
+    let sig_bytes = base64::engine::general_purpose::STANDARD
+        .decode(sig_b64.trim())
+        .map_err(|e| format!("invalid signature (base64): {e}"))?;
+    let sig_arr: [u8; 64] = sig_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| format!("signature must be 64 bytes, got {}", sig_bytes.len()))?;
+    let sig = Signature::from_bytes(&sig_arr);
+
+    key.verify_strict(body, &sig).map_err(|_| "signature does not verify".to_string())
+}
+
+/// Validate that `key_b64` decodes to a well-formed 32-byte ed25519 public key (so `grease registry
+/// add --key` rejects a typo at add time). Returns `Ok(())` if usable.
+pub fn validate_public_key(key_b64: &str) -> Result<(), String> {
+    use base64::Engine;
+    use ed25519_dalek::VerifyingKey;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(key_b64.trim())
+        .map_err(|e| format!("invalid public key (base64): {e}"))?;
+    let arr: [u8; 32] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| format!("public key must be 32 bytes, got {}", bytes.len()))?;
+    VerifyingKey::from_bytes(&arr).map_err(|e| format!("invalid ed25519 public key: {e}"))?;
+    Ok(())
+}
+
 /// Read the `kind` field of a raw registry payload without committing to a full parse (so
 /// `grease install` can route to the right typed parser). Defaults to `Prompt` when the payload
 /// carries no `kind` (a grease-v1 prompt payload).
@@ -326,6 +373,30 @@ mod tests {
         assert_eq!(sha256_hex(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
     }
 
+    // RFC 8032 ed25519 test vector 2: message is the single byte 0x72.
+    const RFC8032_PUB: &str = "PUAXw+hDiVqStwqnTRt+vJyYLM8uxJaMwM1V8Sr0Zgw=";
+    const RFC8032_SIG: &str =
+        "kqAJqfDUyrhyDoILX2QlQKKye1QWUD+Ps3YiI+vbadoIWsHkPhWZbkWPNhPQ8R2MOHsurrQwKu6wDSkWErsMAA==";
+    const RFC8032_MSG: &[u8] = &[0x72];
+
+    #[test]
+    fn verify_signature_accepts_a_valid_ed25519_signature() {
+        assert!(verify_signature(RFC8032_MSG, RFC8032_SIG, RFC8032_PUB).is_ok());
+    }
+
+    #[test]
+    fn verify_signature_rejects_tamper_and_bad_inputs() {
+        // Wrong message → no verify.
+        assert!(verify_signature(b"different", RFC8032_SIG, RFC8032_PUB).is_err());
+        // Wrong key (all-zero, a valid point but not the signer) → no verify.
+        use base64::Engine;
+        let zero_key = base64::engine::general_purpose::STANDARD.encode([0u8; 32]);
+        assert!(verify_signature(RFC8032_MSG, RFC8032_SIG, &zero_key).is_err());
+        // Malformed base64 / wrong lengths are clean errors, not panics.
+        assert!(verify_signature(RFC8032_MSG, "not-base64!!", RFC8032_PUB).is_err());
+        assert!(verify_signature(RFC8032_MSG, RFC8032_SIG, "AAAA").is_err()); // key too short
+    }
+
     #[test]
     fn payload_kind_defaults_to_prompt_and_reads_declared() {
         assert_eq!(payload_kind(br#"{"name":"x","body":"hi"}"#).unwrap(), PackageKind::Prompt);
@@ -377,3 +448,4 @@ mod tests {
         assert_eq!(sk, back);
     }
 }
+

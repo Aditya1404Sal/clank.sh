@@ -32,6 +32,15 @@ pub struct InstallMarker {
     /// the registry index carried no hash). Defaults false for markers written before this field.
     #[serde(default)]
     pub verified: bool,
+    /// Whether the payload's ed25519 signature was verified against the registry's trusted key
+    /// (`grease registry add --key`). `false` = the registry is unsigned (no key configured), or the
+    /// marker predates signing. Defaults false.
+    #[serde(default)]
+    pub signature_verified: bool,
+    /// The signer identity the registry index advertised for this package (`signer` field), recorded
+    /// for `info`/`list` when the signature verified. `None` = unsigned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer: Option<String>,
 }
 
 /// The typed payload of an installed package, tagged by kind.
@@ -320,10 +329,16 @@ fn fallback_synopsis(name: &str, description: &str, kind: &str) -> String {
     }
 }
 
-/// The `sha256 <prefix> (verified|unverified)` note used in help text.
+/// The integrity note used in help text: the sha256 status plus, when signed, the signer identity.
 fn integrity_note(marker: &InstallMarker) -> String {
     let status = if marker.verified { "verified" } else { "unverified" };
-    format!("sha256 {} ({status})", &marker.sha256[..marker.sha256.len().min(12)])
+    let sha = format!("sha256 {} ({status})", &marker.sha256[..marker.sha256.len().min(12)]);
+    if marker.signature_verified {
+        let signer = marker.signer.as_deref().unwrap_or("registry key");
+        format!("{sha}, signed by {signer}")
+    } else {
+        format!("{sha}, unsigned")
+    }
 }
 
 /// Load one installed package (`<etc>/<name>.toml` marker + `<store>/<name>/<kind>.json` payload).
@@ -363,7 +378,14 @@ mod tests {
     }
 
     fn marker(kind: PackageKind) -> InstallMarker {
-        InstallMarker { kind, registry: "https://r".into(), sha256: "abcdef012345".into(), verified: true }
+        InstallMarker {
+            kind,
+            registry: "https://r".into(),
+            sha256: "abcdef012345".into(),
+            verified: true,
+            signature_verified: false,
+            signer: None,
+        }
     }
 
     #[test]
