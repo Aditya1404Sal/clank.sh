@@ -12,7 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::greasepkg::{PackageKind, PromptPackage, ScriptPackage, SkillPackage};
+use crate::greasepkg::{McpPackage, PackageKind, PromptPackage, ScriptPackage, SkillPackage};
 use crate::manifest::{AuthorizationPolicy, ExecutionScope, Manifest};
 
 /// The on-disk install marker (`<etc>/<name>.toml`) — the package kind + the registry it came from +
@@ -49,6 +49,7 @@ pub enum Payload {
     Prompt(PromptPackage),
     Script(ScriptPackage),
     Skill(SkillPackage),
+    Mcp(McpPackage),
 }
 
 impl Payload {
@@ -57,6 +58,7 @@ impl Payload {
             Payload::Prompt(_) => PackageKind::Prompt,
             Payload::Script(_) => PackageKind::Script,
             Payload::Skill(_) => PackageKind::Skill,
+            Payload::Mcp(_) => PackageKind::Mcp,
         }
     }
 
@@ -65,6 +67,7 @@ impl Payload {
             Payload::Prompt(p) => &p.name,
             Payload::Script(s) => &s.name,
             Payload::Skill(s) => &s.name,
+            Payload::Mcp(m) => &m.name,
         }
     }
 
@@ -73,6 +76,7 @@ impl Payload {
             Payload::Prompt(p) => &p.description,
             Payload::Script(s) => &s.description,
             Payload::Skill(s) => &s.description,
+            Payload::Mcp(m) => &m.description,
         }
     }
 }
@@ -168,6 +172,11 @@ impl GreaseState {
         self.kind_of(name) == Some(PackageKind::Skill)
     }
 
+    /// Whether `name` is an installed MCP-server package (for `info`/`remove`/boot reconstruction).
+    pub fn is_mcp(&self, name: &str) -> bool {
+        self.kind_of(name) == Some(PackageKind::Mcp)
+    }
+
     /// The installed prompt payload, if `name` is a prompt.
     pub fn prompt(&self, name: &str) -> Option<&PromptPackage> {
         match self.get(name).map(|p| &p.payload) {
@@ -203,6 +212,25 @@ impl GreaseState {
             .collect()
     }
 
+    /// The installed MCP-server payload, if `name` is an MCP package.
+    pub fn mcp(&self, name: &str) -> Option<&McpPackage> {
+        match self.get(name).map(|p| &p.payload) {
+            Some(Payload::Mcp(m)) => Some(m),
+            _ => None,
+        }
+    }
+
+    /// All installed MCP-server packages (for boot reconstruction into `McpState`).
+    pub fn mcp_packages(&self) -> Vec<&McpPackage> {
+        self.packages
+            .iter()
+            .filter_map(|p| match &p.payload {
+                Payload::Mcp(m) => Some(m),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// The dynamic manifest for an installed command package (prompt or script). Both are
     /// `Subprocess`/`Confirm` (a prompt makes an outbound LLM call; a script runs local shell), with
     /// the declared arguments as the input schema. **Skills return `None`** — they are not commands.
@@ -211,7 +239,10 @@ impl GreaseState {
         let (synopsis, params): (String, Vec<crate::manifest::ParamSpec>) = match &pkg.payload {
             Payload::Prompt(p) => (fallback_synopsis(name, &p.description, "prompt"), p.param_specs()),
             Payload::Script(s) => (fallback_synopsis(name, &s.description, "script"), s.param_specs()),
-            Payload::Skill(_) => return None,
+            // A skill isn't a command; an MCP server's command surface lives in `McpState` (the server
+            // + its tool subcommands are registered there at install, with their own bin stub) — grease
+            // is only the durable-persistence layer, so it contributes no dynreg manifest here.
+            Payload::Skill(_) | Payload::Mcp(_) => return None,
         };
         Some(
             Manifest::builtin(name, synopsis)
@@ -272,7 +303,9 @@ impl GreaseState {
         match &pkg.payload {
             Payload::Prompt(p) => Some(self.prompt_help_text(name, p, &pkg.marker)),
             Payload::Script(s) => Some(self.script_help_text(name, s, &pkg.marker)),
-            Payload::Skill(_) => None,
+            // A skill isn't a command; an MCP server's help comes from the `mcp` server bin stub —
+            // `grease info` handles these via their own describers.
+            Payload::Skill(_) | Payload::Mcp(_) => None,
         }
     }
 
@@ -353,6 +386,7 @@ fn load_one(name: &str) -> Option<InstalledPackage> {
         PackageKind::Prompt => Payload::Prompt(PromptPackage::from_json(&bytes).ok()?),
         PackageKind::Script => Payload::Script(ScriptPackage::from_json(&bytes).ok()?),
         PackageKind::Skill => Payload::Skill(SkillPackage::from_json(&bytes).ok()?),
+        PackageKind::Mcp => Payload::Mcp(McpPackage::from_json(&bytes).ok()?),
     };
     Some(InstalledPackage { marker, payload })
 }

@@ -17,13 +17,22 @@
 
 use brush_parser::{tokenize_str, unquote_str, Token};
 
+/// The `--tools/--prompts/--resources` selectors on `grease install` (MCP artifact types). All false
+/// means "not specified" — the installer treats that as all three (README: bare install = everything).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ArtifactFlags {
+    pub tools: bool,
+    pub prompts: bool,
+    pub resources: bool,
+}
+
 /// A parsed `grease` command.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum GreaseCommand {
     RegistryAdd { url: String, key: Option<String> },
     RegistryList,
     RegistryRemove { url: String },
-    Install { name: String },
+    Install { name: String, artifacts: ArtifactFlags },
     Remove { name: String },
     List,
     Search { query: String },
@@ -56,8 +65,25 @@ fn parse(args: &[String]) -> Result<GreaseCommand, String> {
     match sub {
         "registry" => parse_registry(&args[1..]),
         "install" | "add" => {
-            let name = args.get(1).ok_or("grease install: needs a package name")?;
-            Ok(GreaseCommand::Install { name: name.clone() })
+            // `grease install <name> [--tools] [--prompts] [--resources]` — the flags select which of
+            // an MCP server's artifact types to install (ignored for non-MCP packages). No flags = all.
+            let rest = &args[1..];
+            let mut name: Option<String> = None;
+            let (mut tools, mut prompts, mut resources) = (false, false, false);
+            for a in rest {
+                match a.as_str() {
+                    "--tools" => tools = true,
+                    "--prompts" => prompts = true,
+                    "--resources" => resources = true,
+                    other if other.starts_with("--") => {
+                        return Err(format!("grease install: unknown flag '{other}'"))
+                    }
+                    _ if name.is_none() => name = Some(a.clone()),
+                    _ => return Err(format!("grease install: unexpected argument '{a}'")),
+                }
+            }
+            let name = name.ok_or("grease install: needs a package name")?;
+            Ok(GreaseCommand::Install { name, artifacts: ArtifactFlags { tools, prompts, resources } })
         }
         "remove" | "rm" | "uninstall" => {
             let name = args.get(1).ok_or("grease remove: needs a package name")?;
@@ -183,7 +209,18 @@ mod tests {
 
     #[test]
     fn classifies_package_subcommands() {
-        assert_eq!(c("grease install summarize"), GreaseCommand::Install { name: "summarize".into() });
+        assert_eq!(
+            c("grease install summarize"),
+            GreaseCommand::Install { name: "summarize".into(), artifacts: ArtifactFlags::default() }
+        );
+        // MCP artifact selectors parse (order-independent, combinable).
+        assert_eq!(
+            c("grease install github --tools --resources"),
+            GreaseCommand::Install {
+                name: "github".into(),
+                artifacts: ArtifactFlags { tools: true, prompts: false, resources: true }
+            }
+        );
         assert_eq!(c("grease remove summarize"), GreaseCommand::Remove { name: "summarize".into() });
         assert_eq!(c("grease list"), GreaseCommand::List);
         assert_eq!(c("grease"), GreaseCommand::List); // bare grease = list

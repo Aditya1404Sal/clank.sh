@@ -249,7 +249,7 @@ impl Session {
             // wasip2 has no threads: a current-thread runtime drives Brush's async.
             let rt = tokio::runtime::Builder::new_current_thread().build()?;
             let shell = rt.block_on(build_shell())?;
-            Ok(Self {
+            let mut session = Self {
                 shell,
                 transcript: Arc::new(Mutex::new(Transcript::new())),
                 registry: crate::registry::build(),
@@ -265,12 +265,14 @@ impl Session {
                 grease: crate::greasestate::GreaseState::load(),
                 source: SourceInfo::default(),
                 rt,
-            })
+            };
+            session.reconstruct_mcp_from_grease();
+            Ok(session)
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
             let shell = build_shell().await?;
-            Ok(Self {
+            let mut session = Self {
                 shell,
                 transcript: Arc::new(Mutex::new(Transcript::new())),
                 registry: crate::registry::build(),
@@ -285,7 +287,42 @@ impl Session {
                 mcp_http: None,
                 grease: crate::greasestate::GreaseState::load(),
                 source: SourceInfo::default(),
-            })
+            };
+            session.reconstruct_mcp_from_grease();
+            Ok(session)
+        }
+    }
+
+    /// Re-register grease-installed MCP servers into `McpState` from their cached grease payloads.
+    /// `McpState` is empty on boot (it's replay-rebuilt, not FS-backed), but a grease-installed MCP
+    /// package durably cached its tool listing — so we rebuild the server + tool surface here without a
+    /// live `tools/list` (the actual `tools/call` still goes to the server at invocation time).
+    fn reconstruct_mcp_from_grease(&mut self) {
+        for m in self.grease.mcp_packages() {
+            if !m.artifacts.tools {
+                continue;
+            }
+            let config = crate::mcpconfig::McpServerConfig {
+                url: m.url.clone(),
+                enabled: true,
+                auth_env: m.auth_env.clone(),
+                auth_header: None,
+            };
+            let tools: Vec<crate::mcpstate::McpTool> = m
+                .tools
+                .iter()
+                .map(|t| crate::mcpstate::McpTool {
+                    name: t.name.clone(),
+                    description: if t.description.is_empty() {
+                        None
+                    } else {
+                        Some(t.description.clone())
+                    },
+                    input_schema: serde_json::from_str(&t.input_schema)
+                        .unwrap_or(serde_json::json!({})),
+                })
+                .collect();
+            self.mcp.set_installed(&m.name, config, tools);
         }
     }
 
@@ -1586,7 +1623,7 @@ impl Session {
             GreaseCommand::RegistryRemove { url } => self.grease_registry_remove(&url),
             GreaseCommand::List => self.grease_list(),
             GreaseCommand::Info { name } => self.grease_info(&name),
-            GreaseCommand::Install { name } => self.grease_install(&name).await,
+            GreaseCommand::Install { name, artifacts } => self.grease_install(&name, artifacts).await,
             GreaseCommand::Remove { name } => self.grease_remove(&name),
             GreaseCommand::Search { query } => self.grease_search(&query).await,
             GreaseCommand::Update { name } => self.grease_update(name.as_deref()).await,
@@ -1620,6 +1657,9 @@ impl Session {
         if let Some(sk) = self.grease.skill(name) {
             return LineResult::continue_with_stdout(skill_info_text(sk).into_bytes());
         }
+        if let Some(m) = self.grease.mcp(name) {
+            return LineResult::continue_with_stdout(mcp_info_text(m).into_bytes());
+        }
         LineResult::from_outcome(
             Vec::new(),
             format!("grease: '{name}' is not installed\n").into_bytes(),
@@ -1628,9 +1668,15 @@ impl Session {
     }
 
     /// `grease install <name>`: fetch the package from the first configured registry that has it,
-    /// verify its sha256, persist it to the store, write the bin stub, and register it. The installed
-    /// prompt becomes a Confirm-policy command that runs `ask` with the (filled) body.
-    async fn grease_install(&mut self, name: &str) -> LineResult {
+    /// verify its sha256 (+ signature if the registry is signed), persist it to the store, and register
+    /// it. The `artifacts` flags select which of an MCP server's artifact types to install (ignored for
+    /// other kinds). A prompt becomes a Confirm command that runs `ask`; a script runs local shell; an
+    /// MCP server's tools become `<server> <tool>` commands.
+    async fn grease_install(
+        &mut self,
+        name: &str,
+        artifacts: crate::greasecmd::ArtifactFlags,
+    ) -> LineResult {
         if !crate::greaseconfig::is_valid_name(name) {
             return LineResult::from_outcome(
                 Vec::new(),
@@ -1758,6 +1804,25 @@ impl Session {
             );
         }
 
+        // An MCP-server package needs a live step (initialize + tools/list + prompts/list +
+        // resources/list) to enrich its cached surface before persistence — done async here. Other
+        // kinds persist synchronously.
+        if crate::greasepkg::payload_kind(&body) == Ok(crate::greasepkg::PackageKind::Mcp) {
+            return self
+                .grease_finish_install_mcp(
+                    name,
+                    &registry,
+                    &body,
+                    actual,
+                    entry.sha256.is_some(),
+                    signature_verified,
+                    signer,
+                    artifacts,
+                    note,
+                )
+                .await;
+        }
+
         self.grease_finish_install(
             name,
             &registry,
@@ -1768,6 +1833,173 @@ impl Session {
             signer,
             note,
         )
+    }
+
+    /// The MCP-server install path: parse the minimal payload, fetch the live artifact surface
+    /// (tools/prompts, and resources if selected), enrich the payload with the cached listings,
+    /// persist it, register the server into `McpState` (so its tools become `<server> <tool>`
+    /// commands), materialize any prompts as standalone prompt packages, materialize static resources,
+    /// and write the marker. Reuses the existing `mcp_install` machinery for tool registration.
+    #[allow(clippy::too_many_arguments)]
+    async fn grease_finish_install_mcp(
+        &mut self,
+        name: &str,
+        registry: &str,
+        body: &[u8],
+        sha256: String,
+        verified: bool,
+        signature_verified: bool,
+        signer: Option<String>,
+        artifacts: crate::greasecmd::ArtifactFlags,
+        mut note: Vec<u8>,
+    ) -> LineResult {
+        // Parse + name-check the minimal registry payload.
+        let mut pkg = match crate::greasepkg::McpPackage::from_json(body) {
+            Ok(p) => p,
+            Err(e) => return LineResult::from_outcome(Vec::new(), format!("grease install: {e}\n").into_bytes(), 4),
+        };
+        if pkg.name != name {
+            return LineResult::from_outcome(
+                Vec::new(),
+                format!("grease install: registry returned package '{}' for request '{name}'\n", pkg.name).into_bytes(),
+                4,
+            );
+        }
+        // The install-line flags select which artifact types to expose (no flags = all three).
+        pkg.artifacts =
+            crate::greasepkg::McpArtifacts::from_flags(artifacts.tools, artifacts.prompts, artifacts.resources);
+
+        let Some(http) = self.mcp_http.as_deref() else {
+            return LineResult::from_outcome(
+                Vec::new(),
+                b"grease install: no HTTP transport configured (available on the Golem agent)\n".to_vec(),
+                4,
+            );
+        };
+
+        // Build an MCP client against the server and initialize once.
+        let config = crate::mcpconfig::McpServerConfig {
+            url: pkg.url.clone(),
+            enabled: true,
+            auth_env: pkg.auth_env.clone(),
+            auth_header: None,
+        };
+        let auth = config.resolve_auth();
+        let mut client = crate::mcpclient::McpClient::new(http, &pkg.url, auth);
+        let init = match client.initialize().await {
+            Ok(i) => i,
+            Err(e) => {
+                return LineResult::from_outcome(
+                    Vec::new(),
+                    format!("grease install: {name}: {}\n", e.message).into_bytes(),
+                    e.exit_code,
+                )
+            }
+        };
+        let session = init.session_id.clone();
+
+        // Fetch the selected artifact surfaces. tools/list is required when --tools; prompts/list and
+        // resources/list are best-effort (a server may not support them → treated as empty).
+        let mut tool_specs = Vec::new();
+        if pkg.artifacts.tools {
+            match client.list_tools(session.as_deref()).await {
+                Ok(t) => tool_specs = t,
+                Err(e) => {
+                    return LineResult::from_outcome(
+                        Vec::new(),
+                        format!("grease install: {name}: tools/list: {}\n", e.message).into_bytes(),
+                        e.exit_code,
+                    )
+                }
+            }
+        }
+        let prompt_specs = if pkg.artifacts.prompts {
+            client.list_prompts(session.as_deref()).await.unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        // Cache the tool + prompt listings in the payload (so `load()` rebuilds offline).
+        pkg.tools = tool_specs
+            .iter()
+            .map(|t| crate::greasepkg::McpToolCache {
+                name: t.name.clone(),
+                description: t.description.clone().unwrap_or_default(),
+                input_schema: t.input_schema.to_string(),
+            })
+            .collect();
+        pkg.prompts = prompt_specs
+            .iter()
+            .map(|p| crate::greasepkg::McpPromptCache {
+                name: p.name.clone(),
+                description: p.description.clone().unwrap_or_default(),
+            })
+            .collect();
+
+        // Materialize any prompts as standalone prompt packages (fetch each body via prompts/get).
+        let mut installed_prompts = Vec::new();
+        for p in &prompt_specs {
+            let args = serde_json::json!({});
+            let body_text = client.get_prompt(&p.name, args, session.as_deref()).await.unwrap_or_default();
+            installed_prompts.push((p.clone(), body_text));
+        }
+
+        // Materialize selected resources (static files under /mnt/mcp/<server>/). Best-effort; the
+        // full resource surface (dynamic reads, templates) lands in a later increment.
+        let mut resource_count = 0usize;
+        if pkg.artifacts.resources {
+            resource_count = materialize_mcp_resources(name, &mut client, session.as_deref()).await;
+        }
+
+        // Persist the enriched payload + marker.
+        let payload = crate::greasestate::Payload::Mcp(pkg.clone());
+        if let Err(msg) = self.persist_package(name, crate::greasepkg::PackageKind::Mcp, &payload) {
+            return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 1);
+        }
+        let marker = crate::greasestate::InstallMarker {
+            kind: crate::greasepkg::PackageKind::Mcp,
+            registry: registry.to_string(),
+            sha256: sha256.clone(),
+            verified,
+            signature_verified,
+            signer,
+        };
+        if let Err(msg) = write_install_marker(name, &marker) {
+            return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 1);
+        }
+
+        // Register the server + tools into `McpState` (so `<server> <tool>` dispatch + the mcp bin stub
+        // work), reusing the mcp machinery.
+        let tool_count = tool_specs.len();
+        if pkg.artifacts.tools {
+            let mcp_tools: Vec<crate::mcpstate::McpTool> = tool_specs.into_iter().map(Into::into).collect();
+            self.mcp.set_installed(name, config, mcp_tools);
+            if let Some(help) = self.mcp.server_help(name) {
+                let _ = crate::mcpconfig::write_bin_stub(name, &help);
+            }
+        }
+
+        // Materialize the prompt packages (each becomes an installed grease prompt on $PATH).
+        let prompt_count = installed_prompts.len();
+        for (spec, body_text) in installed_prompts {
+            self.install_mcp_prompt(&spec, &body_text, registry);
+        }
+
+        // Register the grease package view.
+        self.grease.set_installed(crate::greasestate::InstalledPackage { marker, payload });
+
+        let sig_status = if signature_verified { ", signed" } else { "" };
+        let status = if verified { "verified" } else { "unverified" };
+        note.extend_from_slice(
+            format!(
+                "installed {name} [mcp] (sha256 {} — {status}{sig_status})\n\
+                 {tool_count} tools, {prompt_count} prompts, {resource_count} resources\n\
+                 tools run as `{name} <tool>`\n",
+                &sha256[..12]
+            )
+            .as_bytes(),
+        );
+        LineResult::continue_with_stdout(note)
     }
 
     /// Verify + persist a fetched package payload and register it, dispatching on the payload's
@@ -1844,6 +2076,40 @@ impl Session {
         LineResult::continue_with_stdout(out)
     }
 
+    /// Install an MCP server's prompt as a standalone grease prompt package (README: MCP prompts are
+    /// installed to `/usr/lib/prompts/bin` and are indistinguishable from standalone prompts). The
+    /// prompt's declared arguments become the package arguments; `{{arg}}` placeholders in the fetched
+    /// body are already resolved server-side for the empty-arg fetch, so v1 stores the fetched body as
+    /// a non-parameterized prompt (re-fetch with args is a future refinement).
+    fn install_mcp_prompt(&mut self, spec: &crate::mcpclient::PromptSpec, body: &str, registry: &str) {
+        let pkg = crate::greasepkg::PromptPackage {
+            name: spec.name.clone(),
+            description: spec.description.clone().unwrap_or_default(),
+            model: None,
+            arguments: Vec::new(),
+            body: body.to_string(),
+        };
+        // Persist as a prompt package + marker + bin stub, and register it.
+        let payload = crate::greasestate::Payload::Prompt(pkg);
+        if self.persist_package(&spec.name, crate::greasepkg::PackageKind::Prompt, &payload).is_err() {
+            return;
+        }
+        let sha = crate::greasepkg::sha256_hex(body.as_bytes());
+        let marker = crate::greasestate::InstallMarker {
+            kind: crate::greasepkg::PackageKind::Prompt,
+            registry: registry.to_string(),
+            sha256: sha,
+            verified: false,
+            signature_verified: false,
+            signer: None,
+        };
+        if write_install_marker(&spec.name, &marker).is_err() {
+            return;
+        }
+        self.grease.set_installed(crate::greasestate::InstalledPackage { marker, payload });
+        self.materialize_package(&spec.name, crate::greasepkg::PackageKind::Prompt);
+    }
+
     /// Parse a fetched payload for `kind` into a [`crate::greasestate::Payload`], verifying the
     /// package's own name matches the requested `name`. Returns an error string on parse/name mismatch.
     fn parse_and_check_payload(
@@ -1852,7 +2118,7 @@ impl Session {
         kind: crate::greasepkg::PackageKind,
         body: &[u8],
     ) -> Result<crate::greasestate::Payload, String> {
-        use crate::greasepkg::{PackageKind, PromptPackage, ScriptPackage, SkillPackage};
+        use crate::greasepkg::{McpPackage, PackageKind, PromptPackage, ScriptPackage, SkillPackage};
         use crate::greasestate::Payload;
         let (payload, pkg_name) = match kind {
             PackageKind::Prompt => {
@@ -1869,6 +2135,11 @@ impl Session {
                 let s = SkillPackage::from_json(body).map_err(|e| format!("grease install: {e}\n"))?;
                 let n = s.name.clone();
                 (Payload::Skill(s), n)
+            }
+            PackageKind::Mcp => {
+                let m = McpPackage::from_json(body).map_err(|e| format!("grease install: {e}\n"))?;
+                let n = m.name.clone();
+                (Payload::Mcp(m), n)
             }
         };
         if pkg_name != name {
@@ -1894,6 +2165,7 @@ impl Session {
             Payload::Prompt(p) => p.to_json(),
             Payload::Script(s) => s.to_json(),
             Payload::Skill(s) => s.to_json(),
+            Payload::Mcp(m) => m.to_json(),
         };
         std::fs::write(store.join(kind.payload_file()), json)
             .map_err(|e| format!("grease install: cannot write payload: {e}\n"))
@@ -1934,6 +2206,11 @@ impl Session {
                     let _ = crate::greaseconfig::materialize_skill(sk);
                 }
             }
+            PackageKind::Mcp => {
+                // MCP registration into `McpState` (tools) + prompt materialization happens in the
+                // async `grease_finish_install_mcp` path (it needs the live server); nothing to do
+                // synchronously here.
+            }
         }
     }
 
@@ -1958,6 +2235,13 @@ impl Session {
             }
             crate::greasepkg::PackageKind::Skill => {
                 let _ = std::fs::remove_dir_all(crate::greaseconfig::skills_dir().join(name));
+            }
+            crate::greasepkg::PackageKind::Mcp => {
+                // Deregister the server from `McpState` (also removes its /usr/lib/mcp/bin stub) and
+                // remove any materialized resource tree under /mnt/mcp/<name>/.
+                let _ = crate::mcpconfig::remove(name);
+                self.mcp.remove(name);
+                let _ = std::fs::remove_dir_all(crate::greaseconfig::mcp_mount_dir().join(name));
             }
         }
         self.grease.remove(name);
@@ -2027,7 +2311,18 @@ impl Session {
         }
         let mut out = String::new();
         for t in targets {
-            let result = Box::pin(self.grease_install(&t)).await;
+            // Re-install preserving the package's existing artifact selection (for MCP; a no-op for
+            // other kinds). The stored payload carries the prior `artifacts`, so pass its flags.
+            let flags = self
+                .grease
+                .mcp(&t)
+                .map(|m| crate::greasecmd::ArtifactFlags {
+                    tools: m.artifacts.tools,
+                    prompts: m.artifacts.prompts,
+                    resources: m.artifacts.resources,
+                })
+                .unwrap_or_default();
+            let result = Box::pin(self.grease_install(&t, flags)).await;
             out.push_str(&String::from_utf8_lossy(&result.terminal_output()));
         }
         LineResult::continue_with_stdout(out.into_bytes())
@@ -2693,7 +2988,7 @@ impl Session {
     /// (the caller falls back to the generic confirm text).
     fn grease_install_disclosure(&self, gated_command: &str, sudo_grant: bool) -> Option<String> {
         let cmd = crate::greasecmd::classify(gated_command)?.ok()?;
-        let crate::greasecmd::GreaseCommand::Install { name } = cmd else {
+        let crate::greasecmd::GreaseCommand::Install { name, .. } = cmd else {
             return None;
         };
         let registries = crate::greaseconfig::list_registries();
@@ -3003,6 +3298,61 @@ async fn fetch_index_entry(
     IndexEntry { sha256: s("sha256"), sig: s("sig"), signer: s("signer") }
 }
 
+/// Materialize an MCP server's resources under `/mnt/mcp/<server>/` (static files). Returns the count
+/// materialized. Fetches `resources/list` and writes each readable resource as a real file at its
+/// mount path (path-confined). A read failure skips that resource (best-effort). Free fn (no `self`)
+/// so it can run while `client` borrows `self.mcp_http`.
+async fn materialize_mcp_resources(
+    server: &str,
+    client: &mut crate::mcpclient::McpClient<'_>,
+    session: Option<&str>,
+) -> usize {
+    let Ok(resources) = client.list_resources(session).await else {
+        return 0;
+    };
+    let root = crate::greaseconfig::mcp_mount_dir().join(server);
+    let mut count = 0;
+    for res in &resources {
+        let Ok(contents) = client.read_resource(&res.uri, session).await else {
+            continue;
+        };
+        let rel = mcp_resource_rel_path(&res.uri);
+        let Some(dest) = crate::greaseconfig::mcp_safe_join(&root, &rel) else {
+            continue;
+        };
+        if let Some(parent) = dest.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if std::fs::write(&dest, contents.as_bytes()).is_ok() {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Convert an MCP resource URI to a relative path under `/mnt/mcp/<server>/`. Strips a `<scheme>://`
+/// (or `<scheme>:`) prefix and any leading slashes, leaving the path-like remainder (e.g.
+/// `file:///repo/README.md` → `repo/README.md`, `github://repo/src/main.rs` → `repo/src/main.rs`).
+/// Query/fragment are dropped. The caller path-confines the result with `mcp_safe_join`.
+fn mcp_resource_rel_path(uri: &str) -> String {
+    // Drop the scheme.
+    let after_scheme = match uri.split_once("://") {
+        Some((_scheme, rest)) => rest,
+        None => match uri.split_once(':') {
+            Some((_scheme, rest)) => rest,
+            None => uri,
+        },
+    };
+    // Drop query/fragment.
+    let path = after_scheme.split(['?', '#']).next().unwrap_or(after_scheme);
+    let trimmed = path.trim_start_matches('/');
+    if trimmed.is_empty() {
+        "resource".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// The leading command word of a top-level (operator-free) `line`, with any `sudo` prefix stripped —
 /// for matching against installed grease prompts. `None` for a nested line (operators present).
 fn prompt_leading_word(line: &str) -> Option<String> {
@@ -3086,6 +3436,37 @@ fn skill_info_text(sk: &crate::greasepkg::SkillPackage) -> String {
         "\nA skill is a capability-context package, not a command; it is surfaced to the model \
          when you run `ask`.\n",
     );
+    out
+}
+
+/// `grease info <mcp-server>` text: the server endpoint, exposed artifact types, and the cached
+/// tool/prompt listings.
+fn mcp_info_text(m: &crate::greasepkg::McpPackage) -> String {
+    let mut out = format!("{} — {} [mcp]\n", m.name, m.description);
+    out.push_str(&format!("\nServer: {}\n", m.url));
+    let mut kinds = Vec::new();
+    if m.artifacts.tools {
+        kinds.push("tools");
+    }
+    if m.artifacts.prompts {
+        kinds.push("prompts");
+    }
+    if m.artifacts.resources {
+        kinds.push("resources");
+    }
+    out.push_str(&format!("Artifacts: {}\n", kinds.join(", ")));
+    if !m.tools.is_empty() {
+        out.push_str(&format!("\nTools (run as `{} <tool>`):\n", m.name));
+        for t in &m.tools {
+            out.push_str(&format!("  {} — {}\n", t.name, t.description));
+        }
+    }
+    if !m.prompts.is_empty() {
+        out.push_str("\nPrompts (installed as $PATH commands):\n");
+        for p in &m.prompts {
+            out.push_str(&format!("  {} — {}\n", p.name, p.description));
+        }
+    }
     out
 }
 
@@ -3647,6 +4028,7 @@ mod tests {
             std::env::remove_var("CLANK_GREASE_BIN");
             std::env::remove_var("CLANK_GREASE_SCRIPT_BIN");
             std::env::remove_var("CLANK_GREASE_SKILLS");
+            std::env::remove_var("CLANK_GREASE_MCP_MOUNT");
         }
     }
     fn set_grease_dirs() -> GreaseDirsGuard {
@@ -3654,12 +4036,13 @@ mod tests {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let base = std::env::temp_dir().join(format!("clank_grease_sess_{}_{n}", std::process::id()));
-        for sub in ["etc", "store", "bin", "script-bin", "skills"] {
+        for sub in ["etc", "store", "bin", "script-bin", "skills", "mnt-mcp"] {
             std::fs::create_dir_all(base.join(sub)).unwrap();
         }
         std::env::set_var("CLANK_GREASE_ETC", base.join("etc"));
         std::env::set_var("CLANK_GREASE_STORE", base.join("store"));
         std::env::set_var("CLANK_GREASE_BIN", base.join("bin"));
+        std::env::set_var("CLANK_GREASE_MCP_MOUNT", base.join("mnt-mcp"));
         std::env::set_var("CLANK_GREASE_SCRIPT_BIN", base.join("script-bin"));
         std::env::set_var("CLANK_GREASE_SKILLS", base.join("skills"));
         GreaseDirsGuard { _lock: lock }
@@ -3710,6 +4093,128 @@ mod tests {
                 "tools":[{"name":"echo","description":"echoes input",
                           "inputSchema":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}]}})),
         ]
+    }
+
+    /// A hybrid fake for grease-MCP install tests: grease registry URLs (`/index.json`, `/packages/`)
+    /// are matched by URL substring; the MCP endpoint (any other URL) is answered by JSON-RPC method
+    /// name parsed from the request body. Covers initialize/tools/list/prompts/list/prompts/get/
+    /// resources/list/resources/read.
+    struct FakeMcpArtifactHttp {
+        routes: Vec<(String, crate::mcpclient::HttpResponse)>,
+    }
+    impl FakeMcpArtifactHttp {
+        fn new(routes: Vec<(&str, crate::mcpclient::HttpResponse)>) -> Self {
+            Self { routes: routes.into_iter().map(|(u, r)| (u.to_string(), r)).collect() }
+        }
+    }
+    #[async_trait::async_trait(?Send)]
+    impl crate::mcpclient::McpHttp for FakeMcpArtifactHttp {
+        async fn request(
+            &self,
+            _method: &str,
+            url: &str,
+            _headers: &[(String, String)],
+            body: Option<Vec<u8>>,
+        ) -> Result<crate::mcpclient::HttpResponse, String> {
+            // Grease registry fetches route by URL.
+            for (pat, resp) in &self.routes {
+                if pat.starts_with('/') && url.contains(pat.as_str()) {
+                    return Ok(resp.clone());
+                }
+            }
+            // Otherwise it's an MCP JSON-RPC POST — route by the `method` field in the body.
+            let body = body.unwrap_or_default();
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(serde_json::json!({}));
+            let m = v.get("method").and_then(|x| x.as_str()).unwrap_or("");
+            for (pat, resp) in &self.routes {
+                if pat == m {
+                    return Ok(resp.clone());
+                }
+            }
+            // Unmapped MCP method → an empty-result success (notifications, etc.).
+            Ok(mcp_json(serde_json::json!({"jsonrpc":"2.0","id":1,"result":{}})))
+        }
+    }
+
+    /// End-to-end: `grease install <server>` for a `kind:mcp` package fetches the server's live surface
+    /// (initialize + tools/list + prompts/list + prompts/get + resources/list/read), registers the
+    /// tools into `McpState` (so `<server> <tool>` works), materializes prompts as $PATH commands and
+    /// static resources under /mnt/mcp, and caches the surface so a fresh Session rebuilds it offline.
+    #[test]
+    fn grease_install_an_mcp_server_registers_tools_prompts_resources() {
+        on_rt(async {
+            let _dirs = set_grease_dirs();
+            let _mcp = set_mcp_dirs();
+            let mut session = Session::new().await.unwrap();
+
+            // The grease registry payload: a minimal mcp package pointing at the server URL.
+            let pkg = serde_json::json!({
+                "kind": "mcp", "name": "demo",
+                "description": "a demo MCP server", "url": "https://mcp.demo/x"
+            });
+            let mut init = mcp_json(serde_json::json!({
+                "jsonrpc":"2.0","id":1,"result":{
+                    "protocolVersion":"2025-03-26","serverInfo":{"name":"demo","version":"1"},
+                    "capabilities":{"tools":{},"prompts":{},"resources":{}}}}));
+            init.headers.push(("mcp-session-id".into(), "s-1".into()));
+            let tools = mcp_json(serde_json::json!({"jsonrpc":"2.0","id":2,"result":{
+                "tools":[{"name":"echo","description":"echo it",
+                    "inputSchema":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}]}}));
+            let prompts_list = mcp_json(serde_json::json!({"jsonrpc":"2.0","id":3,"result":{
+                "prompts":[{"name":"summarize-diff","description":"summarize a diff"}]}}));
+            let prompts_get = mcp_json(serde_json::json!({"jsonrpc":"2.0","id":4,"result":{
+                "messages":[{"role":"user","content":{"type":"text","text":"Summarize this diff."}}]}}));
+            let res_list = mcp_json(serde_json::json!({"jsonrpc":"2.0","id":5,"result":{
+                "resources":[{"uri":"file:///repo/README.md","name":"readme","mimeType":"text/plain"}]}}));
+            let res_read = mcp_json(serde_json::json!({"jsonrpc":"2.0","id":6,"result":{
+                "contents":[{"uri":"file:///repo/README.md","text":"# Hello from the resource"}]}}));
+
+            session.set_mcp_http(Box::new(FakeMcpArtifactHttp::new(vec![
+                ("/packages/", grease_json(pkg)),
+                ("initialize", init),
+                ("tools/list", tools),
+                ("prompts/list", prompts_list),
+                ("prompts/get", prompts_get),
+                ("resources/list", res_list),
+                ("resources/read", res_read),
+            ])));
+            session.run_line("grease registry add https://reg.example").await;
+
+            let inst = session.eval_line("sudo grease install demo").await;
+            assert_eq!(inst.exit_code, 0, "install stderr: {}", String::from_utf8_lossy(&inst.stderr));
+            let out = String::from_utf8(inst.stdout).unwrap();
+            assert!(out.contains("installed demo [mcp]"), "install output: {out}");
+            assert!(out.contains("1 tools") && out.contains("1 prompts"), "counts: {out}");
+
+            // The server is registered in McpState: `<server> <tool>` is a recognized tool line.
+            assert!(session.is_mcp_tool_line("demo echo --text hi"));
+            assert!(session.grease.is_mcp("demo"));
+
+            // The prompt was materialized as a standalone $PATH prompt.
+            assert!(session.grease.is_prompt("summarize-diff"));
+
+            // The static resource was materialized under /mnt/mcp/demo/.
+            let res_path = crate::greaseconfig::mcp_mount_dir().join("demo/repo/README.md");
+            assert_eq!(
+                std::fs::read_to_string(&res_path).unwrap(),
+                "# Hello from the resource"
+            );
+
+            // `grease info demo` describes the server + its artifacts.
+            let info = String::from_utf8(session.eval_line("grease info demo").await.stdout).unwrap();
+            assert!(info.contains("[mcp]") && info.contains("https://mcp.demo/x"), "info: {info}");
+            assert!(info.contains("echo") && info.contains("summarize-diff"), "info lists artifacts: {info}");
+
+            // A FRESH Session rebuilds the tool surface from the cached payload (no live fetch).
+            let session2 = Session::new().await.unwrap();
+            assert!(session2.is_mcp_tool_line("demo echo --text hi"), "boot reconstruction failed");
+
+            // Remove deregisters from McpState + deletes the resource mount.
+            let rm = session.eval_line("sudo grease remove demo").await;
+            assert_eq!(rm.exit_code, 0);
+            assert!(!session.grease.is_mcp("demo"));
+            assert!(!session.is_mcp_tool_line("demo echo --text hi"));
+        });
     }
 
     /// `mcp add` installs a server: config written, tools fetched, `mcp list`/`mcp tools`/`which`

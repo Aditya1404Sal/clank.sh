@@ -121,6 +121,25 @@ pub struct ToolSpec {
     pub input_schema: Value,
 }
 
+/// One prompt advertised by a server (`prompts/list`). `arguments` are the declared prompt arguments
+/// (name + required flag), used to build a standalone prompt package at grease install time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromptSpec {
+    pub name: String,
+    pub description: Option<String>,
+    /// `(arg-name, description, required)` for each declared argument.
+    pub arguments: Vec<(String, String, bool)>,
+}
+
+/// One resource advertised by a server (`resources/list`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResourceSpec {
+    pub uri: String,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub mime_type: Option<String>,
+}
+
 /// The result of a `tools/call`.
 #[derive(Clone, Debug)]
 pub struct CallToolResult {
@@ -378,6 +397,136 @@ impl<'a> McpClient<'a> {
             }));
         }
         Ok(CallToolResult { text, raw: result, is_error })
+    }
+
+    /// `prompts/list` — the server's advertised prompts (name + description + declared arguments).
+    /// Paginated like `tools/list`. A server without the prompts capability typically returns a
+    /// method-not-found error, which the caller can treat as "no prompts".
+    pub async fn list_prompts(&mut self, session_id: Option<&str>) -> McpResult<Vec<PromptSpec>> {
+        let mut prompts = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..MAX_TOOL_PAGES {
+            let params = cursor.as_ref().map(|c| serde_json::json!({ "cursor": c }));
+            let result = self.call("prompts/list", params, session_id).await?;
+            if let Some(arr) = result.get("prompts").and_then(Value::as_array) {
+                for p in arr {
+                    let Some(name) = p.get("name").and_then(Value::as_str) else { continue };
+                    let arguments = p
+                        .get("arguments")
+                        .and_then(Value::as_array)
+                        .map(|args| {
+                            args.iter()
+                                .filter_map(|a| {
+                                    let n = a.get("name").and_then(Value::as_str)?.to_string();
+                                    let d = a
+                                        .get("description")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let req = a.get("required").and_then(Value::as_bool).unwrap_or(false);
+                                    Some((n, d, req))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    prompts.push(PromptSpec {
+                        name: name.to_string(),
+                        description: p.get("description").and_then(Value::as_str).map(String::from),
+                        arguments,
+                    });
+                }
+            }
+            match result.get("nextCursor").and_then(Value::as_str) {
+                Some(next) if !next.is_empty() => cursor = Some(next.to_string()),
+                _ => return Ok(prompts),
+            }
+        }
+        Ok(prompts)
+    }
+
+    /// `prompts/get` — fetch a prompt's messages (with the given arguments), joining the text content
+    /// into a single string (the body a standalone prompt package would carry / run through `ask`).
+    pub async fn get_prompt(
+        &mut self,
+        name: &str,
+        arguments: Value,
+        session_id: Option<&str>,
+    ) -> McpResult<String> {
+        let params = serde_json::json!({ "name": name, "arguments": arguments });
+        let result = self.call("prompts/get", Some(params), session_id).await?;
+        // Join each message's text content (role prefixes dropped — grease stores a flat prompt body).
+        // A message's `content` is a single `{type,text}` object (per the MCP prompt spec), not the
+        // array `tools/call` returns, so read the text field directly.
+        let mut out = String::new();
+        if let Some(msgs) = result.get("messages").and_then(Value::as_array) {
+            for m in msgs {
+                let text = m
+                    .get("content")
+                    .and_then(|c| c.get("text"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if !text.is_empty() {
+                    if !out.is_empty() {
+                        out.push('\n');
+                    }
+                    out.push_str(text);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// `resources/list` — the server's advertised resources (uri + name + description + mimeType).
+    /// Paginated like `tools/list`. A server without the resources capability returns method-not-found.
+    pub async fn list_resources(&mut self, session_id: Option<&str>) -> McpResult<Vec<ResourceSpec>> {
+        let mut resources = Vec::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..MAX_TOOL_PAGES {
+            let params = cursor.as_ref().map(|c| serde_json::json!({ "cursor": c }));
+            let result = self.call("resources/list", params, session_id).await?;
+            if let Some(arr) = result.get("resources").and_then(Value::as_array) {
+                for r in arr {
+                    let Some(uri) = r.get("uri").and_then(Value::as_str) else { continue };
+                    resources.push(ResourceSpec {
+                        uri: uri.to_string(),
+                        name: r.get("name").and_then(Value::as_str).map(String::from),
+                        description: r.get("description").and_then(Value::as_str).map(String::from),
+                        mime_type: r.get("mimeType").and_then(Value::as_str).map(String::from),
+                    });
+                }
+            }
+            match result.get("nextCursor").and_then(Value::as_str) {
+                Some(next) if !next.is_empty() => cursor = Some(next.to_string()),
+                _ => return Ok(resources),
+            }
+        }
+        Ok(resources)
+    }
+
+    /// `resources/read` — read a resource's contents by URI. Joins the text of each returned content
+    /// item (the common single-text case yields that text verbatim). Binary (`blob`) contents are
+    /// returned base64-decoded when possible, else the raw base64 string.
+    pub async fn read_resource(&mut self, uri: &str, session_id: Option<&str>) -> McpResult<String> {
+        let params = serde_json::json!({ "uri": uri });
+        let result = self.call("resources/read", Some(params), session_id).await?;
+        let mut out = String::new();
+        if let Some(items) = result.get("contents").and_then(Value::as_array) {
+            for item in items {
+                if let Some(t) = item.get("text").and_then(Value::as_str) {
+                    if !out.is_empty() {
+                        out.push('\n');
+                    }
+                    out.push_str(t);
+                } else if let Some(b) = item.get("blob").and_then(Value::as_str) {
+                    use base64::Engine;
+                    match base64::engine::general_purpose::STANDARD.decode(b) {
+                        Ok(bytes) => out.push_str(&String::from_utf8_lossy(&bytes)),
+                        Err(_) => out.push_str(b),
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Close a session (HTTP DELETE with the session id). A 405 means the server refuses explicit

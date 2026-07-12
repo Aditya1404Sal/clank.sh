@@ -24,6 +24,9 @@ pub const DEFAULT_BIN: &str = "/usr/lib/prompts/bin";
 pub const DEFAULT_SCRIPT_BIN: &str = "/usr/bin";
 /// Default skills directory (`/usr/share/skills/<name>/`), whose `*/bin` glob is already on `$PATH`.
 pub const DEFAULT_SKILLS: &str = "/usr/share/skills";
+/// Default MCP resource mount root (`/mnt/mcp/<server>/`) — where an MCP server's resources are
+/// materialized (static files) and its dynamic/template stubs are surfaced (README:669).
+pub const DEFAULT_MCP_MOUNT: &str = "/mnt/mcp";
 
 /// The registry list — configured registry URLs `grease install`/`search` fetch from, in order.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +77,13 @@ pub fn script_bin_dir() -> PathBuf {
 /// The skills directory (`/usr/share/skills`), honoring `$CLANK_GREASE_SKILLS`.
 pub fn skills_dir() -> PathBuf {
     PathBuf::from(std::env::var("CLANK_GREASE_SKILLS").unwrap_or_else(|_| DEFAULT_SKILLS.to_string()))
+}
+
+/// The MCP resource mount root (`/mnt/mcp`), honoring `$CLANK_GREASE_MCP_MOUNT`.
+pub fn mcp_mount_dir() -> PathBuf {
+    PathBuf::from(
+        std::env::var("CLANK_GREASE_MCP_MOUNT").unwrap_or_else(|_| DEFAULT_MCP_MOUNT.to_string()),
+    )
 }
 
 /// The `registries.toml` path.
@@ -205,6 +215,12 @@ fn safe_join(root: &Path, rel: &str) -> Option<PathBuf> {
         return None;
     }
     Some(root.join(rel_path))
+}
+
+/// Public path-confinement join for MCP resource materialization under `/mnt/mcp/<server>/` — same
+/// `..`/absolute-escape guard as [`safe_join`], keeping a server's resources inside its mount dir.
+pub fn mcp_safe_join(root: &Path, rel: &str) -> Option<PathBuf> {
+    safe_join(root, rel)
 }
 
 #[cfg(test)]

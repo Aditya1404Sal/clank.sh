@@ -27,6 +27,9 @@ pub enum PackageKind {
     Prompt,
     Script,
     Skill,
+    /// An MCP server's artifacts (tools/prompts/resources) — the server name becomes a command whose
+    /// tools are subcommands (README:657).
+    Mcp,
 }
 
 impl PackageKind {
@@ -36,6 +39,7 @@ impl PackageKind {
             PackageKind::Prompt => "prompt.json",
             PackageKind::Script => "script.json",
             PackageKind::Skill => "skill.json",
+            PackageKind::Mcp => "mcp.json",
         }
     }
 
@@ -45,6 +49,7 @@ impl PackageKind {
             PackageKind::Prompt => "prompt",
             PackageKind::Script => "script",
             PackageKind::Skill => "skill",
+            PackageKind::Mcp => "mcp",
         }
     }
 }
@@ -232,6 +237,103 @@ impl SkillPackage {
     }
 }
 
+/// Which of an MCP server's three artifact types this install exposes (`--tools`/`--prompts`/
+/// `--resources`, default all). Selected at install and persisted so `load` reconstructs the same
+/// surface. See README:657.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct McpArtifacts {
+    #[serde(default = "yes")]
+    pub tools: bool,
+    #[serde(default = "yes")]
+    pub prompts: bool,
+    #[serde(default = "yes")]
+    pub resources: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for McpArtifacts {
+    /// No selectors ⇒ all three (README: bare `grease install <server>` installs everything).
+    fn default() -> Self {
+        Self { tools: true, prompts: true, resources: true }
+    }
+}
+
+impl McpArtifacts {
+    /// Build from the parsed `--tools/--prompts/--resources` flags: if none were given, all three.
+    pub fn from_flags(tools: bool, prompts: bool, resources: bool) -> Self {
+        if !tools && !prompts && !resources {
+            Self::default()
+        } else {
+            Self { tools, prompts, resources }
+        }
+    }
+}
+
+/// One tool cached in an installed MCP package's payload (a serde mirror of
+/// [`crate::mcpclient::ToolSpec`] so `load()` rebuilds the tool surface without a live `tools/list`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct McpToolCache {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// The tool's JSON-schema input (lossless), as a JSON string (kept as a string so the payload is
+    /// plain and diff-friendly; parsed back to a `Value` on load).
+    #[serde(default)]
+    pub input_schema: String,
+}
+
+/// One prompt cached in an installed MCP package's payload (name + description; the prompt body is
+/// materialized as a standalone `PromptPackage` at install time, so only the listing is cached).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct McpPromptCache {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+/// An installed MCP-server package (grease type 2). The durable payload carries the server URL +
+/// auth-env + which artifacts are exposed + the cached tool/prompt listings, so `GreaseState::load()`
+/// rebuilds the surface on boot without a live re-fetch (MCP's own state is replay-only, not FS-backed).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct McpPackage {
+    /// The kebab-case server/command name (the `/usr/lib/mcp/bin/<name>` command).
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// The HTTPS MCP endpoint (README: HTTPS-only, no stdio).
+    pub url: String,
+    /// The name of the env var holding the bearer token (never the token itself), if the server needs
+    /// auth. Mirrors `McpServerConfig::auth_env`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_env: Option<String>,
+    /// Which artifact types this install exposes.
+    #[serde(default)]
+    pub artifacts: McpArtifacts,
+    /// Cached tool listing (populated at install from `tools/list`), so `type`/`man`/authz work offline.
+    #[serde(default)]
+    pub tools: Vec<McpToolCache>,
+    /// Cached prompt listing (populated at install from `prompts/list`).
+    #[serde(default)]
+    pub prompts: Vec<McpPromptCache>,
+}
+
+impl McpPackage {
+    pub fn from_json(bytes: &[u8]) -> Result<Self, String> {
+        serde_json::from_slice(bytes).map_err(|e| format!("invalid mcp package JSON: {e}"))
+    }
+
+    pub fn to_json(&self) -> String {
+        serde_json::to_string_pretty(self).unwrap_or_default()
+    }
+}
+
 /// The lowercase hex sha256 of `bytes` — for content integrity verification.
 pub fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
@@ -301,6 +403,7 @@ pub fn payload_kind(bytes: &[u8]) -> Result<PackageKind, String> {
         None | Some("prompt") => Ok(PackageKind::Prompt),
         Some("script") => Ok(PackageKind::Script),
         Some("skill") => Ok(PackageKind::Skill),
+        Some("mcp") => Ok(PackageKind::Mcp),
         Some(other) => Err(format!("unknown package kind '{other}'")),
     }
 }
