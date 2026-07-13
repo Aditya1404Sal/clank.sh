@@ -138,7 +138,7 @@ pub fn build_system_prompt_with_mcp(
 pub fn build_system_prompt_with_capabilities(
     registry: &CommandRegistry,
     mcp: &crate::mcp::state::McpState,
-    grease: &crate::greasestate::GreaseState,
+    grease: &crate::grease::state::GreaseState,
 ) -> String {
     let mut out = build_system_prompt(registry);
     append_mcp_tools(&mut out, mcp);

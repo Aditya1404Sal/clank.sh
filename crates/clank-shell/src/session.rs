@@ -262,7 +262,7 @@ pub struct Session {
     /// `grease` for registry fetches (it's a generic durable "fetch bytes over HTTPS" seam).
     mcp_http: Option<Box<dyn crate::mcp::client::McpHttp>>,
     /// Installed grease packages (prompts). Reconstructed from the durable agent FS on boot.
-    grease: crate::greasestate::GreaseState,
+    grease: crate::grease::state::GreaseState,
     /// The log sink installed per-line (the `/var/log` observability layer). Defaults to the direct
     /// append sink (correct on native); the agent injects a whole-file-rewrite sink whose writes are
     /// idempotent under oplog replay, avoiding line duplication (see `logging` + `log_sink`).
@@ -301,7 +301,7 @@ impl Session {
                 repl: None,
                 mcp: crate::mcp::state::McpState::default(),
                 mcp_http: None,
-                grease: crate::greasestate::GreaseState::load(),
+                grease: crate::grease::state::GreaseState::load(),
                 log_sink: std::sync::Arc::new(crate::logging::DefaultLogSink),
                 cap_cache: None,
                 source: SourceInfo::default(),
@@ -329,7 +329,7 @@ impl Session {
                 repl: None,
                 mcp: crate::mcp::state::McpState::default(),
                 mcp_http: None,
-                grease: crate::greasestate::GreaseState::load(),
+                grease: crate::grease::state::GreaseState::load(),
                 log_sink: std::sync::Arc::new(crate::logging::DefaultLogSink),
                 cap_cache: None,
                 source: SourceInfo::default(),
@@ -721,7 +721,7 @@ impl Session {
                 Ok(cmd) => self.run_mcp(cmd).await,
                 Err(e) => LineResult::from_outcome(Vec::new(), format!("{e}\n").into_bytes(), 2),
             }
-        } else if let Some(parsed) = crate::greasecmd::classify(line) {
+        } else if let Some(parsed) = crate::grease::cmd::classify(line) {
             // `grease` package management runs at the Session layer — install/search/update do HTTP.
             match parsed {
                 Ok(cmd) => self.run_grease(cmd).await,
@@ -1831,8 +1831,8 @@ impl Session {
     /// `session open`/`close`) require the injected transport; the sync ones (`list`, `tools`,
     /// `remove`, `session list`/`info`) work without it.
     /// Dispatch a parsed `grease` command.
-    async fn run_grease(&mut self, cmd: crate::greasecmd::GreaseCommand) -> LineResult {
-        use crate::greasecmd::GreaseCommand;
+    async fn run_grease(&mut self, cmd: crate::grease::cmd::GreaseCommand) -> LineResult {
+        use crate::grease::cmd::GreaseCommand;
         match cmd {
             GreaseCommand::RegistryAdd { url, key } => self.grease_registry_add(&url, key.as_deref()),
             GreaseCommand::RegistryList => self.grease_registry_list(),
@@ -1891,9 +1891,9 @@ impl Session {
     async fn grease_install(
         &mut self,
         name: &str,
-        artifacts: crate::greasecmd::ArtifactFlags,
+        artifacts: crate::grease::cmd::ArtifactFlags,
     ) -> LineResult {
-        if !crate::greaseconfig::is_valid_name(name) {
+        if !crate::grease::config::is_valid_name(name) {
             return LineResult::from_outcome(
                 Vec::new(),
                 format!("grease install: '{name}' is not a valid kebab-case package name\n").into_bytes(),
@@ -1908,7 +1908,7 @@ impl Session {
                 2,
             );
         }
-        let registries = crate::greaseconfig::list_registries();
+        let registries = crate::grease::config::list_registries();
         if registries.is_empty() {
             return LineResult::from_outcome(
                 Vec::new(),
@@ -1966,7 +1966,7 @@ impl Session {
         // Content-addressed integrity: verify the fetched body against the registry's advertised hash.
         // A mismatch is a hard reject (tamper/corruption); a missing index hash falls back to
         // record-only (older/loose registries still work), with a stderr note.
-        let actual = crate::greasepkg::sha256_hex(&body);
+        let actual = crate::grease::pkg::sha256_hex(&body);
         let mut note = Vec::new();
         match &entry.sha256 {
             Some(exp) if exp.eq_ignore_ascii_case(&actual) => {} // verified
@@ -1995,7 +1995,7 @@ impl Session {
         // packages). No configured key ⇒ unsigned registry (record-only, as before), with a note.
         let mut signature_verified = false;
         let mut signer: Option<String> = None;
-        if let Some(trusted_key) = crate::greaseconfig::registry_key(&registry) {
+        if let Some(trusted_key) = crate::grease::config::registry_key(&registry) {
             let Some(sig) = entry.sig.as_deref() else {
                 return LineResult::from_outcome(
                     Vec::new(),
@@ -2007,7 +2007,7 @@ impl Session {
                     4,
                 );
             };
-            if let Err(e) = crate::greasepkg::verify_signature(&body, sig, &trusted_key) {
+            if let Err(e) = crate::grease::pkg::verify_signature(&body, sig, &trusted_key) {
                 return LineResult::from_outcome(
                     Vec::new(),
                     format!("grease install: signature verification failed for '{name}': {e}\n")
@@ -2069,7 +2069,7 @@ impl Session {
         // re-checked against the converted JSON: the served `.md` bytes are what the registry signed/
         // logged. A JSON body passes through untouched.
         let body = if is_markdown_frontmatter(&body) {
-            match crate::greasepkg::PromptPackage::from_markdown(&body) {
+            match crate::grease::pkg::PromptPackage::from_markdown(&body) {
                 Ok(p) => p.to_json().into_bytes(),
                 Err(e) => {
                     return LineResult::from_outcome(
@@ -2083,7 +2083,7 @@ impl Session {
             body
         };
 
-        if crate::greasepkg::payload_kind(&body) == Ok(crate::greasepkg::PackageKind::Mcp) {
+        if crate::grease::pkg::payload_kind(&body) == Ok(crate::grease::pkg::PackageKind::Mcp) {
             return self.grease_finish_install_mcp(name, &registry, &body, integrity, artifacts, note).await;
         }
 
@@ -2101,11 +2101,11 @@ impl Session {
         registry: &str,
         body: &[u8],
         integrity: InstallIntegrity,
-        artifacts: crate::greasecmd::ArtifactFlags,
+        artifacts: crate::grease::cmd::ArtifactFlags,
         mut note: Vec<u8>,
     ) -> LineResult {
         // Parse + name-check the minimal registry payload.
-        let mut pkg = match crate::greasepkg::McpPackage::from_json(body) {
+        let mut pkg = match crate::grease::pkg::McpPackage::from_json(body) {
             Ok(p) => p,
             Err(e) => return LineResult::from_outcome(Vec::new(), format!("grease install: {e}\n").into_bytes(), 4),
         };
@@ -2118,7 +2118,7 @@ impl Session {
         }
         // The install-line flags select which artifact types to expose (no flags = all three).
         pkg.artifacts =
-            crate::greasepkg::McpArtifacts::from_flags(artifacts.tools, artifacts.prompts, artifacts.resources);
+            crate::grease::pkg::McpArtifacts::from_flags(artifacts.tools, artifacts.prompts, artifacts.resources);
 
         let Some(http) = self.mcp_http.as_deref() else {
             return LineResult::from_outcome(
@@ -2173,7 +2173,7 @@ impl Session {
         // Cache the tool + prompt listings in the payload (so `load()` rebuilds offline).
         pkg.tools = tool_specs
             .iter()
-            .map(|t| crate::greasepkg::McpToolCache {
+            .map(|t| crate::grease::pkg::McpToolCache {
                 name: t.name.clone(),
                 description: t.description.clone().unwrap_or_default(),
                 input_schema: t.input_schema.to_string(),
@@ -2181,7 +2181,7 @@ impl Session {
             .collect();
         pkg.prompts = prompt_specs
             .iter()
-            .map(|p| crate::greasepkg::McpPromptCache {
+            .map(|p| crate::grease::pkg::McpPromptCache {
                 name: p.name.clone(),
                 description: p.description.clone().unwrap_or_default(),
             })
@@ -2206,10 +2206,10 @@ impl Session {
                 .filter_map(|t| {
                     let tname = t.name.clone()?;
                     let cmd = format!("{name}-{tname}");
-                    if !crate::greaseconfig::is_valid_name(&cmd) {
+                    if !crate::grease::config::is_valid_name(&cmd) {
                         return None;
                     }
-                    Some(crate::greasepkg::McpTemplateCache {
+                    Some(crate::grease::pkg::McpTemplateCache {
                         name: cmd,
                         uri_template: t.uri_template.clone(),
                         description: t.description.clone().unwrap_or_default(),
@@ -2221,11 +2221,11 @@ impl Session {
         let template_count = pkg.templates.len();
 
         // Persist the enriched payload + marker.
-        let payload = crate::greasestate::Payload::Mcp(pkg.clone());
-        if let Err(msg) = self.persist_package(name, crate::greasepkg::PackageKind::Mcp, &payload) {
+        let payload = crate::grease::state::Payload::Mcp(pkg.clone());
+        if let Err(msg) = self.persist_package(name, crate::grease::pkg::PackageKind::Mcp, &payload) {
             return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 1);
         }
-        let marker = integrity.to_marker(crate::greasepkg::PackageKind::Mcp, registry);
+        let marker = integrity.to_marker(crate::grease::pkg::PackageKind::Mcp, registry);
         if let Err(msg) = write_install_marker(name, &marker) {
             return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 1);
         }
@@ -2257,7 +2257,7 @@ impl Session {
         }
 
         // Register the grease package view.
-        self.grease.set_installed(crate::greasestate::InstalledPackage { marker, payload });
+        self.grease.set_installed(crate::grease::state::InstalledPackage { marker, payload });
 
         note.extend_from_slice(
             format!(
@@ -2284,7 +2284,7 @@ impl Session {
         integrity: InstallIntegrity,
         note: Vec<u8>,
     ) -> LineResult {
-        let kind = match crate::greasepkg::payload_kind(body) {
+        let kind = match crate::grease::pkg::payload_kind(body) {
             Ok(k) => k,
             Err(e) => {
                 return LineResult::from_outcome(
@@ -2309,14 +2309,14 @@ impl Session {
         if let Err(msg) = write_install_marker(name, &marker) {
             return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 1);
         }
-        let installed = crate::greasestate::InstalledPackage { marker, payload };
+        let installed = crate::grease::state::InstalledPackage { marker, payload };
         // Materialize the kind's on-disk surface (bin stub / skill dir tree) — needs the help text,
         // which is derived from the registered package, so register first.
         self.grease.set_installed(installed);
         self.materialize_package(name, kind);
 
         let run_hint = match kind {
-            crate::greasepkg::PackageKind::Skill => {
+            crate::grease::pkg::PackageKind::Skill => {
                 format!("see it with `grease info {name}`")
             }
             _ => format!("run it with `{name}`"),
@@ -2339,7 +2339,7 @@ impl Session {
     /// body are already resolved server-side for the empty-arg fetch, so v1 stores the fetched body as
     /// a non-parameterized prompt (re-fetch with args is a future refinement).
     fn install_mcp_prompt(&mut self, spec: &crate::mcp::client::PromptSpec, body: &str, registry: &str) {
-        let pkg = crate::greasepkg::PromptPackage {
+        let pkg = crate::grease::pkg::PromptPackage {
             name: spec.name.clone(),
             description: spec.description.clone().unwrap_or_default(),
             model: None,
@@ -2347,13 +2347,13 @@ impl Session {
             body: body.to_string(),
         };
         // Persist as a prompt package + marker + bin stub, and register it.
-        let payload = crate::greasestate::Payload::Prompt(pkg);
-        if self.persist_package(&spec.name, crate::greasepkg::PackageKind::Prompt, &payload).is_err() {
+        let payload = crate::grease::state::Payload::Prompt(pkg);
+        if self.persist_package(&spec.name, crate::grease::pkg::PackageKind::Prompt, &payload).is_err() {
             return;
         }
-        let sha = crate::greasepkg::sha256_hex(body.as_bytes());
-        let marker = crate::greasestate::InstallMarker {
-            kind: crate::greasepkg::PackageKind::Prompt,
+        let sha = crate::grease::pkg::sha256_hex(body.as_bytes());
+        let marker = crate::grease::state::InstallMarker {
+            kind: crate::grease::pkg::PackageKind::Prompt,
             registry: registry.to_string(),
             sha256: sha,
             verified: false,
@@ -2365,22 +2365,22 @@ impl Session {
         if write_install_marker(&spec.name, &marker).is_err() {
             return;
         }
-        self.grease.set_installed(crate::greasestate::InstalledPackage { marker, payload });
-        self.materialize_package(&spec.name, crate::greasepkg::PackageKind::Prompt);
+        self.grease.set_installed(crate::grease::state::InstalledPackage { marker, payload });
+        self.materialize_package(&spec.name, crate::grease::pkg::PackageKind::Prompt);
     }
 
-    /// Parse a fetched payload for `kind` into a [`crate::greasestate::Payload`], verifying the
+    /// Parse a fetched payload for `kind` into a [`crate::grease::state::Payload`], verifying the
     /// package's own name matches the requested `name`. Returns an error string on parse/name mismatch.
     fn parse_and_check_payload(
         &self,
         name: &str,
-        kind: crate::greasepkg::PackageKind,
+        kind: crate::grease::pkg::PackageKind,
         body: &[u8],
-    ) -> Result<crate::greasestate::Payload, String> {
-        use crate::greasepkg::{
+    ) -> Result<crate::grease::state::Payload, String> {
+        use crate::grease::pkg::{
             AgentPackage, McpPackage, PackageKind, PromptPackage, ScriptPackage, SkillPackage,
         };
-        use crate::greasestate::Payload;
+        use crate::grease::state::Payload;
         let (payload, pkg_name) = match kind {
             PackageKind::Prompt => {
                 let p = PromptPackage::from_json(body).map_err(|e| format!("grease install: {e}\n"))?;
@@ -2420,11 +2420,11 @@ impl Session {
     fn persist_package(
         &self,
         name: &str,
-        kind: crate::greasepkg::PackageKind,
-        payload: &crate::greasestate::Payload,
+        kind: crate::grease::pkg::PackageKind,
+        payload: &crate::grease::state::Payload,
     ) -> Result<(), String> {
-        use crate::greasestate::Payload;
-        let store = crate::greaseconfig::store_dir().join(name);
+        use crate::grease::state::Payload;
+        let store = crate::grease::config::store_dir().join(name);
         std::fs::create_dir_all(&store)
             .map_err(|e| format!("grease install: cannot create store dir: {e}\n"))?;
         let json = match payload {
@@ -2441,16 +2441,16 @@ impl Session {
     /// Materialize a kind's on-disk surface after registration: a bin stub for command packages
     /// (prompt→`/usr/lib/prompts/bin`, script→`/usr/bin`) or the skill dir tree (docs + bundled
     /// `bin/` scripts) for a skill. Best-effort — the durable payload is already persisted.
-    fn materialize_package(&self, name: &str, kind: crate::greasepkg::PackageKind) {
-        use crate::greasepkg::PackageKind;
+    fn materialize_package(&self, name: &str, kind: crate::grease::pkg::PackageKind) {
+        use crate::grease::pkg::PackageKind;
         match kind {
             PackageKind::Prompt => {
                 let help = self
                     .grease
                     .pkg_help(name)
                     .unwrap_or_else(|| format!("{name} — installed prompt\n"));
-                let _ = crate::greaseconfig::write_bin_stub(
-                    &crate::greaseconfig::bin_dir(),
+                let _ = crate::grease::config::write_bin_stub(
+                    &crate::grease::config::bin_dir(),
                     name,
                     &help,
                     "prompt",
@@ -2461,8 +2461,8 @@ impl Session {
                     .grease
                     .pkg_help(name)
                     .unwrap_or_else(|| format!("{name} — installed script\n"));
-                let _ = crate::greaseconfig::write_bin_stub(
-                    &crate::greaseconfig::script_bin_dir(),
+                let _ = crate::grease::config::write_bin_stub(
+                    &crate::grease::config::script_bin_dir(),
                     name,
                     &help,
                     "script",
@@ -2470,7 +2470,7 @@ impl Session {
             }
             PackageKind::Skill => {
                 if let Some(sk) = self.grease.skill(name) {
-                    let _ = crate::greaseconfig::materialize_skill(sk);
+                    let _ = crate::grease::config::materialize_skill(sk);
                 }
             }
             PackageKind::Mcp => {
@@ -2483,8 +2483,8 @@ impl Session {
                     .grease
                     .pkg_help(name)
                     .unwrap_or_else(|| format!("{name} — installed agent\n"));
-                let _ = crate::greaseconfig::write_bin_stub(
-                    &crate::greaseconfig::agent_bin_dir(),
+                let _ = crate::grease::config::write_bin_stub(
+                    &crate::grease::config::agent_bin_dir(),
                     name,
                     &help,
                     "agent",
@@ -2503,27 +2503,27 @@ impl Session {
                 1,
             );
         };
-        let _ = std::fs::remove_file(crate::greaseconfig::etc_dir().join(format!("{name}.toml")));
-        let _ = std::fs::remove_dir_all(crate::greaseconfig::store_dir().join(name));
+        let _ = std::fs::remove_file(crate::grease::config::etc_dir().join(format!("{name}.toml")));
+        let _ = std::fs::remove_dir_all(crate::grease::config::store_dir().join(name));
         match kind {
-            crate::greasepkg::PackageKind::Prompt => {
-                let _ = std::fs::remove_file(crate::greaseconfig::bin_dir().join(name));
+            crate::grease::pkg::PackageKind::Prompt => {
+                let _ = std::fs::remove_file(crate::grease::config::bin_dir().join(name));
             }
-            crate::greasepkg::PackageKind::Script => {
-                let _ = std::fs::remove_file(crate::greaseconfig::script_bin_dir().join(name));
+            crate::grease::pkg::PackageKind::Script => {
+                let _ = std::fs::remove_file(crate::grease::config::script_bin_dir().join(name));
             }
-            crate::greasepkg::PackageKind::Skill => {
-                let _ = std::fs::remove_dir_all(crate::greaseconfig::skills_dir().join(name));
+            crate::grease::pkg::PackageKind::Skill => {
+                let _ = std::fs::remove_dir_all(crate::grease::config::skills_dir().join(name));
             }
-            crate::greasepkg::PackageKind::Mcp => {
+            crate::grease::pkg::PackageKind::Mcp => {
                 // Deregister the server from `McpState` (also removes its /usr/lib/mcp/bin stub) and
                 // remove any materialized resource tree under /mnt/mcp/<name>/.
                 let _ = crate::mcp::config::remove(name);
                 self.mcp.remove(name);
-                let _ = std::fs::remove_dir_all(crate::greaseconfig::mcp_mount_dir().join(name));
+                let _ = std::fs::remove_dir_all(crate::grease::config::mcp_mount_dir().join(name));
             }
-            crate::greasepkg::PackageKind::Agent => {
-                let _ = std::fs::remove_file(crate::greaseconfig::agent_bin_dir().join(name));
+            crate::grease::pkg::PackageKind::Agent => {
+                let _ = std::fs::remove_file(crate::grease::config::agent_bin_dir().join(name));
             }
         }
         self.grease.remove(name);
@@ -2532,7 +2532,7 @@ impl Session {
 
     /// `grease search <query>`: fetch each registry's `index.json` and list matching package names.
     async fn grease_search(&mut self, query: &str) -> LineResult {
-        let registries = crate::greaseconfig::list_registries();
+        let registries = crate::grease::config::list_registries();
         if registries.is_empty() {
             return LineResult::from_outcome(
                 Vec::new(),
@@ -2598,7 +2598,7 @@ impl Session {
             let flags = self
                 .grease
                 .mcp(&t)
-                .map(|m| crate::greasecmd::ArtifactFlags {
+                .map(|m| crate::grease::cmd::ArtifactFlags {
                     tools: m.artifacts.tools,
                     prompts: m.artifacts.prompts,
                     resources: m.artifacts.resources,
@@ -2622,7 +2622,7 @@ impl Session {
             );
         }
         if let Some(k) = key {
-            if let Err(e) = crate::greasepkg::validate_public_key(k) {
+            if let Err(e) = crate::grease::pkg::validate_public_key(k) {
                 return LineResult::from_outcome(
                     Vec::new(),
                     format!("grease registry add: {e}\n").into_bytes(),
@@ -2630,7 +2630,7 @@ impl Session {
                 );
             }
         }
-        match crate::greaseconfig::add_registry(url, key) {
+        match crate::grease::config::add_registry(url, key) {
             Ok(true) => {
                 let msg = if key.is_some() {
                     format!("added registry {url} (signed)\n")
@@ -2648,7 +2648,7 @@ impl Session {
 
     /// `grease registry list`: the configured registry URLs.
     fn grease_registry_list(&self) -> LineResult {
-        let urls = crate::greaseconfig::list_registries();
+        let urls = crate::grease::config::list_registries();
         if urls.is_empty() {
             return LineResult::continue_with_stdout(b"no registries configured\n".to_vec());
         }
@@ -2657,7 +2657,7 @@ impl Session {
 
     /// `grease registry remove <url>`: drop a registry URL.
     fn grease_registry_remove(&self, url: &str) -> LineResult {
-        match crate::greaseconfig::remove_registry(url) {
+        match crate::grease::config::remove_registry(url) {
             Ok(true) => LineResult::continue_with_stdout(format!("removed registry {url}\n").into_bytes()),
             Ok(false) => LineResult::from_outcome(
                 Vec::new(),
@@ -3505,7 +3505,7 @@ impl Session {
     async fn run_agent_reserved(
         &mut self,
         name: &str,
-        pkg: &crate::greasepkg::AgentPackage,
+        pkg: &crate::grease::pkg::AgentPackage,
         parsed: &ParsedAgentLine,
         sub: &str,
     ) -> LineResult {
@@ -3734,11 +3734,11 @@ impl Session {
     /// prompt naming the package, its source registries, and its `ask` capability. `None` otherwise
     /// (the caller falls back to the generic confirm text).
     fn grease_install_disclosure(&self, gated_command: &str, sudo_grant: bool) -> Option<String> {
-        let cmd = crate::greasecmd::classify(gated_command)?.ok()?;
-        let crate::greasecmd::GreaseCommand::Install { name, .. } = cmd else {
+        let cmd = crate::grease::cmd::classify(gated_command)?.ok()?;
+        let crate::grease::cmd::GreaseCommand::Install { name, .. } = cmd else {
             return None;
         };
-        let registries = crate::greaseconfig::list_registries();
+        let registries = crate::grease::config::list_registries();
         let from = if registries.is_empty() {
             "no configured registry".to_string()
         } else {
@@ -4044,8 +4044,8 @@ struct InstallIntegrity {
 
 impl InstallIntegrity {
     /// Build the on-disk install marker for a given kind + registry.
-    fn to_marker(&self, kind: crate::greasepkg::PackageKind, registry: &str) -> crate::greasestate::InstallMarker {
-        crate::greasestate::InstallMarker {
+    fn to_marker(&self, kind: crate::grease::pkg::PackageKind, registry: &str) -> crate::grease::state::InstallMarker {
+        crate::grease::state::InstallMarker {
             kind,
             registry: registry.to_string(),
             sha256: self.sha256.clone(),
@@ -4159,7 +4159,7 @@ async fn fetch_index_entry(
 
 /// Verify a package's RFC-6962 inclusion proof: the log leaf is the payload's hex sha256 string (the
 /// content-address), so the proof witnesses that this exact content was logged. Decodes the base64
-/// root + proof nodes and delegates to [`crate::greasepkg::verify_inclusion_proof`].
+/// root + proof nodes and delegates to [`crate::grease::pkg::verify_inclusion_proof`].
 fn verify_log_inclusion(payload_sha256_hex: &str, log: &LogProof) -> Result<(), String> {
     use base64::Engine;
     let root = base64::engine::general_purpose::STANDARD
@@ -4175,7 +4175,7 @@ fn verify_log_inclusion(payload_sha256_hex: &str, log: &LogProof) -> Result<(), 
         })
         .collect();
     let proof = proof?;
-    crate::greasepkg::verify_inclusion_proof(
+    crate::grease::pkg::verify_inclusion_proof(
         payload_sha256_hex.as_bytes(),
         log.leaf_index,
         log.tree_size,
@@ -4193,16 +4193,16 @@ async fn materialize_mcp_resources(
     server: &str,
     client: &mut crate::mcp::client::McpClient<'_>,
     session: Option<&str>,
-) -> Vec<crate::greasepkg::McpResourceCache> {
+) -> Vec<crate::grease::pkg::McpResourceCache> {
     let Ok(resources) = client.list_resources(session).await else {
         return Vec::new();
     };
-    let root = crate::greaseconfig::mcp_mount_dir().join(server);
+    let root = crate::grease::config::mcp_mount_dir().join(server);
     let mut cache = Vec::new();
     for res in &resources {
         let rel = mcp_resource_rel_path(&res.uri);
         let mut is_static = false;
-        if let Some(dest) = crate::greaseconfig::mcp_safe_join(&root, &rel) {
+        if let Some(dest) = crate::grease::config::mcp_safe_join(&root, &rel) {
             if let Ok(contents) = client.read_resource(&res.uri, session).await {
                 if let Some(parent) = dest.parent() {
                     let _ = std::fs::create_dir_all(parent);
@@ -4210,7 +4210,7 @@ async fn materialize_mcp_resources(
                 is_static = std::fs::write(&dest, contents.as_bytes()).is_ok();
             }
         }
-        cache.push(crate::greasepkg::McpResourceCache {
+        cache.push(crate::grease::pkg::McpResourceCache {
             uri: res.uri.clone(),
             rel_path: rel,
             description: res.description.clone().unwrap_or_default(),
@@ -4358,7 +4358,7 @@ struct ParsedAgentLine {
 /// from its args.
 fn parse_agent_line(
     words: &[String],
-    pkg: &crate::greasepkg::AgentPackage,
+    pkg: &crate::grease::pkg::AgentPackage,
 ) -> Result<ParsedAgentLine, String> {
     use crate::golem::agent::InvokeMode;
     let is_ctor = |k: &str| pkg.constructor_params.iter().any(|p| p == k);
@@ -4445,10 +4445,10 @@ fn parse_agent_line(
 }
 
 /// Persist an install marker to `<etc>/<name>.toml`. Returns a user-facing error string on failure.
-fn write_install_marker(name: &str, marker: &crate::greasestate::InstallMarker) -> Result<(), String> {
+fn write_install_marker(name: &str, marker: &crate::grease::state::InstallMarker) -> Result<(), String> {
     let marker_toml = toml::to_string_pretty(marker)
         .map_err(|e| format!("grease install: marker serialize error: {e}\n"))?;
-    let etc = crate::greaseconfig::etc_dir();
+    let etc = crate::grease::config::etc_dir();
     let _ = std::fs::create_dir_all(&etc);
     std::fs::write(etc.join(format!("{name}.toml")), marker_toml)
         .map_err(|e| format!("grease install: cannot write marker: {e}\n"))
@@ -4456,7 +4456,7 @@ fn write_install_marker(name: &str, marker: &crate::greasestate::InstallMarker) 
 
 /// `grease info <skill>` text: the skill is not a command, so we describe its envelope + the bundled
 /// documents/scripts rather than generated command help.
-fn skill_info_text(sk: &crate::greasepkg::SkillPackage) -> String {
+fn skill_info_text(sk: &crate::grease::pkg::SkillPackage) -> String {
     let mut out = format!("{} — {} [skill]\n", sk.name, sk.description);
     if let Some(use_) = &sk.intended_use {
         out.push_str(&format!("\nIntended use: {use_}\n"));
@@ -4486,7 +4486,7 @@ fn skill_info_text(sk: &crate::greasepkg::SkillPackage) -> String {
 
 /// `grease info <mcp-server>` text: the server endpoint, exposed artifact types, and the cached
 /// tool/prompt listings.
-fn mcp_info_text(m: &crate::greasepkg::McpPackage) -> String {
+fn mcp_info_text(m: &crate::grease::pkg::McpPackage) -> String {
     let mut out = format!("{} — {} [mcp]\n", m.name, m.description);
     out.push_str(&format!("\nServer: {}\n", m.url));
     let mut kinds = Vec::new();
@@ -5087,7 +5087,7 @@ mod tests {
         }
     }
     fn set_grease_dirs() -> GreaseDirsGuard {
-        let lock = crate::greaseconfig::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let lock = crate::grease::config::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let base = std::env::temp_dir().join(format!("clank_grease_sess_{}_{n}", std::process::id()));
@@ -5262,7 +5262,7 @@ mod tests {
             assert!(session.grease.is_prompt("summarize-diff"));
 
             // The static resource was materialized under /mnt/mcp/demo/.
-            let res_path = crate::greaseconfig::mcp_mount_dir().join("demo/repo/README.md");
+            let res_path = crate::grease::config::mcp_mount_dir().join("demo/repo/README.md");
             assert_eq!(
                 std::fs::read_to_string(&res_path).unwrap(),
                 "# Hello from the resource"
@@ -5329,7 +5329,7 @@ mod tests {
             assert_eq!(inst.exit_code, 0, "install stderr: {}", String::from_utf8_lossy(&inst.stderr));
 
             // The static resource is a real file.
-            let static_path = crate::greaseconfig::mcp_mount_dir().join("srv/docs/guide.md");
+            let static_path = crate::grease::config::mcp_mount_dir().join("srv/docs/guide.md");
             assert_eq!(std::fs::read_to_string(&static_path).unwrap(), "static guide body");
 
             // `ls /mnt/mcp/srv/` lists both the static dir (docs) and the dynamic dir (metrics).
@@ -5551,7 +5551,7 @@ mod tests {
             assert!(String::from_utf8(inst.stdout).unwrap().contains("[agent]"));
             assert!(session.grease.is_agent("shopping-cart"));
             // The agent bin stub landed in the agents bin dir.
-            assert!(crate::greaseconfig::agent_bin_dir().join("shopping-cart").exists());
+            assert!(crate::grease::config::agent_bin_dir().join("shopping-cart").exists());
 
             // `--help` describes the type + methods (no invocation).
             let help = session.eval_line("shopping-cart --help").await;
@@ -5584,7 +5584,7 @@ mod tests {
             let rm = session.eval_line("sudo grease remove shopping-cart").await;
             assert_eq!(rm.exit_code, 0);
             assert!(!session.grease.is_agent("shopping-cart"));
-            assert!(!crate::greaseconfig::agent_bin_dir().join("shopping-cart").exists());
+            assert!(!crate::grease::config::agent_bin_dir().join("shopping-cart").exists());
         });
     }
 
@@ -5924,8 +5924,8 @@ mod tests {
             // It's an installed SCRIPT (not a prompt), and its stub is in the script bin dir.
             assert!(session.grease.is_script("greet"));
             assert!(!session.grease.is_prompt("greet"));
-            assert!(crate::greaseconfig::script_bin_dir().join("greet").exists());
-            assert!(!crate::greaseconfig::bin_dir().join("greet").exists());
+            assert!(crate::grease::config::script_bin_dir().join("greet").exists());
+            assert!(!crate::grease::config::bin_dir().join("greet").exists());
 
             // `grease list` shows it tagged as a script.
             let list = String::from_utf8(session.eval_line("grease list").await.stdout).unwrap();
@@ -5957,7 +5957,7 @@ mod tests {
             let rm = session.eval_line("sudo grease remove greet").await;
             assert_eq!(rm.exit_code, 0);
             assert!(!session.grease.is_script("greet"));
-            assert!(!crate::greaseconfig::script_bin_dir().join("greet").exists());
+            assert!(!crate::grease::config::script_bin_dir().join("greet").exists());
         });
     }
 
@@ -5987,7 +5987,7 @@ mod tests {
             assert!(out.contains("installed code-review") && out.contains("[skill]"), "out: {out}");
 
             // The dir tree is materialized: doc + bundled bin script.
-            let skill_root = crate::greaseconfig::skills_dir().join("code-review");
+            let skill_root = crate::grease::config::skills_dir().join("code-review");
             assert_eq!(
                 std::fs::read_to_string(skill_root.join("SKILL.md")).unwrap(),
                 "Review for correctness first."
@@ -6054,7 +6054,7 @@ mod tests {
             let index = serde_json::json!({
                 "packages": [{
                     "name": "signed-pkg", "description": "d",
-                    "sha256": crate::greasepkg::sha256_hex(&body),
+                    "sha256": crate::grease::pkg::sha256_hex(&body),
                     "sig": sig, "signer": "alice"
                 }]
             });
@@ -6097,7 +6097,7 @@ mod tests {
             let index = serde_json::json!({
                 "packages": [{
                     "name": "bad-sig", "description": "d",
-                    "sha256": crate::greasepkg::sha256_hex(&body),
+                    "sha256": crate::grease::pkg::sha256_hex(&body),
                     "sig": wrong_sig, "signer": "mallory"
                 }]
             });
@@ -6132,7 +6132,7 @@ mod tests {
             let (pubkey, _sig) = sign_payload(&body);
             let index = serde_json::json!({
                 "packages": [{ "name": "nosig", "description": "d",
-                    "sha256": crate::greasepkg::sha256_hex(&body) }] // NO sig field
+                    "sha256": crate::grease::pkg::sha256_hex(&body) }] // NO sig field
             });
             session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![
                 ("/index.json", grease_json(index)),
@@ -6204,7 +6204,7 @@ mod tests {
             let (pubkey, sig) = sign_payload(&body);
             // Build a 2-leaf tree: leaf 0 = our package's sha256-hex string (the log leaf), leaf 1 = a
             // sibling. Proof for leaf 0 is [leaf_hash(sibling)]; root = node(leaf0, leaf1).
-            let leaf0 = crate::greasepkg::sha256_hex(&body);
+            let leaf0 = crate::grease::pkg::sha256_hex(&body);
             let sibling = b"another-package-digest".to_vec();
             let h0 = rfc_leaf(leaf0.as_bytes());
             let h1 = rfc_leaf(&sibling);
@@ -6250,7 +6250,7 @@ mod tests {
             });
             let body = grease_json(pkg.clone()).body;
             let (pubkey, sig) = sign_payload(&body);
-            let leaf0 = crate::greasepkg::sha256_hex(&body);
+            let leaf0 = crate::grease::pkg::sha256_hex(&body);
             let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
             // A bogus root that won't match the recomputed one.
             let index = serde_json::json!({
@@ -6312,7 +6312,7 @@ mod tests {
             let pkg = serde_json::json!({
                 "name": "vpkg", "description": "verified package", "body": "hello."
             });
-            let good = crate::greasepkg::sha256_hex(pkg.to_string().as_bytes());
+            let good = crate::grease::pkg::sha256_hex(pkg.to_string().as_bytes());
             let mut session = Session::new().await.unwrap();
             let index = serde_json::json!({
                 "packages": [{"name":"vpkg","description":"verified package","sha256": good}]
@@ -6348,7 +6348,7 @@ mod tests {
             assert_eq!(inst.exit_code, 4);
             assert!(String::from_utf8(inst.stderr).unwrap().contains("integrity check failed"));
             assert!(!session.grease.is_prompt("vpkg"), "a mismatched package must not install");
-            assert!(!crate::greaseconfig::store_dir().join("vpkg").exists());
+            assert!(!crate::grease::config::store_dir().join("vpkg").exists());
         });
     }
 

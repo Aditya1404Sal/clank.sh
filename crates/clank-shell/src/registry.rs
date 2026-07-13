@@ -170,7 +170,7 @@ pub fn build() -> CommandRegistry {
     for manifest in crate::mcp::cmd::manifests() {
         registry.insert(manifest);
     }
-    for manifest in crate::greasecmd::manifests() {
+    for manifest in crate::grease::cmd::manifests() {
         registry.insert(manifest);
     }
     for manifest in crate::golem::cluster::manifests() {

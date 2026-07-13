@@ -2,7 +2,7 @@
 //!
 //! Writes `<dir>/packages/*.json` (one per package kind) and a signed `<dir>/index.json` whose entries
 //! carry the real `sha256`, a detached ed25519 `sig`, a `signer`, and an RFC-6962 transparency-log
-//! inclusion proof — computed with the SAME code the agent verifies (`clank_shell::greasepkg`'s
+//! inclusion proof — computed with the SAME code the agent verifies (`clank_shell::grease::pkg`'s
 //! `sha256_hex` + the leaf-hash domain separation), so the fixture can never drift from the verifier.
 //!
 //! Deterministic: the signing key is the fixed `[7u8; 32]` seed (the public key is printed on the last
@@ -91,7 +91,7 @@ fn main() {
     for p in &packages {
         std::fs::write(pkgdir.join(format!("{}.{}", p.name, p.ext)), &p.body).expect("write package");
         let body = p.body.as_bytes();
-        let sha = clank_shell::greasepkg::sha256_hex(body);
+        let sha = clank_shell::grease::pkg::sha256_hex(body);
         let sig = b64(&sk.sign(body).to_bytes());
         // Single-leaf transparency log: leaf = the sha256-hex string; root = leaf_hash(leaf); proof = [].
         let log = if p.with_log {

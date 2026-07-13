@@ -12,7 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::greasepkg::{
+use crate::grease::pkg::{
     AgentPackage, McpPackage, PackageKind, PromptPackage, ScriptPackage, SkillPackage,
 };
 use crate::manifest::{AuthorizationPolicy, ExecutionScope, Manifest};
@@ -124,7 +124,7 @@ impl GreaseState {
     /// each package's payload from the store per its kind. Corrupt/partial installs are skipped.
     pub fn load() -> Self {
         let mut packages = Vec::new();
-        let etc = crate::greaseconfig::etc_dir();
+        let etc = crate::grease::config::etc_dir();
         if let Ok(entries) = std::fs::read_dir(&etc) {
             for entry in entries.flatten() {
                 let path = entry.path();
@@ -278,7 +278,7 @@ impl GreaseState {
         &self,
         server: &str,
         rel_path: &str,
-    ) -> Option<&crate::greasepkg::McpResourceCache> {
+    ) -> Option<&crate::grease::pkg::McpResourceCache> {
         self.mcp(server)?.resources.iter().find(|r| r.rel_path == rel_path)
     }
 
@@ -522,10 +522,10 @@ fn integrity_note(marker: &InstallMarker) -> String {
 /// Load one installed package (`<etc>/<name>.toml` marker + `<store>/<name>/<kind>.json` payload).
 /// `None` if either file is missing or unparseable. Dispatches on the marker's `kind`.
 fn load_one(name: &str) -> Option<InstalledPackage> {
-    let marker_path = crate::greaseconfig::etc_dir().join(format!("{name}.toml"));
+    let marker_path = crate::grease::config::etc_dir().join(format!("{name}.toml"));
     let marker: InstallMarker = toml::from_str(&std::fs::read_to_string(marker_path).ok()?).ok()?;
     let payload_path =
-        crate::greaseconfig::store_dir().join(name).join(marker.kind.payload_file());
+        crate::grease::config::store_dir().join(name).join(marker.kind.payload_file());
     let bytes = std::fs::read(payload_path).ok()?;
     let payload = match marker.kind {
         PackageKind::Prompt => Payload::Prompt(PromptPackage::from_json(&bytes).ok()?),
@@ -540,7 +540,7 @@ fn load_one(name: &str) -> Option<InstalledPackage> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::greasepkg::PackageArg;
+    use crate::grease::pkg::PackageArg;
 
     fn sample_prompt() -> PromptPackage {
         PromptPackage {

@@ -187,7 +187,7 @@ pub fn write_bin_stub(dir: &Path, name: &str, help: &str, label: &str) -> Result
 /// `$PATH`). Best-effort; the durable payload is already persisted in the store. Any document `path`
 /// that escapes the skill dir (`..` / absolute) is skipped (defense-in-depth against a hostile
 /// registry).
-pub fn materialize_skill(sk: &crate::greasepkg::SkillPackage) -> Result<(), String> {
+pub fn materialize_skill(sk: &crate::grease::pkg::SkillPackage) -> Result<(), String> {
     let root = skills_dir().join(&sk.name);
     std::fs::create_dir_all(&root).map_err(|e| format!("cannot create {root:?}: {e}"))?;
     for doc in &sk.documents {
@@ -320,7 +320,7 @@ mod tests {
 
     #[test]
     fn materialize_skill_writes_docs_and_scripts_and_confines_paths() {
-        use crate::greasepkg::{SkillDocument, SkillPackage, SkillScript};
+        use crate::grease::pkg::{SkillDocument, SkillPackage, SkillScript};
         with_temp_dirs(|| {
             let sk = SkillPackage {
                 name: "code-review".into(),
