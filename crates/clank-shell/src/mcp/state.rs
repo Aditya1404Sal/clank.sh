@@ -8,8 +8,8 @@
 use serde_json::Value;
 
 use crate::manifest::{AuthorizationPolicy, ExecutionScope, Manifest, ParamSpec, ParamType};
-use crate::mcpclient::{InitializeResult, ToolSpec};
-use crate::mcpconfig::McpServerConfig;
+use crate::mcp::client::{InitializeResult, ToolSpec};
+use crate::mcp::config::McpServerConfig;
 
 /// One installed MCP tool (mirrors [`ToolSpec`] with an owned schema).
 #[derive(Clone, Debug)]
@@ -277,7 +277,7 @@ fn schema_to_params(schema: &Value) -> Vec<ParamSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mcpconfig::McpServerConfig;
+    use crate::mcp::config::McpServerConfig;
 
     fn tool(name: &str, schema: Value) -> McpTool {
         McpTool { name: name.into(), description: Some(format!("does {name}")), input_schema: schema }

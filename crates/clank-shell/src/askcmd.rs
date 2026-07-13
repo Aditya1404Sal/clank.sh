@@ -122,10 +122,10 @@ pub fn build_system_prompt(registry: &CommandRegistry) -> String {
 }
 
 /// Like [`build_system_prompt`] but also lists installed MCP tools (each exposed as its own
-/// `mcp__<server>__<tool>` tool). `mcp_tools` is [`crate::mcpstate::McpState::ask_tool_definitions`].
+/// `mcp__<server>__<tool>` tool). `mcp_tools` is [`crate::mcp::state::McpState::ask_tool_definitions`].
 pub fn build_system_prompt_with_mcp(
     registry: &CommandRegistry,
-    mcp: &crate::mcpstate::McpState,
+    mcp: &crate::mcp::state::McpState,
 ) -> String {
     let mut out = build_system_prompt(registry);
     append_mcp_tools(&mut out, mcp);
@@ -137,7 +137,7 @@ pub fn build_system_prompt_with_mcp(
 /// `/proc/clank/system-prompt` so the human-visible view matches what the model sees.
 pub fn build_system_prompt_with_capabilities(
     registry: &CommandRegistry,
-    mcp: &crate::mcpstate::McpState,
+    mcp: &crate::mcp::state::McpState,
     grease: &crate::greasestate::GreaseState,
 ) -> String {
     let mut out = build_system_prompt(registry);
@@ -172,7 +172,7 @@ pub fn build_system_prompt_with_capabilities(
 }
 
 /// Append the installed-MCP-tools block to `out` (shared by both system-prompt builders).
-fn append_mcp_tools(out: &mut String, mcp: &crate::mcpstate::McpState) {
+fn append_mcp_tools(out: &mut String, mcp: &crate::mcp::state::McpState) {
     let mcp_tools = mcp.ask_tool_definitions();
     if !mcp_tools.is_empty() {
         out.push_str(

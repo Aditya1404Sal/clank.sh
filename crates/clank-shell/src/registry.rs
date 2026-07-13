@@ -167,7 +167,7 @@ pub fn build() -> CommandRegistry {
     for manifest in crate::askcmd::manifests() {
         registry.insert(manifest);
     }
-    for manifest in crate::mcpcmd::manifests() {
+    for manifest in crate::mcp::cmd::manifests() {
         registry.insert(manifest);
     }
     for manifest in crate::greasecmd::manifests() {

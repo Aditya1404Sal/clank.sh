@@ -1,5 +1,5 @@
 //! `Session`-held view of installed grease packages, reconstructed from the **durable agent FS** on
-//! boot (unlike [`crate::mcpstate`], which is replay-rebuilt in memory).
+//! boot (unlike [`crate::mcp::state`], which is replay-rebuilt in memory).
 //!
 //! The store is the source of truth: each installed package is `<store>/<name>/<kind>.json` (the full
 //! typed payload) plus `<etc>/<name>.toml` (an install marker carrying the [`PackageKind`]). `load()`

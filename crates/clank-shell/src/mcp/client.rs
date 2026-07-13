@@ -2,7 +2,7 @@
 //!
 //! MCP scope: `initialize` → `notifications/initialized` → `tools/list` (paginated) → `tools/call` →
 //! session `close` (HTTP DELETE), plus prompts, resources, and templates. HTTPS-only (wasm can't spawn
-//! stdio servers). OAuth is deferred (see [`crate::mcpcmd`]).
+//! stdio servers). OAuth is deferred (see [`crate::mcp::cmd`]).
 //!
 //! The HTTP transport is a **trait seam** ([`McpHttp`]) — unlike curl/wget's cfg-gated `fetch`, MCP
 //! needs response *headers* (the `Mcp-Session-Id`) and scriptable multi-step fakes for tests. The

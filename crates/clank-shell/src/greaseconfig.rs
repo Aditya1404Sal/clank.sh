@@ -1,6 +1,6 @@
 //! `grease` on-disk state: the registry URL list and the per-package config, under `/etc/grease/`.
 //!
-//! Mirrors [`crate::mcpconfig`]. Three directories, each overridable via an env var so native tests
+//! Mirrors [`crate::mcp::config`]. Three directories, each overridable via an env var so native tests
 //! are hermetic; on the agent the defaults are used (and the agent FS is durable, so what grease
 //! writes survives across invocations):
 //!
@@ -50,7 +50,7 @@ pub struct RegistryEntry {
 }
 
 /// A process-global lock serializing tests that set `$CLANK_GREASE_*` (process-global env vars, so
-/// parallel native tests must not race). Mirrors [`crate::mcpconfig::TEST_ENV_LOCK`].
+/// parallel native tests must not race). Mirrors [`crate::mcp::config::TEST_ENV_LOCK`].
 #[cfg(test)]
 pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -101,7 +101,7 @@ fn registries_path() -> PathBuf {
 }
 
 /// Whether `name` is a valid kebab-case package name (`[a-z0-9-]+`, not empty, no leading/trailing `-`).
-/// Same rule as [`crate::mcpconfig::is_valid_name`].
+/// Same rule as [`crate::mcp::config::is_valid_name`].
 pub fn is_valid_name(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with('-')
@@ -173,7 +173,7 @@ pub fn list_registries() -> Vec<String> {
 /// Write an inert bin stub at `<dir>/<name>` (a managed-by header + help text). A real file so
 /// `which`/`ls`/`cat`/`type` see it with no virtual-fs code — but it is NEVER executed (wasip2 has no
 /// process spawn); the command runs via Session interception. `label` names the kind in the header
-/// (`prompt`/`script`). Mirrors [`crate::mcpconfig::write_bin_stub`].
+/// (`prompt`/`script`). Mirrors [`crate::mcp::config::write_bin_stub`].
 pub fn write_bin_stub(dir: &Path, name: &str, help: &str, label: &str) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {dir:?}: {e}"))?;
     let content = format!(

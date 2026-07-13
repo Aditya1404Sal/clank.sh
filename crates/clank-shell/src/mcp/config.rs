@@ -51,7 +51,7 @@ impl McpServerConfig {
 
     /// Resolve the auth (header + value) from the environment, if `auth_env` is set and present. The
     /// default header is `Authorization` with a `Bearer ` prefix; a custom header sends the raw value.
-    pub fn resolve_auth(&self) -> Option<crate::mcpclient::McpAuth> {
+    pub fn resolve_auth(&self) -> Option<crate::mcp::client::McpAuth> {
         let var = self.auth_env.as_ref()?;
         let value = std::env::var(var).ok()?;
         let header = self.auth_header.clone().unwrap_or_else(|| "Authorization".to_string());
@@ -60,7 +60,7 @@ impl McpServerConfig {
         } else {
             value
         };
-        Some(crate::mcpclient::McpAuth { header, value })
+        Some(crate::mcp::client::McpAuth { header, value })
     }
 }
 

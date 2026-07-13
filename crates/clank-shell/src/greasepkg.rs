@@ -431,7 +431,7 @@ impl McpArtifacts {
 }
 
 /// One tool cached in an installed MCP package's payload (a serde mirror of
-/// [`crate::mcpclient::ToolSpec`] so `load()` rebuilds the tool surface without a live `tools/list`).
+/// [`crate::mcp::client::ToolSpec`] so `load()` rebuilds the tool surface without a live `tools/list`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct McpToolCache {

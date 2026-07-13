@@ -256,11 +256,11 @@ pub struct Session {
     /// native-terminal feature there).
     repl: Option<ReplState>,
     /// Installed MCP servers + open sessions. Reconstructed deterministically under Golem replay.
-    mcp: crate::mcpstate::McpState,
+    mcp: crate::mcp::state::McpState,
     /// The injected MCP HTTP transport. Installed by the agent build (a durable `wstd` client);
     /// `None` on native, in which case MCP degrades to a clean "not configured" error. Also used by
     /// `grease` for registry fetches (it's a generic durable "fetch bytes over HTTPS" seam).
-    mcp_http: Option<Box<dyn crate::mcpclient::McpHttp>>,
+    mcp_http: Option<Box<dyn crate::mcp::client::McpHttp>>,
     /// Installed grease packages (prompts). Reconstructed from the durable agent FS on boot.
     grease: crate::greasestate::GreaseState,
     /// The log sink installed per-line (the `/var/log` observability layer). Defaults to the direct
@@ -299,7 +299,7 @@ impl Session {
                 pending_invocations: Vec::new(),
                 next_ask_stdin: None,
                 repl: None,
-                mcp: crate::mcpstate::McpState::default(),
+                mcp: crate::mcp::state::McpState::default(),
                 mcp_http: None,
                 grease: crate::greasestate::GreaseState::load(),
                 log_sink: std::sync::Arc::new(crate::logging::DefaultLogSink),
@@ -327,7 +327,7 @@ impl Session {
                 pending_invocations: Vec::new(),
                 next_ask_stdin: None,
                 repl: None,
-                mcp: crate::mcpstate::McpState::default(),
+                mcp: crate::mcp::state::McpState::default(),
                 mcp_http: None,
                 grease: crate::greasestate::GreaseState::load(),
                 log_sink: std::sync::Arc::new(crate::logging::DefaultLogSink),
@@ -348,16 +348,16 @@ impl Session {
             if !m.artifacts.tools {
                 continue;
             }
-            let config = crate::mcpconfig::McpServerConfig {
+            let config = crate::mcp::config::McpServerConfig {
                 url: m.url.clone(),
                 enabled: true,
                 auth_env: m.auth_env.clone(),
                 auth_header: None,
             };
-            let tools: Vec<crate::mcpstate::McpTool> = m
+            let tools: Vec<crate::mcp::state::McpTool> = m
                 .tools
                 .iter()
-                .map(|t| crate::mcpstate::McpTool {
+                .map(|t| crate::mcp::state::McpTool {
                     name: t.name.clone(),
                     description: if t.description.is_empty() {
                         None
@@ -398,9 +398,9 @@ impl Session {
 
     /// Install the MCP HTTP transport (a durable `wstd` client on the agent). Without one, MCP
     /// commands report "not configured" (exit 4). Injected after construction like the ask provider.
-    pub fn set_mcp_http(&mut self, http: Box<dyn crate::mcpclient::McpHttp>) {
+    pub fn set_mcp_http(&mut self, http: Box<dyn crate::mcp::client::McpHttp>) {
         // Wrap the transport so every MCP + grease-registry request is logged to http.log (redacted).
-        self.mcp_http = Some(Box::new(crate::mcpclient::LoggingMcpHttp::new(http)));
+        self.mcp_http = Some(Box::new(crate::mcp::client::LoggingMcpHttp::new(http)));
     }
 
     /// Install the `/var/log` log sink. The agent injects a whole-file-rewrite sink (idempotent under
@@ -714,7 +714,7 @@ impl Session {
             // is awaited here, one level under the Golem SDK's `wstd::block_on` where the durable
             // context and the WASI-HTTP reactor are live. See `askcmd`.
             self.run_ask(args, blanket_authorized).await
-        } else if let Some(parsed) = crate::mcpcmd::classify(line) {
+        } else if let Some(parsed) = crate::mcp::cmd::classify(line) {
             // `mcp` management runs at the Session layer — its add/reload/session subcommands do
             // HTTP, which must await under the live reactor (same rule as curl/ask).
             match parsed {
@@ -1321,7 +1321,7 @@ impl Session {
     /// Generated help for an MCP tool line ending in `--help` (or a bare `<server>`): the server's
     /// tool list. `None` if the line isn't an installed-server line or doesn't request help.
     fn mcp_help_for(&self, line: &str) -> Option<String> {
-        let inv = match crate::mcpcmd::parse_tool_invocation(line)? {
+        let inv = match crate::mcp::cmd::parse_tool_invocation(line)? {
             Ok(inv) => inv,
             Err(_) => return None,
         };
@@ -2129,14 +2129,14 @@ impl Session {
         };
 
         // Build an MCP client against the server and initialize once.
-        let config = crate::mcpconfig::McpServerConfig {
+        let config = crate::mcp::config::McpServerConfig {
             url: pkg.url.clone(),
             enabled: true,
             auth_env: pkg.auth_env.clone(),
             auth_header: None,
         };
         let auth = config.resolve_auth();
-        let mut client = crate::mcpclient::McpClient::new(http, &pkg.url, auth);
+        let mut client = crate::mcp::client::McpClient::new(http, &pkg.url, auth);
         let init = match client.initialize().await {
             Ok(i) => i,
             Err(e) => {
@@ -2234,10 +2234,10 @@ impl Session {
         // work), reusing the mcp machinery.
         let tool_count = tool_specs.len();
         if pkg.artifacts.tools {
-            let mcp_tools: Vec<crate::mcpstate::McpTool> = tool_specs.into_iter().map(Into::into).collect();
+            let mcp_tools: Vec<crate::mcp::state::McpTool> = tool_specs.into_iter().map(Into::into).collect();
             self.mcp.set_installed(name, config, mcp_tools);
             if let Some(help) = self.mcp.server_help(name) {
-                let _ = crate::mcpconfig::write_bin_stub(name, &help);
+                let _ = crate::mcp::config::write_bin_stub(name, &help);
             }
         }
 
@@ -2253,7 +2253,7 @@ impl Session {
                 "{} — MCP resource template ({}). Run `{} <arg…>` to read the constructed URI.\n",
                 t.name, t.uri_template, t.name
             );
-            let _ = crate::mcpconfig::write_bin_stub(&t.name, &help);
+            let _ = crate::mcp::config::write_bin_stub(&t.name, &help);
         }
 
         // Register the grease package view.
@@ -2338,7 +2338,7 @@ impl Session {
     /// prompt's declared arguments become the package arguments; `{{arg}}` placeholders in the fetched
     /// body are already resolved server-side for the empty-arg fetch, so v1 stores the fetched body as
     /// a non-parameterized prompt (re-fetch with args is a future refinement).
-    fn install_mcp_prompt(&mut self, spec: &crate::mcpclient::PromptSpec, body: &str, registry: &str) {
+    fn install_mcp_prompt(&mut self, spec: &crate::mcp::client::PromptSpec, body: &str, registry: &str) {
         let pkg = crate::greasepkg::PromptPackage {
             name: spec.name.clone(),
             description: spec.description.clone().unwrap_or_default(),
@@ -2518,7 +2518,7 @@ impl Session {
             crate::greasepkg::PackageKind::Mcp => {
                 // Deregister the server from `McpState` (also removes its /usr/lib/mcp/bin stub) and
                 // remove any materialized resource tree under /mnt/mcp/<name>/.
-                let _ = crate::mcpconfig::remove(name);
+                let _ = crate::mcp::config::remove(name);
                 self.mcp.remove(name);
                 let _ = std::fs::remove_dir_all(crate::greaseconfig::mcp_mount_dir().join(name));
             }
@@ -2668,8 +2668,8 @@ impl Session {
         }
     }
 
-    async fn run_mcp(&mut self, cmd: crate::mcpcmd::McpCommand) -> LineResult {
-        use crate::mcpcmd::McpCommand;
+    async fn run_mcp(&mut self, cmd: crate::mcp::cmd::McpCommand) -> LineResult {
+        use crate::mcp::cmd::McpCommand;
         match cmd {
             McpCommand::List => self.mcp_list(),
             McpCommand::Tools { server } => self.mcp_tools(&server),
@@ -2692,7 +2692,7 @@ impl Session {
 
     /// `mcp list`: configured servers with url/enabled/install status/tool count or error.
     fn mcp_list(&self) -> LineResult {
-        let names = crate::mcpconfig::list_names();
+        let names = crate::mcp::config::list_names();
         if names.is_empty() {
             return LineResult::continue_with_stdout(b"no MCP servers configured\n".to_vec());
         }
@@ -2711,7 +2711,7 @@ impl Session {
                 )),
                 None => {
                     // Configured on disk but not yet loaded into this session.
-                    let url = crate::mcpconfig::load(name)
+                    let url = crate::mcp::config::load(name)
                         .ok()
                         .flatten()
                         .map(|c| c.url)
@@ -2752,7 +2752,7 @@ impl Session {
 
     /// `mcp remove <server>`: delete the config + stub and forget the server.
     fn mcp_remove(&mut self, name: &str) -> LineResult {
-        match crate::mcpconfig::remove(name) {
+        match crate::mcp::config::remove(name) {
             Ok(()) => {
                 self.mcp.remove(name);
                 LineResult::continue_with_stdout(format!("removed MCP server '{name}'\n").into_bytes())
@@ -2770,7 +2770,7 @@ impl Session {
         auth_env: Option<String>,
         auth_header: Option<String>,
     ) -> LineResult {
-        if !crate::mcpconfig::is_valid_name(name) {
+        if !crate::mcp::config::is_valid_name(name) {
             return LineResult::from_outcome(
                 Vec::new(),
                 format!("mcp add: invalid server name '{name}' (use kebab-case: [a-z0-9-])\n").into_bytes(),
@@ -2785,10 +2785,10 @@ impl Session {
                 2,
             );
         }
-        let mut config = crate::mcpconfig::McpServerConfig::new(url);
+        let mut config = crate::mcp::config::McpServerConfig::new(url);
         config.auth_env = auth_env;
         config.auth_header = auth_header;
-        if let Err(e) = crate::mcpconfig::save(name, &config) {
+        if let Err(e) = crate::mcp::config::save(name, &config) {
             return LineResult::from_outcome(Vec::new(), format!("mcp add: {e}\n").into_bytes(), 1);
         }
         self.mcp_install(name, config).await
@@ -2798,12 +2798,12 @@ impl Session {
     async fn mcp_reload(&mut self, name: Option<&str>) -> LineResult {
         let names: Vec<String> = match name {
             Some(n) => vec![n.to_string()],
-            None => crate::mcpconfig::list_names(),
+            None => crate::mcp::config::list_names(),
         };
         let mut out = String::new();
         let mut any_err = false;
         for n in names {
-            let config = match crate::mcpconfig::load(&n) {
+            let config = match crate::mcp::config::load(&n) {
                 Ok(Some(c)) => c,
                 Ok(None) => {
                     out.push_str(&format!("mcp reload: no config for '{n}'\n"));
@@ -2836,7 +2836,7 @@ impl Session {
     async fn mcp_install(
         &mut self,
         name: &str,
-        config: crate::mcpconfig::McpServerConfig,
+        config: crate::mcp::config::McpServerConfig,
     ) -> LineResult {
         let Some(http) = self.mcp_http.as_deref() else {
             self.mcp.set_failed(name, config, "no HTTP transport".into());
@@ -2847,7 +2847,7 @@ impl Session {
             );
         };
         let auth = config.resolve_auth();
-        let mut client = crate::mcpclient::McpClient::new(http, &config.url, auth);
+        let mut client = crate::mcp::client::McpClient::new(http, &config.url, auth);
         let init = match client.initialize().await {
             Ok(i) => i,
             Err(e) => {
@@ -2865,11 +2865,11 @@ impl Session {
             }
         };
         let tool_count = tools.len();
-        let mcp_tools: Vec<crate::mcpstate::McpTool> = tools.into_iter().map(Into::into).collect();
+        let mcp_tools: Vec<crate::mcp::state::McpTool> = tools.into_iter().map(Into::into).collect();
         self.mcp.set_installed(name, config, mcp_tools);
         // Write the /usr/lib/mcp/bin stub so which/ls/type see the server as a $PATH command.
         if let Some(help) = self.mcp.server_help(name) {
-            let _ = crate::mcpconfig::write_bin_stub(name, &help);
+            let _ = crate::mcp::config::write_bin_stub(name, &help);
         }
         LineResult::continue_with_stdout(
             format!("installed MCP server '{name}' ({tool_count} tools)\n").into_bytes(),
@@ -2930,7 +2930,7 @@ impl Session {
             );
         };
         let auth = config.resolve_auth();
-        let mut client = crate::mcpclient::McpClient::new(http, &config.url, auth);
+        let mut client = crate::mcp::client::McpClient::new(http, &config.url, auth);
         match client.initialize().await {
             Ok(init) => {
                 let local_id = self.mcp.open_session(server, &init);
@@ -2971,7 +2971,7 @@ impl Session {
             );
         };
         let auth = config.resolve_auth();
-        let client = crate::mcpclient::McpClient::new(http, &config.url, auth);
+        let client = crate::mcp::client::McpClient::new(http, &config.url, auth);
         match client.close_session(&server_sid).await {
             Ok(()) => LineResult::continue_with_stdout(format!("closed session {id}\n").into_bytes()),
             Err(e) => LineResult::from_outcome(
@@ -2985,7 +2985,7 @@ impl Session {
     /// Whether `line`'s leading word is an installed MCP server (and it isn't `mcp` itself). Drives
     /// the dynamic `<server> <tool>` dispatch.
     fn is_mcp_tool_line(&self, line: &str) -> bool {
-        match crate::mcpcmd::parse_tool_invocation(line) {
+        match crate::mcp::cmd::parse_tool_invocation(line) {
             Some(Ok(inv)) => self.mcp.is_server(&inv.server),
             _ => false,
         }
@@ -3039,9 +3039,9 @@ impl Session {
                 4,
             );
         };
-        let config = crate::mcpconfig::McpServerConfig { url: url.clone(), enabled: true, auth_env, auth_header: None };
+        let config = crate::mcp::config::McpServerConfig { url: url.clone(), enabled: true, auth_env, auth_header: None };
         let auth = config.resolve_auth();
-        let mut client = crate::mcpclient::McpClient::new(http, &url, auth);
+        let mut client = crate::mcp::client::McpClient::new(http, &url, auth);
         let session = client.initialize().await.ok().and_then(|i| i.session_id);
         match client.read_resource(uri, session.as_deref()).await {
             Ok(content) => LineResult::continue_with_stdout(content.into_bytes()),
@@ -3127,9 +3127,9 @@ impl Session {
                 4,
             );
         };
-        let config = crate::mcpconfig::McpServerConfig { url: url.clone(), enabled: true, auth_env, auth_header: None };
+        let config = crate::mcp::config::McpServerConfig { url: url.clone(), enabled: true, auth_env, auth_header: None };
         let auth = config.resolve_auth();
-        let mut client = crate::mcpclient::McpClient::new(http, &url, auth);
+        let mut client = crate::mcp::client::McpClient::new(http, &url, auth);
         let session = client.initialize().await.ok().and_then(|i| i.session_id);
         let _ = client.subscribe_resource(uri, session.as_deref()).await; // best-effort
 
@@ -3196,9 +3196,9 @@ impl Session {
                 4,
             );
         };
-        let config = crate::mcpconfig::McpServerConfig { url: url.clone(), enabled: true, auth_env, auth_header: None };
+        let config = crate::mcp::config::McpServerConfig { url: url.clone(), enabled: true, auth_env, auth_header: None };
         let auth = config.resolve_auth();
-        let mut client = crate::mcpclient::McpClient::new(http, &url, auth);
+        let mut client = crate::mcp::client::McpClient::new(http, &url, auth);
         let session = client.initialize().await.ok().and_then(|i| i.session_id);
         match client.read_resource(&uri, session.as_deref()).await {
             Ok(content) => LineResult::continue_with_stdout(content.into_bytes()),
@@ -3559,7 +3559,7 @@ impl Session {
     /// (or `--args '<json>'`), issue `tools/call` (reusing an open session or initializing one), and
     /// render the result (text content joined, or raw JSON with `--json`).
     async fn run_mcp_tool(&mut self, line: &str) -> LineResult {
-        let inv = match crate::mcpcmd::parse_tool_invocation(line) {
+        let inv = match crate::mcp::cmd::parse_tool_invocation(line) {
             Some(Ok(inv)) => inv,
             Some(Err(e)) => {
                 return LineResult::from_outcome(Vec::new(), format!("{}: {e}\n", "mcp").into_bytes(), 2)
@@ -3629,7 +3629,7 @@ impl Session {
             );
         };
         let auth = config.resolve_auth();
-        let mut client = crate::mcpclient::McpClient::new(http, &config.url, auth);
+        let mut client = crate::mcp::client::McpClient::new(http, &config.url, auth);
         match client.call_tool(&tool_name, arguments, session_id.as_deref()).await {
             Ok(result) => {
                 let out = if inv.json {
@@ -4119,7 +4119,7 @@ fn is_markdown_frontmatter(body: &[u8]) -> bool {
 /// index is unreachable, unparseable, or has no entry for `name` — the caller then falls back to
 /// record-only integrity (and unsigned).
 async fn fetch_index_entry(
-    http: &dyn crate::mcpclient::McpHttp,
+    http: &dyn crate::mcp::client::McpHttp,
     base: &str,
     name: &str,
 ) -> IndexEntry {
@@ -4191,7 +4191,7 @@ fn verify_log_inclusion(payload_sha256_hex: &str, log: &LogProof) -> Result<(), 
 /// Free fn (no `self`) so it can run while `client` borrows `self.mcp_http`.
 async fn materialize_mcp_resources(
     server: &str,
-    client: &mut crate::mcpclient::McpClient<'_>,
+    client: &mut crate::mcp::client::McpClient<'_>,
     session: Option<&str>,
 ) -> Vec<crate::greasepkg::McpResourceCache> {
     let Ok(resources) = client.list_resources(session).await else {
@@ -4979,15 +4979,15 @@ mod tests {
 
     // ---- MCP core (C1) --------------------------------------------------------------------------
 
-    /// A scripted [`McpHttp`](crate::mcpclient::McpHttp) fake: replays JSON responses and records
+    /// A scripted [`McpHttp`](crate::mcp::client::McpHttp) fake: replays JSON responses and records
     /// requests. Shared by the MCP session tests.
     struct FakeMcpHttp {
-        responses: std::sync::Arc<Mutex<std::collections::VecDeque<crate::mcpclient::HttpResponse>>>,
+        responses: std::sync::Arc<Mutex<std::collections::VecDeque<crate::mcp::client::HttpResponse>>>,
         seen: std::sync::Arc<Mutex<Vec<(String, String)>>>,
     }
 
     impl FakeMcpHttp {
-        fn new(responses: Vec<crate::mcpclient::HttpResponse>) -> Self {
+        fn new(responses: Vec<crate::mcp::client::HttpResponse>) -> Self {
             Self {
                 responses: std::sync::Arc::new(Mutex::new(responses.into())),
                 seen: std::sync::Arc::new(Mutex::new(Vec::new())),
@@ -4996,14 +4996,14 @@ mod tests {
     }
 
     #[async_trait::async_trait(?Send)]
-    impl crate::mcpclient::McpHttp for FakeMcpHttp {
+    impl crate::mcp::client::McpHttp for FakeMcpHttp {
         async fn request(
             &self,
             method: &str,
             url: &str,
             _headers: &[(String, String)],
             body: Option<Vec<u8>>,
-        ) -> Result<crate::mcpclient::HttpResponse, String> {
+        ) -> Result<crate::mcp::client::HttpResponse, String> {
             let method_and_body =
                 format!("{method} {}", String::from_utf8_lossy(&body.unwrap_or_default()));
             self.seen.lock().unwrap().push((url.to_string(), method_and_body));
@@ -5015,8 +5015,8 @@ mod tests {
         }
     }
 
-    fn mcp_json(value: serde_json::Value) -> crate::mcpclient::HttpResponse {
-        crate::mcpclient::HttpResponse {
+    fn mcp_json(value: serde_json::Value) -> crate::mcp::client::HttpResponse {
+        crate::mcp::client::HttpResponse {
             status: 200,
             headers: vec![("content-type".into(), "application/json".into())],
             body: value.to_string().into_bytes(),
@@ -5027,34 +5027,34 @@ mod tests {
     /// a URL substring → response, so grease's `index.json` + `packages/<name>.json` fetches don't
     /// collide. An unmatched URL is a 404.
     struct FakeGreaseHttp {
-        routes: Vec<(String, crate::mcpclient::HttpResponse)>,
+        routes: Vec<(String, crate::mcp::client::HttpResponse)>,
     }
     impl FakeGreaseHttp {
-        fn new(routes: Vec<(&str, crate::mcpclient::HttpResponse)>) -> Self {
+        fn new(routes: Vec<(&str, crate::mcp::client::HttpResponse)>) -> Self {
             Self { routes: routes.into_iter().map(|(u, r)| (u.to_string(), r)).collect() }
         }
     }
     #[async_trait::async_trait(?Send)]
-    impl crate::mcpclient::McpHttp for FakeGreaseHttp {
+    impl crate::mcp::client::McpHttp for FakeGreaseHttp {
         async fn request(
             &self,
             _method: &str,
             url: &str,
             _headers: &[(String, String)],
             _body: Option<Vec<u8>>,
-        ) -> Result<crate::mcpclient::HttpResponse, String> {
+        ) -> Result<crate::mcp::client::HttpResponse, String> {
             for (pat, resp) in &self.routes {
                 if url.contains(pat.as_str()) {
                     return Ok(resp.clone());
                 }
             }
-            Ok(crate::mcpclient::HttpResponse { status: 404, headers: vec![], body: Vec::new() })
+            Ok(crate::mcp::client::HttpResponse { status: 404, headers: vec![], body: Vec::new() })
         }
     }
 
     /// A 200 JSON response (for `FakeGreaseHttp` routes).
-    fn grease_json(value: serde_json::Value) -> crate::mcpclient::HttpResponse {
-        crate::mcpclient::HttpResponse {
+    fn grease_json(value: serde_json::Value) -> crate::mcp::client::HttpResponse {
+        crate::mcp::client::HttpResponse {
             status: 200,
             headers: vec![("content-type".into(), "application/json".into())],
             body: value.to_string().into_bytes(),
@@ -5062,8 +5062,8 @@ mod tests {
     }
 
     /// A 200 text response (for a `.md` prompt body served by `FakeGreaseHttp`).
-    fn grease_text(body: &str) -> crate::mcpclient::HttpResponse {
-        crate::mcpclient::HttpResponse {
+    fn grease_text(body: &str) -> crate::mcp::client::HttpResponse {
+        crate::mcp::client::HttpResponse {
             status: 200,
             headers: vec![("content-type".into(), "text/markdown".into())],
             body: body.as_bytes().to_vec(),
@@ -5118,7 +5118,7 @@ mod tests {
     /// A fresh temp `$CLANK_MCP_ETC/$CLANK_MCP_BIN` pair, exported for the duration of the returned
     /// guard (which serializes MCP tests via the shared lock and clears the vars on drop).
     fn set_mcp_dirs() -> McpDirsGuard {
-        let lock = crate::mcpconfig::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let lock = crate::mcp::config::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let base = std::env::temp_dir().join(format!("clank_mcp_sess_{}_{n}", std::process::id()));
@@ -5135,7 +5135,7 @@ mod tests {
     }
 
     /// The initialize + initialized + tools/list responses for a server offering one `echo` tool.
-    fn mcp_install_script() -> Vec<crate::mcpclient::HttpResponse> {
+    fn mcp_install_script() -> Vec<crate::mcp::client::HttpResponse> {
         let mut init = mcp_json(serde_json::json!({
             "jsonrpc":"2.0","id":1,"result":{
                 "protocolVersion":"2025-03-26",
@@ -5156,22 +5156,22 @@ mod tests {
     /// name parsed from the request body. Covers initialize/tools/list/prompts/list/prompts/get/
     /// resources/list/resources/read.
     struct FakeMcpArtifactHttp {
-        routes: Vec<(String, crate::mcpclient::HttpResponse)>,
+        routes: Vec<(String, crate::mcp::client::HttpResponse)>,
     }
     impl FakeMcpArtifactHttp {
-        fn new(routes: Vec<(&str, crate::mcpclient::HttpResponse)>) -> Self {
+        fn new(routes: Vec<(&str, crate::mcp::client::HttpResponse)>) -> Self {
             Self { routes: routes.into_iter().map(|(u, r)| (u.to_string(), r)).collect() }
         }
     }
     #[async_trait::async_trait(?Send)]
-    impl crate::mcpclient::McpHttp for FakeMcpArtifactHttp {
+    impl crate::mcp::client::McpHttp for FakeMcpArtifactHttp {
         async fn request(
             &self,
             _method: &str,
             url: &str,
             _headers: &[(String, String)],
             body: Option<Vec<u8>>,
-        ) -> Result<crate::mcpclient::HttpResponse, String> {
+        ) -> Result<crate::mcp::client::HttpResponse, String> {
             // Grease registry fetches route by URL.
             for (pat, resp) in &self.routes {
                 if pat.starts_with('/') && url.contains(pat.as_str()) {
@@ -5310,7 +5310,7 @@ mod tests {
             let static_read = mcp_json(serde_json::json!({"jsonrpc":"2.0","id":3,"result":{
                 "contents":[{"uri":"file:///docs/guide.md","text":"static guide body"}]}}));
             // Dynamic resource: install read FAILS (500) → recorded dynamic; a later live read succeeds.
-            let dyn_read_fail = crate::mcpclient::HttpResponse { status: 500, headers: vec![], body: Vec::new() };
+            let dyn_read_fail = crate::mcp::client::HttpResponse { status: 500, headers: vec![], body: Vec::new() };
             let dyn_read_ok = mcp_json(serde_json::json!({"jsonrpc":"2.0","id":9,"result":{
                 "contents":[{"uri":"live://metrics/cpu","text":"cpu: 42%"}]}}));
 
@@ -6060,7 +6060,7 @@ mod tests {
             });
             session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![
                 ("/index.json", grease_json(index)),
-                ("/packages/", crate::mcpclient::HttpResponse {
+                ("/packages/", crate::mcp::client::HttpResponse {
                     status: 200,
                     headers: vec![("content-type".into(), "application/json".into())],
                     body,
@@ -6103,7 +6103,7 @@ mod tests {
             });
             session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![
                 ("/index.json", grease_json(index)),
-                ("/packages/", crate::mcpclient::HttpResponse {
+                ("/packages/", crate::mcp::client::HttpResponse {
                     status: 200,
                     headers: vec![("content-type".into(), "application/json".into())],
                     body,
@@ -6136,7 +6136,7 @@ mod tests {
             });
             session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![
                 ("/index.json", grease_json(index)),
-                ("/packages/", crate::mcpclient::HttpResponse {
+                ("/packages/", crate::mcp::client::HttpResponse {
                     status: 200,
                     headers: vec![("content-type".into(), "application/json".into())],
                     body,
@@ -6222,7 +6222,7 @@ mod tests {
             });
             session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![
                 ("/index.json", grease_json(index)),
-                ("/packages/", crate::mcpclient::HttpResponse {
+                ("/packages/", crate::mcp::client::HttpResponse {
                     status: 200,
                     headers: vec![("content-type".into(), "application/json".into())],
                     body,
@@ -6263,7 +6263,7 @@ mod tests {
             });
             session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![
                 ("/index.json", grease_json(index)),
-                ("/packages/", crate::mcpclient::HttpResponse {
+                ("/packages/", crate::mcp::client::HttpResponse {
                     status: 200,
                     headers: vec![("content-type".into(), "application/json".into())],
                     body,
@@ -6551,7 +6551,7 @@ mod tests {
             let _dirs = set_mcp_dirs();
             let mut session = Session::new().await.unwrap();
             // initialize returns a 500.
-            let bad = crate::mcpclient::HttpResponse { status: 500, headers: vec![], body: vec![] };
+            let bad = crate::mcp::client::HttpResponse { status: 500, headers: vec![], body: vec![] };
             session.set_mcp_http(Box::new(FakeMcpHttp::new(vec![bad])));
 
             let add = session.eval_line("sudo mcp add demo https://x.example/mcp").await;
@@ -6597,7 +6597,7 @@ mod tests {
     }
 
     /// A `tools/call` response echoing text content.
-    fn mcp_call_response(text: &str) -> crate::mcpclient::HttpResponse {
+    fn mcp_call_response(text: &str) -> crate::mcp::client::HttpResponse {
         mcp_json(serde_json::json!({"jsonrpc":"2.0","id":9,"result":{
             "content":[{"type":"text","text":text}], "isError":false}}))
     }
@@ -6749,7 +6749,7 @@ mod tests {
             open_init.headers.push(("mcp-session-id".into(), "srv-open".into()));
             script.push(open_init);
             script.push(mcp_json(serde_json::json!({}))); // initialized
-            script.push(crate::mcpclient::HttpResponse { status: 405, headers: vec![], body: vec![] });
+            script.push(crate::mcp::client::HttpResponse { status: 405, headers: vec![], body: vec![] });
             session.set_mcp_http(Box::new(FakeMcpHttp::new(script)));
             session.eval_line("sudo mcp add demo https://x/mcp").await;
             session.eval_line("sudo mcp session open demo").await;

@@ -2,7 +2,7 @@
 //!
 //! `grease` is a **Session-layer interception** (like `mcp`/`ask`): its `install`/`update`/`search`
 //! subcommands do outbound HTTP, which must await under the live WASI-HTTP reactor. The work lives in
-//! `Session` methods; this module only parses. Mirrors [`crate::mcpcmd`].
+//! `Session` methods; this module only parses. Mirrors [`crate::mcp::cmd`].
 //!
 //! grease v1 grammar (prompts only):
 //! ```text
