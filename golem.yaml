@@ -1,0 +1,27 @@
+# yaml-language-server: $schema=https://schema.golem.cloud/app/golem/1.5.0/golem.schema.json
+# clank.sh Golem application: the `clank:agent` component (crates/clank-agent) wraps the shell
+# Session as a durable agent instance. Build/deploy with `golem build` / `golem deploy`.
+
+manifestVersion: 1.5.0
+
+app: clank
+
+environments:
+  local:
+    server: local
+    componentPresets: debug
+  cloud:
+    server: cloud
+    componentPresets: release
+
+components:
+  clank:agent:
+    dir: crates/clank-agent
+    templates: rust
+    env:
+      # Anthropic API key for the `ask` command's durable LLM provider, passed through from the host
+      # environment at deploy time (Jinja substitution, resolved against the shell running
+      # `golem deploy`). Substitution is strict — the host var must be defined — so the golem-e2e
+      # exports an empty default before deploying; with an empty/unset key `ask` reports "not
+      # configured" (exit 4) and the e2e skips its network assertions.
+      ANTHROPIC_API_KEY: "{{ ANTHROPIC_API_KEY }}"

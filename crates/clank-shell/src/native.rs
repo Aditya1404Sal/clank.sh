@@ -1,0 +1,126 @@
+//! Native target: the shell as an ordinary executable over blocking `std::io`. All command
+//! execution and output capture live in the shared [`crate::session::Session`]; this driver is
+//! just the prompt/read/write loop.
+
+use crate::session::Session;
+use crate::{trim_eol, Flow, PROMPT};
+use std::io::{self, Write};
+
+/// Run the interactive read/eval/print loop until `exit` or end-of-input.
+pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let mut session = Session::new().await?;
+    let mut line = String::new();
+
+    loop {
+        write_stdout(PROMPT)?;
+
+        line.clear();
+        if io::stdin().read_line(&mut line)? == 0 {
+            // EOF: leave the cursor on a fresh line after the dangling prompt.
+            write_stdout(b"\n")?;
+            break;
+        }
+
+        let line_str = String::from_utf8_lossy(trim_eol(line.as_bytes())).into_owned();
+
+        // `ask repl` is a native-terminal feature: run the interactive REPL loop inline (the native
+        // driver owns the terminal, so it can block on human input between turns — the durable agent
+        // cannot, and returns an honest message from `eval_line`). See `Session::repl_*`.
+        if let Some(args) = crate::ai::ask::classify_repl(&line_str) {
+            run_repl(&mut session, &args).await?;
+            continue;
+        }
+
+        let result = session.eval_line(&line_str).await;
+        write_stdout(&result.terminal_output())?;
+        let flow = result.flow;
+
+        // If the line surfaced a `prompt-user` question, collect the human's answer inline (the
+        // native REPL owns the terminal) and deliver it. An answer outside `--choices` leaves the
+        // prompt pending, so keep reading until it resolves. EOF is an abort.
+        if result.pending_prompt.is_some() {
+            while session.has_pending_prompt() {
+                line.clear();
+                let answer = if io::stdin().read_line(&mut line)? == 0 {
+                    session.answer_prompt(None).await // EOF → abort
+                } else {
+                    let answer_str = String::from_utf8_lossy(trim_eol(line.as_bytes())).into_owned();
+                    session.answer_prompt(Some(answer_str)).await
+                };
+                write_stdout(&answer.terminal_output())?;
+            }
+        }
+
+        if let Flow::Exit = flow {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+/// Run an interactive `ask repl` session: an AI conversation with its OWN isolated transcript.
+/// Prompts `[<model>]> `; each line is either a meta-command (`:model`/`:new-session`/`:exit`) or a
+/// prompt sent to the model. On exit (`:exit`, `:quit`, or Ctrl-D), the session content is printed
+/// to stdout so it enters the parent transcript once as rendered output (README). The parent shell's
+/// transcript is untouched during the REPL — only the isolated one grows.
+async fn run_repl(
+    session: &mut Session,
+    args: &crate::ai::ask::ReplArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let model = match session.repl_start(args) {
+        Ok(m) => m,
+        Err(msg) => {
+            write_stdout(msg.as_bytes())?;
+            return Ok(());
+        }
+    };
+    write_stdout(format!("ask repl — model {model}. Type :exit to leave.\n").as_bytes())?;
+
+    let mut line = String::new();
+    loop {
+        // The prompt shows the CURRENT model (it can change via :model).
+        let prompt_model = session.repl_model().unwrap_or_default();
+        write_stdout(format!("[{prompt_model}]> ").as_bytes())?;
+
+        line.clear();
+        if io::stdin().read_line(&mut line)? == 0 {
+            write_stdout(b"\n")?; // Ctrl-D: leave the REPL cleanly.
+            break;
+        }
+        let input = String::from_utf8_lossy(trim_eol(line.as_bytes())).into_owned();
+        if input.trim().is_empty() {
+            continue;
+        }
+
+        // Meta-command? (`:model`, `:new-session`, `:exit`, …)
+        if let Some((output, should_exit)) = session.repl_meta(&input) {
+            write_stdout(output.as_bytes())?;
+            if should_exit {
+                break;
+            }
+            continue;
+        }
+
+        // Otherwise it's a prompt: one model turn against the isolated transcript.
+        let reply = session.repl_turn(&input).await;
+        write_stdout(reply.as_bytes())?;
+        if !reply.ends_with('\n') {
+            write_stdout(b"\n")?;
+        }
+    }
+
+    // On exit, emit the session content to stdout (enters the parent transcript once, as rendered
+    // output) and drop the REPL state.
+    let rendered = session.repl_end();
+    write_stdout(&rendered)?;
+    Ok(())
+}
+
+/// Write all `bytes` to stdout and flush. Takes a fresh stdout handle each call so no lock is
+/// held across the `.await` on command execution.
+fn write_stdout(bytes: &[u8]) -> io::Result<()> {
+    let mut out = io::stdout();
+    out.write_all(bytes)?;
+    out.flush()
+}

@@ -1,0 +1,107 @@
+[package]
+name = "clank-shell"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+# cdylib → the wasm component; rlib → linked by the native `clank` binary.
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "clank"
+path = "src/main.rs"
+
+# All-target deps: Brush (the shell interpreter) now runs on both native and wasm. `nix` is
+# gated under cfg(unix) inside brush-core, so the wasm32-wasip2 build still pulls zero nix.
+# tokio provides the runtime brush requires for its internal async (current-thread on wasm).
+[dependencies]
+brush-core = "0.5"
+brush-builtins = "0.2"
+brush-parser = "0.4"
+# The curl/wget HTTP commands (wasm/native HTTP seam lives in these crates). clank intercepts
+# curl/wget in Session::run_command and awaits their async `run` under the live reactor.
+wcurl = { path = "../wcurl" }
+waget = { path = "../waget" }
+tokio = { version = "1", features = ["rt"] }
+diffy = { version = "0.5", features = ["std"] }
+grep = "0.4"
+infer = "0.19"
+jaq-core = "3.1"
+jaq-json = "2.0"
+jaq-std = "3.0"
+regex = "1"
+similar = "2.7"
+# Internal coreutils (uutils), registered as clank builtins. uucore is patched for wasm32-wasip2
+# via [patch.crates-io] in the workspace root.
+uu_cat = "0.9"
+uu_ls = "0.9"
+uu_wc = "0.9"
+uu_head = "0.9"
+uu_sort = "0.9"
+uu_mkdir = "0.9"
+uu_rm = "0.9"
+uu_mv = "0.9"
+uu_cp = "0.9"
+uu_env = "0.9"
+uu_cut = "0.9"
+uu_tr = "0.9"
+uu_uniq = "0.9"
+uu_tail = "0.9"
+uu_tee = "0.9"
+uu_touch = "0.9"
+uu_sleep = "0.9"
+# printf is clank-registered (uu_printf) rather than Brush's builtin: Brush gates its printf to
+# `any(unix, windows)` (its uucore dep isn't linked on wasm), so the agent had no printf at all.
+# Registering uu_printf fills wasm and shadows Brush's on native for uniform behavior.
+uu_printf = "0.9"
+async-trait = "0.1"
+# Parsing the agentic `ask` loop's tool-call arguments (the `shell` tool's JSON args) and, later,
+# MCP JSON-RPC. Pure Rust, dual-target-safe (no OS deps).
+serde_json = "1"
+# ask.toml (default model + provider config) read/write. serde derive + the toml crate are pure Rust
+# (toml_edit/winnow, no OS deps) and compile on wasm32-wasip2.
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+# Timestamp rendering for `stat` (already in the tree via brush-core; compiles on wasm32-wasip2).
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Arg parsing for clank builtins written in Brush's `Command` form (xargs) — the same clap the
+# Brush builtins themselves use (already in the tree).
+clap = { version = "4", features = ["derive"] }
+sha2 = "0.11.0"
+# grease package signing: ed25519 detached-signature VERIFICATION only (no keygen/signing), so no
+# RNG/getrandom is needed and the crate builds clean on wasm32-wasip2. `subtle`/`zeroize` (dalek's
+# deps) are already in the tree. `default-features = false` drops the `rand_core`/`std` extras.
+ed25519-dalek = { version = "2", default-features = false }
+# base64 decoding for the signature + public key (already a transitive dep; pure Rust, dual-target).
+base64 = "0.22"
+
+[features]
+# The `wasi:cli/run` REPL driver (`mod wasm` + its p3 bindings). On by default so the native
+# binary and the standalone wasm REPL component build unchanged. Dependents that only need the
+# `Session` core (the Golem agent) turn it off with `default-features = false`, so this crate links
+# as a plain rlib without exporting `wasi:cli/run`.
+default = ["repl-driver"]
+repl-driver = ["dep:wasip3", "dep:wit-bindgen", "dep:futures"]
+
+# Wasm-only: the p3 component bindings and stream I/O. Optional — only pulled in by `repl-driver`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasip3 = { workspace = true, optional = true }
+wit-bindgen = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+
+# Native-only: a multi-thread tokio runtime (Runtime::new) and temp-file output capture.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1", features = ["rt-multi-thread"] }
+tempfile = "3"
+# For redirecting fd 1/2 around uutils' uumain (which writes to std stdout) so its output is
+# captured by brush's fd table (pipes, redirects, the transcript capture).
+libc = "0.2"
+
+[dev-dependencies]
+# Signing side of ed25519 (SigningKey), for tests that produce a signed fixture payload to exercise
+# the verify-only install path. Dev-only, native — never in the wasm agent build. `from_bytes` on a
+# fixed 32-byte seed keeps it deterministic with no RNG.
+ed25519-dalek = { version = "2" }

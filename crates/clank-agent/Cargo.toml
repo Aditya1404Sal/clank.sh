@@ -1,0 +1,26 @@
+[package]
+name = "clank-agent"
+version = "0.0.0"
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+# The Golem agent component. cdylib only — this crate is a leaf component, not a library.
+crate-type = ["cdylib"]
+
+[dependencies]
+# The Golem agent framework. `export_golem_agentic` makes the #[agent_definition]/
+# #[agent_implementation] macros emit the invocable component exports (the golem:agent world).
+golem-rust = { version = "2.1.0", features = ["export_golem_agentic"] }
+wstd = { version = "=0.6.5", features = ["default", "json"] }
+serde = { version = "1", features = ["derive"] }
+
+# The shared shell core (Session + Transcript). default-features=false drops clank-shell's
+# `repl-driver` feature, so it links as a plain rlib WITHOUT the `wasi:cli/run` export that would
+# clash with this crate's golem:agent world.
+clank-shell = { path = "../clank-shell", default-features = false }
+golem-ai-llm = "0.5.1"
+golem-ai-llm-anthropic = "0.5.1"
+async-trait = "0.1"
