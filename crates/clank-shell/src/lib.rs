@@ -17,13 +17,10 @@
 pub mod ai;
 pub mod authz;
 pub mod binfs;
-mod contextcmd;
+pub mod builtins;
 pub mod dynreg;
 pub mod golem;
 pub mod grease;
-mod httpcmd;
-mod interceptstub;
-mod killcmd;
 pub mod logging;
 pub mod manifest;
 pub mod mcp;
@@ -31,13 +28,11 @@ pub mod mcpfs;
 pub mod process;
 pub mod procfs;
 pub mod proctable;
-pub mod promptuser;
 mod ps;
 pub mod registry;
 pub mod session;
 pub mod sysprompt;
 mod tools;
-pub mod typecmd;
 
 // The `wasi:cli/run` REPL driver. Gated behind the `repl-driver` feature so that dependents which
 // only want the shared `Session` core (e.g. the Golem agent crate, which exports its own

@@ -14,7 +14,8 @@
 //! cannot substitute for that. Pipelines and `$(...)` DO work on wasm: the Brush fork replaces the
 //! OS-pipe + spawn model with an in-memory `OpenFile::Stream` pipe run inline-sequentially ("Wall C").
 
-use crate::{dispatch_context, promptuser, typecmd, Flow, Transcript};
+use crate::builtins::{promptuser, typecmd};
+use crate::{dispatch_context, Flow, Transcript};
 use brush_builtins::{BuiltinSet, ShellBuilderExt};
 use brush_core::openfiles::{OpenFile, OpenFiles};
 use brush_core::{ExecutionControlFlow, Shell, SourceInfo};
@@ -23,7 +24,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::authz::{self, AuthzState, Decision};
 use crate::process::ProcessKind;
-use crate::promptuser::{AnswerInput, PendingPrompt, Resolution};
+use crate::builtins::promptuser::{AnswerInput, PendingPrompt, Resolution};
 use crate::proctable::ProcessTable;
 use crate::registry::CommandRegistry;
 
@@ -449,11 +450,11 @@ impl Session {
         if self.pending.is_some() {
             let pending_pid = self.pending.as_ref().and_then(|p| p.pid);
             let kills_pending = matches!(
-                (crate::killcmd::classify(line), pending_pid),
+                (crate::builtins::kill::classify(line), pending_pid),
                 (Some(Ok(args)), Some(pp)) if args
                     .targets
                     .iter()
-                    .any(|t| matches!(t, crate::killcmd::Target::Pid(p) if *p == pp))
+                    .any(|t| matches!(t, crate::builtins::kill::Target::Pid(p) if *p == pp))
             );
             if kills_pending {
                 self.transcript.lock().unwrap().record_command(line);
@@ -698,7 +699,7 @@ impl Session {
             // intercepted in `eval_line`). Route to the async summarizer; the caller
             // (`resolve_auth_confirm`) skips recording its inspection output.
             self.run_context_summarize().await
-        } else if let Some(parsed) = crate::killcmd::classify(line) {
+        } else if let Some(parsed) = crate::builtins::kill::classify(line) {
             // `kill` is Session-owned (it mutates the job table + proc table + pending state) and
             // MUST be tick-free: driving the runtime here could first-poll another parked
             // background job and wedge the invocation on its synchronous body.
@@ -760,13 +761,13 @@ impl Session {
             // through to Brush and hits the honest "no such file").
             self.run_mcp_resource_read(&server, &uri).await
         } else {
-            match crate::httpcmd::classify(line) {
-                Some((crate::httpcmd::HttpCommand::Curl, args)) => {
+            match crate::builtins::http::classify(line) {
+                Some((crate::builtins::http::HttpCommand::Curl, args)) => {
                     let o = wcurl::run(&args).await;
                     log_http_tool("curl", &args, o.exit_code);
                     LineResult::from_outcome(o.stdout, o.stderr, o.exit_code)
                 }
-                Some((crate::httpcmd::HttpCommand::Wget, args)) => {
+                Some((crate::builtins::http::HttpCommand::Wget, args)) => {
                     let o = waget::run(&args).await;
                     log_http_tool("wget", &args, o.exit_code);
                     LineResult::from_outcome(o.stdout, o.stderr, o.exit_code)
@@ -835,8 +836,8 @@ impl Session {
     /// aborts its future (dropped at its next await point — or never polled at all), and flips its
     /// row to `Z`. **Tick-free by design** (see `run_command`). Exit 0 when every target was
     /// killed, 1 on any miss (README exit-code table).
-    fn run_kill(&mut self, args: &crate::killcmd::KillArgs) -> LineResult {
-        use crate::killcmd::Target;
+    fn run_kill(&mut self, args: &crate::builtins::kill::KillArgs) -> LineResult {
+        use crate::builtins::kill::Target;
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let mut any_missed = false;
@@ -4645,8 +4646,8 @@ async fn build_shell() -> Result<Shell, brush_core::Error> {
         .builtins(crate::tools::find::builtins())
         .builtins(crate::tools::xargs::builtins())
         .builtins(crate::ai::model::builtins())
-        .builtins(crate::contextcmd::builtins())
-        .builtins(crate::interceptstub::builtins())
+        .builtins(crate::builtins::context::builtins())
+        .builtins(crate::builtins::interceptstub::builtins())
         .build()
         .await?;
 

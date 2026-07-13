@@ -161,7 +161,7 @@ pub fn build() -> CommandRegistry {
     for manifest in crate::ai::model::manifests() {
         registry.insert(manifest);
     }
-    for manifest in crate::httpcmd::manifests() {
+    for manifest in crate::builtins::http::manifests() {
         registry.insert(manifest);
     }
     for manifest in crate::ai::ask::manifests() {
@@ -176,7 +176,7 @@ pub fn build() -> CommandRegistry {
     for manifest in crate::golem::cluster::manifests() {
         registry.insert(manifest);
     }
-    for manifest in crate::killcmd::manifests() {
+    for manifest in crate::builtins::kill::manifests() {
         registry.insert(manifest);
     }
     for manifest in manual_manifests() {
@@ -218,8 +218,8 @@ mod tests {
             .chain(crate::tools::find::builtins::<SE>())
             .chain(crate::tools::xargs::builtins::<SE>())
             .chain(crate::ai::model::builtins::<SE>())
-            .chain(crate::contextcmd::builtins::<SE>())
-            .chain(crate::interceptstub::builtins::<SE>())
+            .chain(crate::builtins::context::builtins::<SE>())
+            .chain(crate::builtins::interceptstub::builtins::<SE>())
             .map(|(name, _reg)| name)
             // MANUAL_MANIFESTS covers commands with a manifest but no `.builtins()` registration
             // (see its doc comment for why each entry is legitimate) — union them into the
