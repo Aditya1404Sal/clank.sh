@@ -217,21 +217,7 @@ fork/exec on wasm, not because no crate exists.)
 
 ---
 
-## 5. `golem-stuff/` is reference-only, not a build input
-
-`golem-stuff/golem/` is a **vendored checkout of the Golem repo** kept for reference (it has its own
-`Cargo.toml` and is a separate workspace). It is **not** part of clank's build:
-- The root workspace `members` list (Cargo.toml:3) contains only `crates/*`; `golem-stuff` is not a
-  member and is referenced **nowhere** in any workspace/crate `Cargo.toml` (verified by grep).
-- The actual Golem SDK, `golem-rust`, resolves from **crates.io 2.1.0**
-  (`crates/clank-agent/Cargo.toml:16`; `Cargo.lock`: `golem-rust 2.1.0`,
-  `source = registry+https://github.com/rust-lang/crates.io-index`).
-
-(The sibling `golem-temp/` directory is likewise not a workspace member.)
-
----
-
-## 6. What is NOT forked or pinned
+## 5. What is NOT forked or pinned
 
 For completeness, so a maintainer doesn't go hunting for phantom patches:
 
@@ -248,13 +234,3 @@ For completeness, so a maintainer doesn't go hunting for phantom patches:
   - `reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }`
     (native-only, `wcurl`/`waget` `Cargo.toml`) — pure-Rust rustls TLS, no system libcurl/OpenSSL.
   - `chrono` with `default-features = false, features = ["clock"]` (`clank-shell/Cargo.toml:69`).
-
----
-
-## Comment consistency
-
-The Brush fork's "Wall C" work retired the old "wasm pipelines are a limitation" caveat. Two module
-docs (`session/mod.rs` and `wasm.rs`) still carried it and were corrected to match this document: pipelines
-and `$(...)` **work** on wasm (the inline-sequential `OpenFile::Stream` path). What genuinely remains
-unavailable is spawning real external processes — wasip2 has no process spawn — which is a distinct
-constraint from pipelines and is described as such.
