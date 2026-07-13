@@ -7,7 +7,7 @@
 # asserts each returns the expected output, then tears the server down and
 # wipes its data dir. Exits non-zero on the first failed assertion.
 #
-# Usage:   scripts/golem-e2e.sh [--keep] [--takeover] [--with-llm] [--with-grease]
+# Usage:   scripts/golem-e2e.sh [--keep] [--takeover] [--with-llm] [--with-grease] [--with-mcp]
 #   --keep         leave the server running and the data dir on disk after the run
 #                  (handy for poking at the deployed agent manually afterwards).
 #   --takeover     if a golem server is already bound to the default port, kill it
@@ -18,6 +18,10 @@
 #                  full grease install surface (signing, log, prompt/script/skill/mcp/agent install).
 #                  No python/env-var juggling — the script generates + serves everything. The
 #                  model-invoking prompt RUN still needs --with-llm.
+#   --with-mcp     run the live MCP-server assertions against a public no-auth server: sets
+#                  MCP_TEST_URL/TOOL/ARGS to a verified DeepWiki default (pre-set env vars still win).
+#                  The MCP+LLM assert (model calls the tool) additionally needs --with-llm; the public
+#                  endpoint can occasionally flake — that's why it's opt-in.
 #
 # Requires: golem (>=1.5), cargo, jq. Run from anywhere inside the repo.
 
@@ -32,14 +36,16 @@ KEEP=0
 TAKEOVER=0
 WITH_LLM=0
 WITH_GREASE=0
+WITH_MCP=0
 for arg in "$@"; do
   case "$arg" in
     --keep)        KEEP=1 ;;
     --takeover)    TAKEOVER=1 ;;
     --with-llm)    WITH_LLM=1 ;;
     --with-grease) WITH_GREASE=1 ;;
-    -h|--help)  sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    *) echo "unknown option: $arg" >&2; echo "usage: $0 [--keep] [--takeover] [--with-llm] [--with-grease]" >&2; exit 2 ;;
+    --with-mcp)    WITH_MCP=1 ;;
+    -h|--help)  sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "unknown option: $arg" >&2; echo "usage: $0 [--keep] [--takeover] [--with-llm] [--with-grease] [--with-mcp]" >&2; exit 2 ;;
   esac
 done
 
@@ -68,6 +74,17 @@ if [[ $HAS_ANTHROPIC_KEY -eq 1 && $WITH_LLM -eq 1 ]]; then
   RUN_LLM=1
 else
   RUN_LLM=0
+fi
+
+# --with-mcp: point the gated live-MCP block at a public no-auth MCP server (DeepWiki, verified
+# working). Pre-set MCP_TEST_* env vars still win (these are `:-` defaults). NB: the JSON args default
+# is assigned EXPLICITLY, never via `${VAR:-{...}}` — a brace inside a `:-` default closes the
+# expansion at the first `}` and appends a stray `}`, an invalid-JSON "trailing characters" bug.
+if [[ $WITH_MCP -eq 1 ]]; then
+  MCP_TEST_URL="${MCP_TEST_URL:-https://mcp.deepwiki.com/mcp}"
+  MCP_TEST_TOOL="${MCP_TEST_TOOL:-read_wiki_structure}"
+  MCP_TEST_ARGS="${MCP_TEST_ARGS:-}"; [[ -z "$MCP_TEST_ARGS" ]] && MCP_TEST_ARGS='{"repoName":"tj/n"}'
+  export MCP_TEST_URL MCP_TEST_TOOL MCP_TEST_ARGS
 fi
 
 # The agent is addressed by type + a constructor arg (its identity). One name for
@@ -820,25 +837,49 @@ expect_contains "mcp list is empty again"             'mcp list'          'no MC
 # --- Gated live-server block: needs a real HTTPS MCP server (public no-auth, e.g. DeepWiki's
 #     https://mcp.deepwiki.com/mcp). Set MCP_TEST_URL to run; optionally MCP_TEST_TOOL + MCP_TEST_ARGS
 #     (JSON) to exercise an actual tools/call. Gated because public endpoints aren't CI-reliable. This
-#     block makes NO Anthropic calls — it's the MCP HTTP path only.
+#     block makes NO Anthropic calls — it's the MCP HTTP path only. Verified working against DeepWiki
+#     (no API key needed):
+#       MCP_TEST_URL=https://mcp.deepwiki.com/mcp \
+#       MCP_TEST_TOOL=read_wiki_structure MCP_TEST_ARGS='{"repoName":"tj/n"}' \
+#       scripts/golem-e2e.sh --takeover
 if [[ -n "${MCP_TEST_URL:-}" ]]; then
   note "MCP_TEST_URL set — running live MCP server assertions against $MCP_TEST_URL"
   MCP_INST="$(eval_json eval "\"sudo mcp add mcptest ${MCP_TEST_URL}\"")"
   expect_eval "live mcp add installs"                 "$MCP_INST"  '.exit_code'  '0'
   expect_eval "install reports tool count"            "$MCP_INST"  '.stdout | contains("tools")'  'true'
   expect_contains "mcp list shows it installed"       'mcp list'          'enabled'
-  expect_contains "mcp tools lists ≥1 tool"           'mcp tools mcptest'  ''  # non-empty stdout
+  # Assert the tool listing is genuinely NON-EMPTY (an `expect_contains … ''` would always pass).
+  MCP_TOOLS="$(eval_json eval '"mcp tools mcptest"')"
+  expect_eval "mcp tools lists ≥1 tool"               "$MCP_TOOLS"  '.stdout | length > 0'  'true'
   expect_contains "which finds the server stub"       'which mcptest'      '/usr/lib/mcp/bin/mcptest'
   expect_contains "server --help lists tools"         'mcptest --help'     'Tools:'
   # A bare tool call surfaces a confirmation (MCP calls are Confirm); deny it (exit 5), no HTTP.
   if [[ -n "${MCP_TEST_TOOL:-}" ]]; then
-    MCP_CONFIRM="$(eval_json eval "\"mcptest ${MCP_TEST_TOOL} --args '${MCP_TEST_ARGS:-{}}'\"")"
+    # Default the args to an empty object WITHOUT braces-in-default: `${MCP_TEST_ARGS:-{}}` closes the
+    # expansion at the first `}` and appends a stray literal `}` (→ "trailing characters" JSON error).
+    MCP_ARGS="${MCP_TEST_ARGS:-}"; [[ -z "$MCP_ARGS" ]] && MCP_ARGS='{}'
+    # MCP_ARGS is JSON, so it carries `"` — escape the whole command's quotes for the WIT string literal
+    # (an unescaped `"` would terminate the WIT string early and mangle the tool line into an exec
+    # attempt). Same escaping run_line applies.
+    MCP_TOOL_CMD="mcptest ${MCP_TEST_TOOL} --args '${MCP_ARGS}'"
+    MCP_CONFIRM="$(eval_json eval "\"${MCP_TOOL_CMD//\"/\\\"}\"")"
     expect_eval "bare MCP tool call confirms"          "$MCP_CONFIRM"  '.pending_prompt != null'  'true'
     MCP_DENY="$(eval_json answer_prompt '"no"')"
     expect_eval "denied MCP tool exits 5"              "$MCP_DENY"  '.exit_code'  '5'
     # sudo pre-authorizes → the tool actually runs.
-    MCP_RUN="$(eval_json eval "\"sudo mcptest ${MCP_TEST_TOOL} --args '${MCP_TEST_ARGS:-{}}'\"")"
+    MCP_RUN="$(eval_json eval "\"sudo ${MCP_TOOL_CMD//\"/\\\"}\"")"
     expect_eval "sudo MCP tool call runs (exit 0)"     "$MCP_RUN"  '.exit_code'  '0'
+  fi
+  # --- MCP + LLM: the model drives the live MCP tool through the agentic `ask` loop. Needs BOTH a real
+  #     key (RUN_LLM) AND the live server + a known tool name (MCP_TEST_TOOL). Whether haiku picks the
+  #     tool is model-dependent, so — like the other agentic asserts — we pin only the deterministic
+  #     parts: the loop completes cleanly and a tool was invoked. Naming ${MCP_TEST_TOOL} nudges the
+  #     model; it fills the arguments from the tool's schema (clank exposes MCP tools as model tools).
+  if [[ $RUN_LLM -eq 1 && -n "${MCP_TEST_TOOL:-}" ]]; then
+    note "  MCP+LLM: asking the model to use the live MCP tool '${MCP_TEST_TOOL}' (real Anthropic + real MCP)"
+    ASK_MCP="$(eval_json eval "\"sudo ask \\\"Use the mcptest ${MCP_TEST_TOOL} tool once, picking reasonable arguments, then briefly report what it returned.\\\"\"")"
+    expect_eval "ask+MCP loop completes (exit 0)"      "$ASK_MCP"  '.exit_code'  '0'
+    expect_eval "ask+MCP invoked a tool"               "$ASK_MCP"  '.stderr | contains("[tool]")'  'true'
   fi
   # Session lifecycle.
   expect_contains "mcp session open works"            'mcp session open mcptest'  'opened session'
