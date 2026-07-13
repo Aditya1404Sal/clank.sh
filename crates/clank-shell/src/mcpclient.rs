@@ -88,9 +88,10 @@ impl McpHttp for LoggingMcpHttp {
         body: Option<Vec<u8>>,
     ) -> Result<HttpResponse, String> {
         let result = self.inner.request(method, url, headers, body).await;
+        // Redact secret query-params from the URL before logging (README: secrets redacted from http.log).
         let rec = crate::logging::Record::new("http")
             .field("method", method)
-            .field("url", url);
+            .field("url", crate::logging::redact_url(url));
         let rec = match &result {
             Ok(resp) => rec.field("status", resp.status.to_string()),
             Err(e) => rec.field("status", "error").field("error", e),

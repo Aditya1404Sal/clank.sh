@@ -25,13 +25,20 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use clank_shell::logging::{log_dir, LogFile, LogSink};
+use clank_shell::logging::{bound_tail, log_dir, LogFile, LogSink};
 
-/// A replay-safe log sink: buffers each log file's lines in memory and rewrites the whole file on every
-/// append via idempotent `std::fs::write`.
+/// Per-log in-memory buffer cap. The whole-file-rewrite approach costs one full write per line, so an
+/// unbounded buffer would grow without limit and make each write O(total-log-size). Keeping only a
+/// bounded tail bounds both memory and per-write I/O; because the cap is applied deterministically, oplog
+/// replay reproduces the same tail, so the write stays idempotent. `/var/log` is a rolling recent view,
+/// not a permanent archive (the full history lives in the Golem oplog).
+const MAX_LOG_BYTES: usize = 256 * 1024;
+
+/// A replay-safe log sink: buffers each log file's recent lines in memory (bounded, rolling) and rewrites
+/// the whole file on every append via idempotent `std::fs::write`.
 pub struct DurableLogSink {
-    /// Per-file accumulated contents (filename → full text). `RefCell` because `LogSink::append` takes
-    /// `&self`; the agent is single-threaded (wasip2), so there is no cross-thread contention.
+    /// Per-file accumulated contents (filename → bounded recent text). `RefCell` because `LogSink::append`
+    /// takes `&self`; the agent is single-threaded (wasip2), so there is no cross-thread contention.
     buffers: RefCell<HashMap<&'static str, String>>,
 }
 
@@ -52,6 +59,9 @@ impl LogSink for DurableLogSink {
         if !line.ends_with('\n') {
             buf.push('\n');
         }
+        // Bound the buffer to a rolling tail (whole leading lines dropped). Deterministic, so replay
+        // reproduces the identical tail (keeps the whole-file write idempotent).
+        bound_tail(buf, MAX_LOG_BYTES);
         // Idempotent whole-file write — safe to re-execute on replay (converges to identical content).
         let dir = log_dir();
         let _ = std::fs::create_dir_all(&dir);

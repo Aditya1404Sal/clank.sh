@@ -254,8 +254,8 @@ pub struct Session {
     /// Installed grease packages (prompts). Reconstructed from the durable agent FS on boot.
     grease: crate::greasestate::GreaseState,
     /// The log sink installed per-line (the `/var/log` observability layer). Defaults to the direct
-    /// append sink (correct on native); the agent injects a durability-gated sink that appends only when
-    /// the durable execution state is live (avoiding replay duplication — see `logging`).
+    /// append sink (correct on native); the agent injects a whole-file-rewrite sink whose writes are
+    /// idempotent under oplog replay, avoiding line duplication (see `logging` + `log_sink`).
     log_sink: std::sync::Arc<dyn crate::logging::LogSink>,
     source: SourceInfo,
     #[cfg(target_arch = "wasm32")]
@@ -386,8 +386,8 @@ impl Session {
         self.mcp_http = Some(Box::new(crate::mcpclient::LoggingMcpHttp::new(http)));
     }
 
-    /// Install the `/var/log` log sink. The agent injects a durability-gated sink (append only when
-    /// live) so oplog replay doesn't duplicate log lines; native keeps the default direct-append sink.
+    /// Install the `/var/log` log sink. The agent injects a whole-file-rewrite sink (idempotent under
+    /// oplog replay, so no duplicated lines); native keeps the default direct-append sink.
     pub fn set_log_sink(&mut self, sink: std::sync::Arc<dyn crate::logging::LogSink>) {
         self.log_sink = sink;
     }
@@ -612,11 +612,10 @@ impl Session {
         // name resolves to its Confirm-policy manifest — MCP tool calls are outbound HTTP).
         let (policy, elevated, command) = self.resolve_authz(line);
         let effective = strip_sudo_prefix(line);
+        let decision = authz::decide(policy, elevated, self.authz.allow_all);
         // ops.log: a `sudo-only` command is the destructive tier (rm / overwrite). Log the attempt with
-        // its authorization outcome, before `decide` short-circuits — so a denied destructive op is
-        // recorded too.
+        // its authorization outcome — recorded even when denied, so a blocked destructive op still shows.
         if policy == crate::manifest::AuthorizationPolicy::SudoOnly {
-            let decision = authz::decide(policy, elevated, self.authz.allow_all);
             let outcome = match decision {
                 Decision::Allow => "authorized",
                 Decision::Deny => "denied",
@@ -628,7 +627,7 @@ impl Session {
                 .field("outcome", outcome)
                 .emit(crate::logging::LogFile::Ops);
         }
-        match authz::decide(policy, elevated, self.authz.allow_all) {
+        match decision {
             Decision::Allow => {}
             Decision::Deny => {
                 return self.finish_intercepted(pid, LineResult::denied());
@@ -4076,17 +4075,17 @@ fn log_http_tool(tool: &str, args: &[String], exit_code: u8) {
     let url = args.iter().find(|a| !a.starts_with('-')).map(String::as_str).unwrap_or("");
     crate::logging::Record::new("http")
         .field("tool", tool)
-        .field("url", url)
+        .field("url", crate::logging::redact_url(url))
         .field("exit", exit_code.to_string())
         .emit(crate::logging::LogFile::Http);
 }
 
 /// Whether a fetched package body is a Markdown prompt with a leading `---` frontmatter fence (as
 /// opposed to the JSON payload shape). Used to route `.md`-authored prompts through the frontmatter
-/// converter after integrity verification.
+/// converter after integrity verification. Checks the raw byte prefix directly (the fence is ASCII), so
+/// a multibyte character right after the fence can't cause a misclassification.
 fn is_markdown_frontmatter(body: &[u8]) -> bool {
-    let head = &body[..body.len().min(8)];
-    matches!(std::str::from_utf8(head), Ok(s) if s.starts_with("---\n") || s.starts_with("---\r\n"))
+    body.starts_with(b"---\n") || body.starts_with(b"---\r\n")
 }
 
 /// Best-effort lookup of a package's index entry (`sha256` + `sig` + `signer`). GETs
