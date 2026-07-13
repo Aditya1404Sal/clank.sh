@@ -1,8 +1,8 @@
 //! The MCP (Model Context Protocol) client protocol layer: JSON-RPC 2.0 over Streamable HTTP.
 //!
-//! MCP-lite scope: `initialize` → `notifications/initialized` → `tools/list` (paginated) →
-//! `tools/call` → session `close` (HTTP DELETE). HTTPS-only (wasm can't spawn stdio servers). Resources,
-//! prompts, `watch`, and OAuth are deferred (see [`crate::mcpcmd`]).
+//! MCP scope: `initialize` → `notifications/initialized` → `tools/list` (paginated) → `tools/call` →
+//! session `close` (HTTP DELETE), plus prompts, resources, and templates. HTTPS-only (wasm can't spawn
+//! stdio servers). OAuth is deferred (see [`crate::mcpcmd`]).
 //!
 //! The HTTP transport is a **trait seam** ([`McpHttp`]) — unlike curl/wget's cfg-gated `fetch`, MCP
 //! needs response *headers* (the `Mcp-Session-Id`) and scriptable multi-step fakes for tests. The

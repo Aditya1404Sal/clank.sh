@@ -6,7 +6,7 @@
 //! routing the whole command through one place keeps dispatch simple. The actual work lives in
 //! `Session` methods; this module only parses.
 //!
-//! MCP-lite grammar (tools only; resources/prompts/watch deferred):
+//! MCP grammar:
 //! ```text
 //! mcp list
 //! mcp add <name> <url> [--auth-env VAR] [--auth-header HEADER]
@@ -14,7 +14,8 @@
 //! mcp reload [<name>]
 //! mcp tools <server>
 //! mcp session list | open <server> | close <id> | info <id>
-//! mcp watch <uri>            (honest "not supported in MCP-lite")
+//! mcp watch <uri>            (bounded poll — the durable agent can't hold a push stream)
+//! mcp resource info <uri>
 //! ```
 
 use brush_parser::{tokenize_str, unquote_str, Token};

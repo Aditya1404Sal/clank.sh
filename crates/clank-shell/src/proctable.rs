@@ -4,7 +4,7 @@
 //! (static metadata about a command). This is the README's "internal process table" — PID, PPID,
 //! type tag, argv, status, start time.
 //!
-//! **Granularity (increment 2): one process per executed line.** clank's `Session::run_line` runs a
+//! **Granularity: one process per executed line.** clank's `Session::run_line` runs a
 //! whole line through Brush as one unit and never sees individual commands (that would need a Brush
 //! fork), so each executed line becomes one row. `argv` is the line split on whitespace — enough for
 //! `ps` display, not shell-accurate tokenization.

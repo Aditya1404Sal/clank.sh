@@ -11,8 +11,8 @@
 //!
 //! Brush hard-depends on tokio internally (`tokio::spawn` for pipelines, `spawn_blocking` for
 //! owned-shell builtins), so a tokio runtime is required to run it at all — `wit_bindgen::spawn`
-//! cannot substitute for that. On wasm, pipelines/subshells that reach `spawn_blocking` are a
-//! known limitation (no threads); simple builtins and shell language work.
+//! cannot substitute for that. Pipelines and `$(...)` DO work on wasm: the Brush fork replaces the
+//! OS-pipe + spawn model with an in-memory `OpenFile::Stream` pipe run inline-sequentially ("Wall C").
 
 use crate::{dispatch_context, promptuser, typecmd, Flow, Transcript};
 use brush_builtins::{BuiltinSet, ShellBuilderExt};

@@ -453,8 +453,8 @@ pub struct ReplArgs {
 }
 
 /// If `line` is `ask repl [--fresh|--inherit] [--model <id>]`, parse it. `None` otherwise (including
-/// a plain `ask …` — that's [`classify`]). The default seed is `Fresh` (v1: summary-injection, the
-/// README default, is deferred until transcript summarization lands — see the plan).
+/// a plain `ask …` — that's [`classify`]). The default seed is `Fresh`; the README's summary-injection
+/// default is not yet wired for `repl`.
 pub fn classify_repl(line: &str) -> Option<ReplArgs> {
     let words = leading_words(line)?;
     let mut iter = words.iter();
