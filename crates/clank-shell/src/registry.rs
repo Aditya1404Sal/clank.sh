@@ -39,9 +39,18 @@ use crate::manifest::{AuthorizationPolicy, ExecutionScope, Manifest};
 /// - `kill` — the synthetic kill, intercepted in `Session::run_command` (it mutates Session state:
 ///   the bg-job mapping, proc table, and pending prompt; Brush's own kill is nix/unix-gated). See
 ///   `killcmd`.
+/// - `cd`, `export`, `exec`, `exit`, `unset`, `source` (parent-shell) and `alias`, `jobs`, `fg`, `bg`,
+///   `history`, `read`, `wait` (shell-internal) — Brush-native BashMode builtins, like `type`/`command`
+///   above. clank adds manifests so `man`/`/bin`/help and the execution-scope classification cover them;
+///   they dispatch through Brush unchanged (the manifest is metadata only). This completes the
+///   "special-builtin / parent-shell + shell-internal classification" that `build()` had deferred.
 pub const MANUAL_MANIFESTS: &[&str] = &[
     "prompt-user", "type", "command", "curl", "wget", "context", "ask", "kill", "mcp", "grease",
     "golem",
+    // Brush-native BashMode builtins — parent-shell (POSIX special builtins):
+    "cd", "export", "exec", "exit", "unset", "source",
+    // Brush-native BashMode builtins — shell-internal:
+    "alias", "jobs", "fg", "bg", "history", "read", "wait",
 ];
 
 /// Hand-authored manifests for commands not backed by a clank `SimpleCommand` registration (see
@@ -76,6 +85,69 @@ fn manual_manifests() -> Vec<Manifest> {
                  context trim <n> — drop the oldest n transcript entries\n\
                  context summarize — print an AI summary of the transcript (needs the model; \
                  top-level only, confirms unless run with sudo)",
+            ),
+        // --- Brush-native POSIX special builtins (execution-scope: parent-shell). They run in the
+        // parent shell and mutate its state (cwd, env, control flow); they dispatch through Brush
+        // unchanged — clank adds manifests only so `man`/`/bin`/help and the scope-based tool-surface
+        // exclusion classify them. Authorization defaults to `Allow`.
+        Manifest::builtin("cd", "change the shell working directory")
+            .with_scope(ExecutionScope::ParentShell)
+            .with_help(
+                "cd [dir] — change the shell working directory (defaults to $HOME). A parent-shell \
+                 special builtin: it mutates the shell's own state and cannot run as a subprocess.",
+            ),
+        Manifest::builtin("export", "set environment variables for the shell and its subprocesses")
+            .with_scope(ExecutionScope::ParentShell)
+            .with_help(
+                "export NAME[=value] ... — mark shell variables for export to the environment of \
+                 subsequently executed commands.",
+            ),
+        Manifest::builtin("exec", "replace the shell with a command, or apply redirections permanently")
+            .with_scope(ExecutionScope::ParentShell)
+            .with_help(
+                "exec [command [args]] — replace the shell with COMMAND (on the durable agent this is \
+                 emulated: run in-shell, then exit); with no command, redirections apply permanently \
+                 to the current shell.",
+            ),
+        Manifest::builtin("exit", "exit the shell with a status code")
+            .with_scope(ExecutionScope::ParentShell)
+            .with_help("exit [n] — exit the shell with status N (default: the last command's status)."),
+        Manifest::builtin("unset", "remove shell variables or functions")
+            .with_scope(ExecutionScope::ParentShell)
+            .with_help("unset [-f|-v] NAME ... — remove the named shell variables or functions."),
+        Manifest::builtin("source", "read and execute commands from a file in the current shell")
+            .with_scope(ExecutionScope::ParentShell)
+            .with_help(
+                "source FILE [args] (also `.`) — read and execute commands from FILE in the current \
+                 shell, so its variable/function/cwd changes persist in the parent shell.",
+            ),
+        // --- Brush-native shell-internal builtins (execution-scope: shell-internal). They operate on
+        // shell-internal tables (jobs, aliases, history) and cannot run as subprocesses. Manifest-only;
+        // Brush executes them. (`context`/`type`/`command`/`prompt-user`/`which`/`kill` are already
+        // classified elsewhere.)
+        Manifest::builtin("alias", "define or display command aliases")
+            .with_scope(ExecutionScope::ShellInternal)
+            .with_help("alias [name[=value] ...] — define or list command aliases (the alias table)."),
+        Manifest::builtin("jobs", "list active jobs")
+            .with_scope(ExecutionScope::ShellInternal)
+            .with_help("jobs — list the shell's background/suspended jobs (the synthetic job table)."),
+        Manifest::builtin("fg", "resume a job in the foreground")
+            .with_scope(ExecutionScope::ShellInternal)
+            .with_help("fg [%job] — resume a job in the foreground."),
+        Manifest::builtin("bg", "resume a job in the background")
+            .with_scope(ExecutionScope::ShellInternal)
+            .with_help("bg [%job] — resume a suspended job in the background."),
+        Manifest::builtin("history", "display or manage the command history")
+            .with_scope(ExecutionScope::ShellInternal)
+            .with_help("history — display the command history table."),
+        Manifest::builtin("read", "read a line of input into shell variables")
+            .with_scope(ExecutionScope::ShellInternal)
+            .with_help("read [-r] NAME ... — read one line of input into the named shell variables."),
+        Manifest::builtin("wait", "wait for background jobs to complete")
+            .with_scope(ExecutionScope::ShellInternal)
+            .with_help(
+                "wait [%job|pid] — wait for the given (or all) background jobs to complete and return \
+                 their status.",
             ),
     ]
 }
@@ -129,9 +201,10 @@ impl CommandRegistry {
 
 /// Build the registry from the manifests authored alongside clank's builtins.
 ///
-/// Only clank-authored builtins are covered. Brush's BashMode builtins (`cd`, `export`, `echo`,
-/// `type`, …) are not clank code and get manifests in a later increment (they need the
-/// special-builtin / `parent-shell` + `shell-internal` classification work).
+/// Clank-authored builtins carry their manifests next to their registration; the Brush-native
+/// BashMode builtins (`cd`, `export`, `type`, `alias`, …) have hand-authored manifests in
+/// [`manual_manifests`] classifying them as `parent-shell` / `shell-internal`. (`echo` and other
+/// Brush builtins without a clank manifest simply fall back to Brush's own help.)
 pub fn build() -> CommandRegistry {
     let mut registry = CommandRegistry::default();
     for manifest in crate::tools::coreutils::manifests() {
@@ -235,5 +308,27 @@ mod tests {
             "clank builtins and their manifests have drifted: \
              every registered builtin must have exactly one manifest and vice versa"
         );
+    }
+
+    /// The Brush-native special/shell-internal builtins carry the README's execution-scope
+    /// classification: `parent-shell` is now populated and the shell-internal names are classified.
+    #[test]
+    fn brush_native_builtins_carry_execution_scope() {
+        use crate::manifest::ExecutionScope;
+        let registry = build();
+        for name in ["cd", "export", "exec", "exit", "unset", "source"] {
+            assert_eq!(
+                registry.get(name).map(|m| m.execution_scope),
+                Some(ExecutionScope::ParentShell),
+                "{name} should be classified parent-shell",
+            );
+        }
+        for name in ["alias", "jobs", "fg", "bg", "history", "read", "wait"] {
+            assert_eq!(
+                registry.get(name).map(|m| m.execution_scope),
+                Some(ExecutionScope::ShellInternal),
+                "{name} should be classified shell-internal",
+            );
+        }
     }
 }

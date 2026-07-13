@@ -5,8 +5,9 @@
 //!
 //! 1. The clank [`CommandRegistry`](crate::registry::CommandRegistry) manifest — the same content
 //!    `cat /bin/<name>` serves — for every clank-registered or intercepted command.
-//! 2. Brush's own builtin help (`Registration::content_func`, what the `help` builtin prints) for
-//!    Brush-native builtins (`cd`, `export`, `type`, …) that carry no clank manifest.
+//! 2. Brush's own builtin help (`Registration::content_func`, what the `help` builtin prints) for any
+//!    Brush-native builtin that carries no clank manifest (e.g. `echo`). Most BashMode builtins
+//!    (`cd`, `export`, `alias`, `type`, …) now carry clank manifests and render via source 1.
 //!
 //! Unknown names get the classic `No manual entry for <name>` and exit 1. A leading numeric
 //! section operand (`man 1 grep`) is accepted and ignored — LLMs emit it out of habit.
@@ -121,8 +122,8 @@ pub(crate) fn builtins<SE: ShellExtensions>() -> Vec<(String, Registration<SE>)>
 pub(crate) fn manifests() -> Vec<Manifest> {
     vec![Manifest::builtin(Man::NAME, Man::SYNOPSIS).with_help(
         "man [section] NAME... — display documentation for a command. Rendered from the \
-         command's manifest (the same content as `cat /bin/<name>`), or Brush's builtin help for \
-         shell builtins like cd/export. Section numbers are accepted and ignored.",
+         command's manifest (the same content as `cat /bin/<name>`), or Brush's builtin help for any \
+         builtin that carries no clank manifest. Section numbers are accepted and ignored.",
     )]
 }
 

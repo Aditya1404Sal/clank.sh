@@ -1174,7 +1174,7 @@ expect "printf reuses format per batch"   'printf "%s\n" one two'               
 # man — manifest-rendered pages (same source as cat /bin/<name>), Brush-builtin fallback, honest
 # not-found on unknown names.
 expect_contains "man grep renders NAME section"  'man grep'   'grep - search files for a pattern'
-expect_contains "man cd falls back to Brush help" 'man cd'    'cd'
+expect_contains "man cd renders its clank manifest" 'man cd'  'change the shell working directory'
 MAN_MISSING="$(eval_json eval '"man no-such-command-xyz"')"
 expect_eval "man unknown name exits 1"    "$MAN_MISSING" '.exit_code' '1'
 expect_eval "man unknown name says so"    "$MAN_MISSING" '.stderr | contains("No manual entry")' 'true'
