@@ -19,8 +19,13 @@
 //! the buffer is NEVER seeded from the on-disk file — doing so would re-add already-written lines on
 //! replay. The buffer is pure in-memory state, deterministically reproduced by replay, exactly like the
 //! transcript and process table.) This matches how grease persists its store: whole-file `std::fs::write`,
-//! safe under replay. Only `std` + the portable `logging::log_dir` are used — no durability host
-//! primitive (which golem-rust does not expose publicly) is needed.
+//! safe under replay. Only `std` + the portable `logging::log_dir` are used.
+//!
+//! (On the durability API: `golem_rust::durability::Durability::is_live()` IS public, but the only public
+//! path to it is constructing a `Durability`, whose `new()` opens a durable-function region — so peeking
+//! `is_live` to gate a raw append would leave a dangling region. The cheap raw execution-state accessor
+//! (`current_durable_execution_state`) is `pub(crate)` in the SDK. Hence the idempotent whole-file rewrite
+//! is the right mitigation here, not an is-live gate; see [[golem-fs-append-replay-unsafe]].)
 
 use std::cell::RefCell;
 use std::collections::HashMap;

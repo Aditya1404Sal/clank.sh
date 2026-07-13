@@ -1,8 +1,13 @@
 //! The durable Golem cluster interface backing the `golem` command on the Golem agent.
 //!
 //! `clank-shell` defines the [`GolemCluster`](clank_shell::golemcmd::GolemCluster) seam; this module
-//! (wasm-only agent crate) implements it with `golem-rust`'s `golem:api` host bindings. Mirrors the
+//! (wasm-only agent crate) implements it with golem-rust's `golem:api` host bindings. Mirrors the
 //! `AgentInvoker`→`WasmRpcInvoker` seam.
+//!
+//! NB: the `golem_rust::bindings::golem::api::host::*` path is deliberate — golem-rust **2.1.0** (the
+//! resolved dependency) has no crate-root `get_self_metadata`/`fork` wrapper; `pub mod bindings` is the
+//! public API there. (A later SDK adds crate-root wrappers, and the vendored `golem-stuff` checkout shows
+//! them — but migrating to them breaks the 2.1.0 build. Only `ForkResult` is re-exported at the crate root.)
 //!
 //! Scope: the operations with a clean host primitive are wired — `fork` (shell self-fork),
 //! `get-self-metadata` (the shell instance's own status/oplog anchor), `get-agents` (list). Operations
