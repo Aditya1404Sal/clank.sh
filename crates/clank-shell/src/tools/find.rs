@@ -188,14 +188,14 @@ fn walk(path: &str, depth: usize, opts: &FindOpts, out: &mut dyn Write, errs: &m
 /// Serve a virtual root (`/bin`, `/proc/<pid>`, `/proc/clank`) at listing depth: the root as a
 /// directory plus its fixed children as files. Returns false if the root doesn't resolve.
 fn walk_virtual(root: &str, opts: &FindOpts, out: &mut dyn Write) -> bool {
-    let children = if crate::binfs::is_bin_path(root) {
-        crate::binfs::list_children(root)
+    let children = if crate::runtime::binfs::is_bin_path(root) {
+        crate::runtime::binfs::list_children(root)
     } else {
-        crate::procfs::list_children(root)
+        crate::runtime::procfs::list_children(root)
     };
     let Some(children) = children else {
         // Not a listable virtual dir; a resolvable leaf (e.g. /bin/curl) is served as a file.
-        let resolves = crate::binfs::is_bin_path(root) && crate::binfs::resolve(root).is_ok();
+        let resolves = crate::runtime::binfs::is_bin_path(root) && crate::runtime::binfs::resolve(root).is_ok();
         if resolves && opts.mindepth == 0 && opts.matches(root, false) {
             let _ = writeln!(out, "{root}");
         }
@@ -255,7 +255,7 @@ impl SimpleCommand for Find {
         let mut out = context.stdout();
         let mut errs = Vec::new();
         for root in &opts.paths {
-            if crate::binfs::is_bin_path(root) || crate::procfs::is_proc_path(root) {
+            if crate::runtime::binfs::is_bin_path(root) || crate::runtime::procfs::is_proc_path(root) {
                 if !walk_virtual(root, &opts, &mut out) {
                     errs.push(format!("'{root}': No such file or directory"));
                 }

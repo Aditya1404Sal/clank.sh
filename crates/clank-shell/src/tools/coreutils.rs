@@ -357,8 +357,8 @@ impl SimpleCommand for Cat {
         let argv: Vec<String> = args.map(|s| s.as_ref().to_string()).collect();
         let touches_virtual = argv.iter().skip(1).any(|a| {
             !is_flag(a)
-                && (crate::procfs::is_proc_path(a)
-                    || crate::binfs::is_bin_path(a)
+                && (crate::runtime::procfs::is_proc_path(a)
+                    || crate::runtime::binfs::is_bin_path(a)
                     || a == "/dev/null")
         });
 
@@ -370,16 +370,16 @@ impl SimpleCommand for Cat {
         }
 
         // Mixed/virtual path: serve each operand in order.
-        let environ = crate::procfs::current_environ();
-        let table = crate::proctable::active();
+        let environ = crate::runtime::procfs::current_environ();
+        let table = crate::runtime::proctable::active();
         let mut out = context.stdout();
         let mut had_error = false;
         for op in argv.iter().skip(1).filter(|a| !is_flag(a)) {
             if op == "/dev/null" {
                 // Reads as empty (the emulated null device is not a real fs entry uu_cat can open).
-            } else if crate::binfs::is_bin_path(op) {
+            } else if crate::runtime::binfs::is_bin_path(op) {
                 // `/bin/<name>` → the command's help text (static registry; no Session access).
-                match crate::binfs::resolve(op) {
+                match crate::runtime::binfs::resolve(op) {
                     Ok(content) => {
                         let _ = out.write_all(content.as_bytes());
                     }
@@ -388,10 +388,10 @@ impl SimpleCommand for Cat {
                         had_error = true;
                     }
                 }
-            } else if crate::procfs::is_proc_path(op) {
+            } else if crate::runtime::procfs::is_proc_path(op) {
                 let resolved = table
                     .as_ref()
-                    .map(|t| crate::procfs::resolve(op, &t.lock().unwrap(), &environ));
+                    .map(|t| crate::runtime::procfs::resolve(op, &t.lock().unwrap(), &environ));
                 match resolved {
                     Some(Ok(content)) => {
                         let _ = out.write_all(content.as_bytes());
@@ -446,16 +446,16 @@ impl SimpleCommand for Ls {
         let bin_operand = argv
             .iter()
             .skip(1)
-            .find(|a| !is_flag(a) && crate::binfs::is_bin_path(a))
+            .find(|a| !is_flag(a) && crate::runtime::binfs::is_bin_path(a))
             .cloned();
         if let Some(op) = bin_operand {
             let mut out = context.stdout();
-            if let Some(children) = crate::binfs::list_children(&op) {
+            if let Some(children) = crate::runtime::binfs::list_children(&op) {
                 let _ = writeln!(out, "{}", children.join("\n"));
                 return Ok(ExecutionResult::new(0));
             }
             // `/bin/<name>`: a file, not a directory. Exists → print its path; else not found.
-            if crate::binfs::resolve(&op).is_ok() {
+            if crate::runtime::binfs::resolve(&op).is_ok() {
                 let _ = writeln!(out, "{op}");
                 return Ok(ExecutionResult::new(0));
             }
@@ -469,24 +469,24 @@ impl SimpleCommand for Ls {
         let mcp_operand = argv
             .iter()
             .skip(1)
-            .find(|a| !is_flag(a) && crate::mcpfs::is_mcp_path(a))
+            .find(|a| !is_flag(a) && crate::runtime::mcpfs::is_mcp_path(a))
             .cloned();
         if let Some(op) = mcp_operand {
-            let index = crate::mcpfs::active().unwrap_or_default();
+            let index = crate::runtime::mcpfs::active().unwrap_or_default();
             let mut out = context.stdout();
-            match crate::mcpfs::classify(&op, &index) {
-                crate::mcpfs::McpPathKind::Directory(children) => {
+            match crate::runtime::mcpfs::classify(&op, &index) {
+                crate::runtime::mcpfs::McpPathKind::Directory(children) => {
                     let _ = writeln!(out, "{}", children.join("\n"));
                     return Ok(ExecutionResult::new(0));
                 }
-                crate::mcpfs::McpPathKind::Static
-                | crate::mcpfs::McpPathKind::Dynamic { .. }
-                | crate::mcpfs::McpPathKind::Template => {
+                crate::runtime::mcpfs::McpPathKind::Static
+                | crate::runtime::mcpfs::McpPathKind::Dynamic { .. }
+                | crate::runtime::mcpfs::McpPathKind::Template => {
                     // A file/executable (not a dir): `ls <path>` names it, like real `ls`.
                     let _ = writeln!(out, "{op}");
                     return Ok(ExecutionResult::new(0));
                 }
-                crate::mcpfs::McpPathKind::NotFound => {
+                crate::runtime::mcpfs::McpPathKind::NotFound => {
                     let _ = writeln!(context.stderr(), "ls: {op}: No such file or directory");
                     return Ok(ExecutionResult::new(1));
                 }
@@ -496,12 +496,12 @@ impl SimpleCommand for Ls {
         let proc_operand = argv
             .iter()
             .skip(1)
-            .find(|a| !is_flag(a) && crate::procfs::is_proc_path(a))
+            .find(|a| !is_flag(a) && crate::runtime::procfs::is_proc_path(a))
             .cloned();
 
         // Only the fixed-child-name listing of `/proc/<pid>` and `/proc/clank` is served here.
         if let Some(op) = proc_operand {
-            if let Some(children) = crate::procfs::list_children(&op) {
+            if let Some(children) = crate::runtime::procfs::list_children(&op) {
                 let mut out = context.stdout();
                 let _ = writeln!(out, "{}", children.join("\n"));
                 return Ok(ExecutionResult::new(0));

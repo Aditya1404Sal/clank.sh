@@ -326,14 +326,14 @@ fn read_named_input(file: &str, environ: &[(String, String)]) -> Result<Vec<u8>,
     if file == "/dev/null" {
         // The emulated null device: reads as empty.
         Ok(Vec::new())
-    } else if crate::binfs::is_bin_path(file) {
-        crate::binfs::resolve(file)
+    } else if crate::runtime::binfs::is_bin_path(file) {
+        crate::runtime::binfs::resolve(file)
             .map(String::into_bytes)
             .map_err(|_| format!("{file}: No such file or directory"))
-    } else if crate::procfs::is_proc_path(file) {
-        crate::proctable::active()
+    } else if crate::runtime::procfs::is_proc_path(file) {
+        crate::runtime::proctable::active()
             .and_then(|t| {
-                crate::procfs::resolve(file, &t.lock().unwrap(), environ).ok()
+                crate::runtime::procfs::resolve(file, &t.lock().unwrap(), environ).ok()
             })
             .map(String::into_bytes)
             .ok_or_else(|| format!("{file}: No such file or directory"))
@@ -417,7 +417,7 @@ fn run_grep(
         .invert_match(opts.invert)
         .build();
 
-    let environ = crate::procfs::current_environ();
+    let environ = crate::runtime::procfs::current_environ();
     let mut matched = false;
 
     // The (label, bytes) inputs: stdin as one unnamed input, or each named operand.

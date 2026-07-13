@@ -31,7 +31,7 @@
 use std::cell::RefCell;
 use std::sync::{Arc, Mutex};
 
-use crate::process::ProcessKind;
+use crate::runtime::process::ProcessKind;
 
 /// The synthetic shell-root PID (an init-like process). Not a stored row; `render_ps` synthesizes
 /// it so `ps` is never empty and every spawned row has a parent.

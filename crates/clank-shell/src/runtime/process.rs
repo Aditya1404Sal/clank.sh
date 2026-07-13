@@ -5,7 +5,7 @@
 //! (no fork/exec, no OS processes), modeled as distinct implementations of one async trait. This
 //! module defines the *shape* of that trait so those kinds have a common slot to fill.
 //!
-//! The live process *table* + PIDs + R/S/T/Z/P states are in [`proctable`](crate::proctable); the
+//! The live process *table* + PIDs + R/S/T/Z/P states are in [`proctable`](crate::runtime::proctable); the
 //! `ProcessKind` tag below is what those rows carry. The [`ClankProcess`] trait is the original
 //! execution-shape sketch and has no implementors — the running path drives Brush directly (a façade
 //! over `Shell::run_string`, not a parallel task runtime) and records rows in `proctable`.

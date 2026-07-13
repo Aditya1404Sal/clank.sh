@@ -5,7 +5,7 @@
 //! `cat /bin/<name>` to read its help. This module is that namespace: a pure resolver from a `/bin`
 //! path to content, computed from clank's [`CommandRegistry`].
 //!
-//! **Static, unlike `/proc`.** The [`crate::procfs`] namespace reflects the *current* process table
+//! **Static, unlike `/proc`.** The [`crate::runtime::procfs`] namespace reflects the *current* process table
 //! (per-session, mutable) and is reached through a thread-local slot. The builtin *set* never changes
 //! at runtime, so `/bin` resolves against a single lazily-built static snapshot of
 //! [`crate::registry::build`] — no thread-local, no `Session` access needed. clank's own `cat`/`ls`

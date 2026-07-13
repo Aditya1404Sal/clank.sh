@@ -184,7 +184,7 @@ impl McpState {
         Some(m)
     }
 
-    /// The dynamic manifests for all installed servers (for the per-line [`crate::dynreg`] slot that
+    /// The dynamic manifests for all installed servers (for the per-line [`crate::runtime::dynreg`] slot that
     /// `man` consults).
     pub fn all_manifests(&self) -> Vec<Manifest> {
         self.servers

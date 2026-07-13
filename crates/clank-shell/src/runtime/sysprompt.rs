@@ -1,12 +1,12 @@
 //! The live system-prompt slot: the fully-rendered agentic system prompt for the current line.
 //!
 //! `/proc/clank/system-prompt` is meant to show *what the model actually sees* — the command surface
-//! plus installed MCP tools, grease prompts, and skills. But [`crate::procfs`]'s resolver is reached
+//! plus installed MCP tools, grease prompts, and skills. But [`crate::runtime::procfs`]'s resolver is reached
 //! from a synchronous Brush builtin (`cat`) with no access to the live `Session` (its `registry`/`mcp`/
 //! `grease`). So the `Session` renders the full prompt once per `run_line` (via
 //! [`crate::ai::ask::build_system_prompt_with_capabilities`] — the same call `run_ask` makes) and
 //! installs the string here; the procfs resolver reads it. Mirrors the per-line thread-local install
-//! pattern of [`crate::proctable`] / [`crate::mcpfs`] / [`crate::dynreg`] exactly.
+//! pattern of [`crate::runtime::proctable`] / [`crate::runtime::mcpfs`] / [`crate::runtime::dynreg`] exactly.
 //!
 //! When nothing is installed (native off-session reads, tests), the resolver falls back to the static
 //! base prompt — so `cat /proc/clank/system-prompt` is always answerable.

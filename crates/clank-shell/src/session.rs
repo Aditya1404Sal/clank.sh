@@ -23,9 +23,9 @@ use brush_core::{ExecutionControlFlow, Shell, SourceInfo};
 use std::sync::{Arc, Mutex};
 
 use crate::authz::{self, AuthzState, Decision};
-use crate::process::ProcessKind;
+use crate::runtime::process::ProcessKind;
 use crate::builtins::promptuser::{AnswerInput, PendingPrompt, Resolution};
-use crate::proctable::ProcessTable;
+use crate::runtime::proctable::ProcessTable;
 use crate::registry::CommandRegistry;
 
 type BoxError = Box<dyn std::error::Error>;
@@ -126,7 +126,7 @@ struct Pending {
 struct CapabilityCache {
     key: (u64, u64),
     dynreg: std::sync::Arc<std::sync::Mutex<Vec<crate::manifest::Manifest>>>,
-    mcpfs: std::sync::Arc<Vec<crate::mcpfs::ResourceEntry>>,
+    mcpfs: std::sync::Arc<Vec<crate::runtime::mcpfs::ResourceEntry>>,
     sysprompt: std::sync::Arc<String>,
 }
 
@@ -476,7 +476,7 @@ impl Session {
         // the `ps` builtin (a Brush builtin, which can't reach `Session` directly) can read it.
         // The guard clears the slot on drop. The transcript slot is the same pattern, read by the
         // Brush-registered `context` builtin in nested contexts ($(context show), context | head).
-        let _install = crate::proctable::install(self.proc_table.clone());
+        let _install = crate::runtime::proctable::install(self.proc_table.clone());
         let _install_transcript = crate::install_transcript(self.transcript.clone());
         // Build (or reuse a cached) view of the installed capabilities, keyed by the MCP + grease state
         // versions — so the dynamic manifests (`man`/`type` resolution), the MCP resource index (`ls
@@ -504,9 +504,9 @@ impl Session {
             let cap = self.cap_cache.as_ref().expect("cap_cache just populated");
             (cap.dynreg.clone(), cap.mcpfs.clone(), cap.sysprompt.clone())
         };
-        let _install_dynreg = crate::dynreg::install(dynreg);
-        let _install_mcpfs = crate::mcpfs::install(mcpfs);
-        let _install_sysprompt = crate::sysprompt::install(sysprompt);
+        let _install_dynreg = crate::runtime::dynreg::install(dynreg);
+        let _install_mcpfs = crate::runtime::mcpfs::install(mcpfs);
+        let _install_sysprompt = crate::runtime::sysprompt::install(sysprompt);
 
         // Record this line as a process (one PID per executed line). Blank lines get no row, matching
         // the "empty line re-prompts" behavior. `context` lines DO get a row — they're real typed
@@ -804,7 +804,7 @@ impl Session {
     /// bash-style `[id] pid` start line appended to stdout (Brush's own print is interactive-only).
     /// Then reap once — a `wait` in the same line may have completed jobs synchronously.
     fn adopt_new_jobs(&mut self, line_pid: Option<u32>, result: &mut LineResult) {
-        let ppid = line_pid.unwrap_or(crate::proctable::SHELL_ROOT_PID);
+        let ppid = line_pid.unwrap_or(crate::runtime::proctable::SHELL_ROOT_PID);
         let new_jobs: Vec<(usize, String)> = self
             .shell
             .jobs()
@@ -819,7 +819,7 @@ impl Session {
                 .proc_table
                 .lock()
                 .unwrap()
-                .spawn_bg(crate::process::ProcessKind::Builtin, argv, ppid);
+                .spawn_bg(crate::runtime::process::ProcessKind::Builtin, argv, ppid);
             self.bg_jobs.push(BgJob {
                 job_id,
                 pid: bg_pid,
@@ -857,7 +857,7 @@ impl Session {
                     }
                 }
                 Target::Pid(pid) => {
-                    if *pid == crate::proctable::SHELL_ROOT_PID {
+                    if *pid == crate::runtime::proctable::SHELL_ROOT_PID {
                         stderr.extend_from_slice(
                             format!("kill: ({pid}) - Operation not permitted\n").as_bytes(),
                         );
@@ -3015,12 +3015,12 @@ impl Session {
             return None;
         }
         let path = operands[0];
-        if !crate::mcpfs::is_mcp_path(path) {
+        if !crate::runtime::mcpfs::is_mcp_path(path) {
             return None;
         }
         let index = self.grease.mcp_resource_index();
-        match crate::mcpfs::classify(path, &index) {
-            crate::mcpfs::McpPathKind::Dynamic { server, uri } => Some((server, uri)),
+        match crate::runtime::mcpfs::classify(path, &index) {
+            crate::runtime::mcpfs::McpPathKind::Dynamic { server, uri } => Some((server, uri)),
             _ => None,
         }
     }
@@ -3053,7 +3053,7 @@ impl Session {
     /// `mcp resource info <path>` — print the full MCP annotation set for a mounted resource. Reads
     /// from the cached resource index (no live fetch); an unknown path is an error.
     fn run_mcp_resource_info(&self, path: &str) -> LineResult {
-        if !crate::mcpfs::is_mcp_path(path) {
+        if !crate::runtime::mcpfs::is_mcp_path(path) {
             return LineResult::from_outcome(
                 Vec::new(),
                 format!("mcp resource info: '{path}' is not a /mnt/mcp resource\n").into_bytes(),
@@ -3537,9 +3537,9 @@ impl Session {
     fn spawn_agent_invocation_row(&mut self, line: &str, cancel_token: Option<String>) -> u32 {
         let argv: Vec<String> = line.split_whitespace().map(String::from).collect();
         let pid = self.proc_table.lock().unwrap().spawn_bg(
-            crate::process::ProcessKind::AgentInvocation,
+            crate::runtime::process::ProcessKind::AgentInvocation,
             argv,
-            crate::proctable::SHELL_ROOT_PID,
+            crate::runtime::proctable::SHELL_ROOT_PID,
         );
         self.pending_invocations.push(PendingInvocation { pid, cancel_token });
         pid
@@ -4639,7 +4639,7 @@ async fn build_shell() -> Result<Shell, brush_core::Error> {
         .default_builtins(BuiltinSet::BashMode)
         .builtins(crate::tools::coreutils::builtins())
         .builtins(crate::tools::texttools::builtins())
-        .builtins(crate::ps::builtins())
+        .builtins(crate::runtime::ps::builtins())
         .builtins(crate::tools::which::builtins())
         .builtins(crate::tools::man::builtins())
         .builtins(crate::tools::stat::builtins())
@@ -7977,7 +7977,7 @@ mod tests {
                 let row = table
                     .rows()
                     .iter()
-                    .find(|r| r.state == crate::proctable::ProcState::P)
+                    .find(|r| r.state == crate::runtime::proctable::ProcState::P)
                     .expect("a paused row");
                 row.pid
             };

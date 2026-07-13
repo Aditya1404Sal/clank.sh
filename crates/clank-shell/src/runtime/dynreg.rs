@@ -1,8 +1,8 @@
 //! A per-line thread-local slot for **dynamic** command manifests (installed MCP servers) so
-//! Brush-builtin surfaces that only see the static [`binfs::registry()`](crate::binfs::registry) —
+//! Brush-builtin surfaces that only see the static [`binfs::registry()`](crate::runtime::binfs::registry) —
 //! notably `man` — can also resolve runtime-registered names.
 //!
-//! Mirrors [`proctable::install`](crate::proctable::install): the `Session` installs the current MCP
+//! Mirrors [`proctable::install`](crate::runtime::proctable::install): the `Session` installs the current MCP
 //! manifests for the duration of one line (an RAII guard clears the slot on drop), and `man` consults
 //! [`active`] after the static registry. Thread-local so parallel Sessions (native tests) don't
 //! collide; on the single-threaded agent every stage sees the slot.

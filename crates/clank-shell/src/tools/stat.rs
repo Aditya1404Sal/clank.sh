@@ -59,20 +59,20 @@ fn resolve(path: &str, follow: bool) -> Result<StatInfo, String> {
             created: None,
         });
     }
-    if crate::binfs::is_bin_path(path) {
-        if crate::binfs::list_children(path).is_some() {
+    if crate::runtime::binfs::is_bin_path(path) {
+        if crate::runtime::binfs::list_children(path).is_some() {
             return Ok(StatInfo::virtual_dir(path));
         }
-        let content = crate::binfs::resolve(path).map_err(|_| not_found())?;
+        let content = crate::runtime::binfs::resolve(path).map_err(|_| not_found())?;
         return Ok(StatInfo::virtual_file(path, content.len() as u64));
     }
-    if crate::procfs::is_proc_path(path) {
-        if crate::procfs::list_children(path).is_some() {
+    if crate::runtime::procfs::is_proc_path(path) {
+        if crate::runtime::procfs::list_children(path).is_some() {
             return Ok(StatInfo::virtual_dir(path));
         }
-        let environ = crate::procfs::current_environ();
-        let content = crate::proctable::active()
-            .map(|t| crate::procfs::resolve(path, &t.lock().unwrap(), &environ))
+        let environ = crate::runtime::procfs::current_environ();
+        let content = crate::runtime::proctable::active()
+            .map(|t| crate::runtime::procfs::resolve(path, &t.lock().unwrap(), &environ))
             .and_then(Result::ok)
             .ok_or_else(not_found)?;
         return Ok(StatInfo::virtual_file(path, content.len() as u64));
@@ -80,15 +80,15 @@ fn resolve(path: &str, follow: bool) -> Result<StatInfo, String> {
     // `/mnt/mcp/...`: a mounted MCP resource. Static resources are real files (fall through to the fs);
     // directories, dynamic resources, and template stubs are virtual — serve them from the index so
     // `stat` reflects MCP metadata (README:784) even when there's no real file on disk.
-    if crate::mcpfs::is_mcp_path(path) {
-        if let Some(index) = crate::mcpfs::active() {
-            match crate::mcpfs::classify(path, &index) {
-                crate::mcpfs::McpPathKind::Directory(_) => return Ok(StatInfo::virtual_dir(path)),
-                crate::mcpfs::McpPathKind::Dynamic { .. } | crate::mcpfs::McpPathKind::Template => {
+    if crate::runtime::mcpfs::is_mcp_path(path) {
+        if let Some(index) = crate::runtime::mcpfs::active() {
+            match crate::runtime::mcpfs::classify(path, &index) {
+                crate::runtime::mcpfs::McpPathKind::Directory(_) => return Ok(StatInfo::virtual_dir(path)),
+                crate::runtime::mcpfs::McpPathKind::Dynamic { .. } | crate::runtime::mcpfs::McpPathKind::Template => {
                     return Ok(StatInfo::virtual_file(path, 0));
                 }
                 // Static → a real file on disk; fall through. NotFound → fall through (→ "No such file").
-                crate::mcpfs::McpPathKind::Static | crate::mcpfs::McpPathKind::NotFound => {}
+                crate::runtime::mcpfs::McpPathKind::Static | crate::runtime::mcpfs::McpPathKind::NotFound => {}
             }
         }
     }

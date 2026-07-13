@@ -12,7 +12,7 @@
 //!   is NOT available inside `$(...)`/pipes.
 //!
 //! This module is a pure resolver from a path + the per-line **resource index** (a snapshot of the
-//! installed servers' cached resources, installed thread-locally like [`crate::proctable`]) to the
+//! installed servers' cached resources, installed thread-locally like [`crate::runtime::proctable`]) to the
 //! virtual directory structure. It powers `ls /mnt/mcp/...` (listing static + dynamic entries) and
 //! classifies a path as a static file, a dynamic resource (with its URI + server), or a directory.
 
@@ -147,7 +147,7 @@ pub fn classify(path: &str, index: &[ResourceEntry]) -> McpPathKind {
 thread_local! {
     /// The transient per-line MCP resource index. Populated by [`install`] for the duration of one
     /// `run_line` and read by `cat`/`ls` via [`active`]. Thread-local so parallel Sessions (native
-    /// tests) don't collide. Mirrors [`crate::proctable`]'s ACTIVE slot.
+    /// tests) don't collide. Mirrors [`crate::runtime::proctable`]'s ACTIVE slot.
     static ACTIVE: RefCell<Option<Arc<Vec<ResourceEntry>>>> = const { RefCell::new(None) };
 }
 

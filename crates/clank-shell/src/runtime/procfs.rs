@@ -20,7 +20,7 @@
 //! space-joins with a trailing newline — every other clank surface is newline-oriented and
 //! LLM-legibility is a first-class constraint. Documented deviation.
 
-use crate::proctable::{ProcRow, ProcessTable};
+use crate::runtime::proctable::{ProcRow, ProcessTable};
 
 /// Error resolving a `/proc` path — maps to a `cat`/`grep` "No such file or directory".
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,19 +147,19 @@ pub fn list_children(dir: &str) -> Option<Vec<String>> {
 /// `/proc/clank/system-prompt` — the live `ask` system prompt, so this path and the model see the same
 /// bytes (README: "always inspectable"). When a line is executing, the `Session` has installed the
 /// fully-rendered prompt (command surface + installed MCP tools + grease prompts/skills) into the
-/// [`crate::sysprompt`] slot; we serve that. Off-session (native tests, a bare read with no live
+/// [`crate::runtime::sysprompt`] slot; we serve that. Off-session (native tests, a bare read with no live
 /// Session), fall back to the static base prompt over the registry snapshot.
 pub fn system_prompt_stub() -> String {
-    match crate::sysprompt::active() {
+    match crate::runtime::sysprompt::active() {
         Some(prompt) => (*prompt).clone(),
-        None => crate::ai::ask::build_system_prompt(crate::binfs::registry()),
+        None => crate::ai::ask::build_system_prompt(crate::runtime::binfs::registry()),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::process::ProcessKind;
+    use crate::runtime::process::ProcessKind;
 
     fn table_with_one(argv: &str) -> (ProcessTable, u32) {
         let mut t = ProcessTable::new();

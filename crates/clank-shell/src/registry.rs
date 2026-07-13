@@ -140,7 +140,7 @@ pub fn build() -> CommandRegistry {
     for manifest in crate::tools::texttools::manifests() {
         registry.insert(manifest);
     }
-    for manifest in crate::ps::manifests() {
+    for manifest in crate::runtime::ps::manifests() {
         registry.insert(manifest);
     }
     for manifest in crate::tools::which::manifests() {
@@ -211,7 +211,7 @@ mod tests {
         let builtin_names: BTreeSet<String> = crate::tools::coreutils::builtins::<SE>()
             .into_iter()
             .chain(crate::tools::texttools::builtins::<SE>())
-            .chain(crate::ps::builtins::<SE>())
+            .chain(crate::runtime::ps::builtins::<SE>())
             .chain(crate::tools::which::builtins::<SE>())
             .chain(crate::tools::man::builtins::<SE>())
             .chain(crate::tools::stat::builtins::<SE>())

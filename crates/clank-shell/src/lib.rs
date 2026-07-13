@@ -16,22 +16,15 @@
 
 pub mod ai;
 pub mod authz;
-pub mod binfs;
 pub mod builtins;
-pub mod dynreg;
 pub mod golem;
 pub mod grease;
 pub mod logging;
 pub mod manifest;
 pub mod mcp;
-pub mod mcpfs;
-pub mod process;
-pub mod procfs;
-pub mod proctable;
-mod ps;
 pub mod registry;
+pub mod runtime;
 pub mod session;
-pub mod sysprompt;
 mod tools;
 
 // The `wasi:cli/run` REPL driver. Gated behind the `repl-driver` feature so that dependents which

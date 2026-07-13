@@ -17,7 +17,7 @@ use brush_core::extensions::ShellExtensions;
 use brush_core::{Error, ExecutionResult};
 
 use crate::manifest::Manifest;
-use crate::proctable::{self, PsMode};
+use crate::runtime::proctable::{self, PsMode};
 
 pub(crate) struct Ps;
 

@@ -6,7 +6,7 @@
 //! scans the etc dir and reads each payload from the store per its marker's kind; nothing is fetched
 //! here (install already persisted it), so the reconstruction is deterministic and needs no HTTP
 //! replay. Dynamic manifests (for `type`/`man`/authz/the `ask` tool surface) come from
-//! [`Self::all_manifests`], installed into the per-line [`crate::dynreg`] slot the same way MCP
+//! [`Self::all_manifests`], installed into the per-line [`crate::runtime::dynreg`] slot the same way MCP
 //! servers are. Skills are the exception: they are **not commands** — they contribute a system-prompt
 //! listing (via [`Self::skills`]) but no manifest and no `ask` tool.
 
@@ -294,13 +294,13 @@ impl GreaseState {
     }
 
     /// The flattened MCP resource index (all installed servers' resources) for the `/mnt/mcp`
-    /// virtual-fs ([`crate::mcpfs`]).
-    pub fn mcp_resource_index(&self) -> Vec<crate::mcpfs::ResourceEntry> {
+    /// virtual-fs ([`crate::runtime::mcpfs`]).
+    pub fn mcp_resource_index(&self) -> Vec<crate::runtime::mcpfs::ResourceEntry> {
         let mut out = Vec::new();
         for m in self.mcp_packages() {
             for r in &m.resources {
                 let mut e =
-                    crate::mcpfs::ResourceEntry::plain(&m.name, &r.rel_path, &r.uri, r.is_static);
+                    crate::runtime::mcpfs::ResourceEntry::plain(&m.name, &r.rel_path, &r.uri, r.is_static);
                 e.last_modified = r.last_modified.clone();
                 e.audience = r.audience.clone();
                 e.priority = r.priority;
@@ -311,7 +311,7 @@ impl GreaseState {
             // Templates appear as stubs in `/mnt/mcp/<server>/` (README:774) — rel_path is the
             // `<server>-<name>` executable name; the URI carries the template for display.
             for t in &m.templates {
-                let mut e = crate::mcpfs::ResourceEntry::plain(&m.name, &t.name, &t.uri_template, false);
+                let mut e = crate::runtime::mcpfs::ResourceEntry::plain(&m.name, &t.name, &t.uri_template, false);
                 e.is_template = true;
                 e.description = t.description.clone();
                 out.push(e);
@@ -358,7 +358,7 @@ impl GreaseState {
     }
 
     /// The dynamic manifests for all installed command packages (prompts + scripts) — for the
-    /// per-line [`crate::dynreg`] slot. Skills contribute nothing here.
+    /// per-line [`crate::runtime::dynreg`] slot. Skills contribute nothing here.
     pub fn all_manifests(&self) -> Vec<Manifest> {
         self.packages.iter().filter_map(|p| self.manifest_for(p.name())).collect()
     }

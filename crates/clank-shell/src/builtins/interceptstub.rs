@@ -30,7 +30,7 @@ macro_rules! session_stub {
             ) -> Result<String, Error> {
                 // Serve the real manifest help (same source as `cat /bin/<name>`), so `help`
                 // inside Brush matches the top-level surfaces.
-                let help = crate::binfs::registry()
+                let help = crate::runtime::binfs::registry()
                     .get($name)
                     .map(|m| m.help_text.clone())
                     .unwrap_or_else(|| $name.to_string());
