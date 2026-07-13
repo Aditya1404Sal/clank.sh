@@ -78,11 +78,13 @@ fn main() {
             body: r#"{"kind":"skill","name":"reviewing","description":"how to review code","intended-use":"when reviewing code","documents":[{"path":"SKILL.md","content":"Review for correctness first."}],"scripts":[{"name":"review-note","body":"echo check error paths"}]}"#.to_string(),
             with_log: false,
         },
+        // Points at the real `GreeterAgent` deployed alongside clank:agent (crates/greeter-agent),
+        // so the e2e can prove a full wRPC round-trip — not just install/--help against a phantom type.
         Pkg {
-            name: "cart",
+            name: "greeter",
             kind: "agent",
             ext: "json",
-            body: r#"{"kind":"agent","name":"cart","description":"a cart agent","agent-type":"ShoppingCart","constructor-params":["userid"],"methods":[{"name":"add-item","description":"add an item","params":["sku"]}],"ephemeral":false}"#.to_string(),
+            body: r#"{"kind":"agent","name":"greeter","description":"a greeter agent (wRPC round-trip target)","agent-type":"GreeterAgent","constructor-params":["name"],"methods":[{"name":"greet","description":"greet someone by name","params":["who"]}],"ephemeral":false}"#.to_string(),
             with_log: false,
         },
     ];

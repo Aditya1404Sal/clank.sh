@@ -1,0 +1,17 @@
+[package]
+name = "greeter-agent"
+version = "0.0.0"
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+# A minimal second Golem agent, deployed alongside clank:agent purely to prove grease-installed
+# agent invocation (wRPC through WasmRpcInvoker) round-trips end-to-end. cdylib = leaf component.
+crate-type = ["cdylib"]
+
+[dependencies]
+# `export_golem_agentic` makes the #[agent_definition]/#[agent_implementation] macros emit the
+# invocable component exports (the golem:agent world). Nothing else is needed for a String→String agent.
+golem-rust = { version = "2.1.0", features = ["export_golem_agentic"] }

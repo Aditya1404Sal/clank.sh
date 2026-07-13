@@ -25,3 +25,8 @@ components:
       # exports an empty default before deploying; with an empty/unset key `ask` reports "not
       # configured" (exit 4) and the e2e skips its network assertions.
       ANTHROPIC_API_KEY: "{{ ANTHROPIC_API_KEY }}"
+  # A minimal second agent (crates/greeter-agent) deployed alongside clank:agent purely to be the
+  # target of a grease-installed agent invocation — proving clank's WasmRpcInvoker wRPC round-trips.
+  greeter:agent:
+    dir: crates/greeter-agent
+    templates: rust

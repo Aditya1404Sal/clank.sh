@@ -320,7 +320,7 @@ if [[ $WITH_GREASE -eq 1 ]]; then
   # Wire every gated grease block at the one fixture registry. The generator signs EVERY package, so a
   # single keyed registry satisfies the signed block AND the script/skill/agent/prompt blocks.
   export GREASE_SIGNED_URL="$FIXTURE_URL" GREASE_SIGNED_PKG="hello" GREASE_SIGNED_KEY="$FIXTURE_KEY" GREASE_SIGNED_LOG=1 GREASE_SIGNED_KIND="prompt"
-  export GREASE_AGENT_URL="$FIXTURE_URL"  GREASE_AGENT_PKG="cart"
+  export GREASE_AGENT_URL="$FIXTURE_URL"  GREASE_AGENT_PKG="greeter"
   export GREASE_TEST_URL="$FIXTURE_URL"   GREASE_TEST_PKG="hello"   GREASE_TEST_VERIFIED=1
   export GREASE_TEST_SCRIPT_URL="$FIXTURE_URL" GREASE_TEST_SCRIPT_PKG="hostinfo" GREASE_TEST_SCRIPT_ARGS="--label host" GREASE_TEST_SCRIPT_EXPECT="host:"
   export GREASE_TEST_SKILL_URL="$FIXTURE_URL"  GREASE_TEST_SKILL_PKG="reviewing" GREASE_TEST_SKILL_DOC="SKILL.md"
@@ -957,9 +957,11 @@ else
   note "GREASE_SIGNED_URL/PKG/KEY not set — skipping live signed install (native tests cover it)"
 fi
 
-# --- Gated: a Golem-AGENT package install (kind:agent). Set GREASE_AGENT_URL + GREASE_AGENT_PKG. The
-#     install + the no-cluster honest error are assistant-runnable (no key/cluster). A real wRPC
-#     round-trip needs a deployed second agent type (out of this harness's scope).
+# --- Gated: a Golem-AGENT package install + a REAL wRPC round-trip. Under --with-grease the fixture
+#     serves a `greeter` package pointing at the `GreeterAgent` deployed alongside clank:agent
+#     (crates/greeter-agent), so `greeter … greet …` actually invokes it in the cluster via
+#     WasmRpcInvoker::invoke_and_await and returns its greeting — the end-to-end proof the AGENT block
+#     used to lack. No API key needed (pure wRPC, no LLM). Set GREASE_AGENT_URL + GREASE_AGENT_PKG.
 if [[ -n "${GREASE_AGENT_URL:-}" && -n "${GREASE_AGENT_PKG:-}" ]]; then
   note "GREASE_AGENT_URL set — running live agent install against $GREASE_AGENT_URL"
   run_line "grease registry add ${GREASE_AGENT_URL}" >/dev/null
@@ -978,6 +980,16 @@ if [[ -n "${GREASE_AGENT_URL:-}" && -n "${GREASE_AGENT_PKG:-}" ]]; then
   # assert on a bogus method too (unknown-method also exits 2). We only need the --revision error path.
   GAG_REV="$(eval_json eval "\"sudo ${GREASE_AGENT_PKG} --revision 3 nonexistent-method\"")"
   expect_eval "agent --revision is honestly unsupported" "$GAG_REV"  '.stderr | contains("--revision targeting is not supported")'  'true'
+  # THE wRPC round-trip — only for the built-in `greeter` fixture (points at the deployed GreeterAgent).
+  # `--name g1` = constructor identity, `greet` = method, `--who world` = arg; `sudo` pre-authorizes the
+  # outbound invocation. The reply echoes BOTH args, proving the full encode → invoke_and_await → decode
+  # path reached a *separate* agent instance in the cluster.
+  if [[ "${GREASE_AGENT_PKG}" == "greeter" ]]; then
+    GAG_RUN="$(eval_json eval "\"sudo greeter --name g1 greet --who world\"")"
+    expect_eval "agent wRPC invocation exits 0"          "$GAG_RUN"  '.exit_code'  '0'
+    expect_eval "wRPC round-trip returns the greeting"   "$GAG_RUN"  '.stdout | contains("Hello, world")'  'true'
+    expect_eval "round-trip carries the constructor id"  "$GAG_RUN"  '.stdout | contains("GreeterAgent(g1)")'  'true'
+  fi
   run_line "sudo grease remove ${GREASE_AGENT_PKG}" >/dev/null
   run_line "grease registry remove ${GREASE_AGENT_URL}" >/dev/null
 else
