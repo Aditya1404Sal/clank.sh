@@ -94,8 +94,10 @@ impl ClankAgent for ClankAgentImpl {
     }
 
     async fn run_line(&mut self, cmd: String) -> String {
-        let result = self.eval(cmd).await;
-        format!("{}{}", result.stdout, result.stderr)
+        let mut result = self.eval(cmd).await;
+        // Concatenate the two already-owned Strings in place instead of a fresh `format!` allocation.
+        result.stdout.push_str(&result.stderr);
+        result.stdout
     }
 }
 
@@ -138,8 +140,12 @@ impl ClankAgentImpl {
 /// Map a shell [`LineResult`] to the wire [`EvalResult`].
 fn eval_result(result: LineResult) -> EvalResult {
     EvalResult {
-        stdout: String::from_utf8_lossy(&result.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&result.stderr).into_owned(),
+        // Move the bytes into a String on the valid-UTF-8 common path (no copy); only allocate a lossy
+        // copy on the rare invalid-byte path.
+        stdout: String::from_utf8(result.stdout)
+            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()),
+        stderr: String::from_utf8(result.stderr)
+            .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()),
         exit_code: result.exit_code,
         pending_prompt: result.pending_prompt.map(|p| PendingPromptView {
             question: p.question,
