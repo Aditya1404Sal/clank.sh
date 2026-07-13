@@ -46,11 +46,11 @@ uu_printf = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasi
 #
 # The `std-utils` branch (stacked on `wall-c-wasm-pipes`, branched from 0300a84) carries the wasm32
 # changes: std::io::pipe() is unsupported on wasip2 and there's no blocking thread pool, so on wasm
-# both pipelines ("Wall C") AND command substitution `$(...)` use an in-memory
-# `OpenFile::Stream`-backed pipe with inline-sequential execution (the producer completes and drops
-# its writer → clean EOF for the reader) instead of OS pipes + tokio::spawn/spawn_blocking. Native
-# behavior is unchanged. See memory wall-c-pipe-concurrency-path. Pin all three brush crates (one
-# monorepo; lockstep) to the exact commit.
-brush-core = { git = "https://github.com/Aditya1404Sal/brush", rev = "0f4a89c" }
-brush-builtins = { git = "https://github.com/Aditya1404Sal/brush", rev = "0f4a89c" }
-brush-parser = { git = "https://github.com/Aditya1404Sal/brush", rev = "0f4a89c" }
+# both pipelines ("Wall C") AND command substitution `$(...)` AND here-documents/here-strings
+# (`<<EOF`/`<<<`) use an in-memory `OpenFile::Stream`-backed pipe with inline-sequential execution
+# (the producer completes and drops its writer → clean EOF for the reader) instead of OS pipes +
+# tokio::spawn/spawn_blocking. Native behavior is unchanged. See memory wall-c-pipe-concurrency-path.
+# Pin all three brush crates (one monorepo; lockstep) to the exact commit.
+brush-core = { git = "https://github.com/Aditya1404Sal/brush", rev = "309a054" }
+brush-builtins = { git = "https://github.com/Aditya1404Sal/brush", rev = "309a054" }
+brush-parser = { git = "https://github.com/Aditya1404Sal/brush", rev = "309a054" }

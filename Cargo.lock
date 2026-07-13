@@ -280,7 +280,7 @@ dependencies = [
 [[package]]
 name = "brush-builtins"
 version = "0.2.0"
-source = "git+https://github.com/Aditya1404Sal/brush?rev=0f4a89c#0f4a89cfbc57c85e08fd442240409d39ea7981bd"
+source = "git+https://github.com/Aditya1404Sal/brush?rev=309a054#309a054576090e428d1874a1210306ed4f7f29aa"
 dependencies = [
  "brush-core",
  "brush-parser",
@@ -302,7 +302,7 @@ dependencies = [
 [[package]]
 name = "brush-core"
 version = "0.5.0"
-source = "git+https://github.com/Aditya1404Sal/brush?rev=0f4a89c#0f4a89cfbc57c85e08fd442240409d39ea7981bd"
+source = "git+https://github.com/Aditya1404Sal/brush?rev=309a054#309a054576090e428d1874a1210306ed4f7f29aa"
 dependencies = [
  "async-recursion",
  "async-trait",
@@ -340,7 +340,7 @@ dependencies = [
 [[package]]
 name = "brush-parser"
 version = "0.4.0"
-source = "git+https://github.com/Aditya1404Sal/brush?rev=0f4a89c#0f4a89cfbc57c85e08fd442240409d39ea7981bd"
+source = "git+https://github.com/Aditya1404Sal/brush?rev=309a054#309a054576090e428d1874a1210306ed4f7f29aa"
 dependencies = [
  "bon",
  "cached",

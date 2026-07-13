@@ -1232,6 +1232,29 @@ expect_contains "&> captures both streams" 'ls /bin/nope &> /tmp/work/both; cat 
 expect "2>&1 pipes stderr downstream"      'ls /bin/nope 2>&1 | grep -c "No such"'     $'1'
 
 # ============================================================================
+# 2q-b. Here-documents + here-strings (fork: in-memory OpenFile::Stream for `<<`)
+# ============================================================================
+# `<<EOF` / `<<<` used to WEDGE at redirect setup: Brush stages the body through `std::io::pipe()`,
+# unsupported on wasip2 ("operation not supported"). The fork now stages it through the same in-memory
+# `OpenFile::Stream` pipe the Wall-C pipeline/`$()` paths use (write body, drop writer → clean EOF),
+# so here-docs feed any stdin consumer. NB: newlines in the body are `\n` in the WIT string literal
+# (the golem CLI's parser converts them); the body's `$VAR` uses a BARE `$` (a `\$` would be an invalid
+# WIT escape — same caveat as the awk block).
+step "Here-documents and here-strings (<<EOF, <<<)"
+# Basic: the body becomes cat's stdin (no operand → uu_cat reads the staged stream).
+expect "here-doc feeds cat"                'cat <<EOF\nhello\nworld\nEOF'                $'hello\nworld'
+# Redirected into a file, then read back — proves the body reaches a redirect target too.
+expect "here-doc redirect into a file"     'cat <<EOF > /tmp/work/hd\nalpha\nbeta\nEOF\ncat /tmp/work/hd'  $'alpha\nbeta'
+# Piped to a run_tool consumer (grep reads the here-doc as stdin).
+expect "here-doc feeds grep"               'grep o <<EOF\nfoo\nbar\nboo\nEOF'           $'foo\nboo'
+# Piped to a run_uu consumer (wc reads it).
+expect "here-doc feeds wc -l"              'wc -l <<EOF\na\nb\nc\nEOF'                   $'3'
+# Expansion is active for an unquoted delimiter (parser sets requires_expansion; fix is exec-only).
+expect "here-doc expands variables"        'V=kiwi; cat <<EOF\nfruit=$V\nEOF'           $'fruit=kiwi'
+# Here-string (`<<<`) shares the same staging function — fixed for free.
+expect "here-string feeds cat"             'cat <<< here-string-ok'                     $'here-string-ok'
+
+# ============================================================================
 # 2r. Background jobs + synthetic kill + exec (fork std-utils phase 5)
 # ============================================================================
 step "Background jobs, kill, exec"
