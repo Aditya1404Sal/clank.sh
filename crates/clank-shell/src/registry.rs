@@ -98,9 +98,19 @@ fn manual_manifests() -> Vec<Manifest> {
             ),
         Manifest::builtin("export", "set environment variables for the shell and its subprocesses")
             .with_scope(ExecutionScope::ParentShell)
+            // `export --secret NAME=VALUE` marks a variable sensitive: available to agents via the
+            // environment, but its value is redacted from `env`, `ps`, `/proc`, the logs, and the
+            // transcript. Declaring the rule here wires the manifest `redaction-rules` field (README
+            // §200/323) to a real command; enforcement lives in `crate::runtime::secretenv`, driven
+            // by the session's secret table.
+            .with_redaction(vec!["--secret".to_string()])
             .with_help(
                 "export NAME[=value] ... — mark shell variables for export to the environment of \
-                 subsequently executed commands.",
+                 subsequently executed commands.\n\
+                 export --secret NAME=VALUE — additionally mark the variable sensitive: it stays \
+                 available via the environment ($NAME expands, subprocesses inherit it) but its \
+                 value is never echoed by `env`, written to the logs, shown in `ps`, or entered \
+                 into the transcript.",
             ),
         Manifest::builtin("exec", "replace the shell with a command, or apply redirections permanently")
             .with_scope(ExecutionScope::ParentShell)

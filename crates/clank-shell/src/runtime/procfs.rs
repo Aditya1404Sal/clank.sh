@@ -34,8 +34,12 @@ const PROC_ROOT: &str = "/proc/";
 /// Snapshot the shell's current environment as `(key, value)` pairs — the same source `env`
 /// (uu_env) reads, so `/proc/<pid>/environ` and `env` never disagree. Used to populate the
 /// `environ` argument to [`resolve`].
+///
+/// Secret variables (marked via `export --secret`) are filtered out here so they never appear in
+/// `env` or `/proc/<pid>/environ` — the single chokepoint both surfaces read through. See
+/// [`crate::runtime::secretenv`].
 pub fn current_environ() -> Vec<(String, String)> {
-    std::env::vars().collect()
+    crate::runtime::secretenv::filter_environ(std::env::vars().collect())
 }
 
 /// Whether `path` is under the virtual `/proc` namespace. (`/proc` itself and `/proc/` count too.)

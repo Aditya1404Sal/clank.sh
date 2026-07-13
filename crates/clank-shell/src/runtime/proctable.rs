@@ -96,9 +96,12 @@ pub struct ProcRow {
 }
 
 impl ProcRow {
-    /// The command as a display string (argv joined by spaces).
+    /// The command as a display string (argv joined by spaces). Any active `export --secret` value is
+    /// masked so a secret never leaks through `ps` COMMAND, `/proc/<pid>/cmdline`, or the `Cmd:` line
+    /// of `/proc/<pid>/status` — the display chokepoint all three render through. See
+    /// [`crate::runtime::secretenv`].
     pub fn command(&self) -> String {
-        self.argv.join(" ")
+        crate::runtime::secretenv::mask_values(&self.argv.join(" "))
     }
 }
 

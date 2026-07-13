@@ -308,7 +308,9 @@ uu_builtin!(Cp, "cp", "copy files and directories", uu_cp::uumain);
 // what uumain expects — do NOT skip it, or flags like `-p` get dropped (dropping `-p` turned
 // `mkdir -p /tmp/a/b` into a non-recursive mkdir that fails when an intermediate dir is missing).
 uu_builtin!(Mkdir, "mkdir", "create directories", uu_mkdir::uumain);
-uu_builtin!(Env, "env", "print the environment", uu_env::uumain);
+// `env` is hand-written (not `uu_builtin!`) so the LISTING form filters `export --secret` variables
+// out of the environment — uu_env reads `std::env` directly, which would otherwise leak a secret
+// through `env` (and, worse, `env | grep …` in a pipeline). See `Env` below.
 uu_builtin!(Cut, "cut", "select fields from each line", uu_cut::uumain);
 uu_builtin!(Tr, "tr", "translate or delete characters", uu_tr::uumain);
 uu_builtin!(Uniq, "uniq", "report or omit repeated lines", uu_uniq::uumain);
@@ -411,6 +413,104 @@ impl SimpleCommand for Cat {
             }
         }
         Ok(ExecutionResult::new(if had_error { 1 } else { 0 }))
+    }
+}
+
+/// `env`, hand-written so the LISTING form redacts `export --secret` variables. uu_env reads the
+/// process environment (`std::env`) directly, so a secret var — which is set in `std::env` for Full
+/// env parity (real subprocesses inherit it) — would otherwise leak through `env` and, worse,
+/// `env | grep …` as a pipeline stage. This custom builtin renders the *filtered* environment
+/// ([`crate::runtime::procfs::current_environ`], which drops secret keys) for the listing case, and
+/// delegates to `uu_env` unchanged for the run-a-command form (`env CMD`, `env NAME=val CMD`), which
+/// needs the real process env to launch the child.
+pub(crate) struct Env;
+
+impl Env {
+    const NAME: &'static str = "env";
+    const SYNOPSIS: &'static str = "print the environment";
+}
+
+impl SimpleCommand for Env {
+    fn get_content(
+        name: &str,
+        content_type: ContentType,
+        _options: &ContentOptions,
+    ) -> Result<String, Error> {
+        uu_get_content(name, Env::SYNOPSIS, content_type)
+    }
+
+    fn execute<SE, I, S>(context: ExecutionContext<'_, SE>, args: I) -> Result<ExecutionResult, Error>
+    where
+        SE: ShellExtensions,
+        I: Iterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let argv: Vec<String> = args.map(|s| s.as_ref().to_string()).collect();
+
+        // Delegate to uu_env ONLY when there is a real command to run — a bare operand that is neither
+        // a flag nor a `NAME=value` assignment. Running a command must launch a child with the real
+        // process environment (Full env parity — the child inherits secrets). Every listing form
+        // (with or without `-i`/`-u`/`-0`) is served here so the secret filter always applies; there
+        // is no child to inherit anything, so uu_env's env-manipulation flags reduce to display rules
+        // we can honor directly.
+        let has_command = argv
+            .iter()
+            .skip(1)
+            .any(|a| !is_flag(a) && !a.contains('='));
+        if has_command {
+            let os_argv = argv.iter().map(std::ffi::OsString::from);
+            let code = run_uu(&context, move || uu_env::uumain(os_argv));
+            return Ok(ExecutionResult::new(code.clamp(0, 255) as u8));
+        }
+
+        // Listing form. Start from the secret-filtered environment (unless `-i`/`--ignore-environment`,
+        // which starts empty), apply any `-u NAME`/`--unset NAME` removals and inline `NAME=value`
+        // additions, then print. `-0`/`--null` uses NUL separators (GNU `env -0`); otherwise
+        // `KEY=VALUE\n` lines, sorted for a deterministic order (uu_env's is arbitrary; no test pins it).
+        let mut null_sep = false;
+        let mut ignore_env = false;
+        let mut unset: Vec<String> = Vec::new();
+        let mut adds: Vec<(String, String)> = Vec::new();
+        let mut it = argv.iter().skip(1).peekable();
+        while let Some(a) = it.next() {
+            match a.as_str() {
+                "-0" | "--null" => null_sep = true,
+                "-i" | "--ignore-environment" => ignore_env = true,
+                "-u" | "--unset" => {
+                    if let Some(name) = it.next() {
+                        unset.push(name.clone());
+                    }
+                }
+                _ if a.starts_with("-u") => unset.push(a[2..].to_string()),
+                _ => {
+                    if let Some((k, v)) = a.split_once('=') {
+                        adds.push((k.to_string(), v.to_string()));
+                    }
+                }
+            }
+        }
+
+        let mut env: std::collections::BTreeMap<String, String> = if ignore_env {
+            std::collections::BTreeMap::new()
+        } else {
+            crate::runtime::procfs::current_environ().into_iter().collect()
+        };
+        for name in &unset {
+            env.remove(name);
+        }
+        for (k, v) in adds {
+            env.insert(k, v);
+        }
+
+        let mut out = context.stdout();
+        for (k, v) in env {
+            if null_sep {
+                let _ = write!(out, "{k}={v}\0");
+            } else {
+                let _ = writeln!(out, "{k}={v}");
+            }
+        }
+        Ok(ExecutionResult::new(0))
     }
 }
 

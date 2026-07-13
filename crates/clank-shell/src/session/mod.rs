@@ -280,6 +280,14 @@ pub struct Session {
     /// re-rendering the whole system prompt + manifests every command.
     cap_cache: Option<CapabilityCache>,
     source: SourceInfo,
+    /// Variables marked sensitive via `export --secret NAME=VALUE` (README "Sensitive environment
+    /// variables"): `name → value`. The value is available to agents via the environment (set in
+    /// Brush's variable table and `std::env`, so `$NAME` expands and subprocesses inherit it) but is
+    /// redacted from `env`, `ps`, `/proc`, the logs, and the transcript. Installed per-line into the
+    /// [`crate::runtime::secretenv`] thread-local so the synchronous render paths can honor that.
+    /// Deterministic under Golem replay — rebuilt purely from the replayed line history, like
+    /// `bg_jobs` and the process table. `BTreeMap` for a stable install order.
+    secret_env: std::collections::BTreeMap<String, String>,
     #[cfg(target_arch = "wasm32")]
     rt: tokio::runtime::Runtime,
 }
@@ -312,6 +320,7 @@ impl Session {
                 log_sink: std::sync::Arc::new(crate::logging::DefaultLogSink),
                 cap_cache: None,
                 source: SourceInfo::default(),
+                secret_env: std::collections::BTreeMap::new(),
                 rt,
             };
             session.reconstruct_mcp_from_grease();
@@ -340,6 +349,7 @@ impl Session {
                 log_sink: std::sync::Arc::new(crate::logging::DefaultLogSink),
                 cap_cache: None,
                 source: SourceInfo::default(),
+                secret_env: std::collections::BTreeMap::new(),
             };
             session.reconstruct_mcp_from_grease();
             Ok(session)
@@ -471,7 +481,34 @@ impl Session {
             );
         }
 
-        self.transcript.lock().unwrap().record_command(line);
+        // Install the secret-env set FIRST — before the line is recorded — so the synchronous render
+        // paths (`env`, `ps`, `/proc`, the transcript recorder, log text) filter/mask `export
+        // --secret` variables for this whole line. This must precede `record_command` below: a later
+        // line that references a secret *by value* on its command line (e.g. `env | grep sk-abc`) is
+        // masked in the transcript only if the secret set is already active when the line is recorded.
+        // The other per-line installs (proctable/transcript/dynreg/…) happen further down; the secret
+        // set is the one the recorder itself consults, so it leads.
+        let _install_secretenv = crate::runtime::secretenv::install(std::sync::Arc::new(
+            self.secret_env
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        ));
+
+        // Record the typed line into the transcript. `record_command` masks any *already-known*
+        // secret value, but the defining `export --secret KEY=val` line carries a not-yet-known
+        // secret (this line is what marks it), so redact that value explicitly here first. See
+        // `run_secret_export` and [`crate::runtime::secretenv`].
+        match crate::builtins::secretenv::parse(line) {
+            Some(secret) if !secret.value.is_empty() => {
+                let redacted =
+                    line.replace(&secret.value, crate::runtime::secretenv::REDACTED);
+                self.transcript.lock().unwrap().record_command(&redacted);
+            }
+            _ => {
+                self.transcript.lock().unwrap().record_command(line);
+            }
+        }
 
         // Reap finished background jobs (a tick-free poll of Brush's job manager): their rows flip
         // `S → Z`. Silent — bash-style "[1]+ Done" notifications are a later increment; `jobs`/`ps`
@@ -591,6 +628,16 @@ impl Session {
         // the `promptuser` module docs.
         if promptuser::is_prompt_user(line) {
             return self.surface_prompt(line, pid);
+        }
+
+        // `export --secret NAME=VALUE` — mark a variable sensitive (README "Sensitive environment
+        // variables"). Intercepted before Brush so clank owns the secret table + std::env write and
+        // the value never enters any rendered surface. Only a plain top-level line is handled; a
+        // `--secret` export buried in a pipeline / `$(...)` / list falls through to Brush (which
+        // treats `--secret` as an ordinary — if unusual — name and does no redaction), matching how
+        // `context summarize` scopes itself to top-level lines.
+        if crate::builtins::secretenv::is_secret_export(line) && is_plain_line(line) {
+            return self.run_secret_export(line, pid);
         }
 
         // `type` for clank's intercepted commands (`prompt-user`/`curl`/`wget`/`context`): Brush's
@@ -1131,6 +1178,43 @@ impl Session {
         }
         self.transcript.lock().unwrap().record_output(&result.terminal_output());
         result
+    }
+
+    /// Handle an intercepted `export --secret NAME=VALUE` (README "Sensitive environment variables").
+    /// The variable is made available to agents via the environment — set (exported) in Brush's
+    /// variable table so `$NAME` expands, and in `std::env` so real subprocesses inherit it — while
+    /// its value is recorded in [`secret_env`](Self::secret_env) so every render path redacts it. The
+    /// defining line was already recorded to the transcript with its value redacted (see the caller).
+    ///
+    /// Replay-safe on the durable agent: both `set_global` and `std::env::set_var` are whole-value
+    /// writes (idempotent — re-running the line under oplog replay reproduces the same state), unlike
+    /// an append (see the `golem-fs-append-replay-unsafe` note). Produces no stdout; the row is reaped.
+    fn run_secret_export(&mut self, line: &str, pid: Option<u32>) -> LineResult {
+        let Some(secret) = crate::builtins::secretenv::parse(line) else {
+            // The caller already checked `is_secret_export`; this is unreachable in practice.
+            return self.finish_intercepted(pid, LineResult::from_outcome(Vec::new(), Vec::new(), 0));
+        };
+
+        // Mark it exported in Brush's variable table so `$NAME` expands in scripts and it's part of
+        // the exported set. `set_global` replaces any prior value (whole-value → replay-safe).
+        let mut var = brush_core::variables::ShellVariable::new(secret.value.clone());
+        var.export();
+        if let Err(e) = self.shell.env_mut().set_global(&secret.name, var) {
+            let msg = format!("export: {e}\n");
+            return self.finish_intercepted(pid, LineResult::from_outcome(Vec::new(), msg.into_bytes(), 1));
+        }
+
+        // Make it visible to real subprocesses via the process environment (Full env parity). This is
+        // the source `env` / `/proc/environ` read; the secret is filtered back out of *those displays*
+        // by `secretenv::filter_environ`, but a spawned child still inherits it. Whole-value set →
+        // idempotent under replay.
+        std::env::set_var(&secret.name, &secret.value);
+
+        // Record it in the session's secret table so the per-line `secretenv` install redacts it from
+        // every rendered surface on subsequent lines.
+        self.secret_env.insert(secret.name.clone(), secret.value);
+
+        self.finish_intercepted(pid, LineResult::from_outcome(Vec::new(), Vec::new(), 0))
     }
 
     /// Run one input line for terminal-style callers. This keeps the original API used by the REPLs.
@@ -1738,6 +1822,21 @@ fn is_context_summarize(line: &str) -> bool {
     let effective = strip_sudo_prefix(line);
     let mut words = effective.split_whitespace();
     words.next() == Some("context") && words.next() == Some("summarize") && words.next().is_none()
+}
+
+/// Whether `line` is a single simple command with no shell operators (pipes, redirects, lists,
+/// command/parameter substitution, or background `&`). Quote-aware — a shell metacharacter *inside*
+/// a quoted word (e.g. `export --secret K="a|b"`) does not disqualify the line, since Brush's
+/// tokenizer classifies it as part of a `Word`, not an `Operator`. Used to scope `export --secret`
+/// interception to plain top-level lines; anything with operators falls through to Brush.
+fn is_plain_line(line: &str) -> bool {
+    match brush_parser::tokenize_str(line) {
+        Ok(tokens) => !tokens
+            .iter()
+            .any(|t| matches!(t, brush_parser::Token::Operator(_, _))),
+        // A line that doesn't tokenize isn't a clean simple command — let Brush produce the error.
+        Err(_) => false,
+    }
 }
 
 /// Reconstruct a top-level `ask` command line from parsed [`AskArgs`], for deferring an ask-tail

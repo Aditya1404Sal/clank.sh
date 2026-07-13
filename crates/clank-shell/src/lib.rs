@@ -11,8 +11,10 @@
 //!   typed and the output it produced). This is the value `ask` will later read as context.
 //! - [`dispatch_context`] — the clank-specific `context` builtin over that transcript.
 //!
-//! POC scope: the transcript is in-memory for the session (no compaction, no disk); Brush runs
-//! on both targets through [`session::Session`].
+//! The transcript is in-memory for the session (not disk-backed); it is a sliding window that
+//! auto-compacts at the leading edge when it exceeds its token budget — the oldest entries are
+//! evicted into a leading [`Entry::Elided`] marker, which the Session's async step then upgrades to
+//! a model-generated summary block. Brush runs on both targets through [`session::Session`].
 
 pub mod ai;
 pub mod authz;
@@ -133,18 +135,33 @@ impl Transcript {
 
     /// Record a command line as typed (newline already stripped). Starts a new entry whose
     /// output is filled in by later [`record_output`](Self::record_output) calls.
+    ///
+    /// Any active `export --secret` value is masked before the line enters the window, so a secret
+    /// pasted literally on a later command line never reaches the transcript. (The defining
+    /// `export --secret KEY=val` line is redacted separately at its interception site, since the
+    /// secret isn't in the active set until that line finishes.) See [`crate::runtime::secretenv`].
     pub fn record_command(&mut self, command: &str) {
         self.entries.push(Entry::Command {
-            command: command.to_string(),
+            command: crate::runtime::secretenv::mask_values(command),
             output: Vec::new(),
         });
     }
 
     /// Append output bytes to the most recent command's entry, then enforce the window budget.
     /// Enforcement runs here (not in `record_command`) so an entry is costed with its output.
+    ///
+    /// Any active `export --secret` value in the output is masked before it enters the window — a
+    /// secret can surface in output by value even where its name is absent (`echo "$API_KEY"`, a URL
+    /// that embeds it). Non-UTF-8 output is passed through unmasked (masking is text-oriented; binary
+    /// output isn't a plausible secret-leak channel). See [`crate::runtime::secretenv`].
     pub fn record_output(&mut self, output: &[u8]) {
         if let Some(Entry::Command { output: buf, .. }) = self.entries.last_mut() {
-            buf.extend_from_slice(output);
+            match std::str::from_utf8(output) {
+                Ok(text) => buf.extend_from_slice(
+                    crate::runtime::secretenv::mask_values(text).as_bytes(),
+                ),
+                Err(_) => buf.extend_from_slice(output),
+            }
         }
         self.enforce_budget();
     }

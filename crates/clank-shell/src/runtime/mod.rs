@@ -1,8 +1,8 @@
 //! The synthetic process + virtual-filesystem substrate the rest of the shell rides on:
 //! the process model ([`process`]) and table ([`proctable`], `ps` at [`ps`]), the `/proc` virtual fs
 //! ([`procfs`]), the `/bin` namespace ([`binfs`]), the `/mnt/mcp` resource fs ([`mcpfs`]), the dynamic
-//! command-manifest registration slot ([`dynreg`]), and the live `/proc/clank/system-prompt` provider
-//! ([`sysprompt`]).
+//! command-manifest registration slot ([`dynreg`]), the live `/proc/clank/system-prompt` provider
+//! ([`sysprompt`]), and the secret-env redaction filter ([`secretenv`]).
 
 pub mod binfs;
 pub mod dynreg;
@@ -11,4 +11,5 @@ pub mod process;
 pub mod procfs;
 pub mod proctable;
 pub(crate) mod ps;
+pub mod secretenv;
 pub mod sysprompt;

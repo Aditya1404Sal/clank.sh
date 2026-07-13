@@ -135,6 +135,14 @@ impl Manifest {
         self.help_text = help_text.into();
         self
     }
+
+    /// Declare the parameter names whose values must be redacted from every rendered surface
+    /// (`ps`, logs, history, transcript, completion caches, provider manifests) — builder-style.
+    /// See [`redaction_rules`](Self::redaction_rules).
+    pub fn with_redaction(mut self, rules: Vec<String>) -> Self {
+        self.redaction_rules = rules;
+        self
+    }
 }
 
 #[cfg(test)]

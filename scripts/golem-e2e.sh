@@ -1350,6 +1350,30 @@ expect "exec CMD runs the command"        'exec echo exec-ran'   $'exec-ran'
 expect "session survives exec (agent)"    'echo still-here'      $'still-here'
 
 # ============================================================================
+# 2r2. export --secret (README "Sensitive environment variables")
+# ============================================================================
+step "export --secret: sensitive environment variables"
+
+# `export --secret NAME=VALUE` marks a var sensitive. On the DURABLE agent each `eval` is a separate
+# invocation over the SAME persisted Session — so a var set in one invocation must (a) still expand in
+# a later one (available via the environment) yet (b) be redacted from every rendered surface. This
+# also exercises the replay-safe whole-value writes to Brush's table + std::env.
+expect "secret export returns clean (no output)"  'export --secret CLANK_E2E_SECRET=sk-live-4242'  $''
+# (a) Availability: $NAME expands normally in a SUBSEQUENT invocation.
+expect "secret value still expands"     'echo "$CLANK_E2E_SECRET"'   $'sk-live-4242'
+# (b1) env hides the secret key AND value (env reads the process env; the secret filter drops it).
+expect "env does not show the secret key"    'env | grep -c CLANK_E2E_SECRET || true'   $'0'
+expect "env does not show the secret value"  'env | grep -c sk-live-4242 || true'       $'0'
+# (b2) The defining line is recorded in the transcript with its value redacted, key preserved.
+expect_contains "transcript redacts the secret value"  'context show'  'export --secret CLANK_E2E_SECRET=<redacted>'
+expect "transcript has no secret value leak"  'context show | grep -c sk-live-4242 || true'  $'0'
+# (b3) A later echo of the value is masked in the transcript (leak-by-value, name absent).
+run_line 'echo "token is $CLANK_E2E_SECRET"' >/dev/null
+expect_contains "later output value masked in transcript"  'context show'  'token is <redacted>'
+# (b4) ps COMMAND masks the secret value on the export row.
+expect "ps masks the secret value"  'ps | grep -c sk-live-4242 || true'  $'0'
+
+# ============================================================================
 # 2s. Stream fidelity, /dev/null, nested contexts (the A-list)
 # ============================================================================
 step "Stream fidelity, /dev/null, nested contexts"
