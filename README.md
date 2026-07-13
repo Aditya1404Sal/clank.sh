@@ -166,7 +166,7 @@ Golem cluster config is external to the shell — a concern only for the native 
 
 clank.sh is built on Brush (`brush-core`), an MIT-licensed, POSIX- and bash-compatible shell interpreter implemented in Rust, designed explicitly for embedding. Brush is decomposed into independently usable crates: `brush-parser` (AST and parser), `brush-core` (embeddable interpreter with a public API for registering custom builtins), `brush-builtins` (default builtin set, registered optionally), and `brush-interactive` (interactive readline layer). clank.sh adopts `brush-parser` and `brush-core` directly; it registers its own builtins via `brush-core`'s extension API, selectively adopting or overriding the defaults from `brush-builtins`; and it replaces `brush-interactive` with its own transcript-aware interactive layer. What is replaced entirely is the Unix process spawning and runtime model, substituted by the internal async process trait.
 
-Brush's bash compatibility is broad but not total. Known gaps inherited from upstream include: `coproc`, `select`, `ERR` traps, and some `set`/`shopt` flag behavior. Scripts relying on these constructs will need adaptation.
+Brush's bash compatibility is broad but not total. Known gaps inherited from upstream include: `coproc`, `select`, `ERR` traps, and some `set`/`shopt` flag behavior. One further gap is wasm-specific: **process substitution** (`<(...)`, `>(...)`) is unsupported on the agent, since it requires a concurrent producer/consumer over an OS pipe that wasip2 lacks. Scripts relying on any of these constructs will need adaptation.
 
 ---
 
@@ -1014,7 +1014,7 @@ EOF
 
 ### Known scripting gaps
 
-Brush's bash compatibility is broad but not total. The following constructs are not supported in v1: `coproc`, `select`, `ERR` traps, and some `set`/`shopt` flag behavior. Scripts relying on these will need adaptation. All other standard bash scripting constructs work as expected.
+Brush's bash compatibility is broad but not total. The following constructs are not supported in v1: `coproc`, `select`, `ERR` traps, and some `set`/`shopt` flag behavior (Brush upstream gaps), plus **process substitution** (`<(...)`, `>(...)`), which is unsupported on the wasm agent — it needs a concurrent producer/consumer over an OS pipe exposed as a `/dev/fd` path, which wasip2 lacks (pipes, `$(...)`, and here-documents work because their sequential shape maps onto clank's in-memory stream). Scripts relying on any of these will need adaptation. All other standard bash scripting constructs work as expected.
 
 ---
 
@@ -1062,3 +1062,4 @@ WASI has limited terminal support. In v1, clank.sh uses stdin/stdout only. The s
 | MCP elicitation | Addressed by `prompt-user` |
 | MCP sampling | Not addressed in v1 |
 | `coproc`, `select`, `ERR` traps | Not supported in v1 — Brush upstream gaps |
+| Process substitution (`<(...)`, `>(...)`) | Not supported on wasm — needs concurrent OS pipes |

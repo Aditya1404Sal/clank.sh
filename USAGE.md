@@ -71,8 +71,9 @@ golem agent invoke 'ClankAgent("dev")' eval '"mkdir -p /tmp/work; echo hi > /tmp
 # Same instance, later invocation — the file is still there (durable state).
 golem agent invoke 'ClankAgent("dev")' eval '"cat /tmp/work/a"'
 
-# Just the text: add --format json and pull the field you want with jq.
-golem agent invoke -q --format json 'ClankAgent("dev")' eval '"ls /bin"' | jq -r '.result_json.value.stdout'
+# Just the text: `-n` suppresses the live invocation-log stream so stdout is a single JSON document
+# (without it, the `[INVOKE]`/`[STREAM]` log lines print first and choke jq), then pull a field.
+golem agent invoke -q -n --format json 'ClankAgent("dev")' eval '"ls /bin"' | jq -r '.result_json.value.stdout'
 ```
 
 **Interactive pauses** (`prompt-user`, and the authorization gate on destructive/outbound commands
@@ -81,7 +82,7 @@ you deliver the human's answer on a **separate** invocation:
 
 ```sh
 # A bare `rm` (sudo-only) surfaces a confirmation instead of deleting — eval returns pending_prompt.
-golem agent invoke -q --format json 'ClankAgent("dev")' eval '"rm /tmp/work/a"' | jq '.result_json.value.pending_prompt'
+golem agent invoke -q -n --format json 'ClankAgent("dev")' eval '"rm /tmp/work/a"' | jq '.result_json.value.pending_prompt'
 
 # Approve it (or "no" to deny, exit 5) on a follow-up call:
 golem agent invoke 'ClankAgent("dev")' answer_prompt '"yes"'
@@ -865,9 +866,13 @@ The scripting language is **bash-compatible**, derived from Brush's POSIX/bash i
 - Variables, `export`, `cd`, functions, globbing, quoting.
 - Synthetic **job control** over clank processes: `&`, `jobs`, `fg`, `bg`, `wait`, `kill`.
 
-**Known gaps** (Brush upstream limitations; README `### Known scripting gaps`): `coproc`, `select`,
-`ERR` traps, and some `set`/`shopt` flag behavior. Scripts relying on these need adaptation. There is
-also no POSIX process model — no `fork`/`exec`, no real OS processes, no Unix signals.
+**Known gaps.** Brush upstream limitations (README `### Known scripting gaps`): `coproc`, `select`,
+`ERR` traps, and some `set`/`shopt` flag behavior. Plus one wasm-specific gap: **process substitution**
+(`<(...)`, `>(...)`) is not supported on the agent — it needs a concurrent producer/consumer connected
+by an OS pipe exposed as a `/dev/fd` path, which wasip2 lacks (unlike pipes, `$(...)`, and here-docs,
+whose sequential shape maps onto clank's in-memory stream). Scripts relying on any of these need
+adaptation. There is also no POSIX process model — no `fork`/`exec`, no real OS processes, no Unix
+signals.
 
 ```sh
 for f in $(find . -name '*.rs'); do wc -l "$f"; done
