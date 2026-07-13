@@ -114,6 +114,9 @@ impl InstalledPackage {
 #[derive(Default)]
 pub struct GreaseState {
     packages: Vec<InstalledPackage>,
+    /// Monotonic counter bumped on every mutation, so the `Session` can cache capability views
+    /// (manifests / system prompt / resource index) and rebuild only when the package set changes.
+    version: u64,
 }
 
 impl GreaseState {
@@ -141,7 +144,13 @@ impl GreaseState {
             }
         }
         packages.sort_by(|a, b| a.name().cmp(b.name()));
-        Self { packages }
+        Self { packages, version: 0 }
+    }
+
+    /// The mutation counter — see [`version`](Self::version)'s field docs. Any change to the package
+    /// set bumps it, so a cache keyed on it is invalidated exactly when a capability view would change.
+    pub fn version(&self) -> u64 {
+        self.version
     }
 
     /// Insert or replace an installed package (after a successful install).
@@ -150,11 +159,13 @@ impl GreaseState {
         self.remove(&name);
         self.packages.push(pkg);
         self.packages.sort_by(|a, b| a.name().cmp(b.name()));
+        self.version = self.version.wrapping_add(1);
     }
 
     /// Drop an installed package from the in-memory view (the caller removes the files).
     pub fn remove(&mut self, name: &str) {
         self.packages.retain(|p| p.name() != name);
+        self.version = self.version.wrapping_add(1);
     }
 
     pub fn packages(&self) -> &[InstalledPackage] {
@@ -586,6 +597,22 @@ mod tests {
         state.remove("summarize");
         assert!(!state.is_prompt("summarize"));
         assert!(state.manifest_for("summarize").is_none());
+    }
+
+    #[test]
+    fn version_bumps_on_install_and_remove() {
+        // The Session's capability cache keys on version(); install + remove must each bump it so the
+        // system prompt / manifests / resource index rebuild when the package set changes.
+        let mut state = GreaseState::default();
+        let v0 = state.version();
+        state.set_installed(InstalledPackage {
+            marker: marker(PackageKind::Prompt),
+            payload: Payload::Prompt(sample_prompt()),
+        });
+        let v1 = state.version();
+        assert_ne!(v1, v0, "set_installed must bump the version");
+        state.remove("summarize");
+        assert_ne!(state.version(), v1, "remove must bump the version");
     }
 
     #[test]

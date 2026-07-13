@@ -119,6 +119,16 @@ struct Pending {
     kind: PendingKind,
 }
 
+/// A per-line snapshot of the installed capability surface, keyed by the MCP + grease state versions.
+/// Rebuilt only when that key changes; otherwise the same `Arc`s are re-installed each line (a cheap
+/// clone) instead of re-rendering the manifests / resource index / system prompt every command.
+struct CapabilityCache {
+    key: (u64, u64),
+    dynreg: std::sync::Arc<std::sync::Mutex<Vec<crate::manifest::Manifest>>>,
+    mcpfs: std::sync::Arc<Vec<crate::mcpfs::ResourceEntry>>,
+    sysprompt: std::sync::Arc<String>,
+}
+
 /// One live background job: the Brush job manager's id and the clank process-table PID that
 /// represents it (row state `S` until reaped or killed).
 struct BgJob {
@@ -257,6 +267,11 @@ pub struct Session {
     /// append sink (correct on native); the agent injects a whole-file-rewrite sink whose writes are
     /// idempotent under oplog replay, avoiding line duplication (see `logging` + `log_sink`).
     log_sink: std::sync::Arc<dyn crate::logging::LogSink>,
+    /// Cached capability views (dynamic manifests / MCP resource index / system prompt) installed per
+    /// line. These are functions of the MCP + grease state (registry is static), so they're rebuilt only
+    /// when `(mcp.version(), grease.version())` changes — most lines reuse the cache instead of
+    /// re-rendering the whole system prompt + manifests every command.
+    cap_cache: Option<CapabilityCache>,
     source: SourceInfo,
     #[cfg(target_arch = "wasm32")]
     rt: tokio::runtime::Runtime,
@@ -288,6 +303,7 @@ impl Session {
                 mcp_http: None,
                 grease: crate::greasestate::GreaseState::load(),
                 log_sink: std::sync::Arc::new(crate::logging::DefaultLogSink),
+                cap_cache: None,
                 source: SourceInfo::default(),
                 rt,
             };
@@ -315,6 +331,7 @@ impl Session {
                 mcp_http: None,
                 grease: crate::greasestate::GreaseState::load(),
                 log_sink: std::sync::Arc::new(crate::logging::DefaultLogSink),
+                cap_cache: None,
                 source: SourceInfo::default(),
             };
             session.reconstruct_mcp_from_grease();
@@ -460,26 +477,35 @@ impl Session {
         // Brush-registered `context` builtin in nested contexts ($(context show), context | head).
         let _install = crate::proctable::install(self.proc_table.clone());
         let _install_transcript = crate::install_transcript(self.transcript.clone());
-        // Install the dynamic manifests (installed MCP servers + grease prompts) so `man`/`type` (Brush
-        // surfaces that only see the static registry) can resolve runtime-registered names.
-        let mut dynamic = self.mcp.all_manifests();
-        dynamic.extend(self.grease.all_manifests());
-        let _install_dynreg =
-            crate::dynreg::install(std::sync::Arc::new(std::sync::Mutex::new(dynamic)));
-        // Install the MCP resource index so `ls /mnt/mcp/...` (a Brush-registered coreutil) can list
-        // the virtual resource tree for this line.
-        let _install_mcpfs =
-            crate::mcpfs::install(std::sync::Arc::new(self.grease.mcp_resource_index()));
-        // Render + install the live system prompt (command surface + installed MCP tools + grease
-        // prompts + skills) so `cat /proc/clank/system-prompt` shows exactly what the model sees — the
-        // procfs resolver can't reach the live Session state, so we hand it the rendered string.
-        let _install_sysprompt = crate::sysprompt::install(std::sync::Arc::new(
-            crate::askcmd::build_system_prompt_with_capabilities(
-                &self.registry,
-                &self.mcp,
-                &self.grease,
-            ),
-        ));
+        // Build (or reuse a cached) view of the installed capabilities, keyed by the MCP + grease state
+        // versions — so the dynamic manifests (`man`/`type` resolution), the MCP resource index (`ls
+        // /mnt/mcp/...`), and the live system prompt (`cat /proc/clank/system-prompt`) are re-rendered
+        // only when a package/server was installed or removed, not on every command line.
+        let cap_key = (self.mcp.version(), self.grease.version());
+        if self.cap_cache.as_ref().map(|c| c.key) != Some(cap_key) {
+            let mut manifests = self.mcp.all_manifests();
+            manifests.extend(self.grease.all_manifests());
+            self.cap_cache = Some(CapabilityCache {
+                key: cap_key,
+                dynreg: std::sync::Arc::new(std::sync::Mutex::new(manifests)),
+                mcpfs: std::sync::Arc::new(self.grease.mcp_resource_index()),
+                sysprompt: std::sync::Arc::new(crate::askcmd::build_system_prompt_with_capabilities(
+                    &self.registry,
+                    &self.mcp,
+                    &self.grease,
+                )),
+            });
+        }
+        // Clone the cached `Arc`s into the per-line thread-local slots (cheap ref-count bumps); the
+        // guards clear the slots on drop. The manifests/index/prompt are read-only surfaces, so sharing
+        // one `Arc` across lines is safe.
+        let (dynreg, mcpfs, sysprompt) = {
+            let cap = self.cap_cache.as_ref().expect("cap_cache just populated");
+            (cap.dynreg.clone(), cap.mcpfs.clone(), cap.sysprompt.clone())
+        };
+        let _install_dynreg = crate::dynreg::install(dynreg);
+        let _install_mcpfs = crate::mcpfs::install(mcpfs);
+        let _install_sysprompt = crate::sysprompt::install(sysprompt);
 
         // Record this line as a process (one PID per executed line). Blank lines get no row, matching
         // the "empty line re-prompts" behavior. `context` lines DO get a row — they're real typed

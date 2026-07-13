@@ -55,9 +55,18 @@ pub struct McpState {
     servers: Vec<McpServer>,
     sessions: Vec<McpSession>,
     next_session: u64,
+    /// Monotonic counter bumped on every server change (not session open/close — sessions don't affect
+    /// the command surface), so the `Session` can cache capability views and rebuild only on change.
+    version: u64,
 }
 
 impl McpState {
+    /// The mutation counter — bumped by server install/remove (see [`version`](Self::version)'s field
+    /// docs). A cache keyed on it is invalidated exactly when the manifests/system-prompt would change.
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
     /// Install or replace a server's record with a fetched tool list.
     pub fn set_installed(&mut self, name: &str, config: McpServerConfig, tools: Vec<McpTool>) {
         self.remove(name);
@@ -68,6 +77,7 @@ impl McpState {
             installed: true,
             last_error: None,
         });
+        self.version = self.version.wrapping_add(1);
     }
 
     /// Record a server that is configured but failed to install (with the error).
@@ -80,12 +90,14 @@ impl McpState {
             installed: false,
             last_error: Some(error),
         });
+        self.version = self.version.wrapping_add(1);
     }
 
     /// Drop a server (and any of its sessions).
     pub fn remove(&mut self, name: &str) {
         self.servers.retain(|s| s.name != name);
         self.sessions.retain(|s| s.server != name);
+        self.version = self.version.wrapping_add(1);
     }
 
     pub fn servers(&self) -> &[McpServer] {
@@ -304,6 +316,33 @@ mod tests {
         assert!(!state.is_server("bad"));
         assert!(state.manifest_for("bad").is_none());
         assert_eq!(state.get("bad").unwrap().last_error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn version_bumps_on_server_changes_only() {
+        // The Session's capability cache keys on version(); every change to the command surface (install
+        // / failed-install / remove) must bump it, but opening/closing sessions must NOT (sessions aren't
+        // part of the manifests/system-prompt).
+        let mut state = McpState::default();
+        let v0 = state.version();
+        state.set_installed("a", McpServerConfig::new("https://x/mcp"), vec![]);
+        let v1 = state.version();
+        assert_ne!(v1, v0, "set_installed must bump the version");
+        state.set_failed("b", McpServerConfig::new("https://y/mcp"), "boom".into());
+        let v2 = state.version();
+        assert_ne!(v2, v1, "set_failed must bump the version");
+        // A session open does not change the command surface → no bump.
+        let init = InitializeResult {
+            session_id: None,
+            protocol_version: "1".into(),
+            server_name: "a".into(),
+            server_version: "1".into(),
+            capabilities: Value::Null,
+        };
+        state.open_session("a", &init);
+        assert_eq!(state.version(), v2, "opening a session must NOT bump the version");
+        state.remove("a");
+        assert_ne!(state.version(), v2, "remove must bump the version");
     }
 
     #[test]
