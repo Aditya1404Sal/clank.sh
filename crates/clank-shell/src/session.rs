@@ -238,12 +238,12 @@ pub struct Session {
     ask_provider: Option<Box<dyn crate::askcmd::AskProvider>>,
     /// The injected Golem-agent invoker (durable `WasmRpc` on the agent; a fake in tests). `None` on
     /// native / until injected, in which case an agent invocation degrades to a clean "needs a cluster"
-    /// error. See [`crate::agentcmd`].
-    agent_invoker: Option<Box<dyn crate::agentcmd::AgentInvoker>>,
+    /// error. See [`crate::golem::agent`].
+    agent_invoker: Option<Box<dyn crate::golem::agent::AgentInvoker>>,
     /// The injected Golem cluster interface backing the `golem` command + agent oplog/status (durable
     /// `golem:api` bindings on the agent). `None` on native / until injected → the honest no-cluster
-    /// error. See [`crate::golemcmd`].
-    golem_cluster: Option<Box<dyn crate::golemcmd::GolemCluster>>,
+    /// error. See [`crate::golem::cluster`].
+    golem_cluster: Option<Box<dyn crate::golem::cluster::GolemCluster>>,
     /// Triggered/scheduled agent invocations awaiting a possible `kill`-cancel: PID → cancel token.
     pending_invocations: Vec<PendingInvocation>,
     /// Out-of-band stdin for the next `ask` dispatch: the captured stdout of an upstream pipeline
@@ -386,13 +386,13 @@ impl Session {
 
     /// Install the Golem-agent invoker (a durable `WasmRpc` binding on the agent). Without one, an
     /// installed agent command reports "needs a cluster" (README:895). Injected after construction.
-    pub fn set_agent_invoker(&mut self, invoker: Box<dyn crate::agentcmd::AgentInvoker>) {
+    pub fn set_agent_invoker(&mut self, invoker: Box<dyn crate::golem::agent::AgentInvoker>) {
         self.agent_invoker = Some(invoker);
     }
 
     /// Install the Golem cluster interface backing the `golem` command + agent oplog/status (durable
     /// `golem:api` bindings on the agent). Without one, `golem` reports "needs a cluster".
-    pub fn set_golem_cluster(&mut self, cluster: Box<dyn crate::golemcmd::GolemCluster>) {
+    pub fn set_golem_cluster(&mut self, cluster: Box<dyn crate::golem::cluster::GolemCluster>) {
         self.golem_cluster = Some(cluster);
     }
 
@@ -727,7 +727,7 @@ impl Session {
                 Ok(cmd) => self.run_grease(cmd).await,
                 Err(e) => LineResult::from_outcome(Vec::new(), format!("{e}\n").into_bytes(), 2),
             }
-        } else if let Some(parsed) = crate::golemcmd::classify(line) {
+        } else if let Some(parsed) = crate::golem::cluster::classify(line) {
             // `golem` cluster command — runtime API calls await under the reactor (like mcp/ask).
             match parsed {
                 Ok(cmd) => self.run_golem(cmd).await,
@@ -3380,7 +3380,7 @@ impl Session {
             );
         }
 
-        let inv = crate::agentcmd::AgentInvocation {
+        let inv = crate::golem::agent::AgentInvocation {
             agent_type: pkg.agent_type.clone(),
             constructor: parsed.constructor,
             method: parsed.method,
@@ -3412,9 +3412,9 @@ impl Session {
             .collect::<Vec<_>>()
             .join(",");
         let mode = match &inv.mode {
-            crate::agentcmd::InvokeMode::Await => "await".to_string(),
-            crate::agentcmd::InvokeMode::Trigger => "trigger".to_string(),
-            crate::agentcmd::InvokeMode::Schedule(when) => format!("schedule:{when}"),
+            crate::golem::agent::InvokeMode::Await => "await".to_string(),
+            crate::golem::agent::InvokeMode::Trigger => "trigger".to_string(),
+            crate::golem::agent::InvokeMode::Schedule(when) => format!("schedule:{when}"),
         };
         crate::logging::Record::new("agent-invoke")
             .field("type", &inv.agent_type)
@@ -3425,7 +3425,7 @@ impl Session {
             .emit(crate::logging::LogFile::Mcp);
 
         match parsed.mode {
-            crate::agentcmd::InvokeMode::Await => match invoker.invoke(&inv).await {
+            crate::golem::agent::InvokeMode::Await => match invoker.invoke(&inv).await {
                 Ok(result) => {
                     let mut out = result.into_bytes();
                     if !out.ends_with(b"\n") {
@@ -3435,7 +3435,7 @@ impl Session {
                 }
                 Err(e) => LineResult::from_outcome(Vec::new(), format!("{name}: {e}\n").into_bytes(), 1),
             },
-            crate::agentcmd::InvokeMode::Trigger | crate::agentcmd::InvokeMode::Schedule(_) => {
+            crate::golem::agent::InvokeMode::Trigger | crate::golem::agent::InvokeMode::Schedule(_) => {
                 // Fire-and-forget / deferred: returns a handle (+ a PID row for `ps`/`kill`).
                 match invoker.invoke_async(&inv).await {
                     Ok(handle) => {
@@ -3452,11 +3452,11 @@ impl Session {
         }
     }
 
-    /// Dispatch a `golem` cluster command through the injected [`crate::golemcmd::GolemCluster`] seam.
+    /// Dispatch a `golem` cluster command through the injected [`crate::golem::cluster::GolemCluster`] seam.
     /// `interrupt`/`resume` are honest-stubbed (no host primitive); everything else needs a configured
     /// cluster (honest error otherwise).
-    async fn run_golem(&mut self, cmd: crate::golemcmd::GolemCommand) -> LineResult {
-        use crate::golemcmd::GolemCommand as G;
+    async fn run_golem(&mut self, cmd: crate::golem::cluster::GolemCommand) -> LineResult {
+        use crate::golem::cluster::GolemCommand as G;
         // interrupt/resume have no golem-rust host func — report honestly regardless of cluster.
         if let G::AgentInterrupt { pid } | G::AgentResume { pid } = &cmd {
             let verb = if matches!(cmd, G::AgentInterrupt { .. }) { "interrupt" } else { "resume" };
@@ -4345,7 +4345,7 @@ struct ParsedAgentLine {
     constructor: Vec<(String, String)>,
     method: String,
     args: Vec<(String, String)>,
-    mode: crate::agentcmd::InvokeMode,
+    mode: crate::golem::agent::InvokeMode,
     phantom: Option<String>,
     /// `--revision <n>` if given (honest-stubbed — no wasm-rpc slot).
     revision: Option<String>,
@@ -4360,7 +4360,7 @@ fn parse_agent_line(
     words: &[String],
     pkg: &crate::greasepkg::AgentPackage,
 ) -> Result<ParsedAgentLine, String> {
-    use crate::agentcmd::InvokeMode;
+    use crate::golem::agent::InvokeMode;
     let is_ctor = |k: &str| pkg.constructor_params.iter().any(|p| p == k);
     let mut constructor = Vec::new();
     let mut method = String::new();
@@ -5464,41 +5464,41 @@ mod tests {
         });
     }
 
-    /// A scripted [`crate::agentcmd::AgentInvoker`]: records the invocation it saw and returns a fixed
+    /// A scripted [`crate::golem::agent::AgentInvoker`]: records the invocation it saw and returns a fixed
     /// reply (the native stand-in for the durable `WasmRpc` binding, which needs a cluster).
     struct FakeAgentInvoker {
         reply: String,
-        seen: std::sync::Arc<Mutex<Option<crate::agentcmd::AgentInvocation>>>,
+        seen: std::sync::Arc<Mutex<Option<crate::golem::agent::AgentInvocation>>>,
     }
     #[async_trait::async_trait(?Send)]
-    impl crate::agentcmd::AgentInvoker for FakeAgentInvoker {
+    impl crate::golem::agent::AgentInvoker for FakeAgentInvoker {
         async fn invoke(
             &self,
-            inv: &crate::agentcmd::AgentInvocation,
+            inv: &crate::golem::agent::AgentInvocation,
         ) -> Result<String, String> {
             *self.seen.lock().unwrap() = Some(inv.clone());
             Ok(self.reply.clone())
         }
         async fn invoke_async(
             &self,
-            inv: &crate::agentcmd::AgentInvocation,
-        ) -> Result<crate::agentcmd::InvokeHandle, String> {
+            inv: &crate::golem::agent::AgentInvocation,
+        ) -> Result<crate::golem::agent::InvokeHandle, String> {
             *self.seen.lock().unwrap() = Some(inv.clone());
             let (token, note) = match &inv.mode {
-                crate::agentcmd::InvokeMode::Trigger => (None, "triggered".to_string()),
-                crate::agentcmd::InvokeMode::Schedule(w) => {
+                crate::golem::agent::InvokeMode::Trigger => (None, "triggered".to_string()),
+                crate::golem::agent::InvokeMode::Schedule(w) => {
                     (Some("tok".to_string()), format!("scheduled for {w}"))
                 }
-                crate::agentcmd::InvokeMode::Await => (None, String::new()),
+                crate::golem::agent::InvokeMode::Await => (None, String::new()),
             };
-            Ok(crate::agentcmd::InvokeHandle { cancel_token: token, note })
+            Ok(crate::golem::agent::InvokeHandle { cancel_token: token, note })
         }
     }
 
-    /// A scripted [`crate::golemcmd::GolemCluster`] recording the calls it saw.
+    /// A scripted [`crate::golem::cluster::GolemCluster`] recording the calls it saw.
     struct FakeGolemCluster;
     #[async_trait::async_trait(?Send)]
-    impl crate::golemcmd::GolemCluster for FakeGolemCluster {
+    impl crate::golem::cluster::GolemCluster for FakeGolemCluster {
         async fn agent_list(&self) -> Result<String, String> {
             Ok("agent-1\nagent-2".to_string())
         }
@@ -5638,7 +5638,7 @@ mod tests {
             let out = String::from_utf8(run.stdout).unwrap();
             assert!(out.contains("triggered"), "reports triggered: {out}");
             let inv = seen.lock().unwrap().clone().unwrap();
-            assert_eq!(inv.mode, crate::agentcmd::InvokeMode::Trigger);
+            assert_eq!(inv.mode, crate::golem::agent::InvokeMode::Trigger);
             assert_eq!(inv.args, vec![("sku".to_string(), "abc".to_string())]);
 
             // The trigger spawned a PID row; `kill <pid>` clears it. Extract the pid from "[<pid>] …".
@@ -5667,7 +5667,7 @@ mod tests {
             assert!(out.contains("scheduled for 2026-06-01"), "reports schedule: {out}");
             assert_eq!(
                 seen.lock().unwrap().clone().unwrap().mode,
-                crate::agentcmd::InvokeMode::Schedule("2026-06-01T09:00:00Z".to_string())
+                crate::golem::agent::InvokeMode::Schedule("2026-06-01T09:00:00Z".to_string())
             );
             let pid: u32 = out.trim_start_matches('[').split(']').next().unwrap().parse().unwrap();
             let kill = session.eval_line(&format!("kill {pid}")).await;

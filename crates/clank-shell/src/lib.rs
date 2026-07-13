@@ -14,7 +14,6 @@
 //! POC scope: the transcript is in-memory for the session (no compaction, no disk); Brush runs
 //! on both targets through [`session::Session`].
 
-pub mod agentcmd;
 pub mod askcmd;
 pub mod askconfig;
 mod awkcmd;
@@ -24,7 +23,7 @@ mod contextcmd;
 mod coreutils;
 pub mod dynreg;
 mod findcmd;
-pub mod golemcmd;
+pub mod golem;
 pub mod greaseconfig;
 mod greasecmd;
 pub mod greasepkg;
