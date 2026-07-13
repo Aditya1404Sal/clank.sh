@@ -66,9 +66,11 @@ one `[patch` block in the file). Every entry points at:
 git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat"
 ```
 
-Resolved commit `35ecf24d7caa2202940a18ef61be5037776ecd36` (19 `git+` source lines in `Cargo.lock`:
-`uucore` + the 18 `uu_*`). The `clank-shell` `Cargo.toml` still *names* the plain `"0.9"` versions
-(lines 39–59); the workspace `[patch]` transparently redirects them to the fork.
+Resolved commit `35ecf24d7caa2202940a18ef61be5037776ecd36`. The `[patch]` block names 19 crates
+(`uucore` + the 18 `uu_*`), but `Cargo.lock` resolves **20** `git+` source lines from the fork — the
+20th is `uucore_procs`, pulled transitively because `uucore` depends on it from the same repo. The
+`clank-shell` `Cargo.toml` still *names* the plain `"0.9"` versions (lines 39–59); the workspace
+`[patch]` transparently redirects them to the fork.
 
 **WHY wasip2 forced it:** upstream `uucore 0.9` uses the **unstable `wasip2` std feature** and fails
 to build on the target at all. The fork adds:
@@ -249,22 +251,10 @@ For completeness, so a maintainer doesn't go hunting for phantom patches:
 
 ---
 
-## Stale comments found (contradict current behavior)
+## Comment consistency
 
-The Brush fork's "Wall C" work retired the wasm pipeline limitation, but two module docs still
-describe it as a live limitation:
-
-1. **`crates/clank-shell/src/session.rs:12–15`** (module doc) still reads: *"On wasm,
-   pipelines/subshells that reach `spawn_blocking` are a known limitation (no threads); simple
-   builtins and shell language work."* This is **stale** — the `0f4a89c` fork runs pipelines and
-   `$(...)` inline-sequentially over an in-memory `OpenFile::Stream` pipe (no `tokio::spawn`), as the
-   root `Cargo.toml:47–53` comment and the `run_command` doc (`session.rs:660`, "the 'Wall C' shape")
-   both describe. Pipelines work on wasm.
-
-2. **`crates/clank-shell/src/wasm.rs:6–7`** (module doc) still reads: *"Simple builtins + shell
-   language work; pipelines and external commands are known sandbox limitations."* **Partially
-   stale**: pipelines now work (same reason as above). The **external-command** half remains true —
-   wasip2 has no process spawn, so forking host programs is genuinely unavailable — but lumping
-   pipelines in with it is now incorrect.
-
-Both are comment-only; behavior is governed by the fork and the `cfg` code inventoried above.
+The Brush fork's "Wall C" work retired the old "wasm pipelines are a limitation" caveat. Two module
+docs (`session.rs` and `wasm.rs`) still carried it and were corrected to match this document: pipelines
+and `$(...)` **work** on wasm (the inline-sequential `OpenFile::Stream` path). What genuinely remains
+unavailable is spawning real external processes — wasip2 has no process spawn — which is a distinct
+constraint from pipelines and is described as such.

@@ -3,8 +3,9 @@
 //! stdout is driven by a concurrent writer future (via `futures::join!`) so the loop can flush
 //! the prompt and command output while it blocks on the next stdin read. All command execution
 //! lives in the shared [`crate::session::Session`], which drives Brush on an owned current-thread
-//! tokio runtime (wasip2 has no threads). Simple builtins + shell language work; pipelines and
-//! external commands are known sandbox limitations.
+//! tokio runtime (wasip2 has no threads). Builtins, shell language, and pipelines/`$(...)` all work
+//! (the Brush fork's Wall-C inline-sequential path); spawning real external processes is genuinely
+//! unavailable in the sandbox.
 //!
 //! (We keep `futures::join!` rather than `wit_bindgen::spawn` for the writer: `spawn` is
 //! fire-and-forget with no join handle, and `join!` guarantees the stream is fully drained
