@@ -158,13 +158,13 @@ pub fn build() -> CommandRegistry {
     for manifest in crate::xargscmd::manifests() {
         registry.insert(manifest);
     }
-    for manifest in crate::modelcmd::manifests() {
+    for manifest in crate::ai::model::manifests() {
         registry.insert(manifest);
     }
     for manifest in crate::httpcmd::manifests() {
         registry.insert(manifest);
     }
-    for manifest in crate::askcmd::manifests() {
+    for manifest in crate::ai::ask::manifests() {
         registry.insert(manifest);
     }
     for manifest in crate::mcp::cmd::manifests() {
@@ -217,7 +217,7 @@ mod tests {
             .chain(crate::statcmd::builtins::<SE>())
             .chain(crate::findcmd::builtins::<SE>())
             .chain(crate::xargscmd::builtins::<SE>())
-            .chain(crate::modelcmd::builtins::<SE>())
+            .chain(crate::ai::model::builtins::<SE>())
             .chain(crate::contextcmd::builtins::<SE>())
             .chain(crate::interceptstub::builtins::<SE>())
             .map(|(name, _reg)| name)

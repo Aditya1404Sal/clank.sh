@@ -1,7 +1,7 @@
 //! The `model` builtin: list and configure model providers and the default model.
 //!
 //! `model` is an ordinary Brush [`SimpleCommand`] (like [`which`](crate::which)): it does no HTTP and
-//! touches no `Session` state — only `std::fs` on `~/.config/ask/ask.toml` (see [`crate::askconfig`]).
+//! touches no `Session` state — only `std::fs` on `~/.config/ask/ask.toml` (see [`crate::ai::config`]).
 //! That makes it free inside pipes and `$(...)` and keeps it out of the Session interception list. The
 //! `ask` path re-reads ask.toml per invocation, so the file is the single source of truth (no cache).
 //!
@@ -30,7 +30,7 @@ impl Model {
 const PROVIDER: &str = "anthropic";
 
 /// The built-in model catalog (an honest subset; the provider accepts any id, these are the vetted
-/// ones). Haiku is the built-in default (matches [`crate::askcmd::DEFAULT_MODEL`]) — the lightest and
+/// ones). Haiku is the built-in default (matches [`crate::ai::ask::DEFAULT_MODEL`]) — the lightest and
 /// cheapest; opt into a bigger model explicitly.
 const CATALOG: &[&str] = &[
     "anthropic/claude-haiku-4-5-20251001",
@@ -115,11 +115,11 @@ fn run(home: &str, argv: &[String]) -> (String, String, u8) {
 /// The resolved default: the ask.toml value, else the built-in fallback. On a parse error, warn to
 /// stderr and fall back. Returns `(default_id, source, warning)`.
 fn resolved_default(home: &str) -> (String, &'static str, Option<String>) {
-    match crate::askconfig::default_model(home) {
+    match crate::ai::config::default_model(home) {
         Ok(Some(m)) => (m, "~/.config/ask/ask.toml", None),
-        Ok(None) => (crate::askcmd::DEFAULT_MODEL.to_string(), "built-in", None),
+        Ok(None) => (crate::ai::ask::DEFAULT_MODEL.to_string(), "built-in", None),
         Err(e) => (
-            crate::askcmd::DEFAULT_MODEL.to_string(),
+            crate::ai::ask::DEFAULT_MODEL.to_string(),
             "built-in",
             Some(format!("model: {e}; using the built-in default\n")),
         ),
@@ -151,7 +151,7 @@ fn set_default(home: &str, id: Option<&str>) -> (String, String, u8) {
     if !CATALOG.iter().any(|c| *c == canon) {
         warn = format!("model default: '{canon}' is not in the built-in catalog; passing it to the provider as-is\n");
     }
-    match crate::askconfig::save_default_model(home, &canon) {
+    match crate::ai::config::save_default_model(home, &canon) {
         Ok(()) => (format!("default model set to {canon}\n"), warn, 0),
         Err(e) => (String::new(), format!("model default: {e}\n"), 1),
     }
@@ -275,7 +275,7 @@ mod tests {
         let home = temp_home();
         run(&home, &args(&["default", "claude-haiku-4-5"]));
         assert_eq!(
-            crate::askconfig::default_model(&home).unwrap().as_deref(),
+            crate::ai::config::default_model(&home).unwrap().as_deref(),
             Some("anthropic/claude-haiku-4-5")
         );
     }
@@ -295,7 +295,7 @@ mod tests {
         assert_eq!(code, 0);
         assert!(err.contains("not in the built-in catalog"), "got: {err}");
         assert_eq!(
-            crate::askconfig::default_model(&home).unwrap().as_deref(),
+            crate::ai::config::default_model(&home).unwrap().as_deref(),
             Some("anthropic/claude-future-9")
         );
     }

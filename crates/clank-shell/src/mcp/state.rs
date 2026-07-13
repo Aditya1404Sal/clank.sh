@@ -193,10 +193,10 @@ impl McpState {
             .collect()
     }
 
-    /// Every installed MCP tool as an [`crate::askcmd::AskTool`], for the agentic `ask` tool surface.
+    /// Every installed MCP tool as an [`crate::ai::ask::AskTool`], for the agentic `ask` tool surface.
     /// The tool name is namespaced `mcp__<server>__<tool>` (the executor decodes it back to a
     /// `<server> <tool>` call); the parameters schema is the raw inputSchema string.
-    pub fn ask_tool_definitions(&self) -> Vec<crate::askcmd::AskTool> {
+    pub fn ask_tool_definitions(&self) -> Vec<crate::ai::ask::AskTool> {
         let mut tools = Vec::new();
         for server in &self.servers {
             if !server.installed {
@@ -208,7 +208,7 @@ impl McpState {
                     server.name,
                     t.description.as_deref().unwrap_or("")
                 );
-                tools.push(crate::askcmd::AskTool {
+                tools.push(crate::ai::ask::AskTool {
                     name: format!("mcp__{}__{}", server.name, t.name),
                     description: desc,
                     parameters_schema: t.input_schema.to_string(),

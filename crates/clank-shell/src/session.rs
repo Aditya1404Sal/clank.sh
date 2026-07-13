@@ -59,19 +59,19 @@ enum PendingKind {
 /// human answers.
 struct AskPause {
     /// The tool call awaiting the human's answer.
-    call: crate::askcmd::AskToolCall,
+    call: crate::ai::ask::AskToolCall,
     /// The kind of pause, which decides how the human's answer resolves the call.
     kind: AskPauseKind,
     /// Sibling calls from the same assistant turn, not yet executed.
-    remaining: Vec<crate::askcmd::AskToolCall>,
+    remaining: Vec<crate::ai::ask::AskToolCall>,
     /// Results already computed for earlier calls in this turn.
-    completed: Vec<crate::askcmd::AskToolResult>,
+    completed: Vec<crate::ai::ask::AskToolResult>,
 }
 
 /// The outcome of attempting one tool call in the loop: either a finished result to feed back, or a
 /// pause requiring the human before the call can be resolved.
 enum ToolStep {
-    Done(crate::askcmd::AskToolResult),
+    Done(crate::ai::ask::AskToolResult),
     Pause(AskPauseKind),
 }
 
@@ -98,9 +98,9 @@ struct AskLoopState {
     /// The system prompt (rebuilt once at loop start; stable across turns).
     system: String,
     /// The tool definitions offered each turn (stable across turns).
-    tools: Vec<crate::askcmd::AskTool>,
+    tools: Vec<crate::ai::ask::AskTool>,
     /// The conversation so far: `User`, then alternating `Assistant`/`ToolResults`.
-    history: Vec<crate::askcmd::AskTurn>,
+    history: Vec<crate::ai::ask::AskTurn>,
     /// The model id.
     model: String,
     /// Accumulated tool trace (→ the final result's stderr).
@@ -234,8 +234,8 @@ pub struct Session {
     bg_jobs: Vec<BgJob>,
     /// The injected LLM provider for `ask`. Installed by the agent build (a durable Anthropic
     /// provider); `None` on native and until injected, in which case `ask` degrades to a clean
-    /// "not configured" error. See [`crate::askcmd`].
-    ask_provider: Option<Box<dyn crate::askcmd::AskProvider>>,
+    /// "not configured" error. See [`crate::ai::ask`].
+    ask_provider: Option<Box<dyn crate::ai::ask::AskProvider>>,
     /// The injected Golem-agent invoker (durable `WasmRpc` on the agent; a fake in tests). `None` on
     /// native / until injected, in which case an agent invocation degrades to a clean "needs a cluster"
     /// error. See [`crate::golem::agent`].
@@ -379,9 +379,9 @@ impl Session {
 
     /// Install the LLM provider that backs `ask`. The agent build injects a durable Anthropic
     /// provider here after constructing the session; without one, `ask` reports "not configured".
-    pub fn set_ask_provider(&mut self, provider: Box<dyn crate::askcmd::AskProvider>) {
+    pub fn set_ask_provider(&mut self, provider: Box<dyn crate::ai::ask::AskProvider>) {
         // Wrap so each LLM turn is logged to http.log (the outbound Anthropic call).
-        self.ask_provider = Some(Box::new(crate::askcmd::LoggingAskProvider::new(provider)));
+        self.ask_provider = Some(Box::new(crate::ai::ask::LoggingAskProvider::new(provider)));
     }
 
     /// Install the Golem-agent invoker (a durable `WasmRpc` binding on the agent). Without one, an
@@ -489,7 +489,7 @@ impl Session {
                 key: cap_key,
                 dynreg: std::sync::Arc::new(std::sync::Mutex::new(manifests)),
                 mcpfs: std::sync::Arc::new(self.grease.mcp_resource_index()),
-                sysprompt: std::sync::Arc::new(crate::askcmd::build_system_prompt_with_capabilities(
+                sysprompt: std::sync::Arc::new(crate::ai::ask::build_system_prompt_with_capabilities(
                     &self.registry,
                     &self.mcp,
                     &self.grease,
@@ -614,7 +614,7 @@ impl Session {
         // before `eval_line` and runs the interactive loop). An interactive REPL needs a terminal and
         // a blocking read-loop, which the durable agent can't own (Golem serializes invocations — it
         // can't park mid-loop waiting for a human). Return an honest pointer to the working forms.
-        if crate::askcmd::classify_repl(line).is_some() {
+        if crate::ai::ask::classify_repl(line).is_some() {
             let msg = b"ask repl: interactive REPL is a native-terminal feature; on the durable \
                         agent, drive a conversation with repeated `ask` calls (each is one turn)\n";
             return self.finish_intercepted(pid, LineResult::from_outcome(Vec::new(), msg.to_vec(), 2));
@@ -624,7 +624,7 @@ impl Session {
         // reactor isn't live there — the "Wall C" wall), so the Session pre-extracts it: run the
         // upstream, capture its stdout, and dispatch the `ask` tail at the session layer with those
         // bytes as stdin. `ask` must be the FINAL stage; anywhere else it stays the honest stub error.
-        if let Some(pipe) = crate::askcmd::split_ask_tail(line) {
+        if let Some(pipe) = crate::ai::ask::split_ask_tail(line) {
             return self.run_ask_pipe(pipe, pid).await;
         }
 
@@ -708,7 +708,7 @@ impl Session {
                     LineResult::from_outcome(Vec::new(), format!("kill: {e}\n").into_bytes(), 2)
                 }
             }
-        } else if let Some(args) = crate::askcmd::classify(line) {
+        } else if let Some(args) = crate::ai::ask::classify(line) {
             // `ask` dispatches to the injected LLM provider — same "await at the Session layer, never
             // through `execute`'s nested runtime" rule as curl/wget. The provider's async `complete`
             // is awaited here, one level under the Golem SDK's `wstd::block_on` where the durable
@@ -937,10 +937,10 @@ impl Session {
     /// satisfies `sudo-only` (destructive ops still refuse), matching [`authz::decide`].
     async fn run_ask(
         &mut self,
-        mut args: crate::askcmd::AskArgs,
+        mut args: crate::ai::ask::AskArgs,
         blanket_authorized: bool,
     ) -> LineResult {
-        use crate::askcmd::AskTurn;
+        use crate::ai::ask::AskTurn;
 
         // Pick up any pipeline stdin captured for this dispatch (`cat x | ask "…"`). Taken so it
         // never leaks into an unrelated later `ask`.
@@ -981,12 +981,12 @@ impl Session {
         // The tool surface = the generic shell/prompt_user tools, plus one ToolDefinition per installed
         // MCP tool (mcp__<server>__<tool>) and per installed grease prompt (prompt__<name>). Every
         // `grease install`/`mcp add` thus expands what `ask` can do (README).
-        let mut tools = crate::askcmd::build_ask_tools(&self.registry);
+        let mut tools = crate::ai::ask::build_ask_tools(&self.registry);
         tools.extend(self.mcp.ask_tool_definitions());
         tools.extend(self.grease.ask_tool_definitions());
 
-        let system = crate::askcmd::with_json_addendum(
-            crate::askcmd::build_system_prompt_with_capabilities(
+        let system = crate::ai::ask::with_json_addendum(
+            crate::ai::ask::build_system_prompt_with_capabilities(
                 &self.registry,
                 &self.mcp,
                 &self.grease,
@@ -996,7 +996,7 @@ impl Session {
         let state = AskLoopState {
             system,
             tools,
-            history: vec![AskTurn::User(crate::askcmd::user_content_with_stdin(
+            history: vec![AskTurn::User(crate::ai::ask::user_content_with_stdin(
                 &base_transcript,
                 &args.prompt,
                 args.stdin.as_deref(),
@@ -1018,10 +1018,10 @@ impl Session {
     /// Allow); this gates only the `ask` itself.
     async fn run_ask_pipe(
         &mut self,
-        pipe: crate::askcmd::AskTailPipe,
+        pipe: crate::ai::ask::AskTailPipe,
         pid: Option<u32>,
     ) -> LineResult {
-        let crate::askcmd::AskTailPipe {
+        let crate::ai::ask::AskTailPipe {
             upstream,
             args,
             elevated,
@@ -1077,14 +1077,14 @@ impl Session {
     /// `--fresh`, a copy of the parent for `--inherit`), and stash it on `self.repl`. Returns the
     /// resolved model id for the prompt banner, or an `Err` message (unknown provider / no provider).
     /// Native-only — the durable agent returns an honest message from `eval_line` instead.
-    pub fn repl_start(&mut self, args: &crate::askcmd::ReplArgs) -> Result<String, String> {
+    pub fn repl_start(&mut self, args: &crate::ai::ask::ReplArgs) -> Result<String, String> {
         if self.ask_provider.is_none() {
             return Err("ask repl: no model provider configured\n".to_string());
         }
         let (model, _warning) = self.resolve_ask_model(args.model.as_deref())?;
         let transcript = match args.seed {
-            crate::askcmd::ReplSeed::Fresh => Transcript::new(),
-            crate::askcmd::ReplSeed::Inherit => self.transcript.lock().unwrap().clone(),
+            crate::ai::ask::ReplSeed::Fresh => Transcript::new(),
+            crate::ai::ask::ReplSeed::Inherit => self.transcript.lock().unwrap().clone(),
         };
         self.repl = Some(ReplState { transcript, model });
         Ok(self.repl.as_ref().unwrap().model.clone())
@@ -1129,7 +1129,7 @@ impl Session {
     /// into the REPL transcript, and return the reply text. Conversational only (no shell tools) —
     /// the REPL is a chat surface, distinct from agentic `ask`. Requires an active REPL.
     pub async fn repl_turn(&mut self, prompt: &str) -> String {
-        use crate::askcmd::AskTurn;
+        use crate::ai::ask::AskTurn;
         let Some(repl) = self.repl.as_ref() else {
             return "ask repl: no active session\n".to_string();
         };
@@ -1137,9 +1137,9 @@ impl Session {
         let context = String::from_utf8_lossy(&repl.transcript.render()).into_owned();
 
         let state = AskLoopState {
-            system: crate::askcmd::build_system_prompt_with_mcp(&self.registry, &self.mcp),
+            system: crate::ai::ask::build_system_prompt_with_mcp(&self.registry, &self.mcp),
             tools: Vec::new(), // conversational: the REPL doesn't expose shell tools
-            history: vec![AskTurn::User(crate::askcmd::user_content(&context, prompt))],
+            history: vec![AskTurn::User(crate::ai::ask::user_content(&context, prompt))],
             model,
             trace: Vec::new(),
             blanket_authorized: false,
@@ -1209,14 +1209,14 @@ impl Session {
     /// transcript lock is never held across the await), the provider is `take()`n and restored, and a
     /// single `SUMMARIZE_SYSTEM_PROMPT` turn is sent with no tools.
     async fn summarize_text(&mut self, text: &str, model: &str) -> Result<Option<String>, String> {
-        use crate::askcmd::AskTurn;
+        use crate::ai::ask::AskTurn;
 
         let Some(provider) = self.ask_provider.take() else {
             return Ok(None);
         };
         let resp = provider
             .turn(
-                Some(crate::askcmd::SUMMARIZE_SYSTEM_PROMPT),
+                Some(crate::ai::ask::SUMMARIZE_SYSTEM_PROMPT),
                 &[AskTurn::User(text.to_string())],
                 &[],
                 model,
@@ -1254,7 +1254,7 @@ impl Session {
     }
 
     /// Resolve the model id `ask` should target: `--model` (if given) > the ask.toml default > the
-    /// built-in [`crate::askcmd::DEFAULT_MODEL`]. Returns `(bare_model_id, optional_warning)` — the
+    /// built-in [`crate::ai::ask::DEFAULT_MODEL`]. Returns `(bare_model_id, optional_warning)` — the
     /// `anthropic/` prefix is stripped for the provider. An unknown `provider/` prefix is an `Err`
     /// (surfaced before any model call). An ask.toml parse error is a non-fatal warning that falls
     /// back to the built-in default.
@@ -1264,12 +1264,12 @@ impl Session {
             m.to_string()
         } else {
             let home = self.shell_home();
-            match crate::askconfig::default_model(&home) {
+            match crate::ai::config::default_model(&home) {
                 Ok(Some(m)) => m,
-                Ok(None) => crate::askcmd::DEFAULT_MODEL.to_string(),
+                Ok(None) => crate::ai::ask::DEFAULT_MODEL.to_string(),
                 Err(e) => {
                     warning = Some(format!("ask: {e}; using the built-in default\n"));
-                    crate::askcmd::DEFAULT_MODEL.to_string()
+                    crate::ai::ask::DEFAULT_MODEL.to_string()
                 }
             }
         };
@@ -1347,10 +1347,10 @@ impl Session {
     async fn drive_ask_loop(
         &mut self,
         mut state: AskLoopState,
-        mut pending_results: Vec<crate::askcmd::AskToolResult>,
+        mut pending_results: Vec<crate::ai::ask::AskToolResult>,
         pid: Option<u32>,
     ) -> LineResult {
-        use crate::askcmd::AskTurn;
+        use crate::ai::ask::AskTurn;
 
         let Some(mut provider) = self.ask_provider.take() else {
             return LineResult::from_outcome(
@@ -1479,7 +1479,7 @@ impl Session {
         // the JSON on stdout, exit 0, trace still on stderr. Otherwise exit 6 with the raw text on
         // stderr so it isn't lost (README: "raw model response emitted to stderr").
         if state.json {
-            let candidate = crate::askcmd::strip_json_fence(&final_text);
+            let candidate = crate::ai::ask::strip_json_fence(&final_text);
             match serde_json::from_str::<serde_json::Value>(candidate) {
                 Ok(_) => {
                     return LineResult::from_outcome(
@@ -1558,7 +1558,7 @@ impl Session {
         pause: AskPause,
         pid: Option<u32>,
     ) -> LineResult {
-        use crate::askcmd::{AskToolResult, AskTurn};
+        use crate::ai::ask::{AskToolResult, AskTurn};
 
         // An abort (Ctrl-C, or `kill <paused-pid>`) terminates the WHOLE ask, not just this tool call:
         // exit 130 with the trace so far. The paused row is reaped here.
@@ -1661,11 +1661,11 @@ impl Session {
     /// result carrying the code (the model must see failures).
     async fn execute_ask_tool(
         &mut self,
-        call: &crate::askcmd::AskToolCall,
+        call: &crate::ai::ask::AskToolCall,
         blanket_authorized: bool,
         trace: &mut Vec<u8>,
     ) -> ToolStep {
-        use crate::askcmd::AskToolResult;
+        use crate::ai::ask::AskToolResult;
 
         let done_err = |msg: String| {
             ToolStep::Done(AskToolResult {
@@ -1676,7 +1676,7 @@ impl Session {
         };
 
         // The `prompt_user` tool: pause and ask the human directly; the answer becomes the result.
-        if call.name == crate::askcmd::PROMPT_USER_TOOL {
+        if call.name == crate::ai::ask::PROMPT_USER_TOOL {
             let question = match serde_json::from_str::<serde_json::Value>(&call.arguments_json) {
                 Ok(v) => match v.get("question").and_then(|q| q.as_str()) {
                     Some(s) => s.to_string(),
@@ -1740,7 +1740,7 @@ impl Session {
                 }
             }
             line
-        } else if call.name == crate::askcmd::SHELL_TOOL {
+        } else if call.name == crate::ai::ask::SHELL_TOOL {
             // Extract the `command` string from the tool arguments.
             match serde_json::from_str::<serde_json::Value>(&call.arguments_json) {
                 Ok(v) => match v.get("command").and_then(|c| c.as_str()) {
@@ -1758,7 +1758,7 @@ impl Session {
         };
 
         // Guard: `ask` cannot call itself.
-        if crate::askcmd::classify(&command).is_some() {
+        if crate::ai::ask::classify(&command).is_some() {
             trace.extend_from_slice(format!("[tool] $ {command}\n[tool] refused: ask cannot call itself\n").as_bytes());
             return done_err("ask cannot call itself".into());
         }
@@ -1806,11 +1806,11 @@ impl Session {
     /// truncated). Shared by the inline path and the post-approval resume. Emits the `[tool]` trace.
     async fn run_shell_tool(
         &mut self,
-        call: &crate::askcmd::AskToolCall,
+        call: &crate::ai::ask::AskToolCall,
         command: &str,
         blanket_authorized: bool,
         trace: &mut Vec<u8>,
-    ) -> crate::askcmd::AskToolResult {
+    ) -> crate::ai::ask::AskToolResult {
         let result = self.run_command(command, None, blanket_authorized).await;
         trace.extend_from_slice(
             format!("[tool] $ {command}\n[tool] exit {}\n", result.exit_code).as_bytes(),
@@ -1820,7 +1820,7 @@ impl Session {
             "stderr": truncate_tool_output(&result.stderr),
             "exit_code": result.exit_code,
         });
-        crate::askcmd::AskToolResult {
+        crate::ai::ask::AskToolResult {
             id: call.id.clone(),
             name: call.name.clone(),
             outcome: Ok(payload.to_string()),
@@ -2999,7 +2999,7 @@ impl Session {
         if line.chars().any(|c| "|&;<>`$".contains(c)) {
             return None;
         }
-        let words = crate::askcmd::dequote_words(line)?;
+        let words = crate::ai::ask::dequote_words(line)?;
         let mut it = words.iter();
         let mut first = it.next()?.as_str();
         if first == "sudo" {
@@ -3173,7 +3173,7 @@ impl Session {
     /// Positional args fill the template's `{param}` placeholders in order; `--param value` fills by
     /// name. The read awaits under the reactor (top-level only).
     async fn run_mcp_template(&mut self, line: &str) -> LineResult {
-        let words = match crate::askcmd::dequote_words(line) {
+        let words = match crate::ai::ask::dequote_words(line) {
             Some(w) => w,
             None => return LineResult::from_outcome(Vec::new(), b"mcp template: parse error\n".to_vec(), 2),
         };
@@ -3252,7 +3252,7 @@ impl Session {
         };
 
         let model = model_override.or_else(|| package.model.clone());
-        let args = crate::askcmd::AskArgs {
+        let args = crate::ai::ask::AskArgs {
             prompt: filled,
             model,
             fresh: false,
@@ -3305,7 +3305,7 @@ impl Session {
     /// dispatch a reserved subcommand), and invoke it via the injected wRPC invoker in the selected mode
     /// (await / trigger / schedule). Missing invoker → honest "needs a cluster"; unknown method → exit 2.
     async fn run_agent(&mut self, line: &str) -> LineResult {
-        let words = match crate::askcmd::dequote_words(line) {
+        let words = match crate::ai::ask::dequote_words(line) {
             Some(w) => w,
             None => return LineResult::from_outcome(Vec::new(), b"agent: parse error\n".to_vec(), 2),
         };
@@ -3547,7 +3547,7 @@ impl Session {
     /// Generated help for an installed command-package line ending in `--help` (prompt or script).
     /// `None` if the line isn't an installed command package or doesn't request help.
     fn pkg_help_for(&self, line: &str) -> Option<String> {
-        let words = crate::askcmd::dequote_words(line)?;
+        let words = crate::ai::ask::dequote_words(line)?;
         let name = words.first()?;
         if words.iter().any(|w| w == "--help") {
             return self.grease.pkg_help(name);
@@ -4297,7 +4297,7 @@ fn mcp_resource_rel_path(uri: &str) -> String {
 /// The leading command word of a top-level (operator-free) `line`, with any `sudo` prefix stripped —
 /// for matching against installed grease prompts. `None` for a nested line (operators present).
 fn prompt_leading_word(line: &str) -> Option<String> {
-    let words = crate::askcmd::dequote_words(line)?;
+    let words = crate::ai::ask::dequote_words(line)?;
     let first = words.first()?;
     if first == "sudo" {
         words.get(1).cloned()
@@ -4314,7 +4314,7 @@ fn prompt_leading_word(line: &str) -> Option<String> {
 fn parse_pkg_invocation(
     line: &str,
 ) -> Result<(String, Vec<(String, String)>, Option<String>), LineResult> {
-    let words = crate::askcmd::dequote_words(line)
+    let words = crate::ai::ask::dequote_words(line)
         .ok_or_else(|| LineResult::from_outcome(Vec::new(), b"grease: parse error\n".to_vec(), 2))?;
     let name = words[0].clone();
     let mut provided: Vec<(String, String)> = Vec::new();
@@ -4533,7 +4533,7 @@ fn is_context_summarize(line: &str) -> bool {
 /// pipeline's confirmation (the deferred path re-runs a line string). Flags come first, then the
 /// single-quoted prompt. The captured stdin travels separately via `next_ask_stdin`, so it is NOT
 /// embedded here. Single quotes in the prompt are escaped bash-style (`'\''`).
-fn ask_reconstruct(args: &crate::askcmd::AskArgs) -> String {
+fn ask_reconstruct(args: &crate::ai::ask::AskArgs) -> String {
     let mut line = String::from("ask");
     if args.fresh {
         line.push_str(" --fresh");
@@ -4644,7 +4644,7 @@ async fn build_shell() -> Result<Shell, brush_core::Error> {
         .builtins(crate::statcmd::builtins())
         .builtins(crate::findcmd::builtins())
         .builtins(crate::xargscmd::builtins())
-        .builtins(crate::modelcmd::builtins())
+        .builtins(crate::ai::model::builtins())
         .builtins(crate::contextcmd::builtins())
         .builtins(crate::interceptstub::builtins())
         .build()
@@ -4873,8 +4873,8 @@ mod tests {
     #[derive(Clone, Default)]
     struct SeenTurn {
         system: Option<String>,
-        history: Vec<crate::askcmd::AskTurn>,
-        tools: Vec<crate::askcmd::AskTool>,
+        history: Vec<crate::ai::ask::AskTurn>,
+        tools: Vec<crate::ai::ask::AskTool>,
         model: String,
     }
 
@@ -4883,7 +4883,7 @@ mod tests {
         /// `AskRequest.prompt`/`transcript` accessors the tests used.
         fn user_content(&self) -> String {
             match self.history.first() {
-                Some(crate::askcmd::AskTurn::User(s)) => s.clone(),
+                Some(crate::ai::ask::AskTurn::User(s)) => s.clone(),
                 _ => String::new(),
             }
         }
@@ -4895,7 +4895,7 @@ mod tests {
     struct FakeProvider {
         /// Scripted responses, consumed front-to-back. When exhausted, a terminal empty text is
         /// returned (so a mis-scripted test terminates rather than looping).
-        scripted: std::sync::Arc<Mutex<std::collections::VecDeque<crate::askcmd::AskResponse>>>,
+        scripted: std::sync::Arc<Mutex<std::collections::VecDeque<crate::ai::ask::AskResponse>>>,
         /// Every `turn` call, in order.
         seen: std::sync::Arc<Mutex<Vec<SeenTurn>>>,
     }
@@ -4904,14 +4904,14 @@ mod tests {
         /// A provider that replies once with `reply` text and records what it saw.
         fn reply(reply: &str, seen: std::sync::Arc<Mutex<Vec<SeenTurn>>>) -> Self {
             Self::scripted(
-                vec![crate::askcmd::AskResponse::text(reply)],
+                vec![crate::ai::ask::AskResponse::text(reply)],
                 seen,
             )
         }
 
         /// A provider driven by an explicit script of per-turn responses.
         fn scripted(
-            responses: Vec<crate::askcmd::AskResponse>,
+            responses: Vec<crate::ai::ask::AskResponse>,
             seen: std::sync::Arc<Mutex<Vec<SeenTurn>>>,
         ) -> Self {
             Self {
@@ -4922,12 +4922,12 @@ mod tests {
     }
 
     /// A single-`shell`-tool-call response for scripting the agentic loop in tests.
-    fn shell_tool_call(id: &str, command: &str) -> crate::askcmd::AskResponse {
-        crate::askcmd::AskResponse {
+    fn shell_tool_call(id: &str, command: &str) -> crate::ai::ask::AskResponse {
+        crate::ai::ask::AskResponse {
             text: String::new(),
-            tool_calls: vec![crate::askcmd::AskToolCall {
+            tool_calls: vec![crate::ai::ask::AskToolCall {
                 id: id.to_string(),
-                name: crate::askcmd::SHELL_TOOL.to_string(),
+                name: crate::ai::ask::SHELL_TOOL.to_string(),
                 arguments_json: serde_json::json!({ "command": command }).to_string(),
             }],
             finished_for_tools: true,
@@ -4940,11 +4940,11 @@ mod tests {
     fn last_tool_result(
         seen: &std::sync::Arc<Mutex<Vec<SeenTurn>>>,
         call_id: &str,
-    ) -> Option<crate::askcmd::AskToolResult> {
+    ) -> Option<crate::ai::ask::AskToolResult> {
         let turns = seen.lock().unwrap();
         for st in turns.iter().rev() {
             for turn in st.history.iter().rev() {
-                if let crate::askcmd::AskTurn::ToolResults(results) = turn {
+                if let crate::ai::ask::AskTurn::ToolResults(results) = turn {
                     if let Some(r) = results.iter().find(|r| r.id == call_id) {
                         return Some(r.clone());
                     }
@@ -4955,14 +4955,14 @@ mod tests {
     }
 
     #[async_trait::async_trait(?Send)]
-    impl crate::askcmd::AskProvider for FakeProvider {
+    impl crate::ai::ask::AskProvider for FakeProvider {
         async fn turn(
             &self,
             system: Option<&str>,
-            history: &[crate::askcmd::AskTurn],
-            tools: &[crate::askcmd::AskTool],
+            history: &[crate::ai::ask::AskTurn],
+            tools: &[crate::ai::ask::AskTool],
             model: &str,
-        ) -> crate::askcmd::AskResponse {
+        ) -> crate::ai::ask::AskResponse {
             self.seen.lock().unwrap().push(SeenTurn {
                 system: system.map(str::to_string),
                 history: history.to_vec(),
@@ -4973,7 +4973,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .pop_front()
-                .unwrap_or_else(|| crate::askcmd::AskResponse::text(""))
+                .unwrap_or_else(|| crate::ai::ask::AskResponse::text(""))
         }
     }
 
@@ -6009,7 +6009,7 @@ mod tests {
             assert!(info.contains("[skill]") && info.contains("SKILL.md") && info.contains("lint-all"), "info: {info}");
 
             // The skill is surfaced in the agentic system prompt (context, not a callable tool).
-            let sys = crate::askcmd::build_system_prompt_with_capabilities(
+            let sys = crate::ai::ask::build_system_prompt_with_capabilities(
                 &session.registry,
                 &session.mcp,
                 &session.grease,
@@ -6404,9 +6404,9 @@ mod tests {
             let ask_seen = std::sync::Arc::new(Mutex::new(Vec::new()));
             session.set_ask_provider(Box::new(FakeProvider::scripted(
                 vec![
-                    crate::askcmd::AskResponse {
+                    crate::ai::ask::AskResponse {
                         text: String::new(),
-                        tool_calls: vec![crate::askcmd::AskToolCall {
+                        tool_calls: vec![crate::ai::ask::AskToolCall {
                             id: "p1".into(),
                             name: "prompt__tldr".into(),
                             arguments_json: serde_json::json!({ "file": "report.md" }).to_string(),
@@ -6414,8 +6414,8 @@ mod tests {
                         finished_for_tools: true,
                         error: None,
                     },
-                    crate::askcmd::AskResponse::text("the one-line summary"), // nested prompt reply
-                    crate::askcmd::AskResponse::text("summarized it"),        // outer ask final text
+                    crate::ai::ask::AskResponse::text("the one-line summary"), // nested prompt reply
+                    crate::ai::ask::AskResponse::text("summarized it"),        // outer ask final text
                 ],
                 ask_seen.clone(),
             )));
@@ -6457,9 +6457,9 @@ mod tests {
             session.eval_line("sudo grease install greet").await;
 
             session.set_ask_provider(Box::new(FakeProvider::scripted(
-                vec![crate::askcmd::AskResponse {
+                vec![crate::ai::ask::AskResponse {
                     text: String::new(),
-                    tool_calls: vec![crate::askcmd::AskToolCall {
+                    tool_calls: vec![crate::ai::ask::AskToolCall {
                         id: "p1".into(),
                         name: "prompt__greet".into(),
                         arguments_json: "{}".into(),
@@ -6785,9 +6785,9 @@ mod tests {
             let ask_seen = std::sync::Arc::new(Mutex::new(Vec::new()));
             session.set_ask_provider(Box::new(FakeProvider::scripted(
                 vec![
-                    crate::askcmd::AskResponse {
+                    crate::ai::ask::AskResponse {
                         text: String::new(),
-                        tool_calls: vec![crate::askcmd::AskToolCall {
+                        tool_calls: vec![crate::ai::ask::AskToolCall {
                             id: "m1".into(),
                             name: "mcp__demo__echo".into(),
                             arguments_json: serde_json::json!({ "text": "hi mcp" }).to_string(),
@@ -6795,7 +6795,7 @@ mod tests {
                         finished_for_tools: true,
                         error: None,
                     },
-                    crate::askcmd::AskResponse::text("done, the tool ran"),
+                    crate::ai::ask::AskResponse::text("done, the tool ran"),
                 ],
                 ask_seen.clone(),
             )));
@@ -6830,9 +6830,9 @@ mod tests {
 
             session.set_ask_provider(Box::new(FakeProvider::scripted(
                 vec![
-                    crate::askcmd::AskResponse {
+                    crate::ai::ask::AskResponse {
                         text: String::new(),
-                        tool_calls: vec![crate::askcmd::AskToolCall {
+                        tool_calls: vec![crate::ai::ask::AskToolCall {
                             id: "m1".into(),
                             name: "mcp__demo__echo".into(),
                             arguments_json: serde_json::json!({ "text": "x" }).to_string(),
@@ -6840,7 +6840,7 @@ mod tests {
                         finished_for_tools: true,
                         error: None,
                     },
-                    crate::askcmd::AskResponse::text("finished"),
+                    crate::ai::ask::AskResponse::text("finished"),
                 ],
                 std::sync::Arc::new(Mutex::new(Vec::new())),
             )));
@@ -6900,7 +6900,7 @@ mod tests {
                 content.contains("what did I just echo?"),
                 "user content should carry the prompt, got: {content}"
             );
-            assert_eq!(turns[0].model, crate::askcmd::DEFAULT_MODEL);
+            assert_eq!(turns[0].model, crate::ai::ask::DEFAULT_MODEL);
             assert!(
                 content.contains("marker_abc"),
                 "transcript context should include the prior echo, got: {content}"
@@ -6918,7 +6918,7 @@ mod tests {
             // Several identical summaries: each eviction re-opens the pending span and re-summarizes,
             // so more than one summarize turn can fire across the run (the last one wins the marker).
             session.set_ask_provider(Box::new(FakeProvider::scripted(
-                vec![crate::askcmd::AskResponse::text("SUMMARY: earlier work happened"); 8],
+                vec![crate::ai::ask::AskResponse::text("SUMMARY: earlier work happened"); 8],
                 seen.clone(),
             )));
 
@@ -6940,7 +6940,7 @@ mod tests {
             // not the whole transcript.
             let turns = seen.lock().unwrap().clone();
             assert!(
-                turns.iter().any(|t| t.system.as_deref() == Some(crate::askcmd::SUMMARIZE_SYSTEM_PROMPT)),
+                turns.iter().any(|t| t.system.as_deref() == Some(crate::ai::ask::SUMMARIZE_SYSTEM_PROMPT)),
                 "a summarize turn should have fired"
             );
         });
@@ -7337,8 +7337,8 @@ mod tests {
             let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
             session.set_ask_provider(Box::new(FakeProvider::scripted(
                 vec![
-                    crate::askcmd::AskResponse::text("first reply"),
-                    crate::askcmd::AskResponse::text("second reply"),
+                    crate::ai::ask::AskResponse::text("first reply"),
+                    crate::ai::ask::AskResponse::text("second reply"),
                 ],
                 seen.clone(),
             )));
@@ -7346,9 +7346,9 @@ mod tests {
             // Put a marker in the MAIN transcript; the REPL (fresh) must NOT see it.
             session.run_line("echo main_transcript_marker").await;
 
-            let args = crate::askcmd::ReplArgs {
+            let args = crate::ai::ask::ReplArgs {
                 model: None,
-                seed: crate::askcmd::ReplSeed::Fresh,
+                seed: crate::ai::ask::ReplSeed::Fresh,
             };
             session.repl_start(&args).unwrap();
 
@@ -7383,12 +7383,12 @@ mod tests {
                 "ok",
                 std::sync::Arc::new(Mutex::new(Vec::new())),
             )));
-            let args = crate::askcmd::ReplArgs {
+            let args = crate::ai::ask::ReplArgs {
                 model: None,
-                seed: crate::askcmd::ReplSeed::Fresh,
+                seed: crate::ai::ask::ReplSeed::Fresh,
             };
             session.repl_start(&args).unwrap();
-            assert_eq!(session.repl_model().as_deref(), Some(crate::askcmd::DEFAULT_MODEL));
+            assert_eq!(session.repl_model().as_deref(), Some(crate::ai::ask::DEFAULT_MODEL));
 
             // :model switches (anthropic/ prefix stripped).
             let (out, exit) = session.repl_meta(":model anthropic/claude-sonnet-5").unwrap();
@@ -7483,7 +7483,7 @@ mod tests {
             session.set_ask_provider(Box::new(FakeProvider::scripted(
                 vec![
                     shell_tool_call("c1", "echo MARK_42"),
-                    crate::askcmd::AskResponse::text("done: I saw MARK_42"),
+                    crate::ai::ask::AskResponse::text("done: I saw MARK_42"),
                 ],
                 seen.clone(),
             )));
@@ -7512,7 +7512,7 @@ mod tests {
             session.set_ask_provider(Box::new(FakeProvider::scripted(
                 vec![
                     shell_tool_call("c1", "curl https://example.com"),
-                    crate::askcmd::AskResponse::text("I could not fetch it"),
+                    crate::ai::ask::AskResponse::text("I could not fetch it"),
                 ],
                 seen.clone(),
             )));
@@ -7548,7 +7548,7 @@ mod tests {
             session.set_ask_provider(Box::new(FakeProvider::scripted(
                 vec![
                     shell_tool_call("c1", &format!("rm {}", path.display())),
-                    crate::askcmd::AskResponse::text("could not remove"),
+                    crate::ai::ask::AskResponse::text("could not remove"),
                 ],
                 seen.clone(),
             )));
@@ -7578,7 +7578,7 @@ mod tests {
             session.set_ask_provider(Box::new(FakeProvider::scripted(
                 vec![
                     shell_tool_call("c1", &format!("curl {url}")),
-                    crate::askcmd::AskResponse::text("done"),
+                    crate::ai::ask::AskResponse::text("done"),
                 ],
                 seen.clone(),
             )));
@@ -7605,7 +7605,7 @@ mod tests {
                 vec![
                     shell_tool_call("c1", &format!("curl {url_a}")),
                     shell_tool_call("c2", &format!("curl {url_b}")),
-                    crate::askcmd::AskResponse::text("done"),
+                    crate::ai::ask::AskResponse::text("done"),
                 ],
                 seen.clone(),
             )));
@@ -7632,11 +7632,11 @@ mod tests {
         on_rt(async {
             let mut session = Session::new().await.unwrap();
             let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
-            let prompt_call = crate::askcmd::AskResponse {
+            let prompt_call = crate::ai::ask::AskResponse {
                 text: String::new(),
-                tool_calls: vec![crate::askcmd::AskToolCall {
+                tool_calls: vec![crate::ai::ask::AskToolCall {
                     id: "p1".into(),
-                    name: crate::askcmd::PROMPT_USER_TOOL.into(),
+                    name: crate::ai::ask::PROMPT_USER_TOOL.into(),
                     arguments_json: serde_json::json!({ "question": "What port should I use?" })
                         .to_string(),
                 }],
@@ -7644,7 +7644,7 @@ mod tests {
                 error: None,
             };
             session.set_ask_provider(Box::new(FakeProvider::scripted(
-                vec![prompt_call, crate::askcmd::AskResponse::text("using port 8080")],
+                vec![prompt_call, crate::ai::ask::AskResponse::text("using port 8080")],
                 seen.clone(),
             )));
 
@@ -7666,18 +7666,18 @@ mod tests {
         on_rt(async {
             let mut session = Session::new().await.unwrap();
             let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
-            let prompt_call = crate::askcmd::AskResponse {
+            let prompt_call = crate::ai::ask::AskResponse {
                 text: String::new(),
-                tool_calls: vec![crate::askcmd::AskToolCall {
+                tool_calls: vec![crate::ai::ask::AskToolCall {
                     id: "p1".into(),
-                    name: crate::askcmd::PROMPT_USER_TOOL.into(),
+                    name: crate::ai::ask::PROMPT_USER_TOOL.into(),
                     arguments_json: serde_json::json!({ "question": "continue?" }).to_string(),
                 }],
                 finished_for_tools: true,
                 error: None,
             };
             session.set_ask_provider(Box::new(FakeProvider::scripted(
-                vec![prompt_call, crate::askcmd::AskResponse::text("should not reach")],
+                vec![prompt_call, crate::ai::ask::AskResponse::text("should not reach")],
                 seen.clone(),
             )));
 
@@ -7699,8 +7699,8 @@ mod tests {
             let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
             session.set_ask_provider(Box::new(FakeProvider::scripted(
                 vec![
-                    crate::askcmd::AskResponse::text("a"),
-                    crate::askcmd::AskResponse::text("b"),
+                    crate::ai::ask::AskResponse::text("a"),
+                    crate::ai::ask::AskResponse::text("b"),
                 ],
                 seen.clone(),
             )));
@@ -7761,7 +7761,7 @@ mod tests {
             session.set_ask_provider(Box::new(FakeProvider::scripted(
                 vec![
                     shell_tool_call("c1", "ask what is 2+2"),
-                    crate::askcmd::AskResponse::text("ok"),
+                    crate::ai::ask::AskResponse::text("ok"),
                 ],
                 seen.clone(),
             )));
@@ -7783,7 +7783,7 @@ mod tests {
             session.set_ask_provider(Box::new(FakeProvider::scripted(
                 vec![
                     shell_tool_call("c1", "context clear"),
-                    crate::askcmd::AskResponse::text("ok"),
+                    crate::ai::ask::AskResponse::text("ok"),
                 ],
                 seen.clone(),
             )));
@@ -7801,18 +7801,18 @@ mod tests {
         on_rt(async {
             let mut session = Session::new().await.unwrap();
             let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
-            let bad = crate::askcmd::AskResponse {
+            let bad = crate::ai::ask::AskResponse {
                 text: String::new(),
-                tool_calls: vec![crate::askcmd::AskToolCall {
+                tool_calls: vec![crate::ai::ask::AskToolCall {
                     id: "c1".into(),
-                    name: crate::askcmd::SHELL_TOOL.into(),
+                    name: crate::ai::ask::SHELL_TOOL.into(),
                     arguments_json: "{".into(), // not valid JSON
                 }],
                 finished_for_tools: true,
                 error: None,
             };
             session.set_ask_provider(Box::new(FakeProvider::scripted(
-                vec![bad, crate::askcmd::AskResponse::text("recovered")],
+                vec![bad, crate::ai::ask::AskResponse::text("recovered")],
                 seen.clone(),
             )));
 
@@ -7855,8 +7855,8 @@ mod tests {
             let mut session = Session::new().await.unwrap();
             session.set_ask_provider(Box::new(FakeProvider::scripted(
                 vec![
-                    crate::askcmd::AskResponse::text("first"),
-                    crate::askcmd::AskResponse::text("second"),
+                    crate::ai::ask::AskResponse::text("first"),
+                    crate::ai::ask::AskResponse::text("second"),
                 ],
                 std::sync::Arc::new(Mutex::new(Vec::new())),
             )));

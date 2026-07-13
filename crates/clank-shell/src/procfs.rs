@@ -152,7 +152,7 @@ pub fn list_children(dir: &str) -> Option<Vec<String>> {
 pub fn system_prompt_stub() -> String {
     match crate::sysprompt::active() {
         Some(prompt) => (*prompt).clone(),
-        None => crate::askcmd::build_system_prompt(crate::binfs::registry()),
+        None => crate::ai::ask::build_system_prompt(crate::binfs::registry()),
     }
 }
 

@@ -363,12 +363,12 @@ impl GreaseState {
         self.packages.iter().filter_map(|p| self.manifest_for(p.name())).collect()
     }
 
-    /// Installed prompts (and only prompts) as [`crate::askcmd::AskTool`]s, so the model can invoke
+    /// Installed prompts (and only prompts) as [`crate::ai::ask::AskTool`]s, so the model can invoke
     /// prompts as tools. The tool name is namespaced `prompt__<name>` (mirroring `mcp__<server>__<tool>`;
     /// the executor decodes it back to a `<name> --arg value …` line). **Scripts and skills are
     /// excluded** — scripts run local shell and are reachable via the plain `shell` tool; skills are
     /// context, not tools.
-    pub fn ask_tool_definitions(&self) -> Vec<crate::askcmd::AskTool> {
+    pub fn ask_tool_definitions(&self) -> Vec<crate::ai::ask::AskTool> {
         self.packages
             .iter()
             .filter_map(|pkg| match &pkg.payload {
@@ -391,7 +391,7 @@ impl GreaseState {
                 let schema = serde_json::json!({
                     "type": "object", "properties": props, "required": required
                 });
-                crate::askcmd::AskTool {
+                crate::ai::ask::AskTool {
                     name: format!("prompt__{}", p.name),
                     description: format!("[prompt] {}", p.description),
                     parameters_schema: schema.to_string(),

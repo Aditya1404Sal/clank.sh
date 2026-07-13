@@ -4,7 +4,7 @@
 //! plus installed MCP tools, grease prompts, and skills. But [`crate::procfs`]'s resolver is reached
 //! from a synchronous Brush builtin (`cat`) with no access to the live `Session` (its `registry`/`mcp`/
 //! `grease`). So the `Session` renders the full prompt once per `run_line` (via
-//! [`crate::askcmd::build_system_prompt_with_capabilities`] — the same call `run_ask` makes) and
+//! [`crate::ai::ask::build_system_prompt_with_capabilities`] — the same call `run_ask` makes) and
 //! installs the string here; the procfs resolver reads it. Mirrors the per-line thread-local install
 //! pattern of [`crate::proctable`] / [`crate::mcpfs`] / [`crate::dynreg`] exactly.
 //!

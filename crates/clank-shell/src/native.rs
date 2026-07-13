@@ -26,7 +26,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         // `ask repl` is a native-terminal feature: run the interactive REPL loop inline (the native
         // driver owns the terminal, so it can block on human input between turns — the durable agent
         // cannot, and returns an honest message from `eval_line`). See `Session::repl_*`.
-        if let Some(args) = crate::askcmd::classify_repl(&line_str) {
+        if let Some(args) = crate::ai::ask::classify_repl(&line_str) {
             run_repl(&mut session, &args).await?;
             continue;
         }
@@ -66,7 +66,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// transcript is untouched during the REPL — only the isolated one grows.
 async fn run_repl(
     session: &mut Session,
-    args: &crate::askcmd::ReplArgs,
+    args: &crate::ai::ask::ReplArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let model = match session.repl_start(args) {
         Ok(m) => m,
