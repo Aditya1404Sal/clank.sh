@@ -15,20 +15,16 @@
 //! on both targets through [`session::Session`].
 
 pub mod ai;
-mod awkcmd;
 pub mod authz;
 pub mod binfs;
 mod contextcmd;
-mod coreutils;
 pub mod dynreg;
-mod findcmd;
 pub mod golem;
 pub mod grease;
 mod httpcmd;
 mod interceptstub;
 mod killcmd;
 pub mod logging;
-mod mancmd;
 pub mod manifest;
 pub mod mcp;
 pub mod mcpfs;
@@ -39,12 +35,9 @@ pub mod promptuser;
 mod ps;
 pub mod registry;
 pub mod session;
-mod statcmd;
 pub mod sysprompt;
-mod texttools;
+mod tools;
 pub mod typecmd;
-mod which;
-mod xargscmd;
 
 // The `wasi:cli/run` REPL driver. Gated behind the `repl-driver` feature so that dependents which
 // only want the shared `Session` core (e.g. the Golem agent crate, which exports its own

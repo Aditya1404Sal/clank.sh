@@ -7,7 +7,7 @@
 //! every future surface (`type`, `ps`, `ask` tool packaging, authorization) reads them by name.
 //!
 //! **Drift invariant:** each clank builtin must have exactly one manifest and vice versa. The two
-//! lists are authored in the same modules ([`crate::coreutils`], [`crate::texttools`]) — a builtin
+//! lists are authored in the same modules ([`crate::tools::coreutils`], [`crate::tools::texttools`]) — a builtin
 //! registration next to its manifest — and a test here cross-checks that the registry's names match
 //! the builtins actually registered, mirroring the README's "a package that cannot provide a
 //! manifest is rejected at install time."
@@ -134,28 +134,28 @@ impl CommandRegistry {
 /// special-builtin / `parent-shell` + `shell-internal` classification work).
 pub fn build() -> CommandRegistry {
     let mut registry = CommandRegistry::default();
-    for manifest in crate::coreutils::manifests() {
+    for manifest in crate::tools::coreutils::manifests() {
         registry.insert(manifest);
     }
-    for manifest in crate::texttools::manifests() {
+    for manifest in crate::tools::texttools::manifests() {
         registry.insert(manifest);
     }
     for manifest in crate::ps::manifests() {
         registry.insert(manifest);
     }
-    for manifest in crate::which::manifests() {
+    for manifest in crate::tools::which::manifests() {
         registry.insert(manifest);
     }
-    for manifest in crate::mancmd::manifests() {
+    for manifest in crate::tools::man::manifests() {
         registry.insert(manifest);
     }
-    for manifest in crate::statcmd::manifests() {
+    for manifest in crate::tools::stat::manifests() {
         registry.insert(manifest);
     }
-    for manifest in crate::findcmd::manifests() {
+    for manifest in crate::tools::find::manifests() {
         registry.insert(manifest);
     }
-    for manifest in crate::xargscmd::manifests() {
+    for manifest in crate::tools::xargs::manifests() {
         registry.insert(manifest);
     }
     for manifest in crate::ai::model::manifests() {
@@ -208,15 +208,15 @@ mod tests {
         // The names clank actually registers on the Brush shell, from the same producers
         // `build_shell` uses. Uses the DefaultShellExtensions so the generic `builtins()` resolves.
         type SE = brush_core::extensions::DefaultShellExtensions;
-        let builtin_names: BTreeSet<String> = crate::coreutils::builtins::<SE>()
+        let builtin_names: BTreeSet<String> = crate::tools::coreutils::builtins::<SE>()
             .into_iter()
-            .chain(crate::texttools::builtins::<SE>())
+            .chain(crate::tools::texttools::builtins::<SE>())
             .chain(crate::ps::builtins::<SE>())
-            .chain(crate::which::builtins::<SE>())
-            .chain(crate::mancmd::builtins::<SE>())
-            .chain(crate::statcmd::builtins::<SE>())
-            .chain(crate::findcmd::builtins::<SE>())
-            .chain(crate::xargscmd::builtins::<SE>())
+            .chain(crate::tools::which::builtins::<SE>())
+            .chain(crate::tools::man::builtins::<SE>())
+            .chain(crate::tools::stat::builtins::<SE>())
+            .chain(crate::tools::find::builtins::<SE>())
+            .chain(crate::tools::xargs::builtins::<SE>())
             .chain(crate::ai::model::builtins::<SE>())
             .chain(crate::contextcmd::builtins::<SE>())
             .chain(crate::interceptstub::builtins::<SE>())

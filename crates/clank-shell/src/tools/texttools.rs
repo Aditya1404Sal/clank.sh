@@ -53,7 +53,7 @@ macro_rules! text_builtin {
                 // Write through Brush's stdout/stderr sinks (captured on wasm), not io::stdout().
                 // `stdin` is Brush's assigned input `OpenFile` — the upstream pipe stage's output when
                 // this command is on the right-hand side of a `|` — so tools can read piped input.
-                let code = crate::coreutils::run_tool(&context, move |stdin, out, err| {
+                let code = crate::tools::coreutils::run_tool(&context, move |stdin, out, err| {
                     match $run(&argv, stdin, out, err) {
                         Ok(code) => code,
                         Err(e) => {
@@ -71,7 +71,7 @@ macro_rules! text_builtin {
 text_builtin!(Jq, "jq", "filter and transform JSON", run_jq);
 text_builtin!(Grep, "grep", "search files for a pattern", run_grep);
 text_builtin!(Sed, "sed", "stream editor (s///, d, p, q; line/regex addresses)", run_sed);
-text_builtin!(Awk, "awk", "pattern scanning and text processing", crate::awkcmd::run_awk);
+text_builtin!(Awk, "awk", "pattern scanning and text processing", crate::tools::awk::run_awk);
 text_builtin!(Diff, "diff", "compare files line by line", run_diff);
 text_builtin!(Patch, "patch", "apply a diff to a file", run_patch);
 text_builtin!(File, "file", "identify file type", run_file);

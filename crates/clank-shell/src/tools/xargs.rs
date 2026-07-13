@@ -4,7 +4,7 @@
 //! shell instead of spawning: each batch becomes a command line run via
 //! `context.shell.run_string(...)`, the same re-entry the `eval` builtin uses. That makes this a
 //! Brush [`Command`] (async execute) rather than a `SimpleCommand`. Stdin is read through
-//! [`crate::coreutils::tool_stdin`], which on wasm enforces the never-read-real-stdin trap guard.
+//! [`crate::tools::coreutils::tool_stdin`], which on wasm enforces the never-read-real-stdin trap guard.
 //!
 //! Subset: whitespace tokenization (or `-d DELIM`), `-n MAX-ARGS` batching, `-I REPLACE`
 //! per-token substitution. Empty input runs nothing (GNU's `--no-run-if-empty` is our default —
@@ -124,7 +124,7 @@ impl builtins::Command for XargsCommand {
         context: ExecutionContext<'_, SE>,
     ) -> Result<ExecutionResult, Self::Error> {
         let mut input = String::new();
-        let _ = crate::coreutils::tool_stdin(&context)
+        let _ = crate::tools::coreutils::tool_stdin(&context)
             .read_to_string(&mut input);
 
         // -I tokenizes by lines (GNU: each replacement is a whole input line), so

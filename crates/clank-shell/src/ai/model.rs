@@ -1,6 +1,6 @@
 //! The `model` builtin: list and configure model providers and the default model.
 //!
-//! `model` is an ordinary Brush [`SimpleCommand`] (like [`which`](crate::which)): it does no HTTP and
+//! `model` is an ordinary Brush [`SimpleCommand`] (like [`which`](crate::tools::which)): it does no HTTP and
 //! touches no `Session` state — only `std::fs` on `~/.config/ask/ask.toml` (see [`crate::ai::config`]).
 //! That makes it free inside pipes and `$(...)` and keeps it out of the Session interception list. The
 //! `ask` path re-reads ask.toml per invocation, so the file is the single source of truth (no cache).
