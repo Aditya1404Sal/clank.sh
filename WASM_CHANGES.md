@@ -38,9 +38,9 @@ target as `OpenFile::File(std::fs::File)` and duplicates it with `File::try_clon
 is `Unsupported` on `wasm32-wasip2`, so `echo > file` **silently discarded the write** on the agent.
 Upstream `main` refactored `OpenFile::File` to hold an `Arc<File>` (clone becomes `Arc::clone` — no
 syscall), which fixes redirects on wasip2, but that fix is not on crates.io. The fork carries it.
-This is why the native capture path in `crates/clank-shell/src/session.rs:3930` can write
+This is why the native capture path in `crates/clank-shell/src/session/mod.rs:1167` can write
 `OpenFile::File(out_fd.into())` (an `Arc` conversion, not a `try_clone`), and why `effective_stdin`
-in `crates/clank-shell/src/coreutils.rs:198` matches on `OpenFile::File(_)`.
+in `crates/clank-shell/src/tools/coreutils.rs:198` matches on `OpenFile::File(_)`.
 
 **(b) "Wall C" — pipelines and `$(...)` without OS pipes or threads.** `std::io::pipe()` is
 unsupported on wasip2 and there is no blocking thread pool. Upstream Brush wires pipeline stages and
@@ -86,7 +86,7 @@ skip) is only picked up when that command crate *itself* is sourced from the for
 crates clank registers is patched individually.
 
 **ACTIVE:** Yes — these are the internal `cat`/`ls`/`cp`/… builtins registered in
-`crates/clank-shell/src/coreutils.rs` (`uu_builtin!` macro at line 260, registration list at 521).
+`crates/clank-shell/src/tools/coreutils.rs` (`uu_builtin!` macro at line 260, registration list at 520).
 
 ---
 
@@ -95,23 +95,23 @@ crates clank registers is patched individually.
 These are not forks — they are wasm-specific branches clank carries itself, alongside the native
 branch, in this repo.
 
-### 3a. In-memory output capture + current-thread runtime — `crates/clank-shell/src/session.rs`
+### 3a. In-memory output capture + current-thread runtime — `crates/clank-shell/src/session/mod.rs`
 
-- **`BufSink`** (`session.rs:4684`): an `Arc<Mutex<Vec<u8>>>` implementing
+- **`BufSink`** (`session/mod.rs:1921`): an `Arc<Mutex<Vec<u8>>>` implementing
   `brush_core::openfiles::Stream`. Its fd-returning trait methods are `#[cfg(unix)]` upstream, so on
   wasm only `Read`/`Write`/`clone_box` are needed. Whole struct is `#[cfg(target_arch = "wasm32")]`.
-- **`OpenFile::Stream` capture** (`session.rs:3956` `execute`, wasm variant): wasm has no anonymous
+- **`OpenFile::Stream` capture** (`session/mod.rs:1194` `execute`, wasm variant): wasm has no anonymous
   temp file to redirect into, so Brush's stdout/stderr fds are set to `OpenFile::Stream(BufSink…)`
-  (lines 3963/3967) and the buffers are drained after the run. The **native** `execute` instead
+  (lines 1200/1204) and the buffers are drained after the run. The **native** `execute` instead
   captures into an anonymous temp file via `OpenFile::File` (the path that also feeds real external
   programs).
-- **Owned current-thread tokio runtime** (`session.rs:262` field `rt`, built at `session.rs:271`
+- **Owned current-thread tokio runtime** (`session/mod.rs:284` field `rt`, built at `session/mod.rs:293`
   with `Builder::new_current_thread()`): wasip2 has no threads, so Brush's internal async is driven
-  on an owned current-thread runtime, `block_on`'d at `session.rs:3973`. Native uses the ambient
+  on an owned current-thread runtime, `block_on`'d at `session/mod.rs:1211`. Native uses the ambient
   multi-thread runtime from `main` (`crates/clank-shell/src/main.rs:11`, `Runtime::new()`).
-- The `rt` field itself is `#[cfg(target_arch = "wasm32")]` (`session.rs:261`).
+- The `rt` field itself is `#[cfg(target_arch = "wasm32")]` (`session/mod.rs:283`).
 
-### 3b. stdio binding via `__wasilibc_fd_renumber` — `crates/clank-shell/src/coreutils.rs`
+### 3b. stdio binding via `__wasilibc_fd_renumber` — `crates/clank-shell/src/tools/coreutils.rs`
 
 `uu_*` `uumain` functions write to the process-global `std::io::stdout()`/`stderr()`, so their output
 must be redirected onto Brush's assigned `OpenFile`s.
@@ -147,13 +147,13 @@ in the oplog and replayed on recovery). Native uses `reqwest`. The seam is a sma
   `#[cfg(not(...))]` reqwest (`lib.rs:126`). Deps split in `crates/wcurl/Cargo.toml` lines 22–30.
 - **`crates/waget/`** — same split (`crates/waget/Cargo.toml` lines 22–29).
 - **`crates/clank-agent/src/mcp_http.rs`** — `WstdMcpHttp` implements the dual-target
-  `clank_shell::mcpclient::McpHttp` seam using `wstd::http` (this agent crate is wasm-only, so it can
+  `clank_shell::mcp::client::McpHttp` seam using `wstd::http` (this agent crate is wasm-only, so it can
   link the Golem-host-only `wstd` client that `clank-shell` cannot). It additionally collects response
   headers because MCP needs `Mcp-Session-Id`.
 - Both `wcurl`/`waget` pin `wstd = "=0.6.5"` to match `clank-agent` so the whole app resolves one
   `wstd`. `reqwest` is `default-features = false, features = ["rustls-tls"]` — see §6.
 
-Note the load-bearing dispatch rule in `session.rs:658–663`: `curl`/`wget`/`ask`/`mcp`/`grease` are
+Note the load-bearing dispatch rule in `session/mod.rs:718–780`: `curl`/`wget`/`ask`/`mcp`/`grease` are
 awaited directly at the Session layer, **not** through `execute`. `execute` drives Brush on the
 nested `rt.block_on` (the "Wall C" shape), where the wstd WASI-HTTP reactor is not the running
 executor; awaiting these one level under the Golem SDK's `wstd::block_on` keeps the reactor live.
@@ -188,7 +188,7 @@ executor; awaiting these one level under the Golem SDK's `wstd::block_on` keeps 
 running *inside* the component. Two sub-cases:
 
 **(i) Library-backed builtins** — where a dual-target, wasm-buildable Rust crate exists, clank wraps
-it rather than reimplementing. In `crates/clank-shell/src/texttools.rs` (registration at
+it rather than reimplementing. In `crates/clank-shell/src/tools/texttools.rs` (registration at
 texttools.rs:79):
 - `jq` → wraps `jaq-core` / `jaq-json` (texttools.rs:71, 122–125)
 - `grep` → wraps the `grep` crate, ripgrep's library (texttools.rs:72, 373–374)
@@ -201,14 +201,14 @@ still leans on the fd machinery (texttools.rs:1–6).
 
 **(ii) Genuinely hand-rolled from scratch** — where **no wasm-buildable crate exists**, clank ships a
 from-scratch implementation. Each file's module doc states the reason:
-- `crates/clank-shell/src/awkcmd.rs` — no Rust awk crate builds for wasm32-wasip2 (frawk/zawk
+- `crates/clank-shell/src/tools/awk.rs` — no Rust awk crate builds for wasm32-wasip2 (frawk/zawk
   hard-require the cranelift/LLVM **JIT** backends); this is a from-scratch lexer + recursive-descent
-  parser + tree-walking evaluator (awkcmd.rs:1–4).
-- `crates/clank-shell/src/findcmd.rs` — uutils' findutils is bin-only with a C `onig` dependency that
-  doesn't build for wasm32-wasip2; hand-written subset of the common predicates (findcmd.rs:1–4).
-- `crates/clank-shell/src/statcmd.rs` — wasip2 has no `stat(2)` struct (no inode, uid/gid, mode bits,
+  parser + tree-walking evaluator (awk.rs:1–4).
+- `crates/clank-shell/src/tools/find.rs` — uutils' findutils is bin-only with a C `onig` dependency that
+  doesn't build for wasm32-wasip2; hand-written subset of the common predicates (find.rs:1–4).
+- `crates/clank-shell/src/tools/stat.rs` — wasip2 has no `stat(2)` struct (no inode, uid/gid, mode bits,
   block counts); prints `-` for fields the sandbox cannot know rather than inventing them
-  (statcmd.rs:1–4).
+  (stat.rs:1–4).
 
 (The prompt framed all seven of grep/jq/sed/awk/diff/patch/file as reimplementations "because no
 wasm-buildable crate exists"; that is only literally true for the group (ii) tools. grep/jq/diff/
@@ -254,7 +254,7 @@ For completeness, so a maintainer doesn't go hunting for phantom patches:
 ## Comment consistency
 
 The Brush fork's "Wall C" work retired the old "wasm pipelines are a limitation" caveat. Two module
-docs (`session.rs` and `wasm.rs`) still carried it and were corrected to match this document: pipelines
+docs (`session/mod.rs` and `wasm.rs`) still carried it and were corrected to match this document: pipelines
 and `$(...)` **work** on wasm (the inline-sequential `OpenFile::Stream` path). What genuinely remains
 unavailable is spawning real external processes — wasip2 has no process spawn — which is a distinct
 constraint from pipelines and is described as such.

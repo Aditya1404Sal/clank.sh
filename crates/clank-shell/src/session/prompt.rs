@@ -159,9 +159,19 @@ impl Session {
 
         let resolution = promptuser::resolve(&pending.prompt, answer);
         if let Resolution::InvalidChoice { message } = resolution {
-            // Prompt stays pending — re-ask. Don't touch the row (still `P`).
+            // Prompt stays pending — re-ask. Don't touch the row (still `P`). Re-surface the pending
+            // view (not a bare stderr): the question is still outstanding, and a caller that saw an
+            // empty `pending_prompt` here would believe it resolved and hand control back, wedging the
+            // session on a prompt it no longer knows about.
+            let prompt = pending.prompt.clone();
             self.pending = Some(pending);
-            return LineResult::stderr(message);
+            return LineResult {
+                stdout: Vec::new(),
+                stderr: message.into_bytes(),
+                exit_code: 1,
+                flow: Flow::Continue,
+                pending_prompt: Some(prompt),
+            };
         }
 
         // Resolved: resume the row (it will be reaped by the specific path below).

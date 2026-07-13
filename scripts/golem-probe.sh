@@ -3,7 +3,7 @@
 # golem-probe.sh — deploy clank:agent to a throwaway Golem server and run ad-hoc command lines.
 #
 # A debugging companion to golem-e2e.sh: same server/deploy/teardown machinery, but instead of
-# fixed assertions it invokes `run_line` for each command line you pass and prints the raw output,
+# fixed assertions it invokes `eval` for each command line you pass and prints the raw output,
 # then dumps the tail of the server log (where agent-side panics / errors surface). Handy for
 # reproducing a single failing case with full stderr, without editing the e2e.
 #
@@ -143,11 +143,13 @@ if ! golem -Y deploy 2>&1 | tail -5; then
   exit 1
 fi
 
-# --- invoke run_line for a command and print its (stdout+stderr merged) String result ---
+# --- invoke `eval` for a command and print its stdout+stderr merged as text (the agent's single
+#     entry point; this flattens the structured EvalResult to what a terminal would show) ---
 run_line() {
   local cmd="$1"
-  golem agent invoke -q --format json "$AGENT_ID" run_line "\"${cmd//\"/\\\"}\"" 2>>"$SERVER_LOG" \
-    | grep '"result_json"' | tail -1 | jq -r '.result_json.value // empty' 2>/dev/null
+  golem agent invoke -q --format json "$AGENT_ID" eval "\"${cmd//\"/\\\"}\"" 2>>"$SERVER_LOG" \
+    | grep '"result_json"' | tail -1 \
+    | jq -r '(.result_json.value.stdout // "") + (.result_json.value.stderr // "")' 2>/dev/null
 }
 
 # --- invoke eval for a command and return the structured EvalResult JSON (stdout/stderr/exit split) ---

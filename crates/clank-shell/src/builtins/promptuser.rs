@@ -170,23 +170,54 @@ pub fn resolve(pending: &PendingPrompt, answer: AnswerInput) -> Resolution {
     match answer {
         AnswerInput::Abort => Resolution::Aborted,
         AnswerInput::Response(text) => {
-            if let Some(choices) = &pending.choices {
-                if !choices.iter().any(|c| c == &text) {
-                    return Resolution::InvalidChoice {
-                        message: format!(
-                            "prompt-user: '{text}' is not one of [{}]\n",
-                            choices.join("/")
-                        ),
-                    };
-                }
-            }
-            let mut stdout = text.into_bytes();
+            // With `--choices`, resolve the answer to its canonical choice: an exact
+            // (case-insensitive) match wins, else a UNIQUE case-insensitive prefix — so the
+            // `(y)es, (n)o, (a)ll` confirmation accepts `y`/`n`/`a`, not only the full words. The
+            // canonical value (not the raw keystroke) flows downstream, so the authz gate's
+            // `yes`/`all` check and a `$(prompt-user …)` capture both see the real choice.
+            let response = match &pending.choices {
+                Some(choices) => match match_choice(choices, &text) {
+                    Some(canonical) => canonical,
+                    None => {
+                        return Resolution::InvalidChoice {
+                            message: format!(
+                                "prompt-user: '{text}' is not one of [{}]\n",
+                                choices.join("/")
+                            ),
+                        };
+                    }
+                },
+                None => text,
+            };
+            let mut stdout = response.into_bytes();
             stdout.push(b'\n');
             Resolution::Answered {
                 stdout,
                 secret: pending.secret,
             }
         }
+    }
+}
+
+/// Match a response against the offered `--choices`, returning the canonical choice. An exact
+/// case-insensitive match wins outright (so an exact answer never loses to prefix ambiguity);
+/// otherwise a single case-insensitive prefix match resolves (`y` → `yes`), while an ambiguous or
+/// empty prefix is rejected.
+fn match_choice(choices: &[String], text: &str) -> Option<String> {
+    let t = text.trim();
+    if let Some(c) = choices.iter().find(|c| c.eq_ignore_ascii_case(t)) {
+        return Some(c.clone());
+    }
+    if t.is_empty() {
+        return None;
+    }
+    let tl = t.to_ascii_lowercase();
+    let mut hits = choices
+        .iter()
+        .filter(|c| c.to_ascii_lowercase().starts_with(&tl));
+    match (hits.next(), hits.next()) {
+        (Some(c), None) => Some(c.clone()),
+        _ => None,
     }
 }
 
@@ -235,6 +266,41 @@ mod tests {
             Resolution::Answered { stdout, .. } => assert_eq!(stdout, b"yes\n"),
             other => panic!("expected Answered, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn resolve_accepts_letter_shortcuts_as_canonical_choice() {
+        // The authz confirm offers `(y)es, (n)o, (a)ll`; single letters must resolve to the full
+        // canonical word (so the gate's `yes`/`all` check downstream still matches). Same `resolve`
+        // path a `confirm_choices()` gate uses, exercised here via an explicit three-way choice set.
+        let pending = parse(r#"prompt-user "Approve?" --choices yes,no,all"#).unwrap().into_pending(None);
+        for (input, want) in [("y", "yes\n"), ("n", "no\n"), ("a", "all\n"), ("YES", "yes\n")] {
+            match resolve(&pending, AnswerInput::Response(input.to_string())) {
+                Resolution::Answered { stdout, .. } => {
+                    assert_eq!(stdout, want.as_bytes(), "input {input:?}")
+                }
+                other => panic!("expected Answered for {input:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_prefers_exact_match_over_ambiguous_prefix() {
+        // An exact answer must win even when it is also a prefix of another choice.
+        let pending = parse(r#"prompt-user "n?" --choices 1,10,100"#).unwrap().into_pending(None);
+        match resolve(&pending, AnswerInput::Response("1".to_string())) {
+            Resolution::Answered { stdout, .. } => assert_eq!(stdout, b"1\n"),
+            other => panic!("expected Answered, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_rejects_ambiguous_prefix() {
+        let pending = parse(r#"prompt-user "?" --choices yes,yesterday"#).unwrap().into_pending(None);
+        assert!(matches!(
+            resolve(&pending, AnswerInput::Response("y".to_string())),
+            Resolution::InvalidChoice { .. }
+        ));
     }
 
     #[test]

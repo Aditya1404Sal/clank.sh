@@ -9,7 +9,7 @@ same command surface a human does.
 
 This document is a practical, code-grounded reference to **every** command and subsystem. Flags and
 subcommands here are drawn directly from the dispatch ladder in
-`crates/clank-shell/src/session.rs` and the per-command classifier modules — nothing is invented.
+`crates/clank-shell/src/session/mod.rs` and the per-command classifier modules — nothing is invented.
 
 > **Environment note.** clank runs as a single WebAssembly component. There is no `fork`, no `exec`,
 > no real OS processes, and no Unix signal kernel. PIDs are synthetic handles on internal async work
@@ -19,7 +19,111 @@ subcommands here are drawn directly from the dispatch ladder in
 
 ---
 
+## Running clank on a Golem agent
+
+clank ships as the `clank:agent` Golem component (`crates/clank-agent`, wired in `golem.yaml`). You
+**build** it to wasm, **deploy** it to a running Golem server, and then **invoke** its methods to run
+shell commands inside the durable agent. All commands below run from the repo root (the directory
+containing `golem.yaml`).
+
+**Prerequisites:** the [`golem` CLI](https://learn.golem.cloud) (≥ 1.5), `cargo` with a Rust toolchain
+(pinned by `rust-toolchain.toml`), and — for scripting the JSON output — `jq`.
+
+### Build, serve, deploy
+
+```sh
+# 1. Compile crates/clank-agent to the wasm32-wasip2 component.
+#    -Y auto-confirms the golem-managed AGENTS.md section update (needed in non-interactive shells).
+golem -Y build
+
+# 2. Start a local Golem server (binds the default router port 9881; the CLI's active
+#    profile talks to it). Leave this running in its own terminal, or add --detach.
+golem server run
+
+# 3. Deploy the built component to that server.
+golem -Y deploy
+```
+
+> **`ask` and the API key.** The `ask` command's durable LLM provider reads `ANTHROPIC_API_KEY` from
+> the agent env, which `golem.yaml` passes through at deploy time (strict Jinja substitution — the host
+> var must be defined). Export it before `golem deploy` to use `ask`; leave it unset and `ask` cleanly
+> reports "not configured" (exit 4) while every other command works. **Never** hard-code the key.
+>
+> A stale `target/` is the usual cause of a `golem deploy` "failed to parse WebAssembly module" — run
+> `cargo clean -p clank-agent -p clank-shell --target wasm32-wasip2` and rebuild.
+
+### Driving the agent
+
+The agent is addressed by **type + a constructor name**: `ClankAgent("<name>")`. The name *is* the
+agent's identity — distinct names are fully isolated durable instances, each with its own shell state,
+transcript, and filesystem; the **same** name across invocations resumes the same live session (state
+persists — that is the durability).
+
+Every command goes through a single entry point, **`eval "<cmd>"`**, which runs one command line and
+returns a structured record: `stdout`, `stderr`, `exit_code`, and `pending_prompt` (set when the line
+surfaced a `prompt-user`/authorization pause). `eval` takes **one** argument, a **WIT string literal**,
+so the command must be wrapped in quotes *inside* the shell-quoted argument (`'"…"'`):
+
+```sh
+# Run a command; golem pretty-prints the returned record (stdout / stderr / exit_code / pending_prompt).
+golem agent invoke 'ClankAgent("dev")' eval '"mkdir -p /tmp/work; echo hi > /tmp/work/a; cat /tmp/work/a"'
+
+# Same instance, later invocation — the file is still there (durable state).
+golem agent invoke 'ClankAgent("dev")' eval '"cat /tmp/work/a"'
+
+# Just the text: add --format json and pull the field you want with jq.
+golem agent invoke -q --format json 'ClankAgent("dev")' eval '"ls /bin"' | jq -r '.result_json.value.stdout'
+```
+
+**Interactive pauses** (`prompt-user`, and the authorization gate on destructive/outbound commands
+like `rm`, `curl`, `ask`) never block the agent. `eval` returns immediately with `pending_prompt` set;
+you deliver the human's answer on a **separate** invocation:
+
+```sh
+# A bare `rm` (sudo-only) surfaces a confirmation instead of deleting — eval returns pending_prompt.
+golem agent invoke -q --format json 'ClankAgent("dev")' eval '"rm /tmp/work/a"' | jq '.result_json.value.pending_prompt'
+
+# Approve it (or "no" to deny, exit 5) on a follow-up call:
+golem agent invoke 'ClankAgent("dev")' answer_prompt '"yes"'
+# …or abort the outstanding prompt (Ctrl-C convention, exit 130):
+golem agent invoke 'ClankAgent("dev")' abort_prompt
+```
+
+Prefix a command with `sudo` to pre-authorize it and skip the pause (`sudo rm …`, `sudo curl …`,
+`sudo ask …`). Everything after this point in the document is a command you run *through* the agent
+this way — via `eval`.
+
+### Interactive REPL
+
+Typing `golem agent invoke … eval …` per command gets old fast. `scripts/clank-repl.sh` wraps it in a
+readline loop against one durable agent: you type a command, it prints the result, and it drives the
+confirmation pauses for you (surfacing the question, reading your answer, resolving it). The session —
+files, cwd, transcript — persists across lines and across REPL restarts (same `--name` resumes it).
+
+```sh
+scripts/clank-repl.sh                 # attach to an already-running server + deployed clank
+scripts/clank-repl.sh --deploy        # or build + serve + deploy a throwaway one first
+scripts/clank-repl.sh --name demo     # pick the durable agent instance (default: "repl")
+echo 'ls /bin' | scripts/clank-repl.sh   # non-interactive: pipe commands in as a scriptable driver
+```
+
+At a confirmation pause it accepts `y`/`n`/`a` (or the full `yes`/`no`/`all`); type `:abort` to cancel
+one. Quit with `exit`, `:q`, or Ctrl-D.
+
+> **Worked end-to-end example.** `scripts/golem-e2e.sh` builds, serves, deploys, and exercises the
+> whole command surface against a throwaway agent, then tears it down — read it as an executable
+> reference for every invocation shape above (add `--with-llm` for the live-`ask` assertions,
+> `--with-grease` for a signed local package registry, `--keep` to leave the agent up to poke at).
+>
+> **Iterating on the Rust?** `golem build` may report the component `[UP-TO-DATE]` after you edit
+> `clank-shell` (it tracks the `clank-agent` component dir, not its path-dependency), deploying a
+> stale wasm. Force a fresh build with `cargo clean -p clank-shell -p clank-agent --target wasm32-wasip2`.
+
+---
+
 ## Table of contents
+
+0. [Running clank on a Golem agent](#running-clank-on-a-golem-agent)
 
 1. [`ask` — the AI interface](#1-ask--the-ai-interface)
 2. [`context` — the session transcript](#2-context--the-session-transcript)
@@ -777,5 +881,6 @@ sleep 30 & jobs; wait
 ---
 
 *Cross-references point at section headings in `README.md`. Flags and subcommands in this document
-are sourced from `crates/clank-shell/src/session.rs` (the `run_command` dispatch ladder) and the
-`*cmd.rs` classifier modules, plus `crates/wcurl` and `crates/waget` for HTTP.*
+are sourced from `crates/clank-shell/src/session/mod.rs` (the `run_command` dispatch ladder) and the
+per-command `cmd.rs`/`classify` modules (`mcp/`, `grease/`, `golem/`, `ai/`, `tools/`, `builtins/`),
+plus `crates/wcurl` and `crates/waget` for HTTP.*

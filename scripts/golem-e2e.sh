@@ -3,7 +3,7 @@
 # golem-e2e.sh — end-to-end smoke test for clank as a Golem agent.
 #
 # Starts a throwaway local Golem server, builds and deploys the `clank:agent`
-# component, invokes `run_line` for the README file-management command set,
+# component, invokes `eval` for the README file-management command set,
 # asserts each returns the expected output, then tears the server down and
 # wipes its data dir. Exits non-zero on the first failed assertion.
 #
@@ -143,19 +143,21 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# --- assertion: invoke run_line "<cmd>", compare captured output to expected ---
-# `golem agent invoke --format json` prints invocation markers + any agent STDERR stream lines
-# to stdout FIRST, then the actual result document as the final line. That document has the
-# returned String at `.result_json.value`. So: keep only the line carrying `result_json`, take
-# the last one, and pull `.value`. `run_line` never `echo`s the payload (which would let a shell
-# re-interpret the `\n` escapes in the JSON and corrupt it) — the raw bytes flow straight to jq.
+# --- assertion helper: invoke `eval "<cmd>"`, return captured stdout+stderr as text ---
+# `eval` is the agent's single entry point; it returns the structured EvalResult at
+# `.result_json.value`. This helper flattens that to `stdout + stderr` — exactly what the old
+# `run_line` method used to return directly — so every text-comparison assertion below is unchanged.
+# `golem agent invoke --format json` prints invocation markers + any agent STDERR stream lines to
+# stdout FIRST, then the result document as the final line, so we keep only the line carrying
+# `result_json`, take the last, and concatenate the two streams straight into jq (never `echo`ing the
+# payload, which would let a shell re-interpret the `\n` escapes in the JSON and corrupt it).
 run_line() {
   local cmd="$1"
   # ONE positional per function arg; the arg is a WIT string literal → wrap in quotes.
-  golem agent invoke -q --format json "$AGENT_ID" run_line "\"${cmd//\"/\\\"}\"" 2>>"$SERVER_LOG" \
+  golem agent invoke -q --format json "$AGENT_ID" eval "\"${cmd//\"/\\\"}\"" 2>>"$SERVER_LOG" \
     | grep '"result_json"' \
     | tail -1 \
-    | jq -r '.result_json.value // empty' 2>/dev/null
+    | jq -r '(.result_json.value.stdout // "") + (.result_json.value.stderr // "")' 2>/dev/null
 }
 
 expect() {

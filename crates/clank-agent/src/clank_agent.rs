@@ -42,10 +42,6 @@ pub trait ClankAgent {
     /// Abort an outstanding `prompt-user` question (the Ctrl-C convention — exit 130). Separate from
     /// `answer_prompt` so an empty string stays a valid *answer* rather than an abort signal.
     async fn abort_prompt(&mut self) -> EvalResult;
-
-    /// Run one shell command line and return its output. Mutates the durable session (shell state
-    /// and transcript persist across invocations).
-    async fn run_line(&mut self, cmd: String) -> String;
 }
 
 pub struct ClankAgentImpl {
@@ -93,12 +89,6 @@ impl ClankAgent for ClankAgentImpl {
         eval_result(result)
     }
 
-    async fn run_line(&mut self, cmd: String) -> String {
-        let mut result = self.eval(cmd).await;
-        // Concatenate the two already-owned Strings in place instead of a fresh `format!` allocation.
-        result.stdout.push_str(&result.stderr);
-        result.stdout
-    }
 }
 
 impl ClankAgentImpl {
