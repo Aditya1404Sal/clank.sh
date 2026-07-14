@@ -476,9 +476,22 @@ impl Session {
                 self.transcript.lock().unwrap().record_command(line);
                 return self.answer_prompt(None).await;
             }
-            return LineResult::stderr(
-                "clank: a prompt-user question is awaiting a response; answer it first\n",
-            );
+            // Re-surface the still-outstanding prompt (NOT a bare stderr, which carries
+            // pending_prompt=None): a caller that saw an empty pending_prompt here would believe the
+            // prompt resolved and hand control back, wedging the session on a question it no longer
+            // knows about — exactly the connect-shell deadlock a Ctrl-C'd `ask` left behind. Mirrors
+            // the InvalidChoice re-ask in answer_prompt_inner (session/prompt.rs). Same message/exit;
+            // only pending_prompt flips None→Some so any client can route the next input to
+            // answer_prompt. `self.pending` is Some here (guarded above; kills_pending already fired).
+            let prompt = self.pending.as_ref().map(|p| p.prompt.clone());
+            return LineResult {
+                stdout: Vec::new(),
+                stderr: b"clank: a prompt-user question is awaiting a response; answer it first\n"
+                    .to_vec(),
+                exit_code: 1,
+                flow: Flow::Continue,
+                pending_prompt: prompt,
+            };
         }
 
         // Install the secret-env set FIRST — before the line is recorded — so the synchronous render
