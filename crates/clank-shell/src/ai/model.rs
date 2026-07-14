@@ -55,12 +55,12 @@ impl SimpleCommand for Model {
                  \x20 model list              list the built-in model catalog (the default is marked *)\n\
                  \x20 model default <id>      set the default model (writes ~/.config/ask/ask.toml)\n\
                  \x20 model info [<id>]       show details for a model (or the current default)\n\
-                 \x20 model add <provider>    (keys are read from the environment, not stored — see below)\n\
+                 \x20 model add <provider> [--key K]  store a native key, or point at the env var\n\
                  \x20 model remove <provider> remove a provider (anthropic is built in)\n\n\
                  Model ids use `provider/model`; the provider prefix may be omitted for unambiguous names.\n\
                  The catalog is a curated subset — the provider accepts other ids, passed through as-is.\n\
-                 Provider API keys are NOT stored in ask.toml: set ANTHROPIC_API_KEY in the environment\n\
-                 (the Golem agent receives it via golem.yaml).\n\n\
+                 API keys: on native, `model add anthropic --key <k>` stores the key in ~/.config/ask/ask.toml;\n\
+                 without --key (and on the Golem agent), set ANTHROPIC_API_KEY in the environment.\n\n\
                  (clank builtin)\n",
                 Model::SYNOPSIS
             )),
@@ -102,7 +102,7 @@ fn run(home: &str, argv: &[String]) -> (String, String, u8) {
         "list" => list(home),
         "default" => set_default(home, argv.get(1).map(String::as_str)),
         "info" => info(home, argv.get(1).map(String::as_str)),
-        "add" => add(argv),
+        "add" => add(home, argv),
         "remove" => remove(argv.get(1).map(String::as_str)),
         other => (
             String::new(),
@@ -171,20 +171,64 @@ fn info(home: &str, id: Option<&str>) -> (String, String, u8) {
     (out, warn.unwrap_or_default(), 0)
 }
 
-fn add(argv: &[String]) -> (String, String, u8) {
+/// `model add <provider> [--key <k>]`. Only the built-in `anthropic` provider is known.
+///
+/// On **native**, `--key <k>` persists the key to `~/.config/ask/ask.toml` `[providers.anthropic].key`
+/// (README §444) so the native `ask` provider can read it; without `--key` it points at the env var.
+/// On the **agent** (wasm), keys are never written to the durable FS — the message directs the user to
+/// `ANTHROPIC_API_KEY` (golem.yaml passthrough), matching the durable provider's `from_env` contract.
+fn add(home: &str, argv: &[String]) -> (String, String, u8) {
+    let _ = home; // used only on native (see below)
     let provider = argv.get(1).map(String::as_str).unwrap_or("");
-    // Never echo a key value, even on the error path.
-    let msg = if provider == PROVIDER || provider.is_empty() {
-        "model add: provider keys are not stored in ask.toml; set ANTHROPIC_API_KEY in the \
-         environment (the Golem agent receives it via golem.yaml). anthropic is built in.\n"
-            .to_string()
-    } else {
-        format!(
-            "model add: only the built-in anthropic provider is supported; '{provider}' cannot be \
-             added. Set ANTHROPIC_API_KEY in the environment.\n"
+    if !(provider == PROVIDER || provider.is_empty()) {
+        return (
+            String::new(),
+            format!(
+                "model add: only the built-in anthropic provider is supported; '{provider}' cannot \
+                 be added.\n"
+            ),
+            1,
+        );
+    }
+
+    // Extract a `--key <value>` if present. Never echo the value on any path.
+    let key = argv
+        .iter()
+        .position(|a| a == "--key")
+        .and_then(|i| argv.get(i + 1))
+        .map(String::as_str);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        match key {
+            Some(k) if !k.is_empty() => match crate::ai::config::save_provider_key(home, PROVIDER, k) {
+                Ok(()) => (
+                    "model add: stored the anthropic key in ~/.config/ask/ask.toml\n".to_string(),
+                    String::new(),
+                    0,
+                ),
+                Err(e) => (String::new(), format!("model add: {e}\n"), 1),
+            },
+            _ => (
+                String::new(),
+                "model add: anthropic is built in. Provide a key with `--key <value>` to store it \
+                 in ~/.config/ask/ask.toml, or set ANTHROPIC_API_KEY in the environment.\n"
+                    .to_string(),
+                1,
+            ),
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = key;
+        (
+            String::new(),
+            "model add: provider keys are not stored on the agent; set ANTHROPIC_API_KEY in the \
+             environment (the Golem agent receives it via golem.yaml). anthropic is built in.\n"
+                .to_string(),
+            1,
         )
-    };
-    (String::new(), msg, 1)
+    }
 }
 
 fn remove(provider: Option<&str>) -> (String, String, u8) {
@@ -301,14 +345,36 @@ mod tests {
     }
 
     #[test]
-    fn add_is_an_honest_error_naming_the_env_var() {
+    fn add_with_key_stores_it_in_ask_toml() {
         let home = temp_home();
         let (out, err, code) = run(&home, &args(&["add", "anthropic", "--key", "sk-secret-value"]));
+        assert_eq!(code, 0, "native add --key should succeed; err: {err}");
+        assert!(out.contains("ask.toml"), "got: {out}");
+        // The key value must never be echoed on any channel.
+        assert!(!out.contains("sk-secret-value") && !err.contains("sk-secret-value"), "key leaked");
+        // It round-trips through the config layer.
+        assert_eq!(
+            crate::ai::config::provider_key(&home, "anthropic").as_deref(),
+            Some("sk-secret-value")
+        );
+    }
+
+    #[test]
+    fn add_without_key_points_at_config_or_env() {
+        let home = temp_home();
+        let (out, err, code) = run(&home, &args(&["add", "anthropic"]));
         assert_eq!(code, 1);
         assert!(out.is_empty());
-        assert!(err.contains("ANTHROPIC_API_KEY"), "got: {err}");
-        // The key value must never be echoed.
-        assert!(!err.contains("sk-secret-value"), "key leaked: {err}");
+        // Directs the user to --key or the env var; never stores anything.
+        assert!(err.contains("--key") || err.contains("ANTHROPIC_API_KEY"), "got: {err}");
+    }
+
+    #[test]
+    fn add_unknown_provider_is_rejected() {
+        let home = temp_home();
+        let (_out, err, code) = run(&home, &args(&["add", "openai", "--key", "x"]));
+        assert_eq!(code, 1);
+        assert!(err.contains("only the built-in anthropic"), "got: {err}");
     }
 
     #[test]

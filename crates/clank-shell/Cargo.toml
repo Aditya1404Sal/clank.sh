@@ -99,6 +99,11 @@ tempfile = "3"
 # For redirecting fd 1/2 around uutils' uumain (which writes to std stdout) so its output is
 # captured by brush's fd table (pipes, redirects, the transcript capture).
 libc = "0.2"
+# The native HTTP transport backing the ask/MCP/grease/golem provider shims (McpHttp, AskProvider,
+# GolemCluster/AgentInvoker). Same crate + rustls-tls features wcurl/waget already use, so the whole
+# workspace resolves one reqwest; on wasm those seams use the injected wstd impls instead (this dep
+# never reaches the wasm build — it's under the not(wasm32) target block).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 
 [dev-dependencies]
 # Signing side of ed25519 (SigningKey), for tests that produce a signed fixture payload to exercise

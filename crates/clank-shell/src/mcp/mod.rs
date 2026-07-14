@@ -7,4 +7,9 @@
 pub mod client;
 pub(crate) mod cmd;
 pub mod config;
+// The native (reqwest) MCP HTTP transport. wasm uses the injected `wstd` client from `clank-agent`;
+// this fills the same `McpHttp` seam off-Golem, unblocking MCP *and* grease-over-network (they share
+// the transport). cfg-gated so `reqwest` never reaches the wasm build.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod http_native;
 pub mod state;

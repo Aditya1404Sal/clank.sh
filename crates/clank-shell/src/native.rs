@@ -9,6 +9,7 @@ use std::io::{self, Write};
 /// Run the interactive read/eval/print loop until `exit` or end-of-input.
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut session = Session::new().await?;
+    inject_native_providers(&mut session);
     let mut line = String::new();
 
     loop {
@@ -115,6 +116,22 @@ async fn run_repl(
     let rendered = session.repl_end();
     write_stdout(&rendered)?;
     Ok(())
+}
+
+/// Install the native provider shims into the session — the off-Golem mirror of the durable
+/// injection the agent does in `clank-agent`'s `ensure_session`. Each seam has a `reqwest`-backed
+/// native impl; the setters wrap the network transports in the `Logging*` decorators, so `http.log`
+/// covers native `ask`/MCP/grease traffic too.
+///
+/// - **MCP HTTP transport** (also backs `grease` registry/install/update fetches — they share the
+///   `mcp_http` field): always installed.
+/// - **`ask` LLM provider**: always installed; it reports "not configured" at call time if no API key
+///   is present (env `ANTHROPIC_API_KEY` or `~/.config/ask/ask.toml`), rather than being absent.
+/// - **Golem cluster + agent invoker**: installed only when an external cluster config is found
+///   (otherwise native keeps the honest "needs a cluster" error, unchanged).
+fn inject_native_providers(session: &mut Session) {
+    session.set_mcp_http(Box::new(crate::mcp::http_native::ReqwestMcpHttp::new()));
+    session.set_ask_provider(Box::new(crate::ai::anthropic_native::ReqwestAnthropicProvider::new()));
 }
 
 /// Write all `bytes` to stdout and flush. Takes a fresh stdout handle each call so no lock is
