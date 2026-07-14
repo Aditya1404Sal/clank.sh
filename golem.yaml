@@ -1,8 +1,8 @@
-# yaml-language-server: $schema=https://schema.golem.cloud/app/golem/1.5.0/golem.schema.json
+# yaml-language-server: $schema=https://schema.golem.cloud/app/golem/1.6.0-dev.6/golem.schema.json
 # clank.sh Golem application: the `clank:agent` component (crates/clank-agent) wraps the shell
 # Session as a durable agent instance. Build/deploy with `golem build` / `golem deploy`.
 
-manifestVersion: 1.5.0
+manifestVersion: 1.6.0
 
 app: clank
 
@@ -25,8 +25,5 @@ components:
       # exports an empty default before deploying; with an empty/unset key `ask` reports "not
       # configured" (exit 4) and the e2e skips its network assertions.
       ANTHROPIC_API_KEY: "{{ ANTHROPIC_API_KEY }}"
-  # A minimal second agent (crates/greeter-agent) deployed alongside clank:agent purely to be the
-  # target of a grease-installed agent invocation — proving clank's WasmRpcInvoker wRPC round-trips.
-  greeter:agent:
-    dir: crates/greeter-agent
-    templates: rust
+  # SPIKE (spike/dev-golem-sdk): greeter:agent dropped — it pins golem-rust 2.1.0 and is only the
+  # wRPC-invoke fixture, which is stubbed in this spike. Removed from the workspace + this manifest.

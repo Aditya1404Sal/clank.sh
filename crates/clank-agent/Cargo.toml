@@ -11,9 +11,9 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-# The Golem agent framework. `export_golem_agentic` makes the #[agent_definition]/
-# #[agent_implementation] macros emit the invocable component exports (the golem:agent world).
-golem-rust = { version = "2.1.0", features = ["export_golem_agentic"] }
+# SPIKE (spike/dev-golem-sdk): repointed from crates.io golem-rust 2.1.0 to the dev SDK in the
+# golem clone, to test building clank on the newer golem:agent@2.0.0 world. Throwaway.
+golem-rust = { path = "../../golem-stuff/golem/sdks/rust/golem-rust", features = ["export_golem_agentic"] }
 wstd = { version = "=0.6.5", features = ["default", "json"] }
 serde = { version = "1", features = ["derive"] }
 
@@ -21,6 +21,7 @@ serde = { version = "1", features = ["derive"] }
 # `repl-driver` feature, so it links as a plain rlib WITHOUT the `wasi:cli/run` export that would
 # clash with this crate's golem:agent world.
 clank-shell = { path = "../clank-shell", default-features = false }
-golem-ai-llm = "0.5.1"
-golem-ai-llm-anthropic = "0.5.1"
+# SPIKE: golem-ai-llm 0.5.2 hard-pins golem-rust "=2.1.0" — incompatible with the dev SDK. Stubbed.
+# golem-ai-llm = "0.5.1"
+# golem-ai-llm-anthropic = "0.5.1"
 async-trait = "0.1"

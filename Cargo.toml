@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/clank-shell", "crates/clank-agent", "crates/greeter-agent", "crates/wcurl", "crates/waget"]
+# SPIKE: greeter-agent (a gated wRPC test fixture) still pins golem-rust 2.1.0 — dropped from the
+# spike to keep the surface to clank-agent only.
+members = ["crates/clank-shell", "crates/clank-agent", "crates/wcurl", "crates/waget"]
+# SPIKE: exclude the vendored golem clone so its crates (golem-schema, etc.) resolve their
+# `{ workspace = true }` deps against THEIR OWN workspace (golem-stuff/golem/), not clank's root.
+# Also exclude greeter-agent (dropped above) so cargo doesn't try to build its 2.1.0 golem-rust.
+exclude = ["golem-stuff", "crates/greeter-agent"]
 
 [workspace.package]
 edition = "2021"

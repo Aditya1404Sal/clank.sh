@@ -23,11 +23,13 @@ pub struct GolemApiCluster;
 
 /// Render this instance's own metadata (used for `golem oplog`/`status` anchoring + a liveness check).
 fn self_metadata_text() -> String {
-    let md = golem_rust::bindings::golem::api::host::get_self_metadata();
-    // `agent-metadata` carries the agent-id, status, args, env, etc. Show a compact view.
+    // SPIKE (dev SDK): `get_self_metadata` moved from the now-private `bindings::golem::api::host`
+    // to the crate root; `AgentMetadata.agent_id` is a struct (no Display) whose `.agent_id` is the
+    // instance name string.
+    let md = golem_rust::get_self_metadata();
     format!(
         "agent-id: {}\nstatus: {:?}\ncomponent-revision: {}\n",
-        md.agent_id, md.status, md.component_revision
+        md.agent_id.agent_id, md.status, md.component_revision
     )
 }
 
@@ -37,13 +39,13 @@ impl GolemCluster for GolemApiCluster {
         // `get-agents` enumerates agents for the current component. It's a paged resource; we render
         // the first page's agent ids. The constructor needs a component-id filter/precise flag — v1
         // lists the current component's agents via self metadata's component context.
-        let md = golem_rust::bindings::golem::api::host::get_self_metadata();
+        let md = golem_rust::get_self_metadata();
         // Without a component-id + filter we can't page arbitrary agents here; report the self view as
         // the anchor + note that full enumeration needs a component filter (honest partial).
         Ok(format!(
             "this instance:\n{}\n(full `golem agent list` enumeration needs a component filter — \
              not wired in v1)\n",
-            format_args!("agent-id: {}", md.agent_id)
+            format_args!("agent-id: {}", md.agent_id.agent_id)
         ))
     }
 
@@ -82,8 +84,9 @@ impl GolemCluster for GolemApiCluster {
 
     async fn fork(&self) -> Result<String, String> {
         // `fork()` forks the current shell instance; the result tells which side we're on.
+        // SPIKE (dev SDK): `fork` moved to the crate root (host module is now private).
         use golem_rust::ForkResult;
-        match golem_rust::bindings::golem::api::host::fork() {
+        match golem_rust::fork() {
             ForkResult::Original(_) => Ok("forked (this is the original instance)".to_string()),
             ForkResult::Forked(_) => Ok("forked (this is the new instance)".to_string()),
         }
