@@ -132,6 +132,17 @@ async fn run_repl(
 fn inject_native_providers(session: &mut Session) {
     session.set_mcp_http(Box::new(crate::mcp::http_native::ReqwestMcpHttp::new()));
     session.set_ask_provider(Box::new(crate::ai::anthropic_native::ReqwestAnthropicProvider::new()));
+
+    // Golem cluster + agent invoker: only when an external cluster config is present (README §161-163).
+    // Without it, native keeps the honest "needs a cluster" error — Tier C is inert unless configured.
+    if let Some(cfg) = crate::golem::config_native::load() {
+        session.set_golem_cluster(Box::new(
+            crate::golem::rest_native::NativeHttpGolemCluster::new(cfg.clone()),
+        ));
+        session.set_agent_invoker(Box::new(
+            crate::golem::rest_native::NativeHttpAgentInvoker::new(cfg),
+        ));
+    }
 }
 
 /// Write all `bytes` to stdout and flush. Takes a fresh stdout handle each call so no lock is
