@@ -12,8 +12,10 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # SPIKE (spike/dev-golem-sdk): repointed from crates.io golem-rust 2.1.0 to the dev SDK in the
-# golem clone, to test building clank on the newer golem:agent@2.0.0 world. Throwaway.
-golem-rust = { path = "../../golem-stuff/golem/sdks/rust/golem-rust", features = ["export_golem_agentic"] }
+# golem clone, to test building clank on the newer golem:agent@2.0.0 world. Throwaway. The clone lives
+# OUTSIDE clank at ~/Desktop/golemcloud/golem (moved there so its git history — incl. the clank connect
+# patch — isn't lost to clank's /golem-stuff/ .gitignore); this path resolves to it from the repo root.
+golem-rust = { path = "../../../golemcloud/golem/sdks/rust/golem-rust", features = ["export_golem_agentic"] }
 wstd = { version = "=0.6.5", features = ["default", "json"] }
 serde = { version = "1", features = ["derive"] }
 
