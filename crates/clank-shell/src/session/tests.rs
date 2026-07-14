@@ -3399,6 +3399,34 @@ fn command_while_prompt_pending_is_rejected() {
     });
 }
 
+/// A command rejected while a prompt is pending must RE-SURFACE that prompt in `pending_prompt`, not
+/// return a bare error with `pending_prompt: None`. Regression for the connect-shell deadlock: a new
+/// client that attaches to an agent already holding a prompt (e.g. a prior session Ctrl-C'd mid-`ask`)
+/// sees the rejection; without the re-surfaced prompt it believes nothing is pending and routes the
+/// next input to `eval` — which is rejected again, forever. With it, the client can answer and recover.
+#[test]
+fn rejected_command_while_pending_re_surfaces_the_prompt() {
+    on_rt(async {
+        let mut session = Session::new().await.unwrap();
+        session.eval_line(r#"prompt-user "q?""#).await;
+        let blocked = session.eval_line("echo hi").await;
+        // Same rejection contract as before: non-zero exit + the "answer first" message.
+        assert_ne!(blocked.exit_code, 0);
+        assert!(String::from_utf8(blocked.terminal_output())
+            .unwrap()
+            .contains("awaiting a response"));
+        // ...but now the outstanding prompt rides along so a fresh client can resolve it.
+        let p = blocked
+            .pending_prompt
+            .expect("a rejected command must re-surface the pending prompt");
+        assert_eq!(p.question, "q?");
+        // And it is still answerable through the normal path — the session recovers cleanly.
+        let done = session.answer_prompt(Some("ok".to_string())).await;
+        assert_eq!(done.exit_code, 0);
+        assert!(!session.has_pending_prompt());
+    });
+}
+
 /// `answer_prompt` with no prompt outstanding is a clean error, not a panic.
 #[test]
 fn answer_prompt_with_no_pending_is_an_error() {
