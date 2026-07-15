@@ -26,6 +26,93 @@ use brush_core::{Error, ExecutionResult};
 #[cfg(not(target_arch = "wasm32"))]
 static FD_SWAP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Bookkeeping for [`ShellCwd`]: how many builtin calls are currently inside a cwd window, and where
+/// to return when the last of them leaves.
+///
+/// Locked **only** for that bookkeeping — never across a builtin's run — so it cannot deadlock a
+/// pipeline (see [`ShellCwd`]).
+struct CwdState {
+    /// Number of live [`ShellCwd`] guards.
+    depth: usize,
+    /// Where the first guard in found the process; restored when the last one leaves.
+    restore: Option<std::path::PathBuf>,
+}
+
+static CWD_STATE: std::sync::Mutex<CwdState> = std::sync::Mutex::new(CwdState {
+    depth: 0,
+    restore: None,
+});
+
+/// Points the **process's** working directory at the **shell's** for the duration of in-process
+/// builtin calls, restoring it when the last one finishes.
+///
+/// Brush keeps `cd` in its own `Shell::working_dir` and deliberately never calls `set_current_dir` —
+/// the right call for a shell *library*, which hands the working directory to each spawned child
+/// rather than mutating its host process. But clank's builtins are never spawned (wasip2 has no
+/// process spawn at all): they run *in this process* and resolve relative paths through
+/// `std::env::current_dir()`. Without this bridge they ignore `cd` outright — `cd sub; ls` lists the
+/// process's directory and `cd sub; cat f` reads the wrong `f`, while `pwd` and Brush's own redirects
+/// (which consult `working_dir`) look perfectly correct. That split is the bug this closes.
+///
+/// **Restoring is load-bearing**, not tidiness: the cwd is process-global and `Shell::new` seeds a new
+/// session's `working_dir` from `std::env::current_dir()`, so a leaked `cd` would silently become the
+/// starting directory of the next `Session` built in the same process.
+///
+/// **Why it is refcounted rather than a plain save/restore.** Brush runs pipeline stages concurrently
+/// on native, so `cd sub; a | b` has two guards live at once. A per-guard restore would have the
+/// *first* stage to finish put the directory back while the *second* is still running — yanking the
+/// cwd out from under it, so a path it opens late resolves against the wrong place. Instead the first
+/// guard in records the return path and only the last one out restores it. (Serializing the guards
+/// instead is not an option: `run_tool` cannot hold a lock across a stage's run, or a stage blocked
+/// writing into a pipe would deadlock the stage draining it.)
+///
+/// Stages of one line share a `working_dir`, so a nested guard finds the process already where it
+/// wants it and simply leaves it. What refcounting cannot fix is two *different* sessions with
+/// *different* working dirs running builtins at the same time: there is one process directory and they
+/// disagree about it, so whoever is between calls loses. That cannot arise in production — one agent,
+/// one line at a time — and only parallel tests get near it. Closing it properly means teaching every
+/// tool to resolve against `working_dir` explicitly, which is impossible for the `uu_*` crates: they
+/// call `current_dir()` deep inside code we don't own.
+struct ShellCwd;
+
+impl ShellCwd {
+    fn enter<SE: ShellExtensions>(context: &ExecutionContext<'_, SE>) -> Self {
+        // Poisoning is harmless — the state is two plain fields — so recover the guard either way.
+        let mut state = CWD_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let target = context.shell.working_dir();
+        let current = std::env::current_dir().ok();
+
+        // Already there is the common case (no `cd` yet, or a sibling stage of this line moved us to
+        // the same place) — then there is nothing to move and nothing to put back.
+        if current.as_deref() != Some(target) {
+            // If the move doesn't take, leave the builtin to behave as it did before rather than fail
+            // the command: `cd` is then cosmetic for this call — the pre-fix behavior, not worse.
+            if std::env::set_current_dir(target).is_ok() && state.depth == 0 {
+                // Only the first guard in records the return path. A later one would record a
+                // directory a sibling stage had already moved us to, and restoring *that* at the end
+                // would leave the process somewhere the shell never was.
+                state.restore = current;
+            }
+        }
+
+        state.depth += 1;
+        Self
+    }
+}
+
+impl Drop for ShellCwd {
+    fn drop(&mut self) {
+        let mut state = CWD_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.depth -= 1;
+        // Last one out returns the process, so a still-running stage never has it moved underneath it.
+        if state.depth == 0 {
+            if let Some(dir) = state.restore.take() {
+                let _ = std::env::set_current_dir(dir);
+            }
+        }
+    }
+}
+
 /// Run a uutils `uumain` closure with the process's stdout/stderr pointed at the `OpenFile`s
 /// brush assigned for this command, so its output lands wherever brush wants it.
 #[cfg(not(target_arch = "wasm32"))]
@@ -40,6 +127,10 @@ pub(crate) fn run_uu<SE: ShellExtensions>(
     // Serialize the process-global fd swap (see `FD_SWAP_LOCK`). Poisoning is harmless here — the
     // guarded region restores fds even on panic paths — so recover the guard either way.
     let _fd_guard = FD_SWAP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    // Relative operands (`cat f`, `ls`, `touch f`) resolve against the shell's `cd`, not the process's
+    // directory. See `ShellCwd`.
+    let _cwd = ShellCwd::enter(context);
 
     // A broken pipe (e.g. `cat | head`) must not kill the whole clank process; make writes to
     // a closed pipe return EPIPE instead of raising SIGPIPE.
@@ -103,6 +194,10 @@ pub(crate) fn run_uu<SE: ShellExtensions>(
     use std::fs::OpenOptions;
     use std::io::{Read, Write};
     use std::os::fd::AsRawFd;
+
+    // Relative operands resolve against the shell's `cd`, not the process's directory. Single-threaded
+    // here, so no lock is needed. See `ShellCwd`.
+    let _cwd = ShellCwd::enter(context);
 
     extern "C" {
         /// wasi-libc's descriptor renumber: atomically MOVES `fd` onto `newfd`, closing whatever
@@ -213,6 +308,10 @@ pub(crate) fn run_tool<SE: ShellExtensions>(
     context: &ExecutionContext<'_, SE>,
     run: impl FnOnce(&mut dyn std::io::Read, &mut dyn std::io::Write, &mut dyn std::io::Write) -> i32,
 ) -> i32 {
+    // File operands (`grep pat f`, `find .`, `stat f`) resolve against the shell's `cd`. Note this
+    // takes no lock across the run — brush runs pipeline stages concurrently on native, so blocking a
+    // stage another is draining through a pipe would deadlock; `ShellCwd` is refcounted instead.
+    let _cwd = ShellCwd::enter(context);
     let mut stdin = tool_stdin(context);
     let mut out = context.stdout();
     let mut err = context.stderr();
