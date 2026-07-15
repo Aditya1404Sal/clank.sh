@@ -1,9 +1,11 @@
 //! The AI layer: the `ask` command + LLM seam ([`ask`]), the `~/.config/ask/ask.toml` model/provider
 //! config ([`config`]), and the `model` command ([`model`]).
 //!
-//! The concrete LLM provider is injected into the `Session`: the durable golem-ai-llm provider lives
-//! in `clank-agent` (wasm), and the native reqwest→Anthropic provider is [`anthropic_native`]. This
-//! crate owns the target-agnostic [`ask::AskProvider`] seam.
+//! The concrete LLM provider is injected into the `Session`: the durable provider lives in
+//! `clank-agent` (wasm) and calls Anthropic over `wstd` (the Golem runtime records that HTTP call in
+//! the oplog, so it replays on recovery without re-billing); the native reqwest→Anthropic provider is
+//! [`anthropic_native`]. Both share the wire format in [`anthropic_wire`]. This crate owns the
+//! target-agnostic [`ask::AskProvider`] seam.
 
 pub mod ask;
 // The target-agnostic Anthropic Messages API wire format (request build + response parse). Both
