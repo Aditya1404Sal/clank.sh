@@ -19,15 +19,22 @@ Scripts in this directory are the ones to use — **do not** re-derive these com
 
 ## What this even is
 
-`golem agent stream` normally tails an agent's logs. A **patch in `golem-stuff/golem`**
-(branch `clank-connect-patch`) adds **`--interactive`**: instead of streaming logs, it runs a
-**readline loop** — read a line → invoke the agent's `eval` method → render `stdout`/`stderr`/exit →
-resolve any human-in-the-loop pause → repeat. You get a shell prompt talking to a durable agent.
+`golem agent stream` tails an agent's logs, one-way. A **patch in `golem-stuff/golem`**
+(branch `clank-connect-patch`) adds a sibling command, **`golem agent shell`**: a **readline loop** —
+read a line → invoke the agent's `eval` method → render `stdout`/`stderr`/exit → resolve any
+human-in-the-loop pause → repeat. You get a shell prompt talking to a durable agent.
 
-It is **not** clank-specific: `--interactive` works with any agent exposing `eval(string)`,
+It is **not** clank-specific: `agent shell` works with any agent exposing `eval(string)`,
 `answer_prompt(string)` and `abort_prompt()`, each returning
 `{stdout, stderr, exit-code, pending-prompt}`. clank's agent happens to present exactly that surface.
-Without the flag, `stream` log-streams exactly as it always did.
+`stream` is untouched and log-streams exactly as it always did.
+
+**Why a sibling command, not `stream --interactive`** (which is what this patch did first): `stream`'s
+contract is *"live stream its standard output, error and log channels"* — strictly one-way — and this
+never streams those channels; it invokes the agent. The tell was that `--interactive` had to declare
+`conflicts_with_all` against every other flag on `StreamArgs`. A flag incompatible with its entire host
+command belongs somewhere else. The CLI already demonstrates the split: `repl-stream` is a hidden
+*sibling* of `stream` serving the Bridge SDK REPL, rather than a mode of it.
 
 ## Prerequisites
 
@@ -45,7 +52,7 @@ cd golem-native-testing
 Then connect (the command `setup.sh` prints):
 
 ```bash
-../golem-stuff/golem/target/debug/golem agent stream --interactive 'ClankAgent("demo")'
+../golem-stuff/golem/target/debug/golem agent shell 'ClankAgent("demo")'
 ```
 
 You should get:
