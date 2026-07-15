@@ -161,20 +161,23 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # --- assertion helper: invoke `eval "<cmd>"`, return captured stdout+stderr as text ---
-# `eval` is the agent's single entry point; it returns the structured EvalResult at
-# `.result_json.value`. This helper flattens that to `stdout + stderr` — exactly what the old
-# `run_line` method used to return directly — so every text-comparison assertion below is unchanged.
+# `eval` is the agent's single entry point; it returns the structured EvalResult. This helper flattens
+# that to `stdout + stderr` — exactly what the old `run_line` method used to return directly — so every
+# text-comparison assertion below is unchanged.
 # `golem agent invoke --format json` prints invocation markers + any agent STDERR stream lines to
 # stdout FIRST, then the result document as the final line, so we keep only the line carrying
-# `result_json`, take the last, and concatenate the two streams straight into jq (never `echo`ing the
+# `resultJson`, take the last, and concatenate the two streams straight into jq (never `echo`ing the
 # payload, which would let a shell re-interpret the `\n` escapes in the JSON and corrupt it).
+#
+# SPIKE (spike/dev-golem-sdk): reads the POSITIONAL record — [0]=stdout [1]=stderr — under the
+# camelCase `resultJson` key. Same break as `eval_json` below; see the long note there.
 run_line() {
   local cmd="$1"
   # ONE positional per function arg; the arg is a WIT string literal → wrap in quotes.
   golem agent invoke -q --format json "$AGENT_ID" eval "\"${cmd//\"/\\\"}\"" 2>>"$SERVER_LOG" \
-    | grep '"result_json"' \
+    | grep '"resultJson"' \
     | tail -1 \
-    | jq -r '(.result_json.value.stdout // "") + (.result_json.value.stderr // "")' 2>/dev/null
+    | jq -r '.resultJson.value.value.fields as $f | ($f[0].value // "") + ($f[1].value // "")' 2>/dev/null
 }
 
 expect() {
@@ -193,14 +196,37 @@ expect() {
 }
 
 # Invoke a method that returns the structured `EvalResult` record (`eval`, `answer_prompt`,
-# `abort_prompt`) and print the raw `.result_json.value` JSON object (so callers can pull
-# .stdout / .exit-code / .pending-prompt with jq). `$1` = method, remaining args = WIT arg literals.
+# `abort_prompt`) and print it as a plain `{stdout, stderr, exit_code, pending_prompt}` JSON object
+# (so callers can pull .stdout / .exit_code / .pending_prompt with jq).
+# `$1` = method, remaining args = WIT arg literals.
+#
+# SPIKE (spike/dev-golem-sdk): two things changed under `golem:agent@2.0.0` and BOTH had to move here,
+# or every single assertion reads back an empty string (see DEV_SDK_CHANGES.md §3):
+#
+#   1. The CLI's JSON key is now `resultJson`, not `result_json`. The old `grep '"result_json"'`
+#      matched no line at all, so this function returned nothing for every call.
+#   2. The record arrives as a POSITIONAL schema-value-tree: field names live in the type graph, not
+#      the value, so `.value.stdout` does not exist. Fields come back in declaration order as tagged
+#      `{kind, value}` nodes — [0]=stdout [1]=stderr [2]=exit_code [3]=pending_prompt — which we remap
+#      back to names here. Declaration order in `clank_agent.rs`'s `EvalResult` / `PendingPromptView`
+#      is therefore load-bearing for this script.
+EVAL_REMAP='.resultJson.value.value.fields as $f
+  | { stdout: $f[0].value,
+      stderr: $f[1].value,
+      exit_code: $f[2].value,
+      pending_prompt:
+        (if $f[3].value.inner == null then null
+         else ($f[3].value.inner.value.fields as $p
+               | { question: $p[0].value,
+                   choices: (if $p[1].value.inner == null then null
+                             else [ $p[1].value.inner.value.elements[].value ] end) })
+         end) }'
 eval_json() {
   local method="$1"; shift
   golem agent invoke -q --format json "$AGENT_ID" "$method" "$@" 2>>"$SERVER_LOG" \
-    | grep '"result_json"' \
+    | grep '"resultJson"' \
     | tail -1 \
-    | jq -c '.result_json.value // empty' 2>/dev/null
+    | jq -c "$EVAL_REMAP" 2>/dev/null
 }
 
 # Assert a jq filter over an EvalResult JSON object yields the expected value.

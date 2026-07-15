@@ -25,5 +25,8 @@ components:
       # exports an empty default before deploying; with an empty/unset key `ask` reports "not
       # configured" (exit 4) and the e2e skips its network assertions.
       ANTHROPIC_API_KEY: "{{ ANTHROPIC_API_KEY }}"
-  # SPIKE (spike/dev-golem-sdk): greeter:agent dropped — it pins golem-rust 2.1.0 and is only the
-  # wRPC-invoke fixture, which is stubbed in this spike. Removed from the workspace + this manifest.
+  # The wRPC-invoke fixture: a trivial second agent that clank invokes through WasmRpcInvoker, proving
+  # agent→agent invocation round-trips. Exercised by `scripts/golem-e2e.sh --with-grease`.
+  greeter:agent:
+    dir: crates/greeter-agent
+    templates: rust

@@ -14,4 +14,7 @@ crate-type = ["cdylib"]
 [dependencies]
 # `export_golem_agentic` makes the #[agent_definition]/#[agent_implementation] macros emit the
 # invocable component exports (the golem:agent world). Nothing else is needed for a String→String agent.
-golem-rust = { version = "2.1.0", features = ["export_golem_agentic"] }
+# SPIKE (spike/dev-golem-sdk): repointed from crates.io golem-rust 2.1.0 to the dev SDK in the golem
+# clone, in lockstep with clank-agent — greeter is the wRPC *target*, so it must speak the same
+# golem:agent@2.0.0 world as the invoker calling it. See DEV_SDK_CHANGES.md.
+golem-rust = { path = "../../golem-stuff/golem/sdks/rust/golem-rust", features = ["export_golem_agentic"] }

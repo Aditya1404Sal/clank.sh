@@ -94,9 +94,11 @@ remotes, and gitignored ≠ at-risk. Committed work there lives in its own git a
 
 ---
 
-## 3. Bucket 2 — forced by the value-model break (**the one real regression**)
+## 3. Bucket 2 — forced by the value-model break (**rewritten; no capability lost**)
 
-**WHAT:** `crates/clank-agent/src/agent_invoker.rs` is **stubbed**. 143 lines → 32.
+**WHAT:** `crates/clank-agent/src/agent_invoker.rs` was **rewritten** onto the new value model. It was
+briefly stubbed (143 → 32 lines) while the spike answered "does the shell run?"; it is now real again,
+and **live-verified against a second agent in the cluster**.
 
 **WHY:** `golem:agent@2.0.0` **deleted the `data-value` / `element-value` model** the invoker
 marshalled against, replacing it with `schema-value-tree` / `SchemaValue`. This is visible in the WIT:
@@ -105,18 +107,45 @@ resource, but every signature now takes `schema-value-tree` where 1.5.0 took `da
 `invoke-and-await` additionally gained an `option<>` in its success type. `common.wit`'s import set has
 no `data-value`/`element-value` anywhere.
 
-So the real invoker is a near-total rewrite, not a port: `encode_args` (`Schema::to_element_value` →
-`DataValue::Tuple`), `render_result` (`String::from_element_value`), `parse_phantom` (whose type path
-was literally `golem_wasm::golem_core_1_5_x::types::Uuid` — the version break in a symbol name), and
-`build_client` would all need reworking. A dependency-free RFC-3339 parser (`parse_epoch_secs`, ~30
-lines, Howard Hinnant's `days_from_civil` — clank-agent has no `chrono`) went with it.
+So it was a rewrite, not a port. What each piece became:
 
-The stub returns an honest error:
+| Piece | 1.5.0 | dev SDK (2.0.0) |
+|---|---|---|
+| `encode_args` | `Schema::to_element_value` → `DataValue::Tuple` | positional `SchemaValue::Record` → `encode_schema_value` |
+| `build_client` | `WasmRpc::new(&ty, &ctor, ph, &[])` | tree + config **by value** (a value tree is affine — it can carry owned handles) |
+| `render_result` | `DataValue::Tuple` len 1 | `Option<SchemaValueTree>` — **`None` is a `unit` return, not an error** |
+| `parse_phantom` | `golem_wasm::golem_core_1_5_x::types::Uuid` | `schema::wit::wire::Uuid` — same `high_bits`/`low_bits`, body verbatim |
+| `parse_epoch_secs` | Hinnant `days_from_civil` (~30 lines, no `chrono`) | **unchanged** — touches no golem API |
+| `cancel` | honest `Err(..)` | **still an honest `Err`** — see below |
 
-> `"agent invocation is not available on this spike build (clank on the dev golem SDK); the wRPC invoker awaits a rewrite onto the new schema-value-tree model"`
+**Three findings worth keeping:**
 
-**ACTIVE:** Stubbed. **This is the only capability lost on the branch, and the one thing blocking a
-merge.** Grease-installed agent executables report the error above; the shell is unaffected.
+1. **The type paths are decided by a `with:` mapping, not by guessing.** `golem-rust` generates *two*
+   bindgen worlds — `raw_bindings`/`bindings::` (`lib.rs:66-115`) and the feature-gated `golem_agentic`
+   (`lib.rs:201-242`) — so there are **two distinct `WasmRpc` Rust types**, not interchangeable. But
+   *both* map `"golem:core/types@2.0.0": golem_schema::schema::wit::wire` (`lib.rs:76`, `lib.rs:213`),
+   so `encode_schema_value`'s output feeds either. We use `bindings::golem::agent::host::WasmRpc`: it is
+   unconditional, and golem's own reference component (`test-components/agent-rpc/`) uses exactly that
+   in exactly clank-agent's configuration.
+2. **`decode_value`'s signature flips on a *feature*, not a target.** `golem-schema` gates it on
+   `all(feature="guest", not(feature="host"))`: the guest path takes the tree **by value** (to move
+   owned handles out), the pure path takes it **by reference**. `golem-rust` pins
+   `golem-schema = { default-features = false, features = ["guest"] }` and never `host`, so the
+   by-value form holds on native *and* wasm — which is why one source compiles for both.
+3. **The old silent-drop bug is now structurally impossible.** `main`'s `encode_args` used
+   `filter_map(…ok())`, so an argument that failed to encode was **dropped, shifting every later
+   positional arg** — a wrong-agent-call rather than an error. On the new model per-argument lowering is
+   *infallible* (`SchemaValue::String` is a direct variant); only the single whole-tree encode can fail,
+   and that error is propagated. The bug couldn't be ported even on purpose.
+
+**`cancel` stays honestly stubbed — and that is not a value-model problem.** A scheduled invocation's
+`cancellation-token` is a host resource that cannot survive across the agent's serialized invocations
+(Golem parks between them), so it can't be re-acquired later for a `kill`. That constraint is unchanged
+by the SDK bump; it reads identically on `main`.
+
+**ACTIVE:** Rewritten and green. **No capability is lost on the branch.** Verified by 10 native unit
+tests over the pure halves (encode/decode/render/phantom/epoch — a layer `main` had **zero** coverage
+for) plus the live `scripts/golem-e2e.sh --with-grease` round-trip through a real `GreeterAgent`.
 
 The same model swap is visible in `Cargo.lock` — `golem-rust`'s own dependency list:
 
@@ -124,6 +153,37 @@ The same model swap is visible in `Cargo.lock` — `golem-rust`'s own dependency
 main:   golem-rust 2.1.0  → "golem-wasm"
 spike:  golem-rust 0.0.0  → "golem-schema", "wit-bindgen 0.58.0"
 ```
+
+### The value-model break reaches the TEST HARNESS too — the sleeper
+
+`scripts/golem-e2e.sh` was byte-identical to `main`'s and **every one of its ~290 assertions failed on
+this branch** (first run: **4 passed, 288 failed**) — each one reading back `got: ''`, starting from a
+trivial `mkdir -p /tmp/work; echo ready`. It looks exactly like catastrophic agent breakage. It was
+**entirely the result reader**. Two independent changes in the dev CLI's `agent invoke --format json`,
+both of which fail *silently* (empty string, never an error):
+
+1. **The JSON key is now `resultJson`, not `result_json`.** `grep '"result_json"'` matched **no line**,
+   so the helper emitted nothing at all.
+2. **The record arrives as a POSITIONAL `schema-value-tree`** — field names live in the type graph, not
+   the value, so **`.value.stdout` does not exist**. Fields come back in declaration order as tagged
+   `{kind, value}` nodes: `[0]`=stdout `[1]`=stderr `[2]`=exit_code `[3]`=pending_prompt (option →
+   `.value.inner`, record → `.value.fields`, list → `.value.elements`).
+
+Both breaks existed in **two** helpers — `eval_json` (the structured path) and `run_line` (the text
+path most assertions use). Fixing them means remapping positional→named **inside those two helpers**,
+which leaves all ~290 downstream `jq` filters untouched.
+
+**This makes field declaration order in `clank_agent.rs` (`EvalResult`, `PendingPromptView`) a wire
+contract** for anything decoding an invoke result — the same reason golem-cli's `#[derive(FromSchema)]`
+matches by position. Reordering fields silently mis-assigns values.
+
+`golem-native-testing/probe.sh` already documented #2 and sidesteps both by reading the top-level
+`"result"` Debug string (parsed with python — *not* `grep -o '"result":"[^"]*"'`, which truncates at the
+first escaped quote and makes a good result look empty).
+
+**The cost worth reporting to the maintainers:** a value-model change is not confined to guest code. It
+silently invalidates every *out-of-band* consumer of the CLI's JSON — test harnesses, CI scripts,
+dashboards — with an empty read rather than a parse error.
 
 ---
 
@@ -246,27 +306,37 @@ the spike now carry `rev = "309a054"`. Don't inherit that number.
   and Brush forks, the `cfg`-gated wasm infrastructure, the hand-rolled text tools: all unaffected.
 - **`wstd = "=0.6.5"` and `serde` are unchanged** in `crates/clank-agent/Cargo.toml` — which is exactly
   why §4's rewrite cost zero new dependencies.
-- **`crates/greeter-agent/` still exists** — on disk *and* tracked in git (`Cargo.toml`, `src/lib.rs`).
-  Nothing was deleted. It was only dropped from `members` and added to `exclude`
-  (`Cargo.toml:5,9`) and removed from `golem.yaml:28`, because it pins `golem-rust 2.1.0` and is only the
-  wRPC fixture — which §3 stubbed anyway. **Restoring it is ~7 lines.**
+- **`crates/greeter-agent/` is back in the build.** It was briefly dropped from `members`/added to
+  `exclude` and removed from `golem.yaml` (never deleted) while §3 was stubbed, because it pinned
+  `golem-rust 2.1.0`. Restoring it took **three edits and zero source changes**: repoint its one dep to
+  the dev-SDK path (`Cargo.toml:17`, in lockstep with clank-agent — greeter is the wRPC *target*, so it
+  must speak the same `golem:agent@2.0.0` world as the invoker calling it), put it back in `members`,
+  restore its `golem.yaml` block. **`src/lib.rs` needed no change at all** — a plain
+  `#[agent_definition]` String→String agent absorbed the WIT bump exactly as `clank_agent.rs` did, which
+  is a small but real data point about the migration's blast radius on ordinary agent code.
 - **`golem.yaml` is otherwise byte-identical**: `app: clank`, the `environments:` block, and the
   `clank:agent` component with its `ANTHROPIC_API_KEY: "{{ ANTHROPIC_API_KEY }}"` passthrough.
 
 ### The dependency wall that wasn't
 
 The spike was scoped expecting to vendor ~4 SDK crates and rewrite ~45 workspace-inherited deps. It
-took **one line**: `exclude = ["golem-stuff", "crates/greeter-agent"]` (`Cargo.toml:9`). That makes
-cargo resolve `golem-schema`'s `{ workspace = true }` deps against **its own** workspace
-(`golem-stuff/golem/`) instead of clank's root. No vendoring, no dep rewrite.
+took **one line**: `exclude = ["golem-stuff"]` (`Cargo.toml:9`). That makes cargo resolve
+`golem-schema`'s `{ workspace = true }` deps against **its own** workspace (`golem-stuff/golem/`)
+instead of clank's root. No vendoring, no dep rewrite.
 
 ---
 
 ## 8. Known-stale / follow-ups
 
-- **`agent_invoker.rs`** — the wRPC rewrite onto `schema-value-tree` (§3). The real remaining work.
+- **`agent_invoker.rs` is DONE** (§3) — the branch has **no stubs left**. What remains is not clank's to
+  fix: the spike still path-deps an unreleased `golem-rust 0.0.0`, so it cannot merge until the dev SDK
+  ships and `golem-ai-llm` stops pinning `=2.1.0` (§4). That is a release-timing wall, not a code wall.
 - **`crates/clank-shell/src/session/mod.rs`'s fix (`4bd6fa2`)** should be **cherry-picked to `main`** —
   it is SDK-independent (§5).
+- **`scripts/golem-e2e.sh` still calls a bare `golem`** (it is byte-identical to `main`'s). On this
+  branch that resolves to whatever is on `PATH` — a release **1.5.1** CLI cannot parse this branch's
+  `manifestVersion: 1.6.0`. Run it with the dev binary ahead on `PATH`
+  (`golem-stuff/golem/target/debug/golem`), the way `golem-native-testing/setup.sh:16` already does.
 - **The `fork` re-export discrepancy** in §2 is unresolved; re-check against `golem-rust 2.1.0`'s source
   when a network/registry copy is available.
 - The dev binary **rewrites tracked files in this repo** when it builds/deploys (it has rewritten
