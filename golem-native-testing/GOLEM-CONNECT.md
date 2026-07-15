@@ -20,13 +20,14 @@ Scripts in this directory are the ones to use — **do not** re-derive these com
 ## What this even is
 
 `golem agent stream` normally tails an agent's logs. A **patch in `golem-stuff/golem`**
-(branch `clank-connect-patch`) special-cases it: when the agent is a clank shell, it instead runs a
+(branch `clank-connect-patch`) adds **`--interactive`**: instead of streaming logs, it runs a
 **readline loop** — read a line → invoke the agent's `eval` method → render `stdout`/`stderr`/exit →
-resolve any human-in-the-loop pause → repeat. You get a `clank$ ` prompt talking to a durable agent.
+resolve any human-in-the-loop pause → repeat. You get a shell prompt talking to a durable agent.
 
-> **Status:** that patch is mid-rewrite (it fails `cargo fmt` and hardcodes the agent's type name;
-> see `golem-stuff/golem/.claude/CLAUDE.md`). Once the rewrite lands, the trigger becomes an explicit
-> **`--interactive`** flag rather than type-name sniffing. Both forms are noted below.
+It is **not** clank-specific: `--interactive` works with any agent exposing `eval(string)`,
+`answer_prompt(string)` and `abort_prompt()`, each returning
+`{stdout, stderr, exit-code, pending-prompt}`. clank's agent happens to present exactly that surface.
+Without the flag, `stream` log-streams exactly as it always did.
 
 ## Prerequisites
 
@@ -44,8 +45,7 @@ cd golem-native-testing
 Then connect (the command `setup.sh` prints):
 
 ```bash
-../golem-stuff/golem/target/debug/golem agent stream 'ClankAgent("demo")'
-#  after the rewrite:  … agent stream --interactive 'ClankAgent("demo")'
+../golem-stuff/golem/target/debug/golem agent stream --interactive 'ClankAgent("demo")'
 ```
 
 You should get:

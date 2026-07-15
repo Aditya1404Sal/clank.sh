@@ -77,7 +77,7 @@ cat <<EOF
 === READY ===  server up on :$PORT, agent $AGENT_ID deployed.
 
 Connect (interactive shell):
-    $GOLEM agent stream '$AGENT_ID'
+    $GOLEM agent stream --interactive '$AGENT_ID'
 
 Try:  echo hi  |  pwd  |  prompt-user "your name?"  |  ask "in one word, what is a shell"  |  exit
 
