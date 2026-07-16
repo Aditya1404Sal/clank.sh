@@ -158,6 +158,10 @@ pub(crate) fn run_uu<SE: ShellExtensions>(
     let saved_out = redirect(OpenFiles::STDOUT_FD, 1);
     let saved_err = redirect(OpenFiles::STDERR_FD, 2);
 
+    // uucore's exit code is a process-global (`AtomicI32`) that upstream resets by process
+    // exit — which never happens in-process here. Without this, one failed command poisons
+    // every later success's exit code (ls-of-missing made a subsequent touch report 2).
+    uucore::error::set_exit_code(0);
     let code = uumain();
 
     let _ = std::io::stdout().flush();
@@ -262,6 +266,11 @@ pub(crate) fn run_uu<SE: ShellExtensions>(
         }
     }
 
+    // uucore's exit code is a process-global (`AtomicI32`) that upstream resets by process
+    // exit — which never happens in-process here (a wasm agent instance is one long-lived
+    // process across invocations). Without this, one failed command poisons every later
+    // success's exit code.
+    uucore::error::set_exit_code(0);
     let code = uumain();
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();

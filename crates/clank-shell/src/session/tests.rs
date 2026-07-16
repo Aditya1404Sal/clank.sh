@@ -95,6 +95,32 @@ fn eval_line_reports_streams_and_exit_status() {
     });
 }
 
+/// uucore keeps a process-global exit code (`uucore::error::set_exit_code`) that upstream
+/// coreutils resets by dying — each command is its own process there. clank runs `uumain`
+/// IN-PROCESS, so without an explicit reset in `run_uu` a single failed command poisons every
+/// later success: `ls <missing>` (exit 2) made a subsequent successful `touch` also report 2.
+/// Found by the conformance suite's redirects scenario; affects both targets identically (a wasm
+/// agent instance is one long-lived process too).
+#[test]
+fn uu_exit_code_does_not_stick_across_invocations() {
+    on_rt(async {
+        let mut session = Session::new().await.unwrap();
+        let missing = std::env::temp_dir().join(format!("clank_sticky_missing_{}", std::process::id()));
+        let created = std::env::temp_dir().join(format!("clank_sticky_created_{}", std::process::id()));
+
+        let result = session.eval_line(&format!("ls {}", missing.display())).await;
+        assert_ne!(result.exit_code, 0, "ls of a missing path must fail");
+
+        let result = session.eval_line(&format!("touch {}", created.display())).await;
+        assert!(created.exists(), "touch must actually create the file");
+        assert_eq!(
+            result.exit_code, 0,
+            "a successful uu command must not inherit the previous failure's sticky exit code"
+        );
+        let _ = std::fs::remove_file(&created);
+    });
+}
+
 /// End-to-end through the public API: a completed command shows `Z` in `ps`, and `ps` sees its
 /// own row as `R` (spawned before execution, completed only after) — like real Unix.
 #[test]

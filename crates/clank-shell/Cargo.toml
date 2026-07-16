@@ -57,6 +57,9 @@ uu_sleep = "0.9"
 # `any(unix, windows)` (its uucore dep isn't linked on wasm), so the agent had no printf at all.
 # Registering uu_printf fills wasm and shadows Brush's on native for uniform behavior.
 uu_printf = "0.9"
+# Direct uucore dep (same patched fork) so `run_uu` can reset uucore's process-global exit code
+# per invocation — upstream resets it by process exit, which never happens in-process here.
+uucore = "0.9"
 async-trait = "0.1"
 # Parsing the agentic `ask` loop's tool-call arguments (the `shell` tool's JSON args) and, later,
 # MCP JSON-RPC. Pure Rust, dual-target-safe (no OS deps).
