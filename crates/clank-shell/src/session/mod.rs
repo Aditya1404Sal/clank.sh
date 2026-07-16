@@ -1076,11 +1076,22 @@ impl Session {
     }
 
 
-    /// Generated help for an installed command-package line ending in `--help` (prompt or script).
-    /// `None` if the line isn't an installed command package or doesn't request help.
+    /// Generated help for an installed command-package line ending in `--help` (prompt, script, or
+    /// agent). `None` if the line isn't an installed command package or doesn't request help.
+    ///
+    /// A leading `sudo` is skipped: it only pre-authorizes, so it must not change what `--help`
+    /// prints. Without this, `sudo <pkg> --help` looked up the package named "sudo", found nothing,
+    /// and fell through to the package's own parser — for an agent that means
+    /// "unknown flag --help before the method" (exit 2) instead of the agent's surface. The path is
+    /// not hypothetical: `ask`'s per-command authorization re-runs an approved command WITH the sudo
+    /// grant, so a model asking for `<pkg> --help` always took the broken one.
+    /// (`builtins::typecmd::help_for` does the same for the statically-intercepted commands.)
     fn pkg_help_for(&self, line: &str) -> Option<String> {
         let words = crate::ai::ask::dequote_words(line)?;
-        let name = words.first()?;
+        let name = match words.split_first() {
+            Some((first, rest)) if first == "sudo" => rest.first()?,
+            _ => words.first()?,
+        };
         if words.iter().any(|w| w == "--help") {
             return self.grease.pkg_help(name);
         }

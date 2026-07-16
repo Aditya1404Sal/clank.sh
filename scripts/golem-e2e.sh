@@ -996,11 +996,19 @@ if [[ -n "${GREASE_AGENT_URL:-}" && -n "${GREASE_AGENT_PKG:-}" ]]; then
   expect_eval "agent install reports the kind"         "$GAG_INST"  '.stdout | contains("[agent]")'  'true'
   expect_contains "type finds the installed agent"     "type ${GREASE_AGENT_PKG}"  "${GREASE_AGENT_PKG}"
   expect_contains "the agent stub is in /usr/lib/agents/bin"  "cat /usr/lib/agents/bin/${GREASE_AGENT_PKG}"  'clank agent'
-  # Invoking it on the agent (which has a WasmRpc invoker) reaches the cluster; with no deployed target
-  # agent type it errors — but NOT with the "requires a cluster" message (the invoker IS configured).
-  # We only assert it doesn't crash the shell (exit is nonzero-or-zero, shell survives).
+  # `--help` must DESCRIBE the agent and SUCCEED — the exit code is the whole point, because the only
+  # consumer that reads it is a model: `ask`'s agentic loop sees a non-zero exit as "that failed" and
+  # discards the help it just received. Asserted for the sudo form too: `ask`'s per-command
+  # authorization re-runs an approved command WITH the sudo grant, so `sudo <agent> --help` is the path
+  # a model actually takes. It used to exit 2 ("unknown flag --help before the method") because the
+  # `--help` interception did not look past a leading `sudo`, and this assertion missed it by checking
+  # only stdout.
   GAG_HELP="$(eval_json eval "\"${GREASE_AGENT_PKG} --help\"")"
   expect_eval "agent --help describes the type"        "$GAG_HELP"  '.stdout | contains("Agent type")'  'true'
+  expect_eval "agent --help exits 0"                   "$GAG_HELP"  '.exit_code'  '0'
+  GAG_SUDO_HELP="$(eval_json eval "\"sudo ${GREASE_AGENT_PKG} --help\"")"
+  expect_eval "sudo agent --help still describes the type" "$GAG_SUDO_HELP"  '.stdout | contains("Agent type")'  'true'
+  expect_eval "sudo agent --help exits 0"                  "$GAG_SUDO_HELP"  '.exit_code'  '0'
   # --revision is honest-stubbed (no wasm-rpc slot). Uses the agent's first method name if known;
   # the parse fires before any invocation, so any method works — reuse the help to find one is overkill,
   # assert on a bogus method too (unknown-method also exits 2). We only need the --revision error path.

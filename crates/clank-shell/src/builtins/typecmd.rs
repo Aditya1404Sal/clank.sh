@@ -122,8 +122,19 @@ pub fn dispatch(line: &str, registry: &CommandRegistry) -> Option<(String, u8)> 
 ///
 /// This is the one place clank serves `--help` for the intercepted commands (`prompt-user`, `curl`,
 /// `wget`, `context`), which never reach Brush's dispatch and so would otherwise ignore `--help`.
+///
+/// A leading `sudo` is stripped first: it only pre-authorizes the command, so it must not change what
+/// `--help` prints. Without this, `sudo <cmd> --help` fell through to the command's own parser — which
+/// is exactly what this interception exists to prevent (`sudo curl --help` surfacing an outbound-HTTP
+/// confirmation, `sudo greeter --help` failing as "unknown flag --help before the method"). That path
+/// is not hypothetical: `ask`'s per-command authorization re-runs an approved command WITH the sudo
+/// grant applied, so the model asking for `<cmd> --help` was the one that hit it.
 pub fn help_for(line: &str, registry: &CommandRegistry) -> Option<String> {
     let words = words(line)?;
+    let words = match words.split_first() {
+        Some((first, rest)) if first == "sudo" => rest,
+        _ => &words[..],
+    };
     let (first, rest) = words.split_first()?;
     if !is_intercepted(first) {
         return None;
@@ -222,5 +233,31 @@ mod tests {
         assert!(help_for("curl https://example.com", &reg()).is_none());
         // Not a command at all.
         assert!(help_for("", &reg()).is_none());
+    }
+
+    /// `sudo` only pre-authorizes — it must not change what `--help` prints. Regression: `sudo` used
+    /// to make `first` be "sudo", which is not intercepted, so this declined and the line fell through
+    /// to the command's own parser (`sudo curl --help` surfacing an outbound-HTTP confirm rather than
+    /// help). `ask`'s authorization re-runs an approved command WITH the sudo grant, so a model asking
+    /// for `<cmd> --help` always took the broken path.
+    #[test]
+    fn help_for_looks_past_a_leading_sudo() {
+        for cmd in INTERCEPTED {
+            let bare = help_for(&format!("{cmd} --help"), &reg());
+            let sudoed = help_for(&format!("sudo {cmd} --help"), &reg());
+            assert!(sudoed.is_some(), "`sudo {cmd} --help` must serve help");
+            assert_eq!(bare, sudoed, "`sudo` must not change `{cmd} --help`");
+        }
+    }
+
+    #[test]
+    fn help_for_sudo_alone_or_sudo_without_help_is_none() {
+        // `sudo` is not itself an intercepted command, and stripping it must not panic on a bare word.
+        assert!(help_for("sudo", &reg()).is_none());
+        assert!(help_for("sudo --help", &reg()).is_none());
+        // Stripping `sudo` must not invent a --help that was never asked for.
+        assert!(help_for("sudo curl https://example.com", &reg()).is_none());
+        // A non-intercepted command stays Brush's business, sudo or not.
+        assert!(help_for("sudo cat --help", &reg()).is_none());
     }
 }
