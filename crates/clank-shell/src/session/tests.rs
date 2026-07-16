@@ -887,6 +887,21 @@ fn grease_install_then_invoke_a_golem_agent() {
         let help_s = String::from_utf8(help.stdout).unwrap();
         assert!(help_s.contains("ShoppingCart") && help_s.contains("add-item"), "help: {help_s}");
 
+        // `sudo <agent> --help` must print the SAME help: sudo only pre-authorizes. It used to look up
+        // a package named "sudo", find none, and fall through to the agent parser → exit 2 "unknown
+        // flag --help before the method". This is the form that matters most: `ask`'s per-command
+        // authorization re-runs an approved command WITH the sudo grant, so a model asking for
+        // `<agent> --help` only ever saw the failure — and cannot tell it from a bad flag.
+        let sudo_help = session.eval_line("sudo shopping-cart --help").await;
+        assert_eq!(
+            sudo_help.exit_code,
+            0,
+            "sudo --help stderr: {}",
+            String::from_utf8_lossy(&sudo_help.stderr)
+        );
+        assert_eq!(String::from_utf8(sudo_help.stdout).unwrap(), help_s, "sudo must not change --help");
+        assert!(seen.lock().unwrap().is_none(), "--help must not invoke the agent");
+
         // An unknown method → exit 2 (no invocation).
         let bad = session.eval_line("sudo shopping-cart --userid jd frobnicate").await;
         assert_eq!(bad.exit_code, 2);
