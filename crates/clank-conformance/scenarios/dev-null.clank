@@ -1,0 +1,17 @@
+# /dev/null: writes are swallowed, reads are empty, 2> /dev/null silences stderr.
+# (A real device natively; emulated on the agent with a truncate-on-open backing file.)
+
+# > /dev/null swallows stdout...
+run echo noise > /dev/null
+
+# ...and the swallowed bytes are not readable back: cat sees an empty device, exit 0.
+run cat /dev/null
+
+# stat reports a device, not a regular file, on both targets.
+run stat -c %F /dev/null
+out character special file
+
+# 2> /dev/null silences the error text; the failure still reports through its exit code
+# (uu ls exit codes vary by target surface — the silenced stderr is the assertion here).
+run ls ${TMP}/absent 2> /dev/null
+exit any

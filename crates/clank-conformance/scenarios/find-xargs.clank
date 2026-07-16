@@ -1,0 +1,63 @@
+# find (hand-rolled walker: -name/-iname/-type/-maxdepth, sorted children) and xargs
+# (shell re-entry: stdin tokens become in-shell command lines), plus find | xargs
+# composition. Core forms proven on the agent by golem-e2e section 2o.
+
+run mkdir -p ${TMP}/ft/sub
+run echo 1 > ${TMP}/ft/a.txt
+run echo 2 > ${TMP}/ft/sub/b.txt
+run echo 3 > ${TMP}/ft/sub/c.log
+
+run find ${TMP}/ft -name "*.txt"
+out ${TMP}/ft/a.txt
+out ${TMP}/ft/sub/b.txt
+
+run find ${TMP}/ft -type d
+out ${TMP}/ft
+out ${TMP}/ft/sub
+
+run find ${TMP}/ft -type f -name "*.log"
+out ${TMP}/ft/sub/c.log
+
+run find ${TMP}/ft -maxdepth 1 -name "*.txt"
+out ${TMP}/ft/a.txt
+
+# -iname matches case-insensitively.
+run find ${TMP}/ft -iname "*.TXT"
+out ${TMP}/ft/a.txt
+out ${TMP}/ft/sub/b.txt
+
+# No match is not an error: empty output, exit 0 (the strict defaults).
+run find ${TMP}/ft -name "*.nomatch"
+
+# A missing root: exit 1; the message is hand-crafted in the shared walker
+# (find.rs NotFound arm), so the fragment holds on both targets.
+run find ${TMP}/absent-root
+err~ No such file or directory
+exit 1
+
+# xargs — appends stdin tokens to the command.
+run echo one two | xargs echo GOT:
+out GOT: one two
+
+# -n batches invocations.
+run printf 'a\nb\nc\n' | xargs -n 2 echo B:
+out B: a b
+out B: c
+
+# -I substitutes whole lines.
+run printf 'x y\nz\n' | xargs -I {} echo "[{}]"
+out [x y]
+out [z]
+
+# Default command is echo.
+run echo hi there | xargs
+out hi there
+
+# find | xargs composes; xargs is a run_tool consumer (target-agnostic stdin).
+run find ${TMP}/ft -name "*.txt" | xargs echo FOUND:
+out FOUND: ${TMP}/ft/a.txt ${TMP}/ft/sub/b.txt
+
+# xargs handing file arguments to grep (grep reads the files, not stdin).
+run find ${TMP}/ft -name "*.txt" | xargs grep -h .
+out 1
+out 2

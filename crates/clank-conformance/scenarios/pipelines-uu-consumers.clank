@@ -1,0 +1,23 @@
+# KNOWN DIVERGENCE — uu-tool consumers in pipelines (tr/sort/head/wc reading stdin).
+#
+# On the wasm agent this works: the Wall-C plumbing stages pipe input into uu stdin
+# (`run_uu` fd-renumber). Natively `run_uu` deliberately does NOT touch fd 0
+# (crates/clank-shell/src/tools/coreutils.rs — "brush runs pipeline stages concurrently,
+# so redirecting the process-global stdin races with the shell itself"), so a uu consumer
+# reads the REAL process stdin instead of the pipe.
+#
+# `@only golem` pins the working target; drop the marker when native stdin staging lands.
+@only golem
+
+run echo hello | tr a-z A-Z
+out HELLO
+
+run printf 'b\na\nc\n' | sort | head -2
+out a
+out b
+
+run printf 'x\ny\n' | wc -l
+out~ 2
+
+run echo hi | tr a-z A-Z | head -1
+out HI

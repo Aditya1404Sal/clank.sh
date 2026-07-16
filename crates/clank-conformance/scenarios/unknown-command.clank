@@ -1,0 +1,13 @@
+# Unknown command on NATIVE: Brush's PATH search fails → "command not found", exit 127,
+# and $? carries it. The wasm side of this contract is unknown-command-wasm.clank —
+# wasip2 has no process spawn, so Brush's external-exec fallthrough fails with a
+# different message and 126. Product follow-up worth considering: clank-wasm could
+# intercept the fallthrough and report 127 command-not-found like native does.
+@only native
+
+run definitely-not-a-cmd-xyz
+err~ command not found: definitely-not-a-cmd-xyz
+exit 127
+
+run echo code=$?
+out code=127

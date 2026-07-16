@@ -1,0 +1,43 @@
+# Authorization, "all" grant: answering `all` to a Confirm gate approves the command AND
+# grants session-wide Confirm approval — later Confirm commands run without pausing — but
+# the sudo-only tier (rm) still pauses; "all" never satisfies it.
+#
+# `golem rollback` is the Confirm-policy probe (state-changing golem subcommand, no
+# network). The command itself reports an honest error AFTER the gate on both targets, but
+# the text/exit differ (native, no cluster wired: "requires a configured Golem cluster",
+# exit 4; agent, cluster wired: "needs an explicit revert target … not wired in v1",
+# exit 1) — hence err~ on the shared "golem:" prefix + exit any. What this file pins is
+# the PAUSE behavior, asserted strictly.
+
+# 1. A Confirm command pauses: question on stdout, with the (a)ll choice offered.
+run golem rollback
+out golem has requested permission to interact with the Golem cluster (runtime API subset). (y)es, (n)o, (a)ll
+prompt~ has requested permission
+choices yes,no,all
+
+# 2. "all" approves this command (which then runs into its honest target-dependent error)
+#    and grants blanket Confirm for the session.
+answer all
+err~ golem:
+exit any
+
+# 3. The same Confirm command now runs WITHOUT pausing (the strict no-pending default is
+#    the assertion) — straight to the honest error.
+run golem rollback
+err~ golem:
+exit any
+
+# 4. sudo-only is NOT covered by the "all" grant: bare rm still pauses.
+run touch ${TMP}/keep
+run rm ${TMP}/keep
+out rm requires sudo authorization to remove files and directories. (y)es, (n)o
+prompt~ requires sudo authorization
+choices yes,no
+
+# Deny it; the file survives.
+answer no
+err clank: authorization denied
+exit 5
+
+run ls ${TMP}
+out keep

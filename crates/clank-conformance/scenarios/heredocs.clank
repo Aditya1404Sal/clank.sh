@@ -1,0 +1,44 @@
+# Here-documents (<<EOF via + continuations) and here-strings (<<<) feeding the
+# hand-rolled text tools (grep/sed/awk — the `run_tool` path), which hold on BOTH
+# targets. uu-tool consumers (cat/wc) reading a here-doc are a known native
+# divergence — see heredocs-uu-consumers.clank.
+
+run grep o <<EOF
++ foo
++ bar
++ boo
++ EOF
+out foo
+out boo
+
+# Here-string.
+run grep string <<< here-string-ok
+out here-string-ok
+
+# Variables expand inside an unquoted-delimiter here-doc body.
+run V=kiwi
+run grep fruit <<EOF
++ fruit=$V
++ other=thing
++ EOF
+out fruit=kiwi
+
+run sed s/small/BIG/ <<EOF
++ a small step
++ EOF
+out a BIG step
+
+# A here-doc composes with an output redirect.
+run grep -v skip <<EOF > ${TMP}/hd
++ keep-one
++ skip-me
++ keep-two
++ EOF
+run grep keep ${TMP}/hd
+out keep-one
+out keep-two
+
+run awk '{print $2}' <<EOF
++ first second
++ EOF
+out second

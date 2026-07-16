@@ -1,0 +1,48 @@
+# $(...) command substitution: in argument position, inside double quotes, nested,
+# capturing a pipeline, and substituting a failing command (empty text; the status is
+# visible to $? on an assignment-only line).
+
+# Argument position.
+run echo $(echo nested)
+out nested
+
+# Inside double quotes.
+run echo "greeting: $(echo hi)"
+out greeting: hi
+
+# Nested substitution.
+run echo $(echo $(echo deep))
+out deep
+
+# Unquoted, the captured text word-splits; double-quoted, internal newlines survive.
+run echo words: $(printf 'l1\nl2\n')
+out words: l1 l2
+
+run echo "quoted: $(printf 'l1\nl2\n')"
+out quoted: l1
+out l2
+
+# Trailing newlines are stripped from the captured text.
+run echo "trail:[$(printf 'x\n\n\n')]"
+out trail:[x]
+
+# A pipeline inside the substitution (grep consumer — target-agnostic stdin plumbing).
+run echo "n=$(printf 'a\nab\nz\n' | grep -c a)"
+out n=2
+
+# A failing command substitutes as empty text; the outer command still exits 0.
+run echo pre-$(false)-post
+out pre--post
+
+# An assignment-only line takes the substitution's exit status.
+run X=$(false); echo x=$X code=$?
+out x= code=1
+
+run Y=$(true); echo code=$?
+out code=0
+
+# stderr from inside the substitution surfaces on the step (raw fluent key from the uu
+# fork — assert the stable fragment only).
+run echo pre-$(ls ${TMP}/absent)-post
+out pre--post
+err~ cannot-access

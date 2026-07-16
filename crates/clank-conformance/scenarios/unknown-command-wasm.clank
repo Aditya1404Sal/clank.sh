@@ -1,0 +1,13 @@
+# Unknown command on the WASM agent: there is no process spawn on wasip2, so Brush's
+# external-exec fallthrough fails with "operation not supported on this platform" and
+# exit 126 (verified live). Honest platform behavior, but it diverges from native's
+# 127 command-not-found (unknown-command.clank) — if clank-wasm ever intercepts the
+# fallthrough to report 127, this file is what flips.
+@only golem
+
+run definitely-not-a-cmd-xyz
+err~ operation not supported on this platform
+exit 126
+
+run echo code=$?
+out code=126

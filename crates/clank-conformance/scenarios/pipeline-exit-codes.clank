@@ -1,0 +1,52 @@
+# Pipeline exit codes: a pipeline reports its LAST stage, and $? sees that on the next
+# line. Consumers here are the hand-rolled text tools only (grep/sed — the `run_tool`
+# path); uu consumers natively read the real process stdin (pipelines-uu-consumers.clank).
+
+# Success through both stages.
+run echo hello | grep hello
+out hello
+
+run echo code=$?
+out code=0
+
+# The consumer decides: grep with no match fails the pipeline even though the producer
+# succeeded.
+run echo hello | grep nomatch
+exit 1
+
+run echo code=$?
+out code=1
+
+# A failing producer is masked by a succeeding last stage.
+run false | echo last-wins
+out last-wins
+
+run echo code=$?
+out code=0
+
+# A failing LAST stage sets the code even with a succeeding producer.
+run echo x | false
+exit 1
+
+run echo code=$?
+out code=1
+
+# Three stages: the middle failure is invisible — the last stage still wins.
+run true | false | true
+
+run echo code=$?
+out code=0
+
+# The last of three stages fails.
+run echo hello | grep hello | grep nomatch
+exit 1
+
+run echo code=$?
+out code=1
+
+# A green multi-stage pipeline leaves $? at 0.
+run printf 'a\nb\n' | sed s/a/z/ | grep z
+out z
+
+run echo code=$?
+out code=0

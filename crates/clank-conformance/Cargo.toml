@@ -1,0 +1,39 @@
+# clank-conformance — one scenario corpus, two shell targets.
+#
+# Data-driven conformance suite: `.clank` scenario files under `scenarios/` are executed
+# verbatim against (a) the native in-process `Session` and (b) a deployed clank Golem agent
+# driven through the `golem` CLI. Any behavioral divergence between the two targets is a
+# red test here instead of a live surprise.
+#
+# This crate is native-only tooling: it never compiles to wasm (it drives the wasm target
+# as a subprocess), and it is never published.
+
+[package]
+name = "clank-conformance"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+# Session core only — `repl-driver` (the default feature) is the wasm `wasi:cli/run` export,
+# dropped here the same way clank-agent drops it.
+clank-shell = { path = "../clank-shell", default-features = false }
+# libtest-mimic sits in [dependencies] (not dev-) because src/harness.rs builds the Trials;
+# fine for a publish = false tool crate.
+libtest-mimic = "0.8"
+tokio = { version = "1", features = ["rt", "process", "time"] }
+serde_json = "1"
+anyhow = "1"
+
+# The two conformance tiers are SEPARATE test binaries on purpose: cargo runs test binaries
+# serially, so native trials (which swap real fd 1/2 in `run_uu` and move the process cwd)
+# can never interleave with golem trials' reporter output.
+[[test]]
+name = "native"
+harness = false
+
+[[test]]
+name = "golem"
+harness = false

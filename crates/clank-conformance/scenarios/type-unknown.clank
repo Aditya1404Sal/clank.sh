@@ -1,0 +1,14 @@
+# `type` for an unknown name — the CORRECT contract: not-found on stderr, exit 1.
+#
+# @only native because Brush's wasm `type` fallthrough currently LIES: on wasm
+# PathExt::executable returns true for phantom paths, so the agent answers
+# "clank-no-such-cmd-xyz is /usr/local/bin/clank-no-such-cmd-xyz" with exit 0
+# (verified live 2026-07-17). KNOWN BUG in the Brush fork, tracked as a follow-up
+# (std Path::exists-based PathExt on wasm); when the fix lands, drop this marker so
+# the same assertions pin both targets. `which` does NOT share the lie — it reports
+# nothing/exit 1 for unknown names on both targets (path-resolution.clank).
+@only native
+
+run type clank-no-such-cmd-xyz
+err~ not found
+exit 1

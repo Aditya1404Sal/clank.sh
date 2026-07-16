@@ -1,0 +1,40 @@
+# Exit-code plumbing: unknown command → 127, true/false, a failed uu tool's code, and
+# $? refreshing on every step (a successful step resets it to 0 — the once-sticky code).
+
+run true
+
+run echo code=$?
+out code=0
+
+run false
+exit 1
+
+run echo code=$?
+out code=1
+
+# $? reflects the LAST step: the echo above succeeded, so it reads 0 now.
+run echo code=$?
+out code=0
+
+# Unknown command: the exit code and message DIVERGE by target (native: 127
+# command-not-found; wasm: 126 exec-unsupported — wasip2 has no process spawn, so Brush's
+# external-exec fallthrough fails differently). Pinned exactly per target in
+# unknown-command.clank / unknown-command-wasm.clank; here only: it fails, naming the cmd.
+run definitely-not-a-cmd-xyz
+err~ definitely-not-a-cmd-xyz
+exit any
+
+# A failed uu tool: ls on a missing path exits 2. The error text is a raw fluent key
+# behind a context-dependent binary-name prefix — assert the stable fragment only.
+run ls ${TMP}/absent
+err~ cannot-access
+exit 2
+
+run echo code=$?
+out code=2
+
+# And a success right after clears it again.
+run true
+
+run echo code=$?
+out code=0

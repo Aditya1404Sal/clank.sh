@@ -513,6 +513,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "clank-conformance"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "clank-shell",
+ "libtest-mimic",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "clank-shell"
 version = "0.0.0"
 dependencies = [
@@ -559,6 +570,7 @@ dependencies = [
  "uu_tr",
  "uu_uniq",
  "uu_wc",
+ "uucore 0.9.0",
  "waget",
  "wasip3",
  "wcurl",
@@ -1107,6 +1119,12 @@ dependencies = [
  "libc",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "escape8259"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5692dd7b5a1978a5aeb0ce83b7655c58ca8efdcb79d21036ea249da95afec2c6"
 
 [[package]]
 name = "fancy-regex"
@@ -2424,6 +2442,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c943259e342f1e06ff2da7a83eabdfe7f92ce10262688dbf1895ff0b3e6e4652"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "libtest-mimic"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "14e6ba06f0ade6e504aff834d7c34298e5155c6baca353cc6a4aaff2f9fd7f33"
+dependencies = [
+ "anstream",
+ "anstyle",
+ "clap",
+ "escape8259",
 ]
 
 [[package]]

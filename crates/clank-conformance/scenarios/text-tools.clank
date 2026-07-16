@@ -1,0 +1,64 @@
+# wc file variants (uu column padding pinned exactly), stat's honest field subset, and
+# man's manifest-rendered pages. All tools read FILE arguments here — no uu stdin
+# consumers, so the file is native-safe.
+
+# Fixture: 2 lines, 5 words, 24 bytes.
+run printf 'one two\nthree four five\n' > ${TMP}/f
+
+# Multi-column wc right-aligns each count to the widest column (24 -> width 2).
+run wc ${TMP}/f
+out  2  5 24 ${TMP}/f
+
+# Single-count variants print the bare count, no padding.
+run wc -l ${TMP}/f
+out 2 ${TMP}/f
+
+run wc -w ${TMP}/f
+out 5 ${TMP}/f
+
+run wc -c ${TMP}/f
+out 24 ${TMP}/f
+
+# Multiple files add a total row; the uu fork labels it with the raw fluent key.
+run echo -n abc > ${TMP}/sf
+run wc -l ${TMP}/f ${TMP}/sf
+out  2 ${TMP}/f
+out  0 ${TMP}/sf
+out  2 wc-total
+
+# stat -c format strings: size and file type.
+run stat -c %s ${TMP}/sf
+out 3
+
+run stat -c %F ${TMP}/sf
+out regular file
+
+run stat -c %F ${TMP}
+out directory
+
+# Default stat block: size/type are real, inode prints an honest dash, timestamps vary
+# per run — so fragments only.
+run stat ${TMP}/sf
+out~ File: ${TMP}/sf
+out~ Size: 3
+out~ regular file
+out~ Inode: -
+
+# Missing path: stderr-only error, exit 1.
+run stat ${TMP}/definitely-absent
+err~ cannot stat
+exit 1
+
+# man renders the tool's manifest page (same source as cat /bin/<name>).
+run man grep
+out~ NAME
+out~ grep - search files for a pattern
+
+# Brush-builtin pages come from the clank manifest too.
+run man cd
+out~ change the shell working directory
+
+# Unknown name: stderr-only, exit 1.
+run man no-such-command-xyz
+err~ No manual entry
+exit 1

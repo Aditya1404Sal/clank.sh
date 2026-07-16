@@ -1,0 +1,34 @@
+# prompt-user --choices: the choice list rides the pending prompt; an out-of-set answer
+# is rejected (exit 1) with the prompt STILL pending; a valid choice resolves; a unique
+# prefix answer resolves to the CANONICAL choice value.
+
+run prompt-user "Deploy?" --choices staging,production
+out Deploy?
+prompt~ Deploy?
+choices staging,production
+
+# An answer outside the set re-asks: exit 1, the rejection names the set, and the SAME
+# prompt (question + choices) is still pending.
+answer maybe
+err~ is not one of
+exit 1
+prompt~ Deploy?
+choices staging,production
+
+# A valid choice resolves: the answer comes back on stdout, nothing left pending.
+answer staging
+out staging
+
+# The session is usable again after the resolution.
+run echo done
+out done
+
+# A unique (case-insensitive) prefix resolves to the canonical choice — the full value,
+# not the raw keystroke, is what flows downstream.
+run prompt-user "Env?" --choices staging,production
+out Env?
+prompt~ Env?
+choices staging,production
+
+answer prod
+out production

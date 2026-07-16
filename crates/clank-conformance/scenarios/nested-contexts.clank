@@ -1,0 +1,29 @@
+# Nested-context honesty: Session-intercepted commands (kill & co.) inside $(...) /
+# xargs / eval hit Brush stub builtins that explain the constraint instead of dying with
+# a misleading external-exec error; un-intercepted external commands (bash) are honestly
+# absent — neither target can spawn a real process.
+
+run echo before-$(kill 99)-after
+out before--after
+err~ only available as a top-level command
+exit 0
+
+run echo 99 | xargs kill
+err~ only available as a top-level command
+exit 123
+
+run eval "kill 99"
+err~ only available as a top-level command
+exit 1
+
+# No external shell on either target — the point is that `echo hi` must NOT run (stdout
+# stays empty). The refusal text/code diverge (native: 127 command-not-found; wasm: 126
+# "operation not supported on this platform" via Brush's exec fallthrough) — pinned
+# exactly per target in unknown-command.clank / unknown-command-wasm.clank.
+run bash -c "echo hi"
+err~ bash
+exit any
+
+# The session stays healthy after nested-context refusals.
+run echo still-alive
+out still-alive

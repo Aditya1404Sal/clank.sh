@@ -1,0 +1,26 @@
+# Redirect forms round-tripping through the sandbox. ${TMP} is the per-scenario dir
+# (real temp dir natively, /tmp/w on the agent's fresh VFS).
+#
+# Error-text assertions use the stable `cannot-access` fragment: the uu fork emits raw
+# fluent keys (`ls-error-cannot-access-no-such-file`) without path interpolation, and the
+# `<name>:` prefix is the process binary name — different in every context.
+
+run echo one > ${TMP}/f
+run cat ${TMP}/f
+out one
+
+run echo two >> ${TMP}/f
+run cat ${TMP}/f
+out one
+out two
+
+# stderr redirect: the error lands in the file, the step's own stderr stays empty.
+run ls ${TMP}/missing 2> ${TMP}/err
+exit any
+run cat ${TMP}/err
+out~ cannot-access
+
+# 2>&1 folds stderr into stdout.
+run ls ${TMP}/missing 2>&1
+out~ cannot-access
+exit any

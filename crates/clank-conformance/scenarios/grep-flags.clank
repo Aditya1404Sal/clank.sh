@@ -1,0 +1,69 @@
+# grep flag matrix (-c -v -i -n -w) over both input paths: pipe stdin and file args.
+# grep is the hand-rolled run_tool path, so consumers here are safe natively.
+
+# Fixture: mixed-case lines that exercise case, word-boundary, and inversion.
+run printf 'Alpha\nbeta\nalphabet\nalpha\n' > ${TMP}/g
+run cat ${TMP}/g
+out Alpha
+out beta
+out alphabet
+out alpha
+
+# -c counts matching lines.
+run printf 'x\ny\nx\n' | grep -c x
+out 2
+
+run grep -c alpha ${TMP}/g
+out 2
+
+# -v inverts the match.
+run printf 'a\nb\nc\n' | grep -v b
+out a
+out c
+
+run grep -v beta ${TMP}/g
+out Alpha
+out alphabet
+out alpha
+
+# -i ignores case.
+run printf 'Hay\nno\n' | grep -i hay
+out Hay
+
+run grep -i alpha ${TMP}/g
+out Alpha
+out alphabet
+out alpha
+
+# -n prefixes 1-based line numbers.
+run printf 'one\ntwo\nthree\n' | grep -n t
+out 2:two
+out 3:three
+
+run grep -n alpha ${TMP}/g
+out 3:alphabet
+out 4:alpha
+
+# Short flags cluster: -in combines ignore-case with numbering.
+run printf 'Hay\nno\n' | grep -in hay
+out 1:Hay
+
+# -w matches whole words only.
+run printf 'cat\ncatalog\n' | grep -w cat
+out cat
+
+run grep -w alpha ${TMP}/g
+out alpha
+
+# No match: silent with exit 1; -c still reports 0 (and keeps exit 1).
+run printf 'hay\n' | grep needle
+exit 1
+
+run grep -c zzz ${TMP}/g
+out 0
+exit 1
+
+# Missing file: the error is stderr-only and the exit code is 2.
+run grep x ${TMP}/no-such-file
+err~ No such file
+exit 2

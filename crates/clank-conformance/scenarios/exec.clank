@@ -1,0 +1,18 @@
+# KNOWN DIVERGENCE — exec's command form.
+#
+# On the wasm agent `exec CMD` emulates replace-then-exit (run in-shell + the ExitShell
+# flow — there is no OS process to replace), so the durable session survives and the next
+# step still evaluates. Natively exec performs a REAL process replacement: it takes down
+# whatever hosts the Session — including the conformance harness process itself — so the
+# native tier cannot assert it in-process at all.
+#
+# `@only golem` pins the working target; drop the marker if native exec is ever emulated
+# at the Session level instead of replacing the process.
+@only golem
+
+run exec echo exec-ran
+out exec-ran
+
+# The agent session persists across the emulated replace-then-exit.
+run echo still-here
+out still-here
