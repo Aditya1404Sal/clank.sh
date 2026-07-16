@@ -1,7 +1,8 @@
 //! The durable `wstd` HTTP transport backing MCP on the Golem agent.
 //!
 //! `clank-shell` defines the [`McpHttp`](clank_shell::mcp::client::McpHttp) seam but is dual-target and
-//! can't link the Golem-host-only `wstd` client. This module (wasm-only agent crate) implements it with
+//! can't link the Golem-host-only `wstd` client. This module (in `clank-embed`, for any Golem agent
+//! embedding the shell) implements it with
 //! `wstd::http`, mirroring `wcurl`'s wasm `fetch` and additionally collecting response headers (MCP
 //! needs the `Mcp-Session-Id`). The Golem runtime records the HTTP call in the oplog and replays it on
 //! recovery, so the `mcp add`/`tools/list` install flow is durable and replay-deterministic.

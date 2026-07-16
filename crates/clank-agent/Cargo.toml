@@ -16,18 +16,13 @@ crate-type = ["cdylib"]
 # The clone is a nested git repo (its own remotes; carries our `agent stream` connect patch) and is
 # gitignored by clank (/golem-stuff/) — that is correct and does NOT put its history at risk: committed
 # work there lives in the clone's own git and is pushed to the fork. See DEV_SDK_CHANGES.md.
+#
+# `export_golem_agentic` is enabled HERE (the leaf component), not in clank-embed — that feature
+# compiles the SDK's own `Component` export, which a component must carry exactly once.
 golem-rust = { path = "../../golem-stuff/golem/sdks/rust/golem-rust", features = ["export_golem_agentic"] }
-wstd = { version = "=0.6.5", features = ["default", "json"] }
-serde = { version = "1", features = ["derive"] }
 
-# The shared shell core (Session + Transcript). default-features=false drops clank-shell's
-# `repl-driver` feature, so it links as a plain rlib WITHOUT the `wasi:cli/run` export that would
-# clash with this crate's golem:agent world.
-clank-shell = { path = "../clank-shell", default-features = false }
-# SPIKE: dropped. `^0.5.1` resolves to golem-ai-llm 0.5.2, which hard-pins golem-rust "=2.1.0" — an
-# EXACT pin, so it cannot coexist with the dev SDK (and `[patch]` can't override an exact pin either).
-# `ask` is NOT stubbed: ask_provider.rs now calls Anthropic directly over wstd (durability comes from
-# the oplog recording that HTTP call). See DEV_SDK_CHANGES.md §4.
-# golem-ai-llm = "0.5.1"
-# golem-ai-llm-anthropic = "0.5.1"
-async-trait = "0.1"
+# Everything else — the shell engine (Session), the EvalResult wire types, and the five durable
+# provider implementations (ask/mcp/agent-invoker/cluster/log-sink) — comes from clank-embed, the
+# same crate any third-party Golem agent uses to embed the shell. This crate is deliberately the
+# thinnest possible consumer of it: the trait, the impl, three delegations.
+clank-embed = { path = "../clank-embed", features = ["providers"] }

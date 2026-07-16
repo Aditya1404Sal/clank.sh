@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/clank-shell",
+    "crates/clank-embed",
     "crates/clank-agent",
     "crates/greeter-agent",
     "crates/wcurl",

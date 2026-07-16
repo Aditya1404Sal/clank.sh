@@ -84,6 +84,27 @@ clank$ prompt-user "your name?"
 Aditya
 ```
 
+### The second implementer: a shell into GREETER's sandbox
+
+`GreeterAgent` (the trivial wRPC fixture) also implements the shell surface — via the `clank-embed`
+crate, log-sink-only tier (no providers, no env vars). Same server, different agent, different
+prompt label, **different filesystem** (one agent instance = one worker = one isolated VFS):
+
+```bash
+../golem-stuff/golem/target/debug/golem agent shell 'GreeterAgent("demo")'
+```
+
+```
+greeter$ pwd
+/
+greeter$ echo mine > /tmp/proof && cat /tmp/proof     # lives in GREETER's VFS —
+greeter$ ask hi                                       # honest: no model provider configured
+```
+
+Files you created in the clank session do not exist here, and vice versa. This is the proof that
+`agent shell` is a contract (`eval`/`answer_prompt`/`abort_prompt` → eval-result), not a clank
+feature — any agent embedding `clank-embed` (or hand-implementing the three methods) gets it.
+
 When done: `./teardown.sh`.
 
 ---

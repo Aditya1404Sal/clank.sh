@@ -1053,6 +1053,57 @@ expect_eval "golem oplog runs on the agent"           "$GLM_OPL"  '.exit_code'  
 GLM_SUBST="$(eval_json eval '"echo $(golem agent list)"')"
 expect_eval "golem in \$() gives the honest pointer"  "$GLM_SUBST"  '.stderr | contains("top-level command")'  'true'
 
+# ============================================================================
+# 2l-f. greeter — the SECOND implementer of the shell surface (clank-embed)
+# ============================================================================
+# GreeterAgent embeds clank's shell via the clank-embed crate (log-sink-only tier: no providers, no
+# env vars) and exposes the same eval/answer_prompt/abort_prompt surface `golem agent shell` drives.
+# This block proves the surface is a CONTRACT, not a clank feature: a different agent type, in its
+# own isolated worker/VFS, serves the same wire protocol. Unconditional — greeter deploys with
+# clank:agent via golem.yaml.
+step "greeter-agent shell surface (clank-embed: the second implementer)"
+
+# Invoke eval/answer_prompt on the GREETER instance rather than $AGENT_ID. Bash dynamic scoping:
+# `local AGENT_ID` shadows the global for everything eval_json calls, leaving every other assertion
+# untouched. Fresh instance name — NOT "g1", which the grease wRPC block owns.
+GREETER_SHELL_ID="GreeterAgent(\"shell-$$\")"
+greeter_json() {
+  local AGENT_ID="$GREETER_SHELL_ID"
+  eval_json "$@"
+}
+
+GRS_ECHO="$(greeter_json eval '"echo hello-from-greeter"')"
+expect_eval "greeter eval runs a command"          "$GRS_ECHO"  '.stdout | contains("hello-from-greeter")'  'true'
+expect_eval "greeter eval exits 0"                 "$GRS_ECHO"  '.exit_code'  '0'
+
+# Exit codes propagate (a failing command is a result, not a protocol error).
+GRS_FAIL="$(greeter_json eval '"cat /no/such/file"')"
+expect_eval "greeter eval propagates failure"      "$GRS_FAIL"  '.exit_code != 0'  'true'
+
+# VFS isolation: one agent instance = one worker = one filesystem. The /tmp/work tree the CLANK
+# assertions created earlier does not exist in greeter's world.
+GRS_ISO="$(greeter_json eval '"ls /tmp/work"')"
+expect_eval "greeter's VFS is isolated from clank's" "$GRS_ISO"  '.exit_code != 0'  'true'
+
+# The pause round-trip on the embedded shell: surface → abort (130) → surface → answer (0).
+GRS_PU="$(greeter_json eval '"prompt-user \"Proceed?\" --choices yes,no"')"
+expect_eval "greeter prompt surfaces the question" "$GRS_PU"  '.pending_prompt.question'  'Proceed?'
+GRS_ABORT="$(greeter_json abort_prompt)"
+expect_eval "greeter abort_prompt exits 130"       "$GRS_ABORT"  '.exit_code'  '130'
+greeter_json eval '"prompt-user \"Name?\""' >/dev/null
+GRS_ANS="$(greeter_json answer_prompt '"aditya"')"
+expect_eval "greeter answer_prompt resolves"       "$GRS_ANS"  '.stdout'  'aditya'
+expect_eval "greeter prompt clears after answer"   "$GRS_ANS"  '.pending_prompt'  'null'
+
+# The log-sink-only tier degrades honestly: no ask provider ⇒ exit 4 with the not-configured
+# message (sudo pre-authorizes so the authz confirm doesn't mask the provider check).
+GRS_ASK="$(greeter_json eval '"sudo ask hi"')"
+expect_eval "greeter ask degrades honestly (no provider)" "$GRS_ASK"  '.stderr | contains("no model provider configured")'  'true'
+
+# greet() still works on the same instance — the shell surface coexists with the agent's own methods.
+GRS_GREET_LOG="$(greeter_json eval '"echo shell-and-greet-coexist > /tmp/proof; cat /tmp/proof"')"
+expect_eval "greeter shell state persists in its own VFS" "$GRS_GREET_LOG"  '.stdout | contains("shell-and-greet-coexist")'  'true'
+
 # --- Gated live-registry block: needs a registry serving /packages/<name>.json (+ /index.json for
 #     search). Set GREASE_TEST_URL + GREASE_TEST_PKG to run a real install; the installed prompt RUN
 #     also needs --with-llm (it calls the model). If the package has REQUIRED arguments, set

@@ -326,7 +326,49 @@ instead of clank's root. No vendoring, no dep rewrite.
 
 ---
 
-## 8. Known-stale / follow-ups
+## 8. `clank-embed` — the shell surface as a library (any agent can adopt it)
+
+**WHAT:** a new crate, `crates/clank-embed`, extracts everything behind clank's shell surface so any
+Golem agent exposes `eval`/`answer_prompt`/`abort_prompt` with ~12 lines of glue. `clank-agent`
+shrank 145 → ~58 lines and is now just its trait + three delegations; **`greeter-agent` became the
+second implementer** — `golem agent shell 'GreeterAgent("…")'` opens a shell in *greeter's own*
+sandbox. That is the credibility proof that the surface is a contract, not a clank feature.
+
+**The crate:**
+
+| Export | What |
+|---|---|
+| `EvalResult` / `PendingPromptView` | THE positional wire contract, single-sourced (field order is load-bearing — see §3's harness note; the CLI's `FromSchema` mirror decodes by position) |
+| `EmbeddedShell` | `Option<Session>` + a **deferred setup closure** applied when the lazy `Session::new` runs (agent ctors are sync; providers can only be installed on a live Session) |
+| `with_durable_log_sink()` | the minimal **correct** Golem tier — the default sink's raw appends duplicate `/var/log` under oplog replay, so "bare" is a durability bug, not a tier |
+| `with_default_golem_providers()` | clank's full set (ask/mcp/wRPC-invoker/cluster/log-sink), behind the `providers` feature |
+| the five provider modules | moved verbatim from clank-agent (which was `cdylib`-only — nothing could import them) |
+
+**Feature facts (cost real digging):**
+- `derive(Schema)` needs golem-rust's **default features** (`macro` is the load-bearing one). Do
+  **NOT** enable `export_golem_agentic` in a library crate — that feature compiles the SDK's own
+  `Component` export; only the leaf agent crate enables it, exactly once.
+- `wstd` must stay pinned `=0.6.5` in lockstep with golem-rust's own hard pin.
+- One agent instance = one worker = **one isolated VFS** (the FS dir derives from the agent-id
+  string, which embeds the type name + ctor params). A sidecar "shell agent type" can never see the
+  main agent's files — the shell must be methods on the agent's own trait. That is WHY this is a
+  library and not a companion agent.
+
+**⚠ Maintainer report item — reflected-but-not-dispatchable trait defaults.** While designing this
+we found a latent SDK footgun: `#[agent_definition]` reflects **every** trait `fn` (including
+default-bodied ones) into the agent-type schema, but `#[agent_implementation]` generates invoke
+dispatch **only from the impl block's items**. A trait-default method therefore *validates* (it is
+in the schema `get-agent-type` returns) yet **fails every invocation** with `invalid_method_error`.
+This kills the natural "provided-defaults mixin" design for any shared surface, and makes the
+~12-line trait+impl duplication per adopting agent irreducible today. Worth reporting alongside the
+positional-JSON break (§3).
+
+**Publishing caveat:** clank-embed cannot go to crates.io while golem-rust is a 0.0.0 path dep into
+the clone; the crate is shaped for publication when the SDK releases.
+
+---
+
+## 9. Known-stale / follow-ups
 
 - **`agent_invoker.rs` is DONE** (§3) — the branch has **no stubs left**. What remains is not clank's to
   fix: the spike still path-deps an unreleased `golem-rust 0.0.0`, so it cannot merge until the dev SDK

@@ -1,0 +1,42 @@
+[package]
+name = "clank-embed"
+version = "0.0.0"
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+# Unpublishable while golem-rust is a 0.0.0 path dep into the golem-stuff clone (dev SDK spike);
+# the crate is shaped for publication once the SDK releases.
+publish = false
+
+# Plain rlib — this crate is a library other agent components link, never a component itself.
+
+[features]
+default = []
+# The full Golem provider set (ask/mcp/agent-invoker/cluster). ask+mcp need the wstd HTTP client;
+# the invoker+cluster use only ungated golem-rust surface, but ship under the same umbrella so an
+# embedder makes ONE decision: bare exploration shell vs the full clank command surface.
+# The replay-safe log sink is NOT gated: it is std-only and every Golem embed needs it (the default
+# append sink duplicates /var/log lines under oplog replay).
+providers = ["dep:wstd", "dep:async-trait"]
+
+[dependencies]
+# The shell core. default-features=false drops `repl-driver`, so this links as a plain rlib WITHOUT
+# the `wasi:cli/run` export that would clash with an embedding agent's golem:agent world (the same
+# pattern clank-agent has always used).
+clank-shell = { path = "../clank-shell", default-features = false }
+# Default features only: `macro` is the load-bearing one (it makes `derive(Schema)` on the wire
+# types resolve through golem-rust's re-export). Deliberately NOT `export_golem_agentic` — that
+# feature compiles the SDK's own `Component` export into the build; the EMBEDDING agent crate is
+# the one that must enable it, exactly once, on its own golem-rust dependency.
+golem-rust = { path = "../../golem-stuff/golem/sdks/rust/golem-rust" }
+serde = { version = "1", features = ["derive"] }
+
+# Behind `providers`: wstd is the durable HTTP client for ask+mcp (the exact `=0.6.5` pin matches
+# golem-rust's own hard pin — lockstep required); async-trait implements the ?Send seam traits.
+wstd = { version = "=0.6.5", features = ["default", "json"], optional = true }
+async-trait = { version = "0.1", optional = true }
+
+[dev-dependencies]
+# Native test harness: a current-thread runtime to drive the async Session, mirroring how the
+# shell runs natively (clank-shell's own `on_rt` pattern).
+tokio = { version = "1", features = ["rt"] }

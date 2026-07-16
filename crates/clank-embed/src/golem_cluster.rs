@@ -1,7 +1,8 @@
 //! The durable Golem cluster interface backing the `golem` command on the Golem agent.
 //!
 //! `clank-shell` defines the [`GolemCluster`](clank_shell::golem::cluster::GolemCluster) seam; this module
-//! (wasm-only agent crate) implements it with golem-rust's `golem:api` host bindings. Mirrors the
+//! (in `clank-embed`, for any Golem agent embedding the shell) implements it with golem-rust's
+//! `golem:api` host bindings. Mirrors the
 //! `AgentInvoker`→`WasmRpcInvoker` seam.
 //!
 //! NB: the `golem_rust::bindings::golem::api::host::*` path is deliberate — golem-rust **2.1.0** (the

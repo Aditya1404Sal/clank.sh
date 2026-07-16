@@ -513,10 +513,19 @@ dependencies = [
 name = "clank-agent"
 version = "0.0.0"
 dependencies = [
+ "clank-embed",
+ "golem-rust",
+]
+
+[[package]]
+name = "clank-embed"
+version = "0.0.0"
+dependencies = [
  "async-trait",
  "clank-shell",
  "golem-rust",
  "serde",
+ "tokio",
  "wstd",
 ]
 
@@ -1517,6 +1526,7 @@ dependencies = [
 name = "greeter-agent"
 version = "0.0.0"
 dependencies = [
+ "clank-embed",
  "golem-rust",
 ]
 
