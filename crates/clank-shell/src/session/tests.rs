@@ -3900,6 +3900,9 @@ fn pids_are_monotonic_across_lines() {
 /// exactly like an ordinary exported var (the redaction contract must not break value availability).
 #[test]
 fn secret_export_value_still_expands() {
+    let _secret_lock = crate::runtime::secretenv::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     on_rt(async {
         let mut session = Session::new().await.unwrap();
         session
@@ -3926,6 +3929,9 @@ fn secret_export_value_still_expands() {
 /// in `env`. That pre-existing decoupling is not what this test is about.
 #[test]
 fn secret_export_hidden_from_env() {
+    let _secret_lock = crate::runtime::secretenv::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     on_rt(async {
         std::env::set_var("CLANK_ENV_CONTROL", "controlval");
         let mut session = Session::new().await.unwrap();
@@ -3951,22 +3957,31 @@ fn secret_export_hidden_from_env() {
     });
 }
 
-/// `env` filters the secret even as a PIPELINE stage — the custom `Env` builtin handles all forms,
-/// not just a bare top-level `env` (the live e2e caught that a Session-layer bare-`env` intercept
-/// missed `env | grep …`; the fix is a hand-written `Env` builtin, exercised here through a pipe).
+/// `env` filters the secret even as a non-final PIPELINE stage. Natively that stage runs on a Brush
+/// `spawn_blocking` WORKER thread — a thread the per-line secret set was never installed on — which is
+/// exactly why the filter set is a process-global slot and not a thread-local (the conformance suite
+/// caught the leak live: `env | grep -c SECRET` printed 1 natively).
+///
+/// Crucially the consumer is `grep`, NOT `cat`: `grep` is a `run_tool` command that genuinely reads
+/// the pipe, while uu `cat` reads the real process stdin natively and never sees `env`'s piped output
+/// — so an `env | cat` assertion is a false-green that passes even while the secret leaks.
 #[test]
 fn secret_hidden_from_env_in_a_pipeline() {
+    let _secret_lock = crate::runtime::secretenv::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     on_rt(async {
         let mut session = Session::new().await.unwrap();
         session
             .run_line("export --secret CLANK_SECRET_PIPE_ENV=sk-pipehide-999")
             .await;
-        // `env | cat` runs env as a pipeline stage — it must still be filtered.
-        let (out, _) = session.run_line("env | cat").await;
-        let out = String::from_utf8(out).unwrap();
+        // env is stage 0 (non-final) → owned-subshell worker thread on native. Filtered before grep.
+        let result = session.eval_line("env | grep CLANK_SECRET_PIPE_ENV").await;
+        let out = String::from_utf8(result.stdout).unwrap();
         assert!(
-            !out.contains("sk-pipehide-999") && !out.contains("CLANK_SECRET_PIPE_ENV"),
-            "secret must be filtered even when env runs in a pipeline:\n{out}"
+            out.is_empty(),
+            "the secret must be filtered before a pipeline consumer reads it, but env leaked it \
+             to grep:\n{out}"
         );
     });
 }
@@ -3975,6 +3990,9 @@ fn secret_hidden_from_env_in_a_pipeline() {
 /// `-0` flag rather than delegating to uu_env.
 #[test]
 fn secret_hidden_from_env_null_separated() {
+    let _secret_lock = crate::runtime::secretenv::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     on_rt(async {
         let mut session = Session::new().await.unwrap();
         session
@@ -3994,6 +4012,9 @@ fn secret_hidden_from_env_null_separated() {
 /// `NAME=value` operand added on the line still shows.
 #[test]
 fn secret_hidden_from_env_ignore_and_inline_add() {
+    let _secret_lock = crate::runtime::secretenv::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     on_rt(async {
         std::env::set_var("CLANK_ENV_IADD", "willbedropped");
         let mut session = Session::new().await.unwrap();
@@ -4035,6 +4056,9 @@ fn env_unset_drops_a_var() {
 /// redacted; the key name is preserved (only the value is sensitive).
 #[test]
 fn secret_export_line_redacted_in_transcript() {
+    let _secret_lock = crate::runtime::secretenv::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     on_rt(async {
         let mut session = Session::new().await.unwrap();
         session
@@ -4057,6 +4081,9 @@ fn secret_export_line_redacted_in_transcript() {
 /// the transcript — a secret can leak by value where its name never appears.
 #[test]
 fn secret_value_masked_in_later_output() {
+    let _secret_lock = crate::runtime::secretenv::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     on_rt(async {
         let mut session = Session::new().await.unwrap();
         session
@@ -4080,6 +4107,9 @@ fn secret_value_masked_in_later_output() {
 /// (when the secret is active), never the literal value.
 #[test]
 fn secret_value_masked_in_ps() {
+    let _secret_lock = crate::runtime::secretenv::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     on_rt(async {
         let mut session = Session::new().await.unwrap();
         session
