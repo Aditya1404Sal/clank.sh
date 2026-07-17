@@ -16,13 +16,12 @@ run eval "kill 99"
 err~ only available as a top-level command
 exit 1
 
-# No external shell on either target — the point is that `echo hi` must NOT run (stdout
-# stays empty). The refusal text/code diverge (native: 127 command-not-found; wasm: 126
-# "operation not supported on this platform" via Brush's exec fallthrough) — pinned
-# exactly per target in unknown-command.clank / unknown-command-wasm.clank.
+# No external shell on either target: `echo hi` must NOT run (stdout stays empty), and both
+# targets now agree — 127 "command not found" (the brush existence fix removed wasm's phantom
+# PATH hit, so it no longer tries and fails to exec bash with a 126 platform error).
 run bash -c "echo hi"
-err~ bash
-exit any
+err~ command not found: bash
+exit 127
 
 # The session stays healthy after nested-context refusals.
 run echo still-alive

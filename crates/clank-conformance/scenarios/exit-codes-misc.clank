@@ -16,13 +16,16 @@ out code=1
 run echo code=$?
 out code=0
 
-# Unknown command: the exit code and message DIVERGE by target (native: 127
-# command-not-found; wasm: 126 exec-unsupported — wasip2 has no process spawn, so Brush's
-# external-exec fallthrough fails differently). Pinned exactly per target in
-# unknown-command.clank / unknown-command-wasm.clank; here only: it fails, naming the cmd.
+# Unknown command → 127 "command not found" on BOTH targets. (Before the brush
+# PathExt::executable existence fix, wasm's PATH search returned a phantom hit and the agent
+# tried to exec it → "operation not supported" / 126; now the search finds nothing, so wasm
+# reports 127 like native.)
 run definitely-not-a-cmd-xyz
-err~ definitely-not-a-cmd-xyz
-exit any
+err~ command not found: definitely-not-a-cmd-xyz
+exit 127
+
+run echo code=$?
+out code=127
 
 # A failed uu tool: ls on a missing path exits 2. The error text is a raw fluent key
 # behind a context-dependent binary-name prefix — assert the stable fragment only.
