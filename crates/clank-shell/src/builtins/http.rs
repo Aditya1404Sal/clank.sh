@@ -58,15 +58,22 @@ pub fn manifests() -> Vec<Manifest> {
             .with_scope(ExecutionScope::Subprocess)
             .with_policy(AuthorizationPolicy::Confirm)
             .with_help(
-                "curl <url> [-o file] [-s] [-X method] [-d data] [-H \"K: V\"] — fetch a URL over \
-                 HTTP. Body to stdout (or -o file). Outbound HTTP requires confirmation.",
+                "curl <url> [-o file] [-s] [-L] [-i] [-I] [-f] [-X method] [-d data|@file] \
+                 [--json data] [-G] [-H \"K: V\"] [-A ua] [-u user:pass] [-e referer] \
+                 [-m secs] [--connect-timeout secs] [-w fmt] [-v] — fetch a URL over HTTP. Body to \
+                 stdout (or -o file). -L follows redirects, -i/-I include/only headers, -f fails on \
+                 4xx/5xx, -w expands %{http_code} etc. Short flags cluster (-fsSL). Outbound HTTP \
+                 requires confirmation.",
             ),
         Manifest::builtin("wget", "download a file from a URL over HTTP")
             .with_scope(ExecutionScope::Subprocess)
             .with_policy(AuthorizationPolicy::Confirm)
             .with_help(
-                "wget <url> [-O file|-] [-q] — download a URL over HTTP to a file (named after the \
-                 URL by default, -O - for stdout). Outbound HTTP requires confirmation.",
+                "wget <url> [-O file|-] [-q] [-S] [-T secs] [-t tries] [--max-redirect n] \
+                 [--post-data data|--post-file file] [--header \"K: V\"] [-U ua] \
+                 [--content-disposition] — download a URL over HTTP to a file (named after the URL \
+                 by default, -O - for stdout). Follows redirects by default; -S prints response \
+                 headers. Outbound HTTP requires confirmation.",
             ),
     ]
 }

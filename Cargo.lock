@@ -4326,8 +4326,8 @@ name = "waget"
 version = "0.1.0"
 dependencies = [
  "http",
- "reqwest",
  "tokio",
+ "whttp",
  "wstd",
 ]
 
@@ -4572,8 +4572,8 @@ name = "wcurl"
 version = "0.1.0"
 dependencies = [
  "http",
- "reqwest",
  "tokio",
+ "whttp",
  "wstd",
 ]
 
@@ -4617,6 +4617,16 @@ dependencies = [
  "objc2-system-configuration",
  "wasite",
  "web-sys",
+]
+
+[[package]]
+name = "whttp"
+version = "0.1.0"
+dependencies = [
+ "http",
+ "reqwest",
+ "tokio",
+ "wstd",
 ]
 
 [[package]]

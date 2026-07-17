@@ -625,6 +625,25 @@ expect_eval "sudo wget -O - fetches to stdout"     "$NET_WGET"  '.stdout | conta
 eval_json eval '"sudo curl -o /tmp/work/page https://example.com"' >/dev/null
 expect_contains "curl -o wrote a file"             'cat /tmp/work/page'  'Example Domain'
 
+# 7. Expanded flags (-I headers-only via GET, -w %{http_code}, clustered -fsSL) on a FRESH agent
+#    instance. The main e2e instance has accumulated a large durable oplog over hundreds of ops;
+#    piling several more outbound-HTTP calls onto it stresses the worker enough that a later
+#    outbound (the mcp-unreachable probe) wedges — a durable-agent resource interaction, not a
+#    flag defect. A fresh instance (small oplog) exercises the same code without that load. Uses
+#    bash dynamic scoping to shadow $AGENT_ID for this block only (the greeter-block pattern).
+run_curl_flag_block() {
+  local AGENT_ID='ClankAgent("curlflags-'"$$"'")'
+  eval_json eval '"sudo mkdir -p /tmp/w"' >/dev/null
+  local head cluster
+  head="$(eval_json eval '"sudo curl -sI https://example.com"')"
+  expect_eval "curl -I returns response headers"   "$head"  '.stdout | contains("HTTP/1.1 200")'  'true'
+  expect_eval "curl -I omits the body"             "$head"  '.stdout | contains("Example Domain")'  'false'
+  expect "curl -w writes the status code"          'sudo curl -sw "%{http_code}" -o /tmp/w/null https://example.com'  '200'
+  cluster="$(eval_json eval '"sudo curl -fsSL https://example.com"')"
+  expect_eval "clustered -fsSL fetches the body"   "$cluster"  '.stdout | contains("Example Domain")'  'true'
+}
+run_curl_flag_block
+
 # ============================================================================
 # 2k. Resolution surface — type authoritative + virtual /bin + --help for intercepted cmds
 # ============================================================================
