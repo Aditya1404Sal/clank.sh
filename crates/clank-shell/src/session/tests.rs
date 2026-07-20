@@ -1913,6 +1913,31 @@ fn mcp_add_installs_and_surfaces_the_server() {
     });
 }
 
+/// A NEW process reconstructs a plain `mcp add` server from its on-disk config — no network. The
+/// install caches the tool list in the config; the second Session (fresh, NO transport installed)
+/// still knows the server and its tools. Before this, `McpState` was in-memory only and a native
+/// restart forgot every non-grease server.
+#[test]
+fn mcp_state_reconstructs_from_config_cache() {
+    on_rt(async {
+        let _dirs = set_mcp_dirs();
+        {
+            let mut session = Session::new().await.unwrap();
+            session.set_mcp_http(Box::new(FakeMcpHttp::new(mcp_install_script())));
+            let add = session.eval_line("sudo mcp add demo https://x.example/mcp").await;
+            assert_eq!(add.exit_code, 0, "add failed: {}", String::from_utf8_lossy(&add.stderr));
+        }
+        // A brand-new Session, same CLANK_MCP_ETC, no HTTP transport at all.
+        let mut fresh = Session::new().await.unwrap();
+        let (list, _) = fresh.run_line("mcp list").await;
+        let list = String::from_utf8(list).unwrap();
+        assert!(list.contains("demo"), "reconstructed server missing: {list}");
+        let (tools, _) = fresh.run_line("mcp tools demo").await;
+        let tools = String::from_utf8(tools).unwrap();
+        assert!(tools.contains("echo"), "cached tools missing: {tools}");
+    });
+}
+
 /// `mcp add` against an erroring transport keeps the config as "not installed" and exits 4.
 #[test]
 fn mcp_add_transport_failure_is_configured_not_installed() {

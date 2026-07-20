@@ -308,6 +308,7 @@ impl Session {
             enabled: true,
             auth_env: pkg.auth_env.clone(),
             auth_header: None,
+            tools: Vec::new(),
         };
         let auth = config.resolve_auth();
         let mut client = crate::mcp::client::McpClient::new(http, &pkg.url, auth);

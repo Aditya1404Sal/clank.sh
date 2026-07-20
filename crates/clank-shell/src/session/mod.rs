@@ -325,6 +325,7 @@ impl Session {
                 rt,
             };
             session.reconstruct_mcp_from_grease();
+            session.reconstruct_mcp_from_configs();
             Ok(session)
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -353,6 +354,7 @@ impl Session {
                 secret_env: std::collections::BTreeMap::new(),
             };
             session.reconstruct_mcp_from_grease();
+            session.reconstruct_mcp_from_configs();
             Ok(session)
         }
     }
@@ -371,6 +373,7 @@ impl Session {
                 enabled: true,
                 auth_env: m.auth_env.clone(),
                 auth_header: None,
+                tools: Vec::new(),
             };
             let tools: Vec<crate::mcp::state::McpTool> = m
                 .tools
@@ -387,6 +390,41 @@ impl Session {
                 })
                 .collect();
             self.mcp.set_installed(&m.name, config, tools);
+        }
+    }
+
+    /// Reconstruct plain `mcp add` servers from their on-disk configs — WITHOUT network. The tool
+    /// list is the cache written at install time (`mcp_install` re-saves the config with `tools`
+    /// populated); a config with no cache (pre-cache installs, or a failed install) is skipped —
+    /// `mcp reload` refreshes it live. Runs after `reconstruct_mcp_from_grease`, and never
+    /// overwrites a grease-reconstructed server (`is_server` guard); `set_installed` replaces by
+    /// name, so replaying `mcp add` lines on the durable agent stays idempotent over this.
+    ///
+    /// This is what makes native MCP survive a process restart: `McpState` is in-memory, and
+    /// before this only grease-installed servers came back.
+    fn reconstruct_mcp_from_configs(&mut self) {
+        for name in crate::mcp::config::list_names() {
+            let Ok(Some(config)) = crate::mcp::config::load(&name) else {
+                continue;
+            };
+            if !config.enabled || config.tools.is_empty() || self.mcp.is_server(&name) {
+                continue;
+            }
+            let tools: Vec<crate::mcp::state::McpTool> = config
+                .tools
+                .iter()
+                .map(|t| crate::mcp::state::McpTool {
+                    name: t.name.clone(),
+                    description: if t.description.is_empty() {
+                        None
+                    } else {
+                        Some(t.description.clone())
+                    },
+                    input_schema: serde_json::from_str(&t.input_schema)
+                        .unwrap_or(serde_json::json!({})),
+                })
+                .collect();
+            self.mcp.set_installed(&name, config, tools);
         }
     }
 

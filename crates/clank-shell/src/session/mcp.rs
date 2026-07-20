@@ -175,7 +175,7 @@ impl Session {
     async fn mcp_install(
         &mut self,
         name: &str,
-        config: crate::mcp::config::McpServerConfig,
+        mut config: crate::mcp::config::McpServerConfig,
     ) -> LineResult {
         let Some(http) = self.mcp_http.as_deref() else {
             self.mcp.set_failed(name, config, "no HTTP transport".into());
@@ -205,6 +205,18 @@ impl Session {
         };
         let tool_count = tools.len();
         let mcp_tools: Vec<crate::mcp::state::McpTool> = tools.into_iter().map(Into::into).collect();
+        // Cache the fetched tool list in the server's config, so a NEW process reconstructs this
+        // server without network (`Session::reconstruct_mcp_from_configs`). Whole-file re-save —
+        // idempotent, replay-safe on the durable agent.
+        config.tools = mcp_tools
+            .iter()
+            .map(|t| crate::mcp::config::StoredTool {
+                name: t.name.clone(),
+                description: t.description.clone().unwrap_or_default(),
+                input_schema: t.input_schema.to_string(),
+            })
+            .collect();
+        let _ = crate::mcp::config::save(name, &config);
         self.mcp.set_installed(name, config, mcp_tools);
         // Write the /usr/lib/mcp/bin stub so which/ls/type see the server as a $PATH command.
         if let Some(help) = self.mcp.server_help(name) {
@@ -378,7 +390,7 @@ impl Session {
                 4,
             );
         };
-        let config = crate::mcp::config::McpServerConfig { url: url.clone(), enabled: true, auth_env, auth_header: None };
+        let config = crate::mcp::config::McpServerConfig { url: url.clone(), enabled: true, auth_env, auth_header: None, tools: Vec::new() };
         let auth = config.resolve_auth();
         let mut client = crate::mcp::client::McpClient::new(http, &url, auth);
         let session = client.initialize().await.ok().and_then(|i| i.session_id);
@@ -466,7 +478,7 @@ impl Session {
                 4,
             );
         };
-        let config = crate::mcp::config::McpServerConfig { url: url.clone(), enabled: true, auth_env, auth_header: None };
+        let config = crate::mcp::config::McpServerConfig { url: url.clone(), enabled: true, auth_env, auth_header: None, tools: Vec::new() };
         let auth = config.resolve_auth();
         let mut client = crate::mcp::client::McpClient::new(http, &url, auth);
         let session = client.initialize().await.ok().and_then(|i| i.session_id);
@@ -535,7 +547,7 @@ impl Session {
                 4,
             );
         };
-        let config = crate::mcp::config::McpServerConfig { url: url.clone(), enabled: true, auth_env, auth_header: None };
+        let config = crate::mcp::config::McpServerConfig { url: url.clone(), enabled: true, auth_env, auth_header: None, tools: Vec::new() };
         let auth = config.resolve_auth();
         let mut client = crate::mcp::client::McpClient::new(http, &url, auth);
         let session = client.initialize().await.ok().and_then(|i| i.session_id);
