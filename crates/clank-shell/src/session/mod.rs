@@ -578,6 +578,26 @@ impl Session {
             }
         };
 
+        // Syntactically incomplete input (an unterminated heredoc/quote/substitution) must not run:
+        // clank's Brush shell is non-interactive, so Brush marks the parse error FATAL and maps it
+        // to `ExitShell` — which `finish` faithfully turns into `Flow::Exit`, ending the whole
+        // session because someone typed `cat <<EOF`. Catch it here with Brush's own
+        // incomplete-input classification and answer honestly instead. Placed after the pid spawn
+        // (the attempt is real typed work; `ps` should show it) and before every intercept, so no
+        // classifier ever sees a half-construct. The native REPL upgrades this to PS2 continuation
+        // before eval; on the agent one eval is one invocation, so the whole construct must arrive
+        // in a single line (documented).
+        if self.line_is_incomplete(line) {
+            let result = LineResult::from_outcome(
+                Vec::new(),
+                b"clank: incomplete input (a heredoc, quote, or substitution is missing its \
+                  terminator); provide the full construct in one eval\n"
+                    .to_vec(),
+                2,
+            );
+            return self.finish_intercepted(pid, result);
+        }
+
         // `<cmd> --help` for a clank-intercepted command: print its manifest help text (exit 0).
         // These commands never reach Brush's dispatch, so they'd otherwise ignore `--help`. Handled
         // FIRST among all interceptions (before `context`/`prompt-user`/curl and the authz gate) so
@@ -1263,6 +1283,24 @@ impl Session {
         self.pending.is_some()
     }
 
+
+    /// Whether `line` is syntactically *incomplete* — an unterminated heredoc, quote, or
+    /// substitution that needs more input to become a program — as opposed to complete-but-wrong.
+    /// This is exactly brush-interactive's `is_valid_input` classification (its reedline validator
+    /// and basic backend use the same two arms); Brush's `parse_string` is `#[cached]`, so the
+    /// eventual `run_string` of the same text is a cache hit and this pre-parse is ~free.
+    ///
+    /// The native REPL uses it to drive PS2 continuation; `eval_line_inner` uses it to answer
+    /// incomplete input honestly instead of letting the fatal-parse path end the session.
+    pub fn line_is_incomplete(&self, line: &str) -> bool {
+        match self.shell.parse_string(line) {
+            Err(brush_parser::ParseError::Tokenizing { ref inner, .. }) if inner.is_incomplete() => {
+                true
+            }
+            Err(brush_parser::ParseError::ParsingAtEndOfInput) => true,
+            _ => false,
+        }
+    }
 
     /// Native execution: capture Brush's stdout and stderr into anonymous temp files.
     #[cfg(not(target_arch = "wasm32"))]

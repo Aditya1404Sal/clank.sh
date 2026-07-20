@@ -1,0 +1,20 @@
+# Incomplete input must not end the session. clank's Brush shell is non-interactive, so an
+# unterminated heredoc/quote used to raise a FATAL parse error -> ExitShell -> the whole
+# session (native REPL or durable agent) died on one mistyped `cat <<EOF`. Now the Session
+# pre-parses with Brush's own incomplete-input classification and answers honestly (exit 2);
+# the follow-up step proves the same session is still alive. Complete heredocs are covered
+# by heredocs.clank (the `+` continuation directive joins lines into ONE eval).
+
+run cat <<EOF
+err~ incomplete input
+exit 2
+
+run echo alive
+out alive
+
+run echo 'dangling
+err~ incomplete input
+exit 2
+
+run echo still-alive
+out still-alive

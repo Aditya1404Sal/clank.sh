@@ -3919,6 +3919,31 @@ fn secret_export_value_still_expands() {
     });
 }
 
+/// Syntactically incomplete input (unterminated heredoc) answers honestly with exit 2 and the
+/// session SURVIVES — before this, the fatal parse error mapped to `ExitShell` (clank's Brush shell
+/// is non-interactive) and one mistyped `cat <<EOF` ended the whole session.
+#[test]
+fn incomplete_input_survives_the_session() {
+    on_rt(async {
+        let mut session = Session::new().await.unwrap();
+        let result = session.eval_line("cat <<EOF").await;
+        assert_eq!(result.exit_code, 2);
+        assert!(matches!(result.flow, Flow::Continue));
+        let stderr = String::from_utf8(result.stderr).unwrap();
+        assert!(stderr.contains("incomplete input"), "got: {stderr}");
+        // The session is alive and works.
+        let after = session.eval_line("echo alive").await;
+        assert_eq!(String::from_utf8(after.stdout).unwrap(), "alive\n");
+        assert_eq!(after.exit_code, 0);
+        // An unterminated quote takes the same path.
+        let quote = session.eval_line("echo 'dangling").await;
+        assert_eq!(quote.exit_code, 2);
+        // A complete heredoc (newlines embedded in one eval) still runs normally.
+        let ok = session.eval_line("cat <<EOF\nhello\nEOF").await;
+        assert_eq!(String::from_utf8(ok.stdout).unwrap(), "hello\n");
+    });
+}
+
 /// An operator-bearing `--secret` export is refused with an honest error — it must never fall
 /// through to Brush's export, which would set the value with zero redaction. (Exactly the live-demo
 /// probe: `export --secret K=v && echo set` looked like the feature was inert; the truth was a
