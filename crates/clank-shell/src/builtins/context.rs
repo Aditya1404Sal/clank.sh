@@ -71,6 +71,6 @@ impl SimpleCommand for Context {
 }
 
 pub(crate) fn builtins<SE: ShellExtensions>() -> Vec<(String, Registration<SE>)> {
-    use brush_core::builtins::simple_builtin;
-    vec![("context".into(), simple_builtin::<Context, SE>())]
+    use crate::builtins::helpshim::simple_builtin_with_help;
+    vec![("context".into(), simple_builtin_with_help::<Context, SE>())]
 }

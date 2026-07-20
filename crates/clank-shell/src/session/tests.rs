@@ -28,6 +28,11 @@ fn on_rt<F: std::future::Future>(f: F) -> F::Output {
 /// wrong one" regardless of what else lands there.
 #[test]
 fn cd_is_honored_by_builtins_not_just_pwd() {
+    // The process cwd is one global (see ShellCwd's cross-SESSION caveat): another test's builtin
+    // entering ShellCwd with a different working_dir mid-window yanks it. Serialize against the
+    // known heavy contenders (the curl-pipeline tests, whose grep stages hold cwd windows while a
+    // mock server round-trips).
+    let _cwd = CWD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     on_rt(async {
         let dir = std::env::temp_dir().join(format!("clank_cd_{}", std::process::id()));
         let sub = dir.join("sub");
@@ -3634,10 +3639,16 @@ fn curl_approved_runs_the_request() {
     });
 }
 
+/// Serializes the cwd-sensitive `cd` test against the curl-pipeline tests: their grep stages hold
+/// process-cwd windows (ShellCwd) while a mock server round-trips, and the process cwd is one
+/// global across Sessions. Test-parallelism artifact only; production runs one line at a time.
+static CWD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// A curl-HEADED pipeline composes: the Session runs the HTTP, and the downstream (Brush) reads
 /// the response as stdin. `sudo` pre-authorizes, so the pipeline runs directly.
 #[test]
 fn curl_headed_pipeline_feeds_the_downstream() {
+    let _cwd = CWD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     on_rt(async {
         let url = http_mock("alpha\nbeta\ngamma\n");
         let mut session = Session::new().await.unwrap();
@@ -3650,6 +3661,7 @@ fn curl_headed_pipeline_feeds_the_downstream() {
 /// The downstream may itself be a multi-stage Brush pipeline.
 #[test]
 fn curl_headed_pipeline_multistage_downstream() {
+    let _cwd = CWD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     on_rt(async {
         let url = http_mock("c\nb\na\n");
         let mut session = Session::new().await.unwrap();
@@ -3666,6 +3678,7 @@ fn curl_headed_pipeline_multistage_downstream() {
 /// have re-broken it.
 #[test]
 fn curl_headed_pipeline_approved_after_confirm() {
+    let _cwd = CWD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     on_rt(async {
         let url = http_mock("x1\nx2\n");
         let mut session = Session::new().await.unwrap();
@@ -3763,9 +3776,16 @@ fn http_commands_have_confirm_manifests() {
 }
 
 /// `$PATH` is set to clank's README default (the virtual package-resolution namespace).
+/// Both env locks — the PATH is now built from the mcp AND grease dir overrides, so a concurrent
+/// test holding either set of `CLANK_*` vars would leak its temp dirs into this session's PATH.
+/// Lock order is the house order, GREASE then MCP (`set_grease_dirs` before `set_mcp_dirs`
+/// everywhere) — the reverse deadlocks the suite AB-BA.
 #[test]
 fn path_is_the_readme_default() {
-    let _lock = crate::mcp::config::TEST_ENV_LOCK
+    let _grease = crate::grease::config::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _mcp = crate::mcp::config::TEST_ENV_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     on_rt(async {
@@ -3779,10 +3799,11 @@ fn path_is_the_readme_default() {
 /// the drift guard for the dynamic construction.
 #[test]
 fn effective_path_defaults_to_the_readme_path() {
-    let _mcp = crate::mcp::config::TEST_ENV_LOCK
+    // House lock order: grease, then mcp (see path_is_the_readme_default).
+    let _grease = crate::grease::config::TEST_ENV_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
-    let _grease = crate::grease::config::TEST_ENV_LOCK
+    let _mcp = crate::mcp::config::TEST_ENV_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     assert_eq!(effective_path(), DEFAULT_PATH);

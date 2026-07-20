@@ -272,8 +272,8 @@ impl SimpleCommand for Find {
 }
 
 pub(crate) fn builtins<SE: ShellExtensions>() -> Vec<(String, Registration<SE>)> {
-    use brush_core::builtins::simple_builtin;
-    vec![("find".into(), simple_builtin::<Find, SE>())]
+    use crate::builtins::helpshim::simple_builtin_with_help;
+    vec![("find".into(), simple_builtin_with_help::<Find, SE>())]
 }
 
 pub(crate) fn manifests() -> Vec<Manifest> {

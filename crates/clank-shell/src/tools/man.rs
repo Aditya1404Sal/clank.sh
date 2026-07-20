@@ -115,8 +115,8 @@ impl SimpleCommand for Man {
 }
 
 pub(crate) fn builtins<SE: ShellExtensions>() -> Vec<(String, Registration<SE>)> {
-    use brush_core::builtins::simple_builtin;
-    vec![("man".into(), simple_builtin::<Man, SE>())]
+    use crate::builtins::helpshim::simple_builtin_with_help;
+    vec![("man".into(), simple_builtin_with_help::<Man, SE>())]
 }
 
 pub(crate) fn manifests() -> Vec<Manifest> {
