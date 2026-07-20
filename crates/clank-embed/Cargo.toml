@@ -28,7 +28,7 @@ clank-shell = { path = "../clank-shell", default-features = false }
 # types resolve through golem-rust's re-export). Deliberately NOT `export_golem_agentic` — that
 # feature compiles the SDK's own `Component` export into the build; the EMBEDDING agent crate is
 # the one that must enable it, exactly once, on its own golem-rust dependency.
-golem-rust = { path = "../../golem-stuff/golem/sdks/rust/golem-rust" }
+golem-rust = { path = "/Users/adityasalunkhe/Desktop/clank.sh/golem-stuff/golem/sdks/rust/golem-rust" }
 serde = { version = "1", features = ["derive"] }
 
 # Behind `providers`: wstd is the durable HTTP client for ask+mcp (the exact `=0.6.5` pin matches

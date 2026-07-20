@@ -17,7 +17,7 @@ crate-type = ["cdylib"]
 # SPIKE (spike/dev-golem-sdk): repointed from crates.io golem-rust 2.1.0 to the dev SDK in the golem
 # clone, in lockstep with clank-agent — greeter is the wRPC *target*, so it must speak the same
 # golem:agent@2.0.0 world as the invoker calling it. See DEV_SDK_CHANGES.md.
-golem-rust = { path = "../../golem-stuff/golem/sdks/rust/golem-rust", features = ["export_golem_agentic"] }
+golem-rust = { path = "/Users/adityasalunkhe/Desktop/clank.sh/golem-stuff/golem/sdks/rust/golem-rust", features = ["export_golem_agentic"] }
 
 # The embedded shell surface (eval/answer_prompt/abort_prompt + EvalResult), making this the second
 # implementer of the contract `golem agent shell` drives. Deliberately WITHOUT the `providers`

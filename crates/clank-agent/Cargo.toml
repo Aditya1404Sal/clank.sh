@@ -19,7 +19,7 @@ crate-type = ["cdylib"]
 #
 # `export_golem_agentic` is enabled HERE (the leaf component), not in clank-embed — that feature
 # compiles the SDK's own `Component` export, which a component must carry exactly once.
-golem-rust = { path = "../../golem-stuff/golem/sdks/rust/golem-rust", features = ["export_golem_agentic"] }
+golem-rust = { path = "/Users/adityasalunkhe/Desktop/clank.sh/golem-stuff/golem/sdks/rust/golem-rust", features = ["export_golem_agentic"] }
 
 # Everything else — the shell engine (Session), the EvalResult wire types, and the five durable
 # provider implementations (ask/mcp/agent-invoker/cluster/log-sink) — comes from clank-embed, the
