@@ -39,6 +39,17 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         // If the line surfaced a `prompt-user` question, collect the human's answer inline (the
         // native REPL owns the terminal) and deliver it. An answer outside `--choices` leaves the
         // prompt pending, so keep reading until it resolves. EOF is an abort.
+        if let Some(prompt) = &result.pending_prompt {
+            // Show the valid answers. The question alone leaves the human guessing — a `prompt-user`
+            // with `--choices` printed nothing but the text, so a plausible-looking `y` against
+            // `[yes/no]` was rejected with no visible reason. (The sudo/authz gate looks fine only
+            // because it spells "(y)es, (n)o" inside its question string.)
+            if let Some(choices) = &prompt.choices {
+                if !choices.is_empty() {
+                    write_stdout(format!("[{}]\n", choices.join("/")).as_bytes())?;
+                }
+            }
+        }
         if result.pending_prompt.is_some() {
             while session.has_pending_prompt() {
                 line.clear();
