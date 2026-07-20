@@ -646,11 +646,22 @@ impl Session {
         // `export --secret NAME=VALUE` — mark a variable sensitive (README "Sensitive environment
         // variables"). Intercepted before Brush so clank owns the secret table + std::env write and
         // the value never enters any rendered surface. Only a plain top-level line is handled; a
-        // `--secret` export buried in a pipeline / `$(...)` / list falls through to Brush (which
-        // treats `--secret` as an ordinary — if unusual — name and does no redaction), matching how
-        // `context summarize` scopes itself to top-level lines.
-        if crate::builtins::secretenv::is_secret_export(line) && is_plain_line(line) {
-            return self.run_secret_export(line, pid);
+        // `--secret` export carrying operators (`&&`, `|`, `;`, `$()`) is REFUSED rather than
+        // silently falling through to Brush — Brush's export would set the value with no redaction,
+        // which is exactly the surface the flag exists to prevent (observed live: the demo probe
+        // used `export --secret K=v && echo set` and concluded the feature was inert).
+        if crate::builtins::secretenv::is_secret_export(line) {
+            if is_plain_line(line) {
+                return self.run_secret_export(line, pid);
+            }
+            let result = LineResult::from_outcome(
+                Vec::new(),
+                b"export --secret: must be a standalone command (no pipes, `&&`, `;`, or \
+                  substitutions) so the value never reaches an unredacted surface\n"
+                    .to_vec(),
+                2,
+            );
+            return self.finish_intercepted(pid, result);
         }
 
         // `type` for clank's intercepted commands (`prompt-user`/`curl`/`wget`/`context`): Brush's

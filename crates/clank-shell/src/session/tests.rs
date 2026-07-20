@@ -3919,6 +3919,48 @@ fn secret_export_value_still_expands() {
     });
 }
 
+/// An operator-bearing `--secret` export is refused with an honest error — it must never fall
+/// through to Brush's export, which would set the value with zero redaction. (Exactly the live-demo
+/// probe: `export --secret K=v && echo set` looked like the feature was inert; the truth was a
+/// silent unredacted fallthrough.)
+#[test]
+fn secret_export_with_operators_is_refused() {
+    let _secret_lock = crate::runtime::secretenv::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    on_rt(async {
+        let mut session = Session::new().await.unwrap();
+        let result = session
+            .eval_line("export --secret CLANK_SECRET_NONPLAIN=sk-nonplain-7 && echo set")
+            .await;
+        assert_eq!(result.exit_code, 2);
+        let stderr = String::from_utf8(result.stderr).unwrap();
+        assert!(stderr.contains("standalone command"), "got: {stderr}");
+        // Neither half ran: the variable is unset and the `&&` tail never printed.
+        assert!(String::from_utf8(result.stdout).unwrap().is_empty());
+        let echoed = session.eval_line(r#"echo "${CLANK_SECRET_NONPLAIN:-unset}""#).await;
+        assert_eq!(String::from_utf8(echoed.stdout).unwrap(), "unset\n");
+    });
+}
+
+/// Quoted metacharacters in the VALUE keep the line plain — `export --secret K="a|b"` is a
+/// standalone command (the `|` is data, not an operator) and must keep working.
+#[test]
+fn secret_export_quoted_metachar_value_still_plain() {
+    let _secret_lock = crate::runtime::secretenv::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    on_rt(async {
+        let mut session = Session::new().await.unwrap();
+        let result = session
+            .eval_line(r#"export --secret CLANK_SECRET_PIPEVAL="a|b""#)
+            .await;
+        assert_eq!(result.exit_code, 0);
+        let echoed = session.eval_line(r#"echo "$CLANK_SECRET_PIPEVAL""#).await;
+        assert_eq!(String::from_utf8(echoed.stdout).unwrap(), "a|b\n");
+    });
+}
+
 /// A `--secret` variable is hidden from `env` output (neither the value nor the key appears), while
 /// an ordinary environment var (one genuinely in the process env) still shows — proving the filter
 /// drops *only* the secret-marked key.
