@@ -631,6 +631,16 @@ expect_contains "curl -o wrote a file"             'cat /tmp/work/page'  'Exampl
 #    outbound (the mcp-unreachable probe) wedges — a durable-agent resource interaction, not a
 #    flag defect. A fresh instance (small oplog) exercises the same code without that load. Uses
 #    bash dynamic scoping to shadow $AGENT_ID for this block only (the greeter-block pattern).
+# A brand-new agent must be able to write into /tmp on its VERY FIRST eval — no prior mkdir.
+# Pins ensure_fs_layout (Session::new): the fresh VFS gets the README namespace up front. Runs on
+# its own fresh instance because any earlier eval on a shared agent could have created /tmp as a
+# side effect.
+run_fs_bootstrap_block() {
+  local AGENT_ID='ClankAgent("fsboot-'"$$"'")'
+  expect "fresh agent writes /tmp with no prior mkdir"  'echo bootstrapped > /tmp/probe && cat /tmp/probe'  'bootstrapped'
+}
+run_fs_bootstrap_block
+
 run_curl_flag_block() {
   local AGENT_ID='ClankAgent("curlflags-'"$$"'")'
   eval_json eval '"sudo mkdir -p /tmp/w"' >/dev/null

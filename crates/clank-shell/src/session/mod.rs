@@ -295,6 +295,7 @@ pub struct Session {
 impl Session {
     /// Build a non-interactive shell with the full bash-compatible builtin set.
     pub async fn new() -> Result<Self, BoxError> {
+        ensure_fs_layout();
         #[cfg(target_arch = "wasm32")]
         {
             // wasip2 has no threads: a current-thread runtime drives Brush's async.
@@ -2091,6 +2092,56 @@ const DEFAULT_PATH: &str =
 /// The README's home directory. Seeded as `$HOME` on the agent (empty env) so `~` expansion and
 /// `~/.config/ask/ask.toml` resolve; native keeps the host's real `$HOME`.
 const DEFAULT_HOME: &str = "/home/user";
+
+/// One-time, best-effort filesystem layout at session start.
+///
+/// The agent's per-instance VFS starts EMPTY — before this, `/tmp` existed only if a uu builtin's
+/// capture path happened to run first, so a fresh agent's very first `curl -o /tmp/f` or
+/// `echo x > /tmp/f` failed with "No such file or directory (os error 44)" until someone typed
+/// `mkdir -p /tmp` (a live-demo gotcha). Create the whole README namespace up front. Idempotent
+/// (`create_dir_all`) and replay-safe on the durable agent — whole-state directory creation, not an
+/// append.
+///
+/// Native creates ONLY the clank-owned dirs the operator explicitly pointed somewhere writable via
+/// a `CLANK_*` env override — never absolute system paths on the host (`/usr/lib/...` on macOS is
+/// not clank's to create), and `/tmp` already exists on every host.
+fn ensure_fs_layout() {
+    #[cfg(target_arch = "wasm32")]
+    {
+        for d in ["/tmp", "/var/log", DEFAULT_HOME, "/usr/local/bin"] {
+            let _ = std::fs::create_dir_all(d);
+        }
+        for d in [
+            crate::mcp::config::etc_dir(),
+            crate::mcp::config::bin_dir(),
+            crate::grease::config::etc_dir(),
+            crate::grease::config::store_dir(),
+            crate::grease::config::bin_dir(),
+            crate::grease::config::script_bin_dir(),
+            crate::grease::config::skills_dir(),
+            crate::grease::config::agent_bin_dir(),
+        ] {
+            let _ = std::fs::create_dir_all(&d);
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        for (var, dir) in [
+            ("CLANK_MCP_ETC", crate::mcp::config::etc_dir()),
+            ("CLANK_MCP_BIN", crate::mcp::config::bin_dir()),
+            ("CLANK_GREASE_ETC", crate::grease::config::etc_dir()),
+            ("CLANK_GREASE_STORE", crate::grease::config::store_dir()),
+            ("CLANK_GREASE_BIN", crate::grease::config::bin_dir()),
+            ("CLANK_GREASE_SCRIPT_BIN", crate::grease::config::script_bin_dir()),
+            ("CLANK_GREASE_SKILLS", crate::grease::config::skills_dir()),
+            ("CLANK_GREASE_AGENT_BIN", crate::grease::config::agent_bin_dir()),
+        ] {
+            if std::env::var_os(var).is_some() {
+                let _ = std::fs::create_dir_all(&dir);
+            }
+        }
+    }
+}
 
 async fn build_shell() -> Result<Shell, brush_core::Error> {
     // NB: clank's builtins are registered here AND their manifests in `registry::build()`; the two

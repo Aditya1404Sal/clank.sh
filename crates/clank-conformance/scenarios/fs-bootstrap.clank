@@ -1,0 +1,23 @@
+# A fresh agent gets the README filesystem namespace at session start (ensure_fs_layout in
+# Session::new). Before this, the VFS started EMPTY — /tmp existed only if a uu capture path
+# happened to run first, so a fresh agent's first `curl -o /tmp/f` / `echo x > /tmp/f` failed
+# with os error 44 until a manual `mkdir -p /tmp` (a live-demo gotcha).
+#
+# @only golem: native deliberately creates nothing outside CLANK_*-overridden dirs (absolute
+# /usr/... paths on the host are not clank's to create). /tmp itself can't be probed here —
+# the conformance harness injects `mkdir -p ${TMP}` as step 0 of every scenario, which creates
+# /tmp before any step runs — so the pin asserts sibling dirs from the same bootstrap; the
+# no-prior-mkdir /tmp write is asserted live in golem-e2e against a brand-new agent.
+@only golem
+
+run ls -d /usr/lib/mcp/bin
+out /usr/lib/mcp/bin
+
+run ls -d /usr/local/bin
+out /usr/local/bin
+
+run ls -d /var/log
+out /var/log
+
+run ls -d /usr/share/skills
+out /usr/share/skills
