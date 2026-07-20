@@ -14,8 +14,8 @@ crate-type = ["cdylib"]
 [dependencies]
 # `export_golem_agentic` makes the #[agent_definition]/#[agent_implementation] macros emit the
 # invocable component exports (the golem:agent world).
-# SPIKE (spike/dev-golem-sdk): repointed from crates.io golem-rust 2.1.0 to the dev SDK in the golem
-# clone, in lockstep with clank-agent — greeter is the wRPC *target*, so it must speak the same
+# main-rc-1 (the golem 1.6 track): golem-rust comes from the dev SDK in the golem clone, in
+# lockstep with clank-agent — greeter is the wRPC *target*, so it must speak the same
 # golem:agent@2.0.0 world as the invoker calling it. See DEV_SDK_CHANGES.md.
 golem-rust = { path = "/Users/adityasalunkhe/Desktop/clank.sh/golem-stuff/golem/sdks/rust/golem-rust", features = ["export_golem_agentic"] }
 

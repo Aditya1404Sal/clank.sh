@@ -1,11 +1,17 @@
-# DEV_SDK_CHANGES.md — what `spike/dev-golem-sdk` changed to run clank on the dev Golem SDK
+# DEV_SDK_CHANGES.md — what `main-rc-1` changes to run clank on the dev Golem SDK
+
+> **Status change (2026-07-21):** this branch began life as the throwaway `spike/dev-golem-sdk`
+> ("what breaks on the dev SDK?"). It is now **`main-rc-1` — the golem 1.6 track and the main
+> driver going forward**: `main` (the released-1.5.x line) is merged in regularly (currently
+> through `8b1e7df`, the full post-demo hardening pass), and this branch carries `agent shell`
+> demos and 1.6 development. The analysis below is preserved as written — its per-bucket findings
+> are the record of what the SDK move cost; historical mentions of "the spike" refer to this
+> branch's earlier life.
 
 Audience: a maintainer who needs to know exactly what moving clank.sh off the pinned crates.io
 `golem-rust 2.1.0` and onto the **unreleased dev SDK** cost, and why. Every entry below was verified
-against the tree on branch `spike/dev-golem-sdk` (HEAD `db9a820`) versus `main` (`4586d81`). `main` is
-fully contained in the spike — it is a linear +4 commits.
-
-This is a **throwaway branch**. It exists to answer "what breaks?", not to merge. Sibling doc:
+against the tree at the analysis-time HEAD (`db9a820`) versus `main` (`4586d81`); `main` was then
+fully contained in this branch. Sibling doc:
 [WASM_CHANGES.md](WASM_CHANGES.md) (clank's third-party forks for `wasm32-wasip2`) — **§6 below
 falsifies one of its opening claims while this branch is checked out.**
 

@@ -4,7 +4,7 @@ version = "0.0.0"
 edition = "2024"
 license.workspace = true
 repository.workspace = true
-# Unpublishable while golem-rust is a 0.0.0 path dep into the golem-stuff clone (dev SDK spike);
+# Unpublishable while golem-rust is a 0.0.0 path dep into the golem-stuff clone (the 1.6 dev SDK);
 # the crate is shaped for publication once the SDK releases.
 publish = false
 

@@ -10,7 +10,7 @@ members = [
     "crates/wcurl",
     "crates/waget",
 ]
-# SPIKE: exclude the vendored golem clone so its crates (golem-schema, etc.) resolve their
+# main-rc-1: exclude the vendored golem clone so its crates (golem-schema, etc.) resolve their
 # `{ workspace = true }` deps against THEIR OWN workspace (golem-stuff/golem/), not clank's root.
 exclude = ["golem-stuff"]
 
