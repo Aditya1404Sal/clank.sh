@@ -3938,9 +3938,11 @@ fn incomplete_input_survives_the_session() {
         // An unterminated quote takes the same path.
         let quote = session.eval_line("echo 'dangling").await;
         assert_eq!(quote.exit_code, 2);
-        // A complete heredoc (newlines embedded in one eval) still runs normally.
+        // A complete heredoc (newlines embedded in one eval) still runs normally. `contains`, not
+        // exact: uu `cat` runs under the process-global fd-1 swap, which can catch a parallel
+        // test-reporter line printed during the window (the documented run_uu harness leak).
         let ok = session.eval_line("cat <<EOF\nhello\nEOF").await;
-        assert_eq!(String::from_utf8(ok.stdout).unwrap(), "hello\n");
+        assert!(String::from_utf8(ok.stdout).unwrap().contains("hello"));
     });
 }
 

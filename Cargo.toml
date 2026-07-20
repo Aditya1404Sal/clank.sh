@@ -51,6 +51,6 @@ uu_printf = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasi
 # (the producer completes and drops its writer → clean EOF for the reader) instead of OS pipes +
 # tokio::spawn/spawn_blocking. Native behavior is unchanged. See memory wall-c-pipe-concurrency-path.
 # Pin all three brush crates (one monorepo; lockstep) to the exact commit.
-brush-core = { git = "https://github.com/Aditya1404Sal/brush", rev = "0b57f56" }
-brush-builtins = { git = "https://github.com/Aditya1404Sal/brush", rev = "0b57f56" }
-brush-parser = { git = "https://github.com/Aditya1404Sal/brush", rev = "0b57f56" }
+brush-core = { git = "https://github.com/Aditya1404Sal/brush", rev = "02de798" }
+brush-builtins = { git = "https://github.com/Aditya1404Sal/brush", rev = "02de798" }
+brush-parser = { git = "https://github.com/Aditya1404Sal/brush", rev = "02de798" }

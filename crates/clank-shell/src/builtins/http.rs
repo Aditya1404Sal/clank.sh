@@ -96,6 +96,18 @@ mod tests {
         assert_eq!(args, vec!["https://example.com/f"]);
     }
 
+    /// Single quotes are POSIX-literal all the way through the intercept: `-w '\n'` must reach
+    /// wcurl as the two characters `\` `n`, not a bare `n`. Regression pin for the brush-fork
+    /// `unquote_str` fix (rev 02de798) — the old flat scan consumed the backslash and curl printed
+    /// a literal `n` where the user asked for a newline.
+    #[test]
+    fn single_quoted_backslash_survives_dequoting() {
+        let (_, args) = classify(r"curl -s -w '\n' https://x").unwrap();
+        assert_eq!(args, vec!["-s", "-w", r"\n", "https://x"]);
+        let (_, args) = classify(r"curl -w '%{http_code}\n' https://x").unwrap();
+        assert_eq!(args[1], r"%{http_code}\n");
+    }
+
     #[test]
     fn dequotes_a_quoted_header_arg() {
         let (_, args) = classify(r#"curl -H "Accept: application/json" https://x"#).unwrap();
