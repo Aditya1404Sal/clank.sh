@@ -245,31 +245,36 @@ exit
 
 # GOTCHAS
 
-1. **Don't type while `ask` runs.** No prompt is on screen during the invocation, so the terminal
-   queues keystrokes and replays them into the next prompt. This is the single biggest source of
-   "it's bugging out." Same reason: don't paste multi-line blocks into the agent shell.
+Most of the original landmines were FIXED in the post-demo hardening pass (see the entries marked
+✔). What remains:
+
+1. ✔ **Type-ahead during `ask`** — fixed in the golem CLI (`agent shell` now drains queued
+   keystrokes after every invocation and prints a busy line). On an older CLI build: don't type
+   while `ask` runs.
 2. **Fresh agent name every run.** Old names run old component revisions
-   (`operation not supported on this platform` on every pipeline).
-3. **`mkdir -p /tmp` before anything that writes a file** on a new agent.
-4. **Never pipe curl.** `curl … | jq` → `wcurl: unknown option: jq`. Use `-o /tmp/f.json` then
-   `jq . /tmp/f.json`.
-5. **Never type a heredoc** (`cat <<EOF`) — no multi-line continuation; it errors *and ends the session*.
-6. **No `\n` inside `curl -w`** — prints a literal `n`.
-7. **`export --secret NAME=VAL` works — but ONLY as a standalone line.** It sets + exports the
-   variable and redacts it from `env`/`ps`/the transcript. Appending anything (`&& echo ok`, a
-   pipe, `$()`) silently bypasses the secret handling — keep it on its own line.
+   (`operation not supported on this platform` on every pipeline). This is inherent Golem
+   versioning, not a bug.
+3. ✔ **`/tmp` on a new agent** — fixed; the filesystem namespace is bootstrapped at session start.
+4. ✔ **Piping curl** — fixed; `curl -s URL | jq .x` now works as the pipeline HEAD on both
+   targets. curl mid-pipeline (or after `&&`) still declines with an honest error naming the
+   supported form.
+5. ✔ **Heredocs** — fixed twice over: the native REPL does real PS2 continuation (`> `), and an
+   incomplete construct on the agent answers exit 2 instead of ending the session.
+6. ✔ **`\n` inside `curl -w`** — fixed (quote-aware unquoting; single quotes are POSIX-literal).
+7. **`export --secret NAME=VAL` works — but ONLY as a standalone line.** Operator forms
+   (`&& echo ok`, a pipe, `$()`) now refuse with an honest error instead of silently bypassing
+   the redaction.
 8. **Avoid `ls -la`** (prints `ls-total`); `date`, `history`, `yes` don't exist on the agent.
-9. **`grease`/`mcp` natively need `CLANK_GREASE_ETC`/`CLANK_MCP_ETC`** — defaults are `/etc/...`.
+9. **`grease`/`mcp` natively need `CLANK_GREASE_*`/`CLANK_MCP_*` env overrides** — defaults are
+   `/etc/...`, unwritable on macOS. `$PATH` now honors the overrides, and MCP servers survive a
+   native restart (tool lists are cached in the config).
 10. **`ask` on the agent needs `ANTHROPIC_API_KEY` at deploy time**, not run time.
 
 ## Recovery
 
 | Symptom | Fix |
 |---|---|
-| Output looks out of order / context "mixed up" | You typed during an `ask`. `Ctrl-D`, reconnect with a new name |
 | `operation not supported on this platform` | Old agent name — use a new one |
-| `No such file or directory (os error 44)` | `mkdir -p /tmp` |
-| `wcurl: unknown option: jq` | Don't pipe curl — use `-o` |
 | `Cancelled deploying` | add `--yes` |
 | deploy fails on a Jinja var | `export ANTHROPIC_API_KEY=""` |
 | `Request failed after 3 retries` | Terminal 1 server isn't up |
@@ -278,12 +283,11 @@ Reconnecting is always safe — agent state is durable, nothing is lost.
 
 ## If asked "what doesn't work yet?"
 
-- `curl` can't be used in a pipeline (the intercept drops operators).
-- `agent shell` accepts type-ahead during a long invocation instead of flushing stdin before
-  re-prompting — makes slow `ask` runs look reordered. Small, contained fix in `interactive_shell.rs`.
-- `export --secret` only takes effect as a standalone line; operator forms silently bypass it.
-- Native MCP tool *invocation* doesn't resolve on `$PATH` (works on the agent).
-- Script-fed native sessions over-count uu pipelines; interactive is correct.
+- `curl` composes only as the pipeline HEAD (`curl … | jq`); mid-pipeline stays an honest decline —
+  one Session-layer stage per line.
+- Native MCP tool *invocation* still doesn't dispatch cross-restart (recognition and help survive;
+  the live call needs the session that installed it or `mcp reload`).
+- Script-fed native sessions over-count uu pipelines (shared buffered stdin); interactive is correct.
 
 **Test story:** one scenario corpus, two targets — `cargo test -p clank-conformance --test native`
-(30/0) and the same corpus against a live agent (32/0). Workspace: 528 passing.
+(33/0) and the same corpus against a live agent, plus the golem-e2e suite. Workspace: 530+ passing.
