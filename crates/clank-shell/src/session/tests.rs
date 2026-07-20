@@ -28,6 +28,11 @@ fn on_rt<F: std::future::Future>(f: F) -> F::Output {
 /// wrong one" regardless of what else lands there.
 #[test]
 fn cd_is_honored_by_builtins_not_just_pwd() {
+    // The process cwd is one global (see ShellCwd's cross-SESSION caveat): another test's builtin
+    // entering ShellCwd with a different working_dir mid-window yanks it. Serialize against the
+    // known heavy contenders (the curl-pipeline tests, whose grep stages hold cwd windows while a
+    // mock server round-trips).
+    let _cwd = CWD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     on_rt(async {
         let dir = std::env::temp_dir().join(format!("clank_cd_{}", std::process::id()));
         let sub = dir.join("sub");
@@ -92,6 +97,32 @@ fn eval_line_reports_streams_and_exit_status() {
         assert!(result.stderr.is_empty());
         assert_eq!(result.exit_code, 1);
         assert_eq!(result.flow, Flow::Continue);
+    });
+}
+
+/// uucore keeps a process-global exit code (`uucore::error::set_exit_code`) that upstream
+/// coreutils resets by dying — each command is its own process there. clank runs `uumain`
+/// IN-PROCESS, so without an explicit reset in `run_uu` a single failed command poisons every
+/// later success: `ls <missing>` (exit 2) made a subsequent successful `touch` also report 2.
+/// Found by the conformance suite's redirects scenario; affects both targets identically (a wasm
+/// agent instance is one long-lived process too).
+#[test]
+fn uu_exit_code_does_not_stick_across_invocations() {
+    on_rt(async {
+        let mut session = Session::new().await.unwrap();
+        let missing = std::env::temp_dir().join(format!("clank_sticky_missing_{}", std::process::id()));
+        let created = std::env::temp_dir().join(format!("clank_sticky_created_{}", std::process::id()));
+
+        let result = session.eval_line(&format!("ls {}", missing.display())).await;
+        assert_ne!(result.exit_code, 0, "ls of a missing path must fail");
+
+        let result = session.eval_line(&format!("touch {}", created.display())).await;
+        assert!(created.exists(), "touch must actually create the file");
+        assert_eq!(
+            result.exit_code, 0,
+            "a successful uu command must not inherit the previous failure's sticky exit code"
+        );
+        let _ = std::fs::remove_file(&created);
     });
 }
 
@@ -1887,6 +1918,31 @@ fn mcp_add_installs_and_surfaces_the_server() {
     });
 }
 
+/// A NEW process reconstructs a plain `mcp add` server from its on-disk config — no network. The
+/// install caches the tool list in the config; the second Session (fresh, NO transport installed)
+/// still knows the server and its tools. Before this, `McpState` was in-memory only and a native
+/// restart forgot every non-grease server.
+#[test]
+fn mcp_state_reconstructs_from_config_cache() {
+    on_rt(async {
+        let _dirs = set_mcp_dirs();
+        {
+            let mut session = Session::new().await.unwrap();
+            session.set_mcp_http(Box::new(FakeMcpHttp::new(mcp_install_script())));
+            let add = session.eval_line("sudo mcp add demo https://x.example/mcp").await;
+            assert_eq!(add.exit_code, 0, "add failed: {}", String::from_utf8_lossy(&add.stderr));
+        }
+        // A brand-new Session, same CLANK_MCP_ETC, no HTTP transport at all.
+        let mut fresh = Session::new().await.unwrap();
+        let (list, _) = fresh.run_line("mcp list").await;
+        let list = String::from_utf8(list).unwrap();
+        assert!(list.contains("demo"), "reconstructed server missing: {list}");
+        let (tools, _) = fresh.run_line("mcp tools demo").await;
+        let tools = String::from_utf8(tools).unwrap();
+        assert!(tools.contains("echo"), "cached tools missing: {tools}");
+    });
+}
+
 /// `mcp add` against an erroring transport keeps the config as "not installed" and exits 4.
 #[test]
 fn mcp_add_transport_failure_is_configured_not_installed() {
@@ -3583,6 +3639,71 @@ fn curl_approved_runs_the_request() {
     });
 }
 
+/// Serializes the cwd-sensitive `cd` test against the curl-pipeline tests: their grep stages hold
+/// process-cwd windows (ShellCwd) while a mock server round-trips, and the process cwd is one
+/// global across Sessions. Test-parallelism artifact only; production runs one line at a time.
+static CWD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// A curl-HEADED pipeline composes: the Session runs the HTTP, and the downstream (Brush) reads
+/// the response as stdin. `sudo` pre-authorizes, so the pipeline runs directly.
+#[test]
+fn curl_headed_pipeline_feeds_the_downstream() {
+    let _cwd = CWD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    on_rt(async {
+        let url = http_mock("alpha\nbeta\ngamma\n");
+        let mut session = Session::new().await.unwrap();
+        let result = session.eval_line(&format!("sudo curl -s {url} | grep beta")).await;
+        assert_eq!(result.exit_code, 0, "stderr: {}", String::from_utf8_lossy(&result.stderr));
+        assert_eq!(String::from_utf8(result.stdout).unwrap(), "beta\n");
+    });
+}
+
+/// The downstream may itself be a multi-stage Brush pipeline.
+#[test]
+fn curl_headed_pipeline_multistage_downstream() {
+    let _cwd = CWD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    on_rt(async {
+        let url = http_mock("c\nb\na\n");
+        let mut session = Session::new().await.unwrap();
+        let result = session
+            .eval_line(&format!("sudo curl -s {url} | grep -v b | grep -c ."))
+            .await;
+        assert_eq!(String::from_utf8(result.stdout).unwrap(), "2\n");
+    });
+}
+
+/// The deferred-confirm path: an unelevated curl pipeline surfaces the confirm; approving runs the
+/// WHOLE pipeline (head HTTP + downstream). This is the path that forces the head-split to live in
+/// `run_command` — the approval re-runs the raw line there, and an eval_line-only intercept would
+/// have re-broken it.
+#[test]
+fn curl_headed_pipeline_approved_after_confirm() {
+    let _cwd = CWD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    on_rt(async {
+        let url = http_mock("x1\nx2\n");
+        let mut session = Session::new().await.unwrap();
+        let pending = session.eval_line(&format!("curl -s {url} | grep -c x")).await;
+        assert!(pending.pending_prompt.is_some(), "pipeline curl should confirm");
+        let out = session.answer_prompt(Some("yes".to_string())).await;
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(String::from_utf8(out.stdout).unwrap(), "2\n");
+    });
+}
+
+/// curl NOT at the head of the pipeline stays an honest stub error (exit 1) that now names the
+/// supported form — never the old flattened-argv "unknown option" junk.
+#[test]
+fn curl_mid_pipeline_is_an_honest_stub_error() {
+    on_rt(async {
+        let mut session = Session::new().await.unwrap();
+        let result = session.eval_line("sudo echo feed | curl https://unused.invalid").await;
+        assert_eq!(result.exit_code, 1);
+        let stderr = String::from_utf8(result.stderr).unwrap();
+        assert!(stderr.contains("FIRST in the pipeline"), "got: {stderr}");
+        assert!(!stderr.contains("unknown option"), "got: {stderr}");
+    });
+}
+
 /// Denying a `curl` confirmation → exit 5, no request.
 #[test]
 fn curl_denied_returns_exit_5() {
@@ -3655,13 +3776,57 @@ fn http_commands_have_confirm_manifests() {
 }
 
 /// `$PATH` is set to clank's README default (the virtual package-resolution namespace).
+/// Both env locks — the PATH is now built from the mcp AND grease dir overrides, so a concurrent
+/// test holding either set of `CLANK_*` vars would leak its temp dirs into this session's PATH.
+/// Lock order is the house order, GREASE then MCP (`set_grease_dirs` before `set_mcp_dirs`
+/// everywhere) — the reverse deadlocks the suite AB-BA.
 #[test]
 fn path_is_the_readme_default() {
+    let _grease = crate::grease::config::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _mcp = crate::mcp::config::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     on_rt(async {
         let mut session = Session::new().await.unwrap();
         let (out, _) = session.run_line("echo $PATH").await;
         assert_eq!(String::from_utf8(out).unwrap(), format!("{DEFAULT_PATH}\n"));
     });
+}
+
+/// With no `CLANK_*` overrides, `effective_path()` is byte-identical to the documented default —
+/// the drift guard for the dynamic construction.
+#[test]
+fn effective_path_defaults_to_the_readme_path() {
+    // House lock order: grease, then mcp (see path_is_the_readme_default).
+    let _grease = crate::grease::config::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _mcp = crate::mcp::config::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    assert_eq!(effective_path(), DEFAULT_PATH);
+}
+
+/// A `CLANK_MCP_BIN` override lands in `$PATH`, so a native session RESOLVES what `mcp add`
+/// installs — before this, the launcher went to the override dir while `$PATH` kept the hardcoded
+/// default, and `which <server>` never saw it.
+#[test]
+fn effective_path_honors_the_mcp_bin_override() {
+    let _lock = crate::mcp::config::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("mcp-bin");
+    std::env::set_var("CLANK_MCP_BIN", &bin);
+    let path = effective_path();
+    std::env::remove_var("CLANK_MCP_BIN");
+    assert!(
+        path.contains(bin.to_str().unwrap()),
+        "PATH should contain the override: {path}"
+    );
+    assert!(!path.contains("/usr/lib/mcp/bin"), "default entry should be replaced: {path}");
 }
 
 /// `which` finds nothing for a name with no file-backed form, and does NOT report a phantom
@@ -3874,6 +4039,9 @@ fn pids_are_monotonic_across_lines() {
 /// exactly like an ordinary exported var (the redaction contract must not break value availability).
 #[test]
 fn secret_export_value_still_expands() {
+    let _secret_lock = crate::runtime::secretenv::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     on_rt(async {
         let mut session = Session::new().await.unwrap();
         session
@@ -3890,6 +4058,75 @@ fn secret_export_value_still_expands() {
     });
 }
 
+/// Syntactically incomplete input (unterminated heredoc) answers honestly with exit 2 and the
+/// session SURVIVES — before this, the fatal parse error mapped to `ExitShell` (clank's Brush shell
+/// is non-interactive) and one mistyped `cat <<EOF` ended the whole session.
+#[test]
+fn incomplete_input_survives_the_session() {
+    on_rt(async {
+        let mut session = Session::new().await.unwrap();
+        let result = session.eval_line("cat <<EOF").await;
+        assert_eq!(result.exit_code, 2);
+        assert!(matches!(result.flow, Flow::Continue));
+        let stderr = String::from_utf8(result.stderr).unwrap();
+        assert!(stderr.contains("incomplete input"), "got: {stderr}");
+        // The session is alive and works.
+        let after = session.eval_line("echo alive").await;
+        assert_eq!(String::from_utf8(after.stdout).unwrap(), "alive\n");
+        assert_eq!(after.exit_code, 0);
+        // An unterminated quote takes the same path.
+        let quote = session.eval_line("echo 'dangling").await;
+        assert_eq!(quote.exit_code, 2);
+        // A complete heredoc (newlines embedded in one eval) still runs normally. `contains`, not
+        // exact: uu `cat` runs under the process-global fd-1 swap, which can catch a parallel
+        // test-reporter line printed during the window (the documented run_uu harness leak).
+        let ok = session.eval_line("cat <<EOF\nhello\nEOF").await;
+        assert!(String::from_utf8(ok.stdout).unwrap().contains("hello"));
+    });
+}
+
+/// An operator-bearing `--secret` export is refused with an honest error — it must never fall
+/// through to Brush's export, which would set the value with zero redaction. (Exactly the live-demo
+/// probe: `export --secret K=v && echo set` looked like the feature was inert; the truth was a
+/// silent unredacted fallthrough.)
+#[test]
+fn secret_export_with_operators_is_refused() {
+    let _secret_lock = crate::runtime::secretenv::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    on_rt(async {
+        let mut session = Session::new().await.unwrap();
+        let result = session
+            .eval_line("export --secret CLANK_SECRET_NONPLAIN=sk-nonplain-7 && echo set")
+            .await;
+        assert_eq!(result.exit_code, 2);
+        let stderr = String::from_utf8(result.stderr).unwrap();
+        assert!(stderr.contains("standalone command"), "got: {stderr}");
+        // Neither half ran: the variable is unset and the `&&` tail never printed.
+        assert!(String::from_utf8(result.stdout).unwrap().is_empty());
+        let echoed = session.eval_line(r#"echo "${CLANK_SECRET_NONPLAIN:-unset}""#).await;
+        assert_eq!(String::from_utf8(echoed.stdout).unwrap(), "unset\n");
+    });
+}
+
+/// Quoted metacharacters in the VALUE keep the line plain — `export --secret K="a|b"` is a
+/// standalone command (the `|` is data, not an operator) and must keep working.
+#[test]
+fn secret_export_quoted_metachar_value_still_plain() {
+    let _secret_lock = crate::runtime::secretenv::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    on_rt(async {
+        let mut session = Session::new().await.unwrap();
+        let result = session
+            .eval_line(r#"export --secret CLANK_SECRET_PIPEVAL="a|b""#)
+            .await;
+        assert_eq!(result.exit_code, 0);
+        let echoed = session.eval_line(r#"echo "$CLANK_SECRET_PIPEVAL""#).await;
+        assert_eq!(String::from_utf8(echoed.stdout).unwrap(), "a|b\n");
+    });
+}
+
 /// A `--secret` variable is hidden from `env` output (neither the value nor the key appears), while
 /// an ordinary environment var (one genuinely in the process env) still shows — proving the filter
 /// drops *only* the secret-marked key.
@@ -3900,6 +4137,9 @@ fn secret_export_value_still_expands() {
 /// in `env`. That pre-existing decoupling is not what this test is about.
 #[test]
 fn secret_export_hidden_from_env() {
+    let _secret_lock = crate::runtime::secretenv::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     on_rt(async {
         std::env::set_var("CLANK_ENV_CONTROL", "controlval");
         let mut session = Session::new().await.unwrap();
@@ -3925,22 +4165,31 @@ fn secret_export_hidden_from_env() {
     });
 }
 
-/// `env` filters the secret even as a PIPELINE stage — the custom `Env` builtin handles all forms,
-/// not just a bare top-level `env` (the live e2e caught that a Session-layer bare-`env` intercept
-/// missed `env | grep …`; the fix is a hand-written `Env` builtin, exercised here through a pipe).
+/// `env` filters the secret even as a non-final PIPELINE stage. Natively that stage runs on a Brush
+/// `spawn_blocking` WORKER thread — a thread the per-line secret set was never installed on — which is
+/// exactly why the filter set is a process-global slot and not a thread-local (the conformance suite
+/// caught the leak live: `env | grep -c SECRET` printed 1 natively).
+///
+/// Crucially the consumer is `grep`, NOT `cat`: `grep` is a `run_tool` command that genuinely reads
+/// the pipe, while uu `cat` reads the real process stdin natively and never sees `env`'s piped output
+/// — so an `env | cat` assertion is a false-green that passes even while the secret leaks.
 #[test]
 fn secret_hidden_from_env_in_a_pipeline() {
+    let _secret_lock = crate::runtime::secretenv::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     on_rt(async {
         let mut session = Session::new().await.unwrap();
         session
             .run_line("export --secret CLANK_SECRET_PIPE_ENV=sk-pipehide-999")
             .await;
-        // `env | cat` runs env as a pipeline stage — it must still be filtered.
-        let (out, _) = session.run_line("env | cat").await;
-        let out = String::from_utf8(out).unwrap();
+        // env is stage 0 (non-final) → owned-subshell worker thread on native. Filtered before grep.
+        let result = session.eval_line("env | grep CLANK_SECRET_PIPE_ENV").await;
+        let out = String::from_utf8(result.stdout).unwrap();
         assert!(
-            !out.contains("sk-pipehide-999") && !out.contains("CLANK_SECRET_PIPE_ENV"),
-            "secret must be filtered even when env runs in a pipeline:\n{out}"
+            out.is_empty(),
+            "the secret must be filtered before a pipeline consumer reads it, but env leaked it \
+             to grep:\n{out}"
         );
     });
 }
@@ -3949,6 +4198,9 @@ fn secret_hidden_from_env_in_a_pipeline() {
 /// `-0` flag rather than delegating to uu_env.
 #[test]
 fn secret_hidden_from_env_null_separated() {
+    let _secret_lock = crate::runtime::secretenv::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     on_rt(async {
         let mut session = Session::new().await.unwrap();
         session
@@ -3968,6 +4220,9 @@ fn secret_hidden_from_env_null_separated() {
 /// `NAME=value` operand added on the line still shows.
 #[test]
 fn secret_hidden_from_env_ignore_and_inline_add() {
+    let _secret_lock = crate::runtime::secretenv::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     on_rt(async {
         std::env::set_var("CLANK_ENV_IADD", "willbedropped");
         let mut session = Session::new().await.unwrap();
@@ -4009,6 +4264,9 @@ fn env_unset_drops_a_var() {
 /// redacted; the key name is preserved (only the value is sensitive).
 #[test]
 fn secret_export_line_redacted_in_transcript() {
+    let _secret_lock = crate::runtime::secretenv::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     on_rt(async {
         let mut session = Session::new().await.unwrap();
         session
@@ -4031,6 +4289,9 @@ fn secret_export_line_redacted_in_transcript() {
 /// the transcript — a secret can leak by value where its name never appears.
 #[test]
 fn secret_value_masked_in_later_output() {
+    let _secret_lock = crate::runtime::secretenv::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     on_rt(async {
         let mut session = Session::new().await.unwrap();
         session
@@ -4054,6 +4315,9 @@ fn secret_value_masked_in_later_output() {
 /// (when the secret is active), never the literal value.
 #[test]
 fn secret_value_masked_in_ps() {
+    let _secret_lock = crate::runtime::secretenv::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     on_rt(async {
         let mut session = Session::new().await.unwrap();
         session

@@ -1,0 +1,29 @@
+# While a prompt is pending, an ordinary eval is REJECTED (exit 1, nothing runs) and the
+# outstanding prompt RE-SURFACES in pending_prompt (fix d6e692c — a bare rejection with
+# no pending view deadlocked clients that route input by whether a prompt is pending).
+
+run prompt-user "Which color?"
+out Which color?
+prompt~ Which color?
+
+# A command while pending: rejected, did NOT run (empty stdout), and the SAME question
+# rides along so the caller knows to answer.
+run echo sneaky
+err~ awaiting a response
+exit 1
+prompt~ Which color?
+
+# Rejection is repeatable — a second attempt re-surfaces the prompt again (the deadlock
+# was a client looping on exactly this).
+run echo still-sneaky
+err~ awaiting a response
+exit 1
+prompt~ Which color?
+
+# The prompt is still answerable through the normal path.
+answer blue
+out blue
+
+# And the session is fully usable afterward.
+run echo usable
+out usable

@@ -113,8 +113,75 @@ impl Drop for ShellCwd {
     }
 }
 
-/// Run a uutils `uumain` closure with the process's stdout/stderr pointed at the `OpenFile`s
-/// brush assigned for this command, so its output lands wherever brush wants it.
+/// Stage this pipeline stage's piped stdin into a private temp fd, so a uutils tool that reads stdin
+/// (`sort`, `head`, `wc`, `tr`, `cat`) sees the upstream stage's bytes instead of the terminal.
+///
+/// Returns `None` — leaving fd 0 alone — for anything that is not an `OpenFile::PipeReader`. That
+/// narrowness is deliberate and load-bearing: **the shell's own stdin must never be staged.** When
+/// clank is script-fed (`clank < script`) brush hands a command the inherited stdin as an
+/// `OpenFile::File`, which is indistinguishable by variant from a per-command `< file` redirect —
+/// draining it swallows the rest of the script and the session dies at that line (observed: `ls |
+/// wc -l` consumed the remaining 11 lines and reported 67 instead of 56). A `PipeReader` can only
+/// come from a pipeline stage, so it is always safe to consume. The cost is that `uu < file` still
+/// reads the real fd 0 rather than the redirect — exactly as before this function existed, so no
+/// regression — while pipelines, the common case, now compose.
+///
+/// The upstream bytes are drained here, BEFORE the caller takes [`FD_SWAP_LOCK`], and that ordering
+/// is load-bearing too. Brush runs non-final pipeline stages concurrently on native
+/// (`spawn_blocking`), so in `ls | sort` the producer `ls` needs the lock to write fd 1 while the
+/// consumer `sort` is still reading. Draining outside the guarded region lets the producer acquire
+/// the lock and finish; draining inside it would deadlock the pipeline.
+///
+/// The backing file is unlinked immediately — the open fd keeps it alive, so it needs no cleanup and
+/// is invisible to the user, and concurrent stages can never collide on a shared path.
+///
+/// Two limits worth knowing, neither of them new here:
+///
+/// - This only rebinds the *fd*. When clank itself is script-fed (`clank < script`) the REPL reads
+///   through the process-global buffered [`std::io::stdin`] (`native.rs`), which has already pulled
+///   later script lines into userspace — a uu consumer drains that buffer in addition to the staged
+///   pipe, so `ls | wc -l` over-counts by the number of unconsumed lines and the rest of the script
+///   is skipped. `dup2` cannot reach bytes that are already in a `BufReader`. The pre-fix code was
+///   broken here too (it saw *only* the leftover lines); fixing it properly means moving the REPL
+///   off the shared buffered stdin.
+/// - The upstream is drained to EOF, so an unbounded producer (`yes | head -1`) never completes —
+///   `head` cannot early-exit and hand the producer an EPIPE, because the drain has to finish before
+///   the lock is taken. Bounded input, the shell's normal case, is unaffected.
+#[cfg(not(target_arch = "wasm32"))]
+fn stage_piped_stdin<SE: ShellExtensions>(
+    context: &ExecutionContext<'_, SE>,
+) -> Option<std::fs::File> {
+    use brush_core::openfiles::{OpenFile, OpenFiles};
+    use std::io::Seek;
+
+    let mut source = match context.try_fd(OpenFiles::STDIN_FD) {
+        Some(f @ OpenFile::PipeReader(_)) => f,
+        _ => return None,
+    };
+
+    // Unique per process AND per call: two pipeline stages stage their stdin concurrently.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(".clank-uu-stdin-{}-{seq}", std::process::id()));
+
+    let mut staged = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .ok()?;
+    let _ = std::fs::remove_file(&path);
+    // Stream straight to the file — never `read_to_end` into a `Vec` first. Materializing the whole
+    // upstream in memory made `cat /dev/zero | head -1` climb past 16 GB RSS before the watchdog
+    // killed it; copying in fixed-size chunks keeps this flat, which is what the temp file is for.
+    std::io::copy(&mut source, &mut staged).ok()?;
+    staged.seek(std::io::SeekFrom::Start(0)).ok()?;
+    Some(staged)
+}
+
+/// Run a uutils `uumain` closure with the process's stdin/stdout/stderr pointed at the `OpenFile`s
+/// brush assigned for this command, so its input and output land wherever brush wants them.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn run_uu<SE: ShellExtensions>(
     context: &ExecutionContext<'_, SE>,
@@ -123,6 +190,10 @@ pub(crate) fn run_uu<SE: ShellExtensions>(
     use brush_core::openfiles::OpenFiles;
     use std::io::Write;
     use std::os::fd::AsRawFd;
+
+    // Drain a pipeline stage's piped stdin BEFORE taking the lock — the ordering keeps concurrent
+    // stages from deadlocking, and only a `PipeReader` is ever consumed. See `stage_piped_stdin`.
+    let staged_stdin = stage_piped_stdin(context);
 
     // Serialize the process-global fd swap (see `FD_SWAP_LOCK`). Poisoning is harmless here — the
     // guarded region restores fds even on panic paths — so recover the guard either way.
@@ -140,12 +211,12 @@ pub(crate) fn run_uu<SE: ShellExtensions>(
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
 
-    // Point real fds 1/2 at the OpenFiles brush assigned for this command (a redirect target
-    // or the transcript-capture file), run uumain, then restore them. We deliberately do NOT
-    // touch fd 0: clank's REPL owns stdin, and brush runs pipeline stages concurrently, so
-    // redirecting the process-global stdin races with the shell itself. The consequence is
-    // that uutils commands don't compose as pipeline stages (they read/write the real
-    // terminal fds); single invocations and output redirection work and are captured.
+    // Point the real fds at the OpenFiles brush assigned for this command (a redirect target or the
+    // transcript-capture file), run uumain, then restore them. fd 0 is swapped ONLY for a pipeline
+    // stage's `PipeReader` (see `stage_piped_stdin`) — the shell's own stdin, whether a terminal or
+    // a script file, is never taken as a tool's pipe source. That keeps the terminal case exactly as
+    // it was; it does NOT make clank sole owner of its input in the script-fed case, where the REPL's
+    // buffered `std::io::stdin` is a channel `dup2` cannot reach (see `stage_piped_stdin`).
     let redirect = |shell_fd, real_fd| -> i32 {
         let saved = unsafe { libc::dup(real_fd) };
         if let Some(target) = context.try_fd(shell_fd) {
@@ -155,14 +226,26 @@ pub(crate) fn run_uu<SE: ShellExtensions>(
         }
         saved
     };
+    let saved_in = match &staged_stdin {
+        Some(staged) => {
+            let saved = unsafe { libc::dup(0) };
+            unsafe { libc::dup2(staged.as_raw_fd(), 0) };
+            saved
+        }
+        None => -1,
+    };
     let saved_out = redirect(OpenFiles::STDOUT_FD, 1);
     let saved_err = redirect(OpenFiles::STDERR_FD, 2);
 
+    // uucore's exit code is a process-global (`AtomicI32`) that upstream resets by process
+    // exit — which never happens in-process here. Without this, one failed command poisons
+    // every later success's exit code (ls-of-missing made a subsequent touch report 2).
+    uucore::error::set_exit_code(0);
     let code = uumain();
 
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
-    for (saved, real_fd) in [(saved_out, 1), (saved_err, 2)] {
+    for (saved, real_fd) in [(saved_in, 0), (saved_out, 1), (saved_err, 2)] {
         if saved >= 0 {
             unsafe {
                 libc::dup2(saved, real_fd);
@@ -262,6 +345,11 @@ pub(crate) fn run_uu<SE: ShellExtensions>(
         }
     }
 
+    // uucore's exit code is a process-global (`AtomicI32`) that upstream resets by process
+    // exit — which never happens in-process here (a wasm agent instance is one long-lived
+    // process across invocations). Without this, one failed command poisons every later
+    // success's exit code.
+    uucore::error::set_exit_code(0);
     let code = uumain();
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();

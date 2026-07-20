@@ -1,0 +1,27 @@
+# Multi-stage pipelines that hold on BOTH targets today.
+#
+# Producers may be builtins or uu tools (their fd-1 side is bridged natively); consumers
+# here are the hand-rolled text tools (grep/sed/awk — the `run_tool` path), whose stdin
+# plumbing is target-agnostic. uu-tool CONSUMERS (tr/sort/head/wc reading stdin) are a
+# known native divergence — see pipelines-uu-consumers.clank.
+
+run printf 'alpha\nbeta\ngamma\n' | grep a
+out alpha
+out beta
+out gamma
+
+run printf 'alpha\nbeta\ngamma\n' | grep -v beta
+out alpha
+out gamma
+
+run echo hello | sed s/hello/HELLO/
+out HELLO
+
+# Two consumer stages chained.
+run printf 'one\ntwo\nthree\n' | grep t | grep -v three
+out two
+
+# A uu producer feeding a run_tool consumer.
+run touch ${TMP}/seen
+run ls ${TMP} | grep -c seen
+out 1

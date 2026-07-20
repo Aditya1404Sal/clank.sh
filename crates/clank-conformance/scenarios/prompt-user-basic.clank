@@ -1,0 +1,22 @@
+# The pause protocol: a question surfaces (the invocation RETURNS — the shell never
+# blocks on a human), a SEPARATE answer step resolves it; abort follows the Ctrl-C
+# convention (exit 130).
+
+run prompt-user "Which environment?"
+out Which environment?
+prompt~ Which environment?
+
+answer production
+out production
+
+# Aborting clears the pause with exit 130 and no stdout.
+run prompt-user "Proceed?" --confirm
+out~ Proceed?
+prompt~ Proceed?
+
+abort
+exit 130
+
+# The session is usable again after an abort.
+run echo back
+out back

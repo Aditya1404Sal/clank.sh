@@ -4,6 +4,7 @@
 //! `type` is a Rust keyword), and the nested-context honest-error stubs ([`interceptstub`]).
 
 pub(crate) mod context;
+pub(crate) mod helpshim;
 pub(crate) mod http;
 pub(crate) mod interceptstub;
 pub(crate) mod kill;

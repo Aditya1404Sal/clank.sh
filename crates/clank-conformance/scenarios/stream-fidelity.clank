@@ -1,0 +1,42 @@
+# stdout vs stderr are DISTINCT streams on both targets: one command can emit both, each
+# redirect captures only its own stream, and uu/texttools error text lands on stderr with
+# stdout clean. Error text is asserted via stable fragments only — the `<name>:` prefix is
+# the process binary name and differs per context.
+
+# A builtin line emitting both streams.
+run echo to-out; echo to-err >&2
+out to-out
+err to-err
+
+run echo data > ${TMP}/present
+
+# One uu command, both streams: the readable file streams to stdout, the missing one
+# errors on stderr.
+run cat ${TMP}/present ${TMP}/absent
+out data
+err~ No such file
+exit 1
+
+# texttools: grep's missing-file error is stderr-only, exit 2.
+run grep x ${TMP}/absent
+err~ No such file
+exit 2
+
+# 2> captures ONLY stderr — stdout still flows and the step's own stderr stays empty.
+run cat ${TMP}/present ${TMP}/absent 2> ${TMP}/cap-err
+out data
+exit 1
+run cat ${TMP}/cap-err
+out~ No such file
+
+# > captures ONLY stdout — the error still reaches the step's stderr.
+run cat ${TMP}/present ${TMP}/absent > ${TMP}/cap-out
+err~ No such file
+exit 1
+run cat ${TMP}/cap-out
+out data
+
+# uu fluent-key errors (ls) are stderr-only too.
+run ls ${TMP}/absent
+err~ cannot-access
+exit any

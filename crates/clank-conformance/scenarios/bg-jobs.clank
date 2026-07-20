@@ -1,0 +1,34 @@
+# Background jobs: `cmd &` parks an in-shell future, `jobs` lists it, `kill %1` aborts it.
+#
+# Bodies are builtin-only — a bg uu tool natively swaps the process-global fds and wedges
+# the session (the deferred native bg-uu fd-swap). `kill %1` directly follows its spawn:
+# natively any intervening eval ticks the parked task to completion and reaps it (wasm bg
+# is tick-free, so ordering only matters natively).
+
+# A parked job runs during `wait`; its output is proven via a file (bg stdout is
+# orphaned — the spawning line's buffers are gone by the time it runs).
+run { echo bg-ran > ${TMP}/bgproof; } & wait; cat ${TMP}/bgproof
+out bg-ran
+
+# Spawning returns immediately, announcing the job as [1] (pid varies).
+run { echo parked > ${TMP}/parked; } &
+out~ [1]
+
+run kill %1
+out~ Killed
+
+# The job table is empty after the kill.
+run jobs
+
+# Unknown pid: both targets report it on stderr; the exit code diverges today
+# (wasm 1, native 0 — the native kill failure is not propagated to $?).
+run kill 99999
+err~ No such process
+exit any
+
+# A fresh spawn reuses the freed number and shows up Running in the job table.
+run { echo second > ${TMP}/second; } &
+out~ [1]
+
+run jobs
+out~ Running

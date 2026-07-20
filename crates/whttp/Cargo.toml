@@ -1,0 +1,33 @@
+[package]
+name = "whttp"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The shared HTTP transport for `wcurl`/`waget` (the "fourth crate" their duplicated seams
+# anticipated). A cfg-gated WASI-HTTP (wstd) / reqwest client plus TARGET-AGNOSTIC redirect
+# following and timeouts — so both command clients behave identically on native and the
+# Golem/wasip2 agent. wstd does not follow redirects and reqwest does by default; doing it here
+# (with reqwest's auto-follow disabled) removes that divergence.
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# `http::Method` in the public API. Redirect `Location` resolution is hand-rolled (see
+# `resolve_url`) rather than pulling `url` — its `idna`→`icu` dependency compiled ~180 MB of
+# Unicode tables into the wasm agent, which broke unrelated agent behavior and bloated the binary.
+http = "1"
+
+# wasm: wstd's WASI-HTTP client (the only HTTP that works inside a Golem/wasip2 component). Pinned
+# to the exact version clank-agent uses so the whole app resolves one wstd.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wstd = { version = "=0.6.5", features = ["default", "json"] }
+
+# native: reqwest with pure-Rust rustls TLS (no system libcurl/OpenSSL). Auto-redirect is disabled
+# in code so this crate's shared loop is the single source of redirect behavior on both targets.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }

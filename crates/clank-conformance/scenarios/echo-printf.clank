@@ -1,0 +1,69 @@
+# echo flags (-n/-e) and printf formats (%s/%d/%x, zero-padding, %% literal, \t\n
+# escapes, format reuse over extra args, non-numeric %d error) on both targets —
+# printf is the clank-registered uu_printf on native and wasm alike, and the golem
+# e2e already proves echo -e / echo -n / printf "%s-%d" live.
+
+run echo hello
+out hello
+
+# Unquoted runs of spaces collapse — word splitting rejoins args with one space.
+run echo one two   three
+out one two three
+
+# -n suppresses the trailing newline ('out' implies one, so out~).
+run echo -n no-newline
+out~ no-newline
+
+# -e enables escape interpretation: \n splits lines, \t is a real tab.
+run echo -e "a\nb"
+out a
+out b
+
+run echo -e "x\ty"
+out x	y
+
+# printf: %s and %d convert, \n in the format is a real newline.
+run printf "%s-%d\n" a 1
+out a-1
+
+# The format string is reused until the arguments run out.
+run printf "%s\n" one two
+out one
+out two
+
+run printf "%s=%d\n" a 1 b 2
+out a=1
+out b=2
+
+# A quoted multi-word argument is a single %s operand.
+run printf "[%s]\n" "two words"
+out [two words]
+
+# Width/zero-pad, hex, and the %% literal.
+run printf "%05d\n" 42
+out 00042
+
+run printf "%x\n" 255
+out ff
+
+run printf "%%\n"
+out %
+
+# Escape sequences in the format string itself.
+run printf "a\tb\n"
+out a	b
+
+# No newline unless the format asks for one.
+run printf %s bare
+out~ bare
+
+# A non-numeric %d operand prints 0, complains on stderr, exits 1. The message
+# prefix is the process binary name — assert only the stable fragment.
+run printf "%d\n" notanumber
+out 0
+err~ expected a numeric value
+exit 1
+
+# $? saw the failure; exit codes are not sticky beyond that.
+run echo code=$?
+out code=1

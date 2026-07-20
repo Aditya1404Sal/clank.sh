@@ -1,0 +1,44 @@
+# The resolution surface: `type` is the authoritative resolver for ALL commands (including
+# clank-intercepted ones Brush can't see), `which` finds file-backed commands only (never a
+# phantom path for a builtin), and `/bin` is a virtual namespace listing every command.
+
+# `type` answers for intercepted commands (handled before Brush dispatch) with Brush's
+# exact wording, so the two resolvers are indistinguishable to a caller.
+run type curl
+out curl is a shell builtin
+
+run type prompt-user
+out prompt-user is a shell builtin
+
+# `type -t` prints the bare word, like Brush.
+run type -t wget
+out builtin
+
+# Brush-registered builtins still resolve through Brush unchanged.
+run type cat
+out cat is a shell builtin
+
+run type ls
+out ls is a shell builtin
+
+# `type` for an UNKNOWN name lives in type-unknown.clank (@only native): Brush's wasm
+# `type` fallthrough currently LIES — PathExt::executable returns true for phantom paths,
+# so the agent reports "…is /usr/local/bin/<name>" with exit 0. Known Brush-fork bug; the
+# lie is documented there, not asserted here as expected behavior.
+
+# `which` reports file-backed commands only. No $PATH dir is populated yet (grease installs
+# into them later), so it finds nothing for a builtin — critically, no phantom path — and
+# nothing for an unknown name. Empty output, exit 1, in both cases.
+run which ls
+exit 1
+
+run which clank-no-such-cmd-xyz
+exit 1
+
+# Virtual /bin enumerates every command: intercepted cmds and Brush builtins alike.
+run ls /bin
+out~ curl
+out~ prompt-user
+out~ wget
+out~ cat
+out~ type

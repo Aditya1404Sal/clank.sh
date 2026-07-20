@@ -266,8 +266,8 @@ fn canonicalize_checked(id: &str) -> Result<String, String> {
 
 /// The `model` builtin registration, for `build_shell`.
 pub(crate) fn builtins<SE: ShellExtensions>() -> Vec<(String, Registration<SE>)> {
-    use brush_core::builtins::simple_builtin;
-    vec![(Model::NAME.into(), simple_builtin::<Model, SE>())]
+    use crate::builtins::helpshim::simple_builtin_with_help;
+    vec![(Model::NAME.into(), simple_builtin_with_help::<Model, SE>())]
 }
 
 /// The `model` manifest. `Subprocess` scope (README command table), `Allow` (writes only the user's

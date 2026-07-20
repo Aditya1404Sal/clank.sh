@@ -1,0 +1,50 @@
+# The conformance suite (crates/clank-conformance): one scenario corpus, two shell targets.
+#
+# - `native` runs on every push/PR: scenarios against the in-process Session, plus the
+#   suite's own unit tests. No server, no network beyond crates.io.
+# - `golem` runs nightly + on demand: downloads the pinned golem 1.5.x release binary,
+#   builds the wasm agent, stands up a throwaway local server, and drives every scenario
+#   through `golem agent invoke` against a real deployed clank (scripts/conformance-golem.sh).
+
+name: conformance
+
+# `push` on branches only (not tags), no `pull_request` — same-repo PRs would run every
+# commit twice; fork PRs can be added back as `pull_request` if outside contributions start.
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *" # nightly, off the top of the hour
+
+jobs:
+  native:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rustup picks up rust-toolchain.toml (stable + wasm32-wasip2) automatically.
+      - uses: Swatinem/rust-cache@v2
+      - name: Unit tests (parser, matcher, wire contracts)
+        run: cargo test -p clank-conformance --lib
+      - name: Native conformance tier
+        run: cargo test -p clank-conformance --test native
+
+  golem:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Install the pinned golem release binary
+        # The full `golem` binary (includes the local server) — NOT the client-only
+        # `golem-cli-*` asset. Fallback if the asset route ever breaks:
+        # `cargo install golem-cli --locked` (slow).
+        run: |
+          curl -fsSL -o /usr/local/bin/golem \
+            https://github.com/golemcloud/golem/releases/download/v1.5.1/golem-x86_64-unknown-linux-gnu
+          chmod +x /usr/local/bin/golem
+          golem --version
+      - name: Golem conformance tier (throwaway server + deploy)
+        run: scripts/conformance-golem.sh

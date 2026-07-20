@@ -1,0 +1,40 @@
+# uu-tool consumers (cat/wc) reading a here-doc or here-string — both targets.
+#
+# Here-doc bodies are staged through the same channel as pipe input, so they ride the same
+# fix: the wasm agent fd-renumbers the staged stream onto uu stdin, and natively `run_uu`
+# stages the body into a private temp fd and `dup2`s it over fd 0 (`stage_piped_stdin`,
+# crates/clank-shell/src/tools/coreutils.rs). grep/sed/awk consumers are target-agnostic
+# either way — see heredocs.clank.
+
+run cat <<EOF
++ hello
++ world
++ EOF
+out hello
+out world
+
+run wc -l <<EOF
++ a
++ b
++ c
++ EOF
+out~ 3
+
+# Here-doc body redirected on into a file.
+run cat <<EOF > ${TMP}/hd
++ alpha
++ beta
++ EOF
+run cat ${TMP}/hd
+out alpha
+out beta
+
+# Variables expand in the body.
+run V=kiwi; cat <<EOF
++ fruit=$V
++ EOF
+out fruit=kiwi
+
+# Here-string shares the same staging path.
+run cat <<< here-string-ok
+out here-string-ok

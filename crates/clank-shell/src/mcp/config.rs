@@ -32,6 +32,23 @@ pub struct McpServerConfig {
     /// header sends the raw env value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_header: Option<String>,
+    /// The server's tool list as fetched at install time — the cache that lets a NEW process
+    /// reconstruct the server without network (see `Session::reconstruct_mcp_from_configs`).
+    /// Absent in configs written before this field existed (serde default = empty = no cache).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<StoredTool>,
+}
+
+/// A cached tool definition inside a server config — name, description, and the JSON
+/// `inputSchema` stored as a JSON string (the same representation the grease tool cache uses).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct StoredTool {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub input_schema: String,
 }
 
 fn default_true() -> bool {
@@ -46,6 +63,7 @@ impl McpServerConfig {
             enabled: true,
             auth_env: None,
             auth_header: None,
+            tools: Vec::new(),
         }
     }
 

@@ -1,0 +1,26 @@
+# Durability: file state written in one invocation survives into later, SEPARATE
+# invocations — each `run` below is its own `eval` invoke on the deployed agent.
+#
+# `@only golem` because natively the whole scenario is one in-process Session anyway,
+# so this pins nothing there; the live agent run is the real test. Derived from the
+# scripts/golem-e2e.sh durability block (~L1423: write, then cat in a later invocation)
+# and the one-append-per-invocation seeding at ~L377. Only file-based durability is
+# asserted — cwd/`cd` persistence across invocations is deliberately not pinned here.
+@only golem
+
+# invocation 1: create the file
+run echo persisted > ${TMP}/state
+
+# invocation 2: a fresh invoke sees it
+run cat ${TMP}/state
+out persisted
+
+# invocations 3–4: append, one write per invocation
+run echo second >> ${TMP}/state
+run echo third >> ${TMP}/state
+
+# invocation 5: the file accumulated across all prior invocations
+run cat ${TMP}/state
+out persisted
+out second
+out third

@@ -1,0 +1,12 @@
+# Unknown command → Brush's PATH search fails → "command not found", exit 127, on BOTH
+# targets, with $? carrying it. Wasm agreed with native only after the brush
+# PathExt::executable existence fix (rev 0b57f56): previously wasm's PATH search returned a
+# phantom hit, so it tried to exec and failed with "operation not supported" / 126. With a
+# real existence check the search finds nothing and reports 127 like native.
+
+run definitely-not-a-cmd-xyz
+err~ command not found: definitely-not-a-cmd-xyz
+exit 127
+
+run echo code=$?
+out code=127

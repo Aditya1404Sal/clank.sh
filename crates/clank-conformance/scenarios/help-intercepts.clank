@@ -1,0 +1,23 @@
+# `--help` works with or without a leading `sudo` — pins fix aba64a9 (`--help` sees past
+# `sudo`): `sudo` only pre-authorizes, so it must not change what `--help` prints. Before
+# the fix, `sudo curl --help` fell through to curl's own parser and surfaced an
+# outbound-HTTP confirmation instead of help — the strict no-pending-prompt default here
+# is what catches that regression.
+
+# A uu builtin's own --help (clap usage; fluent keys are unlocalized, hence `cat-usage`).
+run cat --help
+out~ Usage:
+out~ --show-all
+
+# The same help, sudo'd.
+run sudo cat --help
+out~ Usage:
+out~ --show-all
+
+# An intercepted command's --help is served from its manifest — no confirmation.
+run curl --help
+out~ fetch a URL over
+
+# The fix path itself: sudo'd intercepted --help still prints help, still no confirmation.
+run sudo curl --help
+out~ fetch a URL over

@@ -1,0 +1,31 @@
+# curl/wget in a pipeline: only the HEAD form (`curl … | rest`) is supported — the Session runs
+# the HTTP and feeds the response to the Brush-run downstream. Every other operator shape must be
+# an HONEST error from the stub (naming the supported form), never the old flattened-argv junk
+# ("wcurl: unknown option: jq" — the tokenizer used to DROP the operators and hand wcurl the
+# downstream's words as flags; found live in the demo).
+#
+# All steps here are deterministic and offline: `sudo` pre-authorizes, and every shape below is a
+# decline — the stub answers without any HTTP running. The live head form is covered by
+# session-level loopback tests (native) and a golem-e2e assertion (agent).
+
+# curl mid-pipeline: the honest stub, pointing at the head form.
+run sudo echo feed | curl https://unused.invalid
+err~ FIRST in the pipeline
+exit 1
+
+# curl after `&&` — an operator shape, not an argv; the stub answers.
+run sudo curl https://unused.invalid && echo tail
+err~ top-level command
+exit 1
+
+# curl inside a command substitution — same stub. (No `sudo` here: the line's gate reads the
+# leading `echo` (Allow), and inside `$()` on native a `sudo` word would resolve to the REAL
+# system sudo via external exec, not clank's elevation.)
+run echo "x$(curl https://unused.invalid)x"
+out xx
+err~ top-level command
+
+# wget mid-pipeline declines identically.
+run sudo echo feed | wget https://unused.invalid
+err~ FIRST in the pipeline
+exit 1

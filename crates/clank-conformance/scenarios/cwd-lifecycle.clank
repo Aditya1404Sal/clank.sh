@@ -1,0 +1,48 @@
+# The cwd lifecycle: cd moves the shell, relative paths resolve against it, pwd echoes
+# it back, and a failed cd leaves it untouched. Runs on BOTH targets — this is the live
+# probe for `cd` on the wasm agent (the ShellCwd fix on this branch).
+
+# The starting directory is target-dependent (host process cwd natively, agent VFS);
+# assert only that pwd prints something path-shaped.
+run pwd
+out~ /
+
+run cd ${TMP}
+run pwd
+out ${TMP}
+
+# Relative writes and reads resolve against the new cwd.
+run echo hi > relfile
+run cat relfile
+out hi
+
+run touch marker
+run ls
+out marker
+out relfile
+
+# Relative cd down, logical `..` back up.
+run mkdir sub
+run cd sub
+run pwd
+out ${TMP}/sub
+
+run cd ..
+run pwd
+out ${TMP}
+
+# Back to an absolute path; the sandbox file stays reachable by its absolute name.
+run cd /
+run pwd
+out /
+
+run cat ${TMP}/relfile
+out hi
+
+# A failed cd reports the missing path and leaves the cwd where it was.
+run cd ${TMP}/definitely-missing
+err~ No such file
+exit 1
+
+run pwd
+out /

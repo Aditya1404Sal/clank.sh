@@ -1,0 +1,10 @@
+# `type` for an unknown name — the CORRECT contract: not-found on stderr, exit 1, on BOTH
+# targets. Brush's wasm `PathExt::executable` used to return true for phantom paths, so the
+# agent answered "clank-no-such-cmd-xyz is /usr/local/bin/clank-no-such-cmd-xyz" with exit 0;
+# the brush fork now does a real `exists() && !is_dir()` check (rev 0b57f56), matching how
+# clank's own `which` already resolved (path-resolution.clank). This scenario pins that the
+# two resolvers now agree across targets.
+
+run type clank-no-such-cmd-xyz
+err~ not found
+exit 1

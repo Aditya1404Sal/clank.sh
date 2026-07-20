@@ -1,0 +1,92 @@
+# Quoting semantics: single vs double quotes, embedded/escaped quotes, literal $ in
+# single quotes, backslash handling, unset-var expansion, word splitting vs "$var",
+# and mixed quote nesting — all Brush parser behavior, identical code on both targets.
+
+run echo 'single quoted'
+out single quoted
+
+run echo "double quoted"
+out double quoted
+
+# Single quotes suppress expansion — the $ stays literal.
+run echo 'literal $HOME'
+out literal $HOME
+
+# Runs of spaces survive inside quotes.
+run echo 'a   b'
+out a   b
+
+# Quotes of the other kind embed literally.
+run echo "it's"
+out it's
+
+run echo 'a "b" c'
+out a "b" c
+
+run echo "a 'b' c"
+out a 'b' c
+
+# Escaped double quotes inside double quotes.
+run echo "embedded \"quotes\" here"
+out embedded "quotes" here
+
+# Escaped $ inside double quotes stays literal.
+run echo "escaped \$dollar"
+out escaped $dollar
+
+# Bare escaped quotes outside any quoting.
+run echo \"quoted\"
+out "quoted"
+
+# Backslashes: removed when unquoted, literal in single quotes, \\ collapses to one
+# inside double quotes.
+run echo back\slash
+out backslash
+
+run echo 'back\slash'
+out back\slash
+
+run echo "back\\slash"
+out back\slash
+
+# An escaped space joins two words into one argument.
+run echo hello\ world
+out hello world
+
+# Variable expansion: double quotes expand, single quotes do not.
+run conf_var=hello
+run echo $conf_var
+out hello
+
+run echo "$conf_var world"
+out hello world
+
+run echo '$conf_var world'
+out $conf_var world
+
+# ${name} braces delimit the name from trailing text.
+run echo "${conf_var}s"
+out hellos
+
+# An unset variable expands to nothing.
+run echo [$conf_unset_xyz]
+out []
+
+# Word splitting: unquoted $var re-splits (inner spaces collapse); "$var" preserves.
+run conf_sp='p   q'
+run echo $conf_sp
+out p q
+
+run echo "$conf_sp"
+out p   q
+
+# Mixed nesting: adjacent quoted/unquoted segments concatenate into one word.
+run echo pre'mid'post
+out premidpost
+
+run echo "a"'b'c
+out abc
+
+# Single quotes nested inside double quotes are literal while $var still expands.
+run echo "outer 'single' $conf_var"
+out outer 'single' hello

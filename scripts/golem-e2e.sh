@@ -651,6 +651,43 @@ expect_eval "sudo wget -O - fetches to stdout"     "$NET_WGET"  '.stdout | conta
 eval_json eval '"sudo curl -o /tmp/work/page https://example.com"' >/dev/null
 expect_contains "curl -o wrote a file"             'cat /tmp/work/page'  'Example Domain'
 
+# 7. Expanded flags (-I headers-only via GET, -w %{http_code}, clustered -fsSL) on a FRESH agent
+#    instance. The main e2e instance has accumulated a large durable oplog over hundreds of ops;
+#    piling several more outbound-HTTP calls onto it stresses the worker enough that a later
+#    outbound (the mcp-unreachable probe) wedges — a durable-agent resource interaction, not a
+#    flag defect. A fresh instance (small oplog) exercises the same code without that load. Uses
+#    bash dynamic scoping to shadow $AGENT_ID for this block only (the greeter-block pattern).
+# A brand-new agent must be able to write into /tmp on its VERY FIRST eval — no prior mkdir.
+# Pins ensure_fs_layout (Session::new): the fresh VFS gets the README namespace up front. Runs on
+# its own fresh instance because any earlier eval on a shared agent could have created /tmp as a
+# side effect.
+run_fs_bootstrap_block() {
+  local AGENT_ID='ClankAgent("fsboot-'"$$"'")'
+  expect "fresh agent writes /tmp with no prior mkdir"  'echo bootstrapped > /tmp/probe && cat /tmp/probe'  'bootstrapped'
+}
+run_fs_bootstrap_block
+
+run_curl_flag_block() {
+  local AGENT_ID='ClankAgent("curlflags-'"$$"'")'
+  eval_json eval '"sudo mkdir -p /tmp/w"' >/dev/null
+  local head cluster
+  head="$(eval_json eval '"sudo curl -sI https://example.com"')"
+  expect_eval "curl -I returns response headers"   "$head"  '.stdout | contains("HTTP/1.1 200")'  'true'
+  expect_eval "curl -I omits the body"             "$head"  '.stdout | contains("Example Domain")'  'false'
+  expect "curl -w writes the status code"          'sudo curl -sw "%{http_code}" -o /tmp/w/null https://example.com'  '200'
+  cluster="$(eval_json eval '"sudo curl -fsSL https://example.com"')"
+  expect_eval "clustered -fsSL fetches the body"   "$cluster"  '.stdout | contains("Example Domain")'  'true'
+  # curl as a pipeline HEAD: the Session runs the HTTP and feeds the body to the Brush-run
+  # downstream as stdin (the hardening fix for the flattened-argv "unknown option: jq" bug).
+  expect "curl | grep -c composes on the agent"    'sudo curl -s https://example.com | grep -c "Example Domain"'  '1'
+  # `-w '\n'` stays two characters through the intercept (quote-aware unquote_str, brush 02de798).
+  # Four backslashes: bash halves them to `\\n`, the WIT string literal unescapes that to `\n` —
+  # so the SHELL receives backslash+n, the thing under test. (`\\n` here would deliver a raw
+  # newline instead: `\n` is itself a WIT escape.)
+  expect "curl -w single-quoted backslash is literal"  "sudo curl -s -o /tmp/w/null -w 'code=%{http_code}\\\\n' https://example.com"  'code=200'
+}
+run_curl_flag_block
+
 # ============================================================================
 # 2k. Resolution surface — type authoritative + virtual /bin + --help for intercepted cmds
 # ============================================================================

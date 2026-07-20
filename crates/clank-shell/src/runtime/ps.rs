@@ -89,8 +89,8 @@ impl SimpleCommand for Ps {
 
 /// The `ps` builtin registration, for `build_shell`.
 pub(crate) fn builtins<SE: ShellExtensions>() -> Vec<(String, Registration<SE>)> {
-    use brush_core::builtins::simple_builtin;
-    vec![("ps".into(), simple_builtin::<Ps, SE>())]
+    use crate::builtins::helpshim::simple_builtin_with_help;
+    vec![("ps".into(), simple_builtin_with_help::<Ps, SE>())]
 }
 
 /// The `ps` manifest, for the command registry. `ps` is `Subprocess` scope (README), `Allow`.

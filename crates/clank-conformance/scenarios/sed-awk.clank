@@ -1,0 +1,92 @@
+# sed (hand-rolled line engine: s/// with flags, addresses, d/p/q, -n, -e) and the awk
+# subset (field extraction, -F / FS, patterns, NR, BEGIN/END) — on pipes and on file
+# arguments. Pipe forms proven on the agent by golem-e2e section 2p.
+
+# --- sed on pipes ---
+
+run echo hello | sed s/hello/HELLO/
+out HELLO
+
+run printf 'aa\naa\n' | sed s/a/X/g
+out XX
+out XX
+
+run printf '#c\nkeep\n#d\n' | sed /^#/d
+out keep
+
+run printf 'a\nb\nc\n' | sed 1d
+out b
+out c
+
+run printf 'a\nb\nc\nd\n' | sed -n 2,3p
+out b
+out c
+
+run printf 'a\nb\nc\n' | sed 2q
+out a
+out b
+
+run echo ab | sed -e s/a/1/ -e s/b/2/
+out 12
+
+# & in the replacement refers to the whole match.
+run echo abc | sed "s/b/[&]/"
+out a[b]c
+
+# --- sed on file arguments (the input file is never mutated) ---
+
+run printf 'red fox\nred hen\n' > ${TMP}/sedfile
+run sed s/red/blue/ ${TMP}/sedfile
+out blue fox
+out blue hen
+
+run sed -n 1p ${TMP}/sedfile
+out red fox
+
+run cat ${TMP}/sedfile
+out red fox
+out red hen
+
+# A missing file exits 1. The message is a propagated raw io::Error whose display text
+# can differ per target (native strerror vs wasip2), so only the exit code is pinned.
+run sed s/x/y/ ${TMP}/nosuchfile
+err*
+exit 1
+
+# -i is honestly refused (hand-crafted message in shared texttools code).
+run sed -i s/red/blue/ ${TMP}/sedfile
+err~ in-place
+exit 1
+
+# --- awk ---
+
+run printf 'a b c\nd e f\n' | awk '{print $1}'
+out a
+out d
+
+run echo root:x:0 | awk -F: '{print $1}'
+out root
+
+# FS assigned in BEGIN behaves like -F.
+run echo one:two | awk 'BEGIN {FS=":"} {print $2}'
+out two
+
+# Comparison pattern gates the action per line.
+run printf 'a:x:5\nb:x:50\n' | awk -F: '$3 > 10 {print $1}'
+out b
+
+run printf '1\n2\n3\n' | awk '{s += $1} END {print s}'
+out 6
+
+run printf 'a\nb\nc\n' | awk 'NR == 2'
+out b
+
+run echo 'a b' | awk '{print $2 "-" $1}'
+out b-a
+
+# --- awk on a file argument ---
+
+run printf 'x 1\ny 2\n' > ${TMP}/awkfile
+run awk '{print $1}' ${TMP}/awkfile
+out x
+out y

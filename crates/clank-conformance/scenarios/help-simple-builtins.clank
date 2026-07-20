@@ -1,0 +1,27 @@
+# `--help` for hand-rolled SimpleCommand builtins (model/which/ps/stat/find/man + the intercept
+# stubs), served by the WithHelp shim. Brush passes --help through to SimpleCommands untouched, so
+# each one used to mishandle it its own way — `model --help` answered "unknown subcommand" exit 2
+# (found live in the demo). The uu-backed builtins are NOT wrapped (uu's clap answers richer help
+# itself — pinned by help-intercepts.clank), and top-level `context --help`/`curl --help` stay with
+# the earlier typecmd intercept.
+
+run model --help
+out~ Subcommands:
+exit 0
+
+run which --help
+out~ locate a file-backed command
+exit 0
+
+run ps --help
+out~ report process status
+exit 0
+
+run find --help
+out~ search for files
+exit 0
+
+# The stubs got the shim too: a NESTED `curl --help` (where the stub, not typecmd, answers) now
+# prints the manifest help with exit 0 instead of the not-usable-here error.
+run echo "$(curl --help)" | grep -c "curl"
+out 1

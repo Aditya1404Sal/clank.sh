@@ -295,6 +295,7 @@ pub struct Session {
 impl Session {
     /// Build a non-interactive shell with the full bash-compatible builtin set.
     pub async fn new() -> Result<Self, BoxError> {
+        ensure_fs_layout();
         #[cfg(target_arch = "wasm32")]
         {
             // wasip2 has no threads: a current-thread runtime drives Brush's async.
@@ -324,6 +325,7 @@ impl Session {
                 rt,
             };
             session.reconstruct_mcp_from_grease();
+            session.reconstruct_mcp_from_configs();
             Ok(session)
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -352,6 +354,7 @@ impl Session {
                 secret_env: std::collections::BTreeMap::new(),
             };
             session.reconstruct_mcp_from_grease();
+            session.reconstruct_mcp_from_configs();
             Ok(session)
         }
     }
@@ -370,6 +373,7 @@ impl Session {
                 enabled: true,
                 auth_env: m.auth_env.clone(),
                 auth_header: None,
+                tools: Vec::new(),
             };
             let tools: Vec<crate::mcp::state::McpTool> = m
                 .tools
@@ -386,6 +390,41 @@ impl Session {
                 })
                 .collect();
             self.mcp.set_installed(&m.name, config, tools);
+        }
+    }
+
+    /// Reconstruct plain `mcp add` servers from their on-disk configs — WITHOUT network. The tool
+    /// list is the cache written at install time (`mcp_install` re-saves the config with `tools`
+    /// populated); a config with no cache (pre-cache installs, or a failed install) is skipped —
+    /// `mcp reload` refreshes it live. Runs after `reconstruct_mcp_from_grease`, and never
+    /// overwrites a grease-reconstructed server (`is_server` guard); `set_installed` replaces by
+    /// name, so replaying `mcp add` lines on the durable agent stays idempotent over this.
+    ///
+    /// This is what makes native MCP survive a process restart: `McpState` is in-memory, and
+    /// before this only grease-installed servers came back.
+    fn reconstruct_mcp_from_configs(&mut self) {
+        for name in crate::mcp::config::list_names() {
+            let Ok(Some(config)) = crate::mcp::config::load(&name) else {
+                continue;
+            };
+            if !config.enabled || config.tools.is_empty() || self.mcp.is_server(&name) {
+                continue;
+            }
+            let tools: Vec<crate::mcp::state::McpTool> = config
+                .tools
+                .iter()
+                .map(|t| crate::mcp::state::McpTool {
+                    name: t.name.clone(),
+                    description: if t.description.is_empty() {
+                        None
+                    } else {
+                        Some(t.description.clone())
+                    },
+                    input_schema: serde_json::from_str(&t.input_schema)
+                        .unwrap_or(serde_json::json!({})),
+                })
+                .collect();
+            self.mcp.set_installed(&name, config, tools);
         }
     }
 
@@ -578,6 +617,26 @@ impl Session {
             }
         };
 
+        // Syntactically incomplete input (an unterminated heredoc/quote/substitution) must not run:
+        // clank's Brush shell is non-interactive, so Brush marks the parse error FATAL and maps it
+        // to `ExitShell` — which `finish` faithfully turns into `Flow::Exit`, ending the whole
+        // session because someone typed `cat <<EOF`. Catch it here with Brush's own
+        // incomplete-input classification and answer honestly instead. Placed after the pid spawn
+        // (the attempt is real typed work; `ps` should show it) and before every intercept, so no
+        // classifier ever sees a half-construct. The native REPL upgrades this to PS2 continuation
+        // before eval; on the agent one eval is one invocation, so the whole construct must arrive
+        // in a single line (documented).
+        if self.line_is_incomplete(line) {
+            let result = LineResult::from_outcome(
+                Vec::new(),
+                b"clank: incomplete input (a heredoc, quote, or substitution is missing its \
+                  terminator); provide the full construct in one eval\n"
+                    .to_vec(),
+                2,
+            );
+            return self.finish_intercepted(pid, result);
+        }
+
         // `<cmd> --help` for a clank-intercepted command: print its manifest help text (exit 0).
         // These commands never reach Brush's dispatch, so they'd otherwise ignore `--help`. Handled
         // FIRST among all interceptions (before `context`/`prompt-user`/curl and the authz gate) so
@@ -646,11 +705,22 @@ impl Session {
         // `export --secret NAME=VALUE` — mark a variable sensitive (README "Sensitive environment
         // variables"). Intercepted before Brush so clank owns the secret table + std::env write and
         // the value never enters any rendered surface. Only a plain top-level line is handled; a
-        // `--secret` export buried in a pipeline / `$(...)` / list falls through to Brush (which
-        // treats `--secret` as an ordinary — if unusual — name and does no redaction), matching how
-        // `context summarize` scopes itself to top-level lines.
-        if crate::builtins::secretenv::is_secret_export(line) && is_plain_line(line) {
-            return self.run_secret_export(line, pid);
+        // `--secret` export carrying operators (`&&`, `|`, `;`, `$()`) is REFUSED rather than
+        // silently falling through to Brush — Brush's export would set the value with no redaction,
+        // which is exactly the surface the flag exists to prevent (observed live: the demo probe
+        // used `export --secret K=v && echo set` and concluded the feature was inert).
+        if crate::builtins::secretenv::is_secret_export(line) {
+            if is_plain_line(line) {
+                return self.run_secret_export(line, pid);
+            }
+            let result = LineResult::from_outcome(
+                Vec::new(),
+                b"export --secret: must be a standalone command (no pipes, `&&`, `;`, or \
+                  substitutions) so the value never reaches an unredacted surface\n"
+                    .to_vec(),
+                2,
+            );
+            return self.finish_intercepted(pid, result);
         }
 
         // `type` for clank's intercepted commands (`prompt-user`/`curl`/`wget`/`context`): Brush's
@@ -826,6 +896,15 @@ impl Session {
             // it's served here at the Session layer for top-level lines only; inside $()/pipes it falls
             // through to Brush and hits the honest "no such file").
             self.run_mcp_resource_read(&server, &uri).await
+        } else if let Some(pipe) = crate::builtins::http::split_http_head(line) {
+            // A curl/wget-HEADED pipeline: the head's HTTP runs here at the Session layer (Wall C),
+            // and the downstream runs through Brush with the response bytes as stdin. Reached only
+            // from run_command, i.e. AFTER the line's authorization resolved (the gate reads the
+            // pipeline's leading word, so `curl … | jq` confirmed as curl; `sudo` pre-authorized) —
+            // which is also why this lives here and not in eval_line: the post-approval path
+            // re-runs the raw line through run_command, and an eval_line-only intercept would miss
+            // it.
+            self.run_http_pipe(pipe).await
         } else {
             match crate::builtins::http::classify(line) {
                 Some((crate::builtins::http::HttpCommand::Curl, args)) => {
@@ -847,6 +926,33 @@ impl Session {
         };
         if let Some(pid) = pid {
             self.proc_table.lock().unwrap().complete(pid);
+        }
+        result
+    }
+
+    /// Run a curl/wget-headed pipeline (`curl … | rest…`): the head's HTTP at the Session layer
+    /// (Wall C — the wstd reactor must be the running executor), then the downstream program
+    /// through Brush with the response bytes as its stdin. POSIX pipe semantics: the downstream
+    /// always runs, fed whatever the head produced (possibly nothing); the line's exit code is the
+    /// downstream's; both stages' stderr concatenate in order.
+    async fn run_http_pipe(&mut self, pipe: crate::builtins::http::HttpHeadPipe) -> LineResult {
+        // wcurl and waget each have their own Outcome type; flatten to a shared triple.
+        let (name, head_stdout, head_stderr, head_exit) = match pipe.cmd {
+            crate::builtins::http::HttpCommand::Curl => {
+                let o = wcurl::run(&pipe.args).await;
+                ("curl", o.stdout, o.stderr, o.exit_code)
+            }
+            crate::builtins::http::HttpCommand::Wget => {
+                let o = waget::run(&pipe.args).await;
+                ("wget", o.stdout, o.stderr, o.exit_code)
+            }
+        };
+        log_http_tool(name, &pipe.args, head_exit);
+        let mut result = self.execute_with_stdin(&pipe.downstream, &head_stdout).await;
+        if !head_stderr.is_empty() {
+            let mut stderr = head_stderr;
+            stderr.extend_from_slice(&result.stderr);
+            result.stderr = stderr;
         }
         result
     }
@@ -1253,10 +1359,41 @@ impl Session {
     }
 
 
+    /// Whether `line` is syntactically *incomplete* — an unterminated heredoc, quote, or
+    /// substitution that needs more input to become a program — as opposed to complete-but-wrong.
+    /// This is exactly brush-interactive's `is_valid_input` classification (its reedline validator
+    /// and basic backend use the same two arms); Brush's `parse_string` is `#[cached]`, so the
+    /// eventual `run_string` of the same text is a cache hit and this pre-parse is ~free.
+    ///
+    /// The native REPL uses it to drive PS2 continuation; `eval_line_inner` uses it to answer
+    /// incomplete input honestly instead of letting the fatal-parse path end the session.
+    pub fn line_is_incomplete(&self, line: &str) -> bool {
+        match self.shell.parse_string(line) {
+            Err(brush_parser::ParseError::Tokenizing { ref inner, .. }) if inner.is_incomplete() => {
+                true
+            }
+            Err(brush_parser::ParseError::ParsingAtEndOfInput) => true,
+            _ => false,
+        }
+    }
+
     /// Native execution: capture Brush's stdout and stderr into anonymous temp files.
     #[cfg(not(target_arch = "wasm32"))]
     async fn execute(&mut self, line: &str) -> LineResult {
-        use std::io::{Read, Seek, SeekFrom};
+        self.execute_impl(line, None).await
+    }
+
+    /// Like [`execute`](Self::execute), but with `stdin_bytes` presented as fd 0 to the whole
+    /// program — how a Session-layer pipeline head (curl/wget, see `run_http_pipe`) hands its
+    /// output to a Brush-run downstream.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn execute_with_stdin(&mut self, line: &str, stdin_bytes: &[u8]) -> LineResult {
+        self.execute_impl(line, Some(stdin_bytes)).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn execute_impl(&mut self, line: &str, stdin_bytes: Option<&[u8]>) -> LineResult {
+        use std::io::{Read, Seek, SeekFrom, Write};
 
         let stdout_capture = match tempfile::tempfile() {
             Ok(f) => f,
@@ -1274,6 +1411,17 @@ impl Session {
         let mut params = self.shell.default_exec_params();
         params.set_fd(OpenFiles::STDOUT_FD, OpenFile::File(out_fd.into()));
         params.set_fd(OpenFiles::STDERR_FD, OpenFile::File(err_fd.into()));
+        if let Some(bytes) = stdin_bytes {
+            // Stage the bytes in an unlinked temp file and hand it to Brush as fd 0.
+            let mut staged = match tempfile::tempfile() {
+                Ok(f) => f,
+                Err(e) => return LineResult::stderr(format!("clank: {e}\n")),
+            };
+            if staged.write_all(bytes).is_err() || staged.seek(SeekFrom::Start(0)).is_err() {
+                return LineResult::stderr(b"clank: failed to stage pipeline stdin\n".to_vec());
+            }
+            params.set_fd(OpenFiles::STDIN_FD, OpenFile::File(staged.into()));
+        }
 
         let result = self
             .shell
@@ -1300,6 +1448,19 @@ impl Session {
     /// async on the owned current-thread runtime.
     #[cfg(target_arch = "wasm32")]
     async fn execute(&mut self, line: &str) -> LineResult {
+        self.execute_impl(line, None).await
+    }
+
+    /// Like [`execute`](Self::execute), but with `stdin_bytes` presented as fd 0 to the whole
+    /// program — how a Session-layer pipeline head (curl/wget, see `run_http_pipe`) hands its
+    /// output to a Brush-run downstream.
+    #[cfg(target_arch = "wasm32")]
+    async fn execute_with_stdin(&mut self, line: &str, stdin_bytes: &[u8]) -> LineResult {
+        self.execute_impl(line, Some(stdin_bytes)).await
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn execute_impl(&mut self, line: &str, stdin_bytes: Option<&[u8]>) -> LineResult {
         let stdout_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
         let stderr_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
         let mut params = self.shell.default_exec_params();
@@ -1311,6 +1472,12 @@ impl Session {
             OpenFiles::STDERR_FD,
             OpenFile::Stream(Box::new(BufSink(stderr_buf.clone()))),
         );
+        if let Some(bytes) = stdin_bytes {
+            params.set_fd(
+                OpenFiles::STDIN_FD,
+                OpenFile::Stream(Box::new(BufSource(std::io::Cursor::new(bytes.to_vec())))),
+            );
+        }
 
         let fut = self
             .shell
@@ -1954,15 +2121,81 @@ fn build_mcp_arguments(
 }
 
 /// The README's default `$PATH` — the resolution namespace clank's package layout installs into.
-/// Nothing populates `/usr/lib/{mcp,agents,prompts}/bin` or the skills glob yet (that's `grease`,
-/// future); these entries currently resolve to nothing, which is correct — `type`/`which` degrade
-/// to "not found" rather than erroring on a missing directory.
+/// Kept as the documented default and the drift-guard baseline; the value actually installed is
+/// [`effective_path`], which resolves the package dirs through their env-overridable config fns.
 const DEFAULT_PATH: &str =
     "/usr/local/bin:/usr/bin:/usr/lib/mcp/bin:/usr/lib/agents/bin:/usr/lib/prompts/bin:/usr/share/skills/*/bin";
+
+/// The README `$PATH` with every package dir resolved through its env-overridable config fn, so a
+/// native session pointed at writable dirs (`CLANK_MCP_BIN=~/.clank/mcp-bin` etc. — required on
+/// macOS, where `/usr/lib/...` isn't writable) RESOLVES what it installs: before this, `mcp add`
+/// wrote its launcher into the override dir while `$PATH` kept the hardcoded default, so
+/// `which`/`type`/`ls /bin` never saw the installed command. With no overrides set this is
+/// byte-identical to [`DEFAULT_PATH`] (unit-pinned).
+fn effective_path() -> String {
+    format!(
+        "/usr/local/bin:{}:{}:{}:{}:{}/*/bin",
+        crate::grease::config::script_bin_dir().display(), // default /usr/bin
+        crate::mcp::config::bin_dir().display(),           // default /usr/lib/mcp/bin
+        crate::grease::config::agent_bin_dir().display(),  // default /usr/lib/agents/bin
+        crate::grease::config::bin_dir().display(),        // default /usr/lib/prompts/bin
+        crate::grease::config::skills_dir().display()      // default /usr/share/skills
+    )
+}
 
 /// The README's home directory. Seeded as `$HOME` on the agent (empty env) so `~` expansion and
 /// `~/.config/ask/ask.toml` resolve; native keeps the host's real `$HOME`.
 const DEFAULT_HOME: &str = "/home/user";
+
+/// One-time, best-effort filesystem layout at session start.
+///
+/// The agent's per-instance VFS starts EMPTY — before this, `/tmp` existed only if a uu builtin's
+/// capture path happened to run first, so a fresh agent's very first `curl -o /tmp/f` or
+/// `echo x > /tmp/f` failed with "No such file or directory (os error 44)" until someone typed
+/// `mkdir -p /tmp` (a live-demo gotcha). Create the whole README namespace up front. Idempotent
+/// (`create_dir_all`) and replay-safe on the durable agent — whole-state directory creation, not an
+/// append.
+///
+/// Native creates ONLY the clank-owned dirs the operator explicitly pointed somewhere writable via
+/// a `CLANK_*` env override — never absolute system paths on the host (`/usr/lib/...` on macOS is
+/// not clank's to create), and `/tmp` already exists on every host.
+fn ensure_fs_layout() {
+    #[cfg(target_arch = "wasm32")]
+    {
+        for d in ["/tmp", "/var/log", DEFAULT_HOME, "/usr/local/bin"] {
+            let _ = std::fs::create_dir_all(d);
+        }
+        for d in [
+            crate::mcp::config::etc_dir(),
+            crate::mcp::config::bin_dir(),
+            crate::grease::config::etc_dir(),
+            crate::grease::config::store_dir(),
+            crate::grease::config::bin_dir(),
+            crate::grease::config::script_bin_dir(),
+            crate::grease::config::skills_dir(),
+            crate::grease::config::agent_bin_dir(),
+        ] {
+            let _ = std::fs::create_dir_all(&d);
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        for (var, dir) in [
+            ("CLANK_MCP_ETC", crate::mcp::config::etc_dir()),
+            ("CLANK_MCP_BIN", crate::mcp::config::bin_dir()),
+            ("CLANK_GREASE_ETC", crate::grease::config::etc_dir()),
+            ("CLANK_GREASE_STORE", crate::grease::config::store_dir()),
+            ("CLANK_GREASE_BIN", crate::grease::config::bin_dir()),
+            ("CLANK_GREASE_SCRIPT_BIN", crate::grease::config::script_bin_dir()),
+            ("CLANK_GREASE_SKILLS", crate::grease::config::skills_dir()),
+            ("CLANK_GREASE_AGENT_BIN", crate::grease::config::agent_bin_dir()),
+        ] {
+            if std::env::var_os(var).is_some() {
+                let _ = std::fs::create_dir_all(&dir);
+            }
+        }
+    }
+}
 
 async fn build_shell() -> Result<Shell, brush_core::Error> {
     // NB: clank's builtins are registered here AND their manifests in `registry::build()`; the two
@@ -1989,7 +2222,7 @@ async fn build_shell() -> Result<Shell, brush_core::Error> {
     // `$PATH` expansion and by `type`/`which` path resolution alike.
     shell.env_mut().set_global(
         "PATH",
-        brush_core::variables::ShellVariable::new(DEFAULT_PATH),
+        brush_core::variables::ShellVariable::new(effective_path()),
     )?;
 
     // Seed `$HOME` to the README layout (`/home/user`) only when unset — the agent's wasm env is
@@ -2063,6 +2296,37 @@ impl std::io::Write for BufSink {
 
 #[cfg(target_arch = "wasm32")]
 impl brush_core::openfiles::Stream for BufSink {
+    fn clone_box(&self) -> Box<dyn brush_core::openfiles::Stream> {
+        Box::new(self.clone())
+    }
+}
+
+/// An in-memory source implementing `brush_core::openfiles::Stream` for wasm stdin injection —
+/// `BufSink`'s read-side sibling. Hands a Session-layer pipeline head's bytes (curl/wget output)
+/// to a Brush-run downstream as fd 0. Writes are no-ops, mirroring `BufSink`'s inert read side.
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone)]
+struct BufSource(std::io::Cursor<Vec<u8>>);
+
+#[cfg(target_arch = "wasm32")]
+impl std::io::Read for BufSource {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        std::io::Read::read(&mut self.0, buf)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl std::io::Write for BufSource {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        Ok(data.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl brush_core::openfiles::Stream for BufSource {
     fn clone_box(&self) -> Box<dyn brush_core::openfiles::Stream> {
         Box::new(self.clone())
     }

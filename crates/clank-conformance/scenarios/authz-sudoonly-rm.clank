@@ -1,0 +1,42 @@
+# Authorization, sudo-only tier: bare `rm` pauses for confirmation (deny → exit 5 and the
+# file survives; approve → the deferred rm runs), while `sudo rm` is pre-authorized and
+# deletes immediately. The gate rides the same pending-prompt pause as prompt-user.
+
+run touch ${TMP}/victim
+
+# Bare rm does NOT delete: it surfaces the sudo confirmation (question on stdout; the
+# sudo tier offers yes/no only — no blanket "all" for the strongest tier).
+run rm ${TMP}/victim
+out rm requires sudo authorization to remove files and directories. (y)es, (n)o
+prompt~ requires sudo authorization
+choices yes,no
+
+# Deny → exit 5 with the denial on stderr…
+answer no
+err clank: authorization denied
+exit 5
+
+# …and the file survives.
+run ls ${TMP}
+out victim
+
+# Second attempt, approved: the deferred rm runs silently (exit 0, the strict default).
+run rm ${TMP}/victim
+out rm requires sudo authorization to remove files and directories. (y)es, (n)o
+prompt~ requires sudo authorization
+choices yes,no
+
+answer yes
+
+# The file is gone (raw fluent-key error text — assert the stable fragment only).
+run ls ${TMP}/victim
+err~ cannot-access
+exit 2
+
+# `sudo rm` marks the invocation elevated: no pause, deletes immediately.
+run touch ${TMP}/victim2
+run sudo rm ${TMP}/victim2
+
+run ls ${TMP}/victim2
+err~ cannot-access
+exit 2

@@ -20,13 +20,13 @@ clank embeds. Redirected from crates.io to a fork.
 **WHERE:** root `Cargo.toml` `[workspace.dependencies]`, lines 54–56:
 
 ```
-brush-core    = { git = "https://github.com/Aditya1404Sal/brush", rev = "0f4a89c" }
-brush-builtins = { git = "https://github.com/Aditya1404Sal/brush", rev = "0f4a89c" }
-brush-parser  = { git = "https://github.com/Aditya1404Sal/brush", rev = "0f4a89c" }
+brush-core    = { git = "https://github.com/Aditya1404Sal/brush", rev = "02de798" }
+brush-builtins = { git = "https://github.com/Aditya1404Sal/brush", rev = "02de798" }
+brush-parser  = { git = "https://github.com/Aditya1404Sal/brush", rev = "02de798" }
 ```
 
 Fork branch `std-utils` (stacked on `wall-c-wasm-pipes`, branched from upstream `0300a84`); pinned
-to exact commit `0f4a89c` (full hash `0f4a89cfbc57c85e08fd442240409d39ea7981bd` in `Cargo.lock`).
+to exact commit `02de798` (see `Cargo.lock` for the full hash).
 All three crates are one monorepo and are pinned in lockstep. The published crates would be
 `brush-core 0.5 / brush-builtins 0.2 / brush-parser 0.4` (see the version strings in
 `crates/clank-shell/Cargo.toml` lines 21–23, which the workspace git pin overrides).

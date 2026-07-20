@@ -69,6 +69,17 @@ macro_rules! session_stub {
                          (cat x | ask \"…\") or inline it (ask \"$(cat x)\")",
                     );
                 }
+                // curl/wget DO work as the FIRST pipeline stage (`curl -s URL | jq .x`) — the
+                // session runs the HTTP and feeds the response to the downstream. This stub only
+                // fires for the other shapes (mid-pipe, after `&&`/`;`, inside a substitution).
+                if $name == "curl" || $name == "wget" {
+                    let _ = writeln!(
+                        context.stderr(),
+                        "{name}: to pipe a response, put {name} FIRST in the pipeline \
+                         ({name} -s URL | jq .x), or write to a file (-o f) and read that",
+                        name = $name,
+                    );
+                }
                 Ok(ExecutionResult::new(1))
             }
         }
@@ -84,14 +95,16 @@ session_stub!(GreaseStub, "grease");
 session_stub!(GolemStub, "golem");
 
 pub(crate) fn builtins<SE: ShellExtensions>() -> Vec<(String, Registration<SE>)> {
-    use brush_core::builtins::simple_builtin;
+    // The help shim makes a nested `$(curl --help)` print the manifest help (exit 0) instead of
+    // the stub's not-usable-here error — help never depends on where it's asked from.
+    use crate::builtins::helpshim::simple_builtin_with_help;
     vec![
-        ("curl".into(), simple_builtin::<CurlStub, SE>()),
-        ("wget".into(), simple_builtin::<WgetStub, SE>()),
-        ("ask".into(), simple_builtin::<AskStub, SE>()),
-        ("kill".into(), simple_builtin::<KillStub, SE>()),
-        ("mcp".into(), simple_builtin::<McpStub, SE>()),
-        ("grease".into(), simple_builtin::<GreaseStub, SE>()),
-        ("golem".into(), simple_builtin::<GolemStub, SE>()),
+        ("curl".into(), simple_builtin_with_help::<CurlStub, SE>()),
+        ("wget".into(), simple_builtin_with_help::<WgetStub, SE>()),
+        ("ask".into(), simple_builtin_with_help::<AskStub, SE>()),
+        ("kill".into(), simple_builtin_with_help::<KillStub, SE>()),
+        ("mcp".into(), simple_builtin_with_help::<McpStub, SE>()),
+        ("grease".into(), simple_builtin_with_help::<GreaseStub, SE>()),
+        ("golem".into(), simple_builtin_with_help::<GolemStub, SE>()),
     ]
 }

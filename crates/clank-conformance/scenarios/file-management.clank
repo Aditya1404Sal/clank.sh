@@ -1,0 +1,41 @@
+# touch/cp/mv/ls round-trips and nested mkdir inside the sandbox — absolute paths only
+# (the cwd side of file handling lives in cwd-lifecycle.clank).
+
+run touch ${TMP}/a
+run ls ${TMP}
+out a
+
+# cp duplicates content byte-for-byte.
+run printf 'hello\nworld\n' > ${TMP}/a
+run cp ${TMP}/a ${TMP}/b
+run cat ${TMP}/b
+out hello
+out world
+
+# mv renames: the content moves, the source name is gone.
+run mv ${TMP}/b ${TMP}/c
+run cat ${TMP}/c
+out hello
+out world
+
+run ls ${TMP}/b
+err~ cannot-access
+exit any
+
+run ls ${TMP}
+out a
+out c
+
+# Nested creation, then listing every level of the structure.
+run mkdir -p ${TMP}/d1/d2
+run touch ${TMP}/d1/d2/f
+run ls ${TMP}/d1
+out d2
+
+run ls ${TMP}/d1/d2
+out f
+
+run ls ${TMP}
+out a
+out c
+out d1

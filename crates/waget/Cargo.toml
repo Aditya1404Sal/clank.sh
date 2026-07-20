@@ -14,16 +14,16 @@ name = "waget"
 path = "src/main.rs"
 
 [dependencies]
-# The `http` crate's shared types (Method) are used by both HTTP backends below.
+# `http::Method` in the parsed request; `whttp` is the shared cfg-gated transport (wstd/reqwest)
+# plus redirect following + timeouts, so waget only parses flags and formats output.
 http = "1"
+whttp = { path = "../whttp" }
 
-# wasm: wstd's WASI-HTTP client (the only HTTP that works inside a Golem/wasip2 component). Pinned
-# to the exact version clank-agent uses so the whole app resolves one wstd.
+# wasm: wstd supplies the standalone bin's `block_on` (the WASI-HTTP reactor). The library's HTTP
+# lives in whttp; this dep is only the bin's runtime.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wstd = { version = "=0.6.5", features = ["default", "json"] }
 
-# native: reqwest with pure-Rust rustls TLS (no system libcurl/OpenSSL dependency); tokio also gives
-# the standalone bin a runtime.
+# native: tokio gives the standalone bin a runtime. (reqwest moved to whttp.)
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
