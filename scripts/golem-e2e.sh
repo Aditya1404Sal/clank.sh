@@ -641,6 +641,14 @@ run_curl_flag_block() {
   expect "curl -w writes the status code"          'sudo curl -sw "%{http_code}" -o /tmp/w/null https://example.com'  '200'
   cluster="$(eval_json eval '"sudo curl -fsSL https://example.com"')"
   expect_eval "clustered -fsSL fetches the body"   "$cluster"  '.stdout | contains("Example Domain")'  'true'
+  # curl as a pipeline HEAD: the Session runs the HTTP and feeds the body to the Brush-run
+  # downstream as stdin (the hardening fix for the flattened-argv "unknown option: jq" bug).
+  expect "curl | grep -c composes on the agent"    'sudo curl -s https://example.com | grep -c "Example Domain"'  '1'
+  # `-w '\n'` stays two characters through the intercept (quote-aware unquote_str, brush 02de798).
+  # Four backslashes: bash halves them to `\\n`, the WIT string literal unescapes that to `\n` —
+  # so the SHELL receives backslash+n, the thing under test. (`\\n` here would deliver a raw
+  # newline instead: `\n` is itself a WIT escape.)
+  expect "curl -w single-quoted backslash is literal"  "sudo curl -s -o /tmp/w/null -w 'code=%{http_code}\\\\n' https://example.com"  'code=200'
 }
 run_curl_flag_block
 

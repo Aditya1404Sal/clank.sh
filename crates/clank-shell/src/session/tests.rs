@@ -3609,6 +3609,63 @@ fn curl_approved_runs_the_request() {
     });
 }
 
+/// A curl-HEADED pipeline composes: the Session runs the HTTP, and the downstream (Brush) reads
+/// the response as stdin. `sudo` pre-authorizes, so the pipeline runs directly.
+#[test]
+fn curl_headed_pipeline_feeds_the_downstream() {
+    on_rt(async {
+        let url = http_mock("alpha\nbeta\ngamma\n");
+        let mut session = Session::new().await.unwrap();
+        let result = session.eval_line(&format!("sudo curl -s {url} | grep beta")).await;
+        assert_eq!(result.exit_code, 0, "stderr: {}", String::from_utf8_lossy(&result.stderr));
+        assert_eq!(String::from_utf8(result.stdout).unwrap(), "beta\n");
+    });
+}
+
+/// The downstream may itself be a multi-stage Brush pipeline.
+#[test]
+fn curl_headed_pipeline_multistage_downstream() {
+    on_rt(async {
+        let url = http_mock("c\nb\na\n");
+        let mut session = Session::new().await.unwrap();
+        let result = session
+            .eval_line(&format!("sudo curl -s {url} | grep -v b | grep -c ."))
+            .await;
+        assert_eq!(String::from_utf8(result.stdout).unwrap(), "2\n");
+    });
+}
+
+/// The deferred-confirm path: an unelevated curl pipeline surfaces the confirm; approving runs the
+/// WHOLE pipeline (head HTTP + downstream). This is the path that forces the head-split to live in
+/// `run_command` — the approval re-runs the raw line there, and an eval_line-only intercept would
+/// have re-broken it.
+#[test]
+fn curl_headed_pipeline_approved_after_confirm() {
+    on_rt(async {
+        let url = http_mock("x1\nx2\n");
+        let mut session = Session::new().await.unwrap();
+        let pending = session.eval_line(&format!("curl -s {url} | grep -c x")).await;
+        assert!(pending.pending_prompt.is_some(), "pipeline curl should confirm");
+        let out = session.answer_prompt(Some("yes".to_string())).await;
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(String::from_utf8(out.stdout).unwrap(), "2\n");
+    });
+}
+
+/// curl NOT at the head of the pipeline stays an honest stub error (exit 1) that now names the
+/// supported form — never the old flattened-argv "unknown option" junk.
+#[test]
+fn curl_mid_pipeline_is_an_honest_stub_error() {
+    on_rt(async {
+        let mut session = Session::new().await.unwrap();
+        let result = session.eval_line("sudo echo feed | curl https://unused.invalid").await;
+        assert_eq!(result.exit_code, 1);
+        let stderr = String::from_utf8(result.stderr).unwrap();
+        assert!(stderr.contains("FIRST in the pipeline"), "got: {stderr}");
+        assert!(!stderr.contains("unknown option"), "got: {stderr}");
+    });
+}
+
 /// Denying a `curl` confirmation → exit 5, no request.
 #[test]
 fn curl_denied_returns_exit_5() {

@@ -857,6 +857,15 @@ impl Session {
             // it's served here at the Session layer for top-level lines only; inside $()/pipes it falls
             // through to Brush and hits the honest "no such file").
             self.run_mcp_resource_read(&server, &uri).await
+        } else if let Some(pipe) = crate::builtins::http::split_http_head(line) {
+            // A curl/wget-HEADED pipeline: the head's HTTP runs here at the Session layer (Wall C),
+            // and the downstream runs through Brush with the response bytes as stdin. Reached only
+            // from run_command, i.e. AFTER the line's authorization resolved (the gate reads the
+            // pipeline's leading word, so `curl … | jq` confirmed as curl; `sudo` pre-authorized) —
+            // which is also why this lives here and not in eval_line: the post-approval path
+            // re-runs the raw line through run_command, and an eval_line-only intercept would miss
+            // it.
+            self.run_http_pipe(pipe).await
         } else {
             match crate::builtins::http::classify(line) {
                 Some((crate::builtins::http::HttpCommand::Curl, args)) => {
@@ -878,6 +887,33 @@ impl Session {
         };
         if let Some(pid) = pid {
             self.proc_table.lock().unwrap().complete(pid);
+        }
+        result
+    }
+
+    /// Run a curl/wget-headed pipeline (`curl … | rest…`): the head's HTTP at the Session layer
+    /// (Wall C — the wstd reactor must be the running executor), then the downstream program
+    /// through Brush with the response bytes as its stdin. POSIX pipe semantics: the downstream
+    /// always runs, fed whatever the head produced (possibly nothing); the line's exit code is the
+    /// downstream's; both stages' stderr concatenate in order.
+    async fn run_http_pipe(&mut self, pipe: crate::builtins::http::HttpHeadPipe) -> LineResult {
+        // wcurl and waget each have their own Outcome type; flatten to a shared triple.
+        let (name, head_stdout, head_stderr, head_exit) = match pipe.cmd {
+            crate::builtins::http::HttpCommand::Curl => {
+                let o = wcurl::run(&pipe.args).await;
+                ("curl", o.stdout, o.stderr, o.exit_code)
+            }
+            crate::builtins::http::HttpCommand::Wget => {
+                let o = waget::run(&pipe.args).await;
+                ("wget", o.stdout, o.stderr, o.exit_code)
+            }
+        };
+        log_http_tool(name, &pipe.args, head_exit);
+        let mut result = self.execute_with_stdin(&pipe.downstream, &head_stdout).await;
+        if !head_stderr.is_empty() {
+            let mut stderr = head_stderr;
+            stderr.extend_from_slice(&result.stderr);
+            result.stderr = stderr;
         }
         result
     }
@@ -1305,7 +1341,20 @@ impl Session {
     /// Native execution: capture Brush's stdout and stderr into anonymous temp files.
     #[cfg(not(target_arch = "wasm32"))]
     async fn execute(&mut self, line: &str) -> LineResult {
-        use std::io::{Read, Seek, SeekFrom};
+        self.execute_impl(line, None).await
+    }
+
+    /// Like [`execute`](Self::execute), but with `stdin_bytes` presented as fd 0 to the whole
+    /// program — how a Session-layer pipeline head (curl/wget, see `run_http_pipe`) hands its
+    /// output to a Brush-run downstream.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn execute_with_stdin(&mut self, line: &str, stdin_bytes: &[u8]) -> LineResult {
+        self.execute_impl(line, Some(stdin_bytes)).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn execute_impl(&mut self, line: &str, stdin_bytes: Option<&[u8]>) -> LineResult {
+        use std::io::{Read, Seek, SeekFrom, Write};
 
         let stdout_capture = match tempfile::tempfile() {
             Ok(f) => f,
@@ -1323,6 +1372,17 @@ impl Session {
         let mut params = self.shell.default_exec_params();
         params.set_fd(OpenFiles::STDOUT_FD, OpenFile::File(out_fd.into()));
         params.set_fd(OpenFiles::STDERR_FD, OpenFile::File(err_fd.into()));
+        if let Some(bytes) = stdin_bytes {
+            // Stage the bytes in an unlinked temp file and hand it to Brush as fd 0.
+            let mut staged = match tempfile::tempfile() {
+                Ok(f) => f,
+                Err(e) => return LineResult::stderr(format!("clank: {e}\n")),
+            };
+            if staged.write_all(bytes).is_err() || staged.seek(SeekFrom::Start(0)).is_err() {
+                return LineResult::stderr(b"clank: failed to stage pipeline stdin\n".to_vec());
+            }
+            params.set_fd(OpenFiles::STDIN_FD, OpenFile::File(staged.into()));
+        }
 
         let result = self
             .shell
@@ -1349,6 +1409,19 @@ impl Session {
     /// async on the owned current-thread runtime.
     #[cfg(target_arch = "wasm32")]
     async fn execute(&mut self, line: &str) -> LineResult {
+        self.execute_impl(line, None).await
+    }
+
+    /// Like [`execute`](Self::execute), but with `stdin_bytes` presented as fd 0 to the whole
+    /// program — how a Session-layer pipeline head (curl/wget, see `run_http_pipe`) hands its
+    /// output to a Brush-run downstream.
+    #[cfg(target_arch = "wasm32")]
+    async fn execute_with_stdin(&mut self, line: &str, stdin_bytes: &[u8]) -> LineResult {
+        self.execute_impl(line, Some(stdin_bytes)).await
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    async fn execute_impl(&mut self, line: &str, stdin_bytes: Option<&[u8]>) -> LineResult {
         let stdout_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
         let stderr_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
         let mut params = self.shell.default_exec_params();
@@ -1360,6 +1433,12 @@ impl Session {
             OpenFiles::STDERR_FD,
             OpenFile::Stream(Box::new(BufSink(stderr_buf.clone()))),
         );
+        if let Some(bytes) = stdin_bytes {
+            params.set_fd(
+                OpenFiles::STDIN_FD,
+                OpenFile::Stream(Box::new(BufSource(std::io::Cursor::new(bytes.to_vec())))),
+            );
+        }
 
         let fut = self
             .shell
@@ -2112,6 +2191,37 @@ impl std::io::Write for BufSink {
 
 #[cfg(target_arch = "wasm32")]
 impl brush_core::openfiles::Stream for BufSink {
+    fn clone_box(&self) -> Box<dyn brush_core::openfiles::Stream> {
+        Box::new(self.clone())
+    }
+}
+
+/// An in-memory source implementing `brush_core::openfiles::Stream` for wasm stdin injection —
+/// `BufSink`'s read-side sibling. Hands a Session-layer pipeline head's bytes (curl/wget output)
+/// to a Brush-run downstream as fd 0. Writes are no-ops, mirroring `BufSink`'s inert read side.
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone)]
+struct BufSource(std::io::Cursor<Vec<u8>>);
+
+#[cfg(target_arch = "wasm32")]
+impl std::io::Read for BufSource {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        std::io::Read::read(&mut self.0, buf)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl std::io::Write for BufSource {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        Ok(data.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl brush_core::openfiles::Stream for BufSource {
     fn clone_box(&self) -> Box<dyn brush_core::openfiles::Stream> {
         Box::new(self.clone())
     }

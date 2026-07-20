@@ -1,0 +1,11 @@
+# The supported curl pipeline form, live: curl as the FIRST stage, response fed to the Brush-run
+# downstream as stdin. Needs real network, so this scenario is the executable SPEC — it reports
+# `ignored` until a network-enabled tier is wired (@requires network). The same form is asserted
+# live today by session-level loopback tests (native) and a golem-e2e block (agent).
+@requires network
+
+run sudo curl -s https://example.com | grep -c "Example Domain"
+out 1
+
+run sudo curl -s https://example.com | grep -o "</html>" | head -1
+out </html>
