@@ -22,13 +22,37 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
             break;
         }
 
-        let line_str = String::from_utf8_lossy(trim_eol(line.as_bytes())).into_owned();
+        let mut line_str = String::from_utf8_lossy(trim_eol(line.as_bytes())).into_owned();
 
         // `ask repl` is a native-terminal feature: run the interactive REPL loop inline (the native
         // driver owns the terminal, so it can block on human input between turns — the durable agent
         // cannot, and returns an honest message from `eval_line`). See `Session::repl_*`.
         if let Some(args) = crate::ai::ask::classify_repl(&line_str) {
             run_repl(&mut session, &args).await?;
+            continue;
+        }
+
+        // PS2 continuation: while the input is syntactically incomplete (open heredoc, quote, or
+        // substitution), keep reading lines — this driver owns the terminal, so a heredoc can be
+        // typed the way every shell user expects. Ctrl-D mid-construct discards the construct, not
+        // the shell. The cap is a backstop against a pathological feed; overflowing it falls
+        // through to eval, where the Session's incomplete-input check answers exit 2 honestly.
+        const MAX_CONTINUATION_LINES: usize = 512;
+        let mut continuations = 0usize;
+        let mut aborted = false;
+        while session.line_is_incomplete(&line_str) && continuations < MAX_CONTINUATION_LINES {
+            write_stdout(b"> ")?;
+            line.clear();
+            if io::stdin().read_line(&mut line)? == 0 {
+                write_stdout(b"\nclank: incomplete input discarded\n")?;
+                aborted = true;
+                break;
+            }
+            line_str.push('\n');
+            line_str.push_str(&String::from_utf8_lossy(trim_eol(line.as_bytes())));
+            continuations += 1;
+        }
+        if aborted {
             continue;
         }
 
