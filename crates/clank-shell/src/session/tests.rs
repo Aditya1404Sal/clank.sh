@@ -3740,11 +3740,47 @@ fn http_commands_have_confirm_manifests() {
 /// `$PATH` is set to clank's README default (the virtual package-resolution namespace).
 #[test]
 fn path_is_the_readme_default() {
+    let _lock = crate::mcp::config::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     on_rt(async {
         let mut session = Session::new().await.unwrap();
         let (out, _) = session.run_line("echo $PATH").await;
         assert_eq!(String::from_utf8(out).unwrap(), format!("{DEFAULT_PATH}\n"));
     });
+}
+
+/// With no `CLANK_*` overrides, `effective_path()` is byte-identical to the documented default —
+/// the drift guard for the dynamic construction.
+#[test]
+fn effective_path_defaults_to_the_readme_path() {
+    let _mcp = crate::mcp::config::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let _grease = crate::grease::config::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    assert_eq!(effective_path(), DEFAULT_PATH);
+}
+
+/// A `CLANK_MCP_BIN` override lands in `$PATH`, so a native session RESOLVES what `mcp add`
+/// installs — before this, the launcher went to the override dir while `$PATH` kept the hardcoded
+/// default, and `which <server>` never saw it.
+#[test]
+fn effective_path_honors_the_mcp_bin_override() {
+    let _lock = crate::mcp::config::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("mcp-bin");
+    std::env::set_var("CLANK_MCP_BIN", &bin);
+    let path = effective_path();
+    std::env::remove_var("CLANK_MCP_BIN");
+    assert!(
+        path.contains(bin.to_str().unwrap()),
+        "PATH should contain the override: {path}"
+    );
+    assert!(!path.contains("/usr/lib/mcp/bin"), "default entry should be replaced: {path}");
 }
 
 /// `which` finds nothing for a name with no file-backed form, and does NOT report a phantom

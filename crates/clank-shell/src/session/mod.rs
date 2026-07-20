@@ -2083,11 +2083,27 @@ fn build_mcp_arguments(
 }
 
 /// The README's default `$PATH` — the resolution namespace clank's package layout installs into.
-/// Nothing populates `/usr/lib/{mcp,agents,prompts}/bin` or the skills glob yet (that's `grease`,
-/// future); these entries currently resolve to nothing, which is correct — `type`/`which` degrade
-/// to "not found" rather than erroring on a missing directory.
+/// Kept as the documented default and the drift-guard baseline; the value actually installed is
+/// [`effective_path`], which resolves the package dirs through their env-overridable config fns.
 const DEFAULT_PATH: &str =
     "/usr/local/bin:/usr/bin:/usr/lib/mcp/bin:/usr/lib/agents/bin:/usr/lib/prompts/bin:/usr/share/skills/*/bin";
+
+/// The README `$PATH` with every package dir resolved through its env-overridable config fn, so a
+/// native session pointed at writable dirs (`CLANK_MCP_BIN=~/.clank/mcp-bin` etc. — required on
+/// macOS, where `/usr/lib/...` isn't writable) RESOLVES what it installs: before this, `mcp add`
+/// wrote its launcher into the override dir while `$PATH` kept the hardcoded default, so
+/// `which`/`type`/`ls /bin` never saw the installed command. With no overrides set this is
+/// byte-identical to [`DEFAULT_PATH`] (unit-pinned).
+fn effective_path() -> String {
+    format!(
+        "/usr/local/bin:{}:{}:{}:{}:{}/*/bin",
+        crate::grease::config::script_bin_dir().display(), // default /usr/bin
+        crate::mcp::config::bin_dir().display(),           // default /usr/lib/mcp/bin
+        crate::grease::config::agent_bin_dir().display(),  // default /usr/lib/agents/bin
+        crate::grease::config::bin_dir().display(),        // default /usr/lib/prompts/bin
+        crate::grease::config::skills_dir().display()      // default /usr/share/skills
+    )
+}
 
 /// The README's home directory. Seeded as `$HOME` on the agent (empty env) so `~` expansion and
 /// `~/.config/ask/ask.toml` resolve; native keeps the host's real `$HOME`.
@@ -2168,7 +2184,7 @@ async fn build_shell() -> Result<Shell, brush_core::Error> {
     // `$PATH` expansion and by `type`/`which` path resolution alike.
     shell.env_mut().set_global(
         "PATH",
-        brush_core::variables::ShellVariable::new(DEFAULT_PATH),
+        brush_core::variables::ShellVariable::new(effective_path()),
     )?;
 
     // Seed `$HOME` to the README layout (`/home/user`) only when unset — the agent's wasm env is
