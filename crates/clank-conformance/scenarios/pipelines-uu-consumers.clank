@@ -1,13 +1,10 @@
-# KNOWN DIVERGENCE — uu-tool consumers in pipelines (tr/sort/head/wc reading stdin).
+# uu-tool consumers in pipelines (tr/sort/head/wc reading stdin) — both targets.
 #
-# On the wasm agent this works: the Wall-C plumbing stages pipe input into uu stdin
-# (`run_uu` fd-renumber). Natively `run_uu` deliberately does NOT touch fd 0
-# (crates/clank-shell/src/tools/coreutils.rs — "brush runs pipeline stages concurrently,
-# so redirecting the process-global stdin races with the shell itself"), so a uu consumer
-# reads the REAL process stdin instead of the pipe.
-#
-# `@only golem` pins the working target; drop the marker when native stdin staging lands.
-@only golem
+# Each target reaches this differently: the wasm agent fd-renumbers the Wall-C staged stream
+# onto uu stdin, while natively `run_uu` stages the pipe into a private temp fd and `dup2`s it
+# over fd 0 (`stage_piped_stdin`, crates/clank-shell/src/tools/coreutils.rs). Natively fd 0 is
+# swapped ONLY for a real pipe/redirect — never for the REPL's terminal — and the upstream bytes
+# are drained before `FD_SWAP_LOCK` is taken, so concurrent stages can't deadlock.
 
 run echo hello | tr a-z A-Z
 out HELLO

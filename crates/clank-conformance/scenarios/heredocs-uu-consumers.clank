@@ -1,14 +1,10 @@
-# KNOWN DIVERGENCE — uu-tool consumers (cat/wc) reading a here-doc or here-string.
+# uu-tool consumers (cat/wc) reading a here-doc or here-string — both targets.
 #
-# Here-doc bodies are staged through the same in-memory OpenFile::Stream as pipes, so
-# they hit the same wall: on the wasm agent `run_uu` fd-renumbers the staged stream onto
-# uu stdin and this works; natively `run_uu` deliberately does NOT touch fd 0
-# (crates/clank-shell/src/tools/coreutils.rs), so a uu consumer reads the REAL process
-# stdin and the here-doc body is lost (probed: `cat <<EOF` prints nothing, exit 0).
-# grep/sed/awk consumers are target-agnostic — see heredocs.clank.
-#
-# `@only golem` pins the working target; drop the marker when native stdin staging lands.
-@only golem
+# Here-doc bodies are staged through the same channel as pipe input, so they ride the same
+# fix: the wasm agent fd-renumbers the staged stream onto uu stdin, and natively `run_uu`
+# stages the body into a private temp fd and `dup2`s it over fd 0 (`stage_piped_stdin`,
+# crates/clank-shell/src/tools/coreutils.rs). grep/sed/awk consumers are target-agnostic
+# either way — see heredocs.clank.
 
 run cat <<EOF
 + hello
