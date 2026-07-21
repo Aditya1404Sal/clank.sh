@@ -1610,6 +1610,10 @@ struct LogProof {
 /// A package's advertised integrity metadata from a registry's `index.json` entry.
 #[derive(Default)]
 struct IndexEntry {
+    /// Whether the registry actually served an index that LISTS this package. Distinguishes an index
+    /// entry that omits the hash (a tamper vector — reject) from no index at all (a raw/indexless
+    /// registry with no integrity claim — trust-on-first-use).
+    found_in_index: bool,
     /// The advertised sha256 of the payload (content-addressing).
     sha256: Option<String>,
     /// The advertised base64 detached ed25519 signature over the payload body.
@@ -1680,7 +1684,7 @@ async fn fetch_index_entry(
             .collect();
         Some(LogProof { leaf_index, tree_size, root, proof })
     });
-    IndexEntry { sha256: s("sha256"), sig: s("sig"), signer: s("signer"), log }
+    IndexEntry { found_in_index: true, sha256: s("sha256"), sig: s("sig"), signer: s("signer"), log }
 }
 
 /// Verify a package's RFC-6962 inclusion proof: the log leaf is the payload's hex sha256 string (the

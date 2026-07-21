@@ -14,8 +14,26 @@ impl Session {
         };
         // Piping into `prompt-user` (`X | prompt-user ...`) is a later increment; for now stdin is
         // never wired, so no markdown is prepended.
-        let pending = args.into_pending(None);
+        let mut pending = args.into_pending(None);
+        // The response is redacted iff the line carries a flag the `prompt-user` manifest declares in
+        // its `redaction-rules` (README:200/323 — redaction is *governed by the manifest entry*, not a
+        // hardcoded flag name). With the built-in `["--secret"]` rule this matches the prior behavior,
+        // but the manifest field is now the authority: change the rule and the redaction follows.
+        pending.secret = self.line_triggers_redaction("prompt-user", line);
         self.surface_pending(pending, pid, PendingKind::UserPrompt)
+    }
+
+    /// Whether `line` carries any flag that `command`'s manifest declares in its `redaction-rules`
+    /// (README:200) — the manifest-driven check that governs which invocations redact. `false` if the
+    /// command has no manifest, no rules, or the line doesn't tokenize.
+    fn line_triggers_redaction(&self, command: &str, line: &str) -> bool {
+        let Some(manifest) = self.registry.get(command) else {
+            return false;
+        };
+        let Some(words) = crate::ai::ask::dequote_words(line) else {
+            return false;
+        };
+        crate::manifest::flags_trigger_redaction(&manifest.redaction_rules, &words)
     }
 
     /// Surface an authorization confirmation for a gated command: pause, record the pending

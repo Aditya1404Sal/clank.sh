@@ -145,6 +145,15 @@ impl Manifest {
     }
 }
 
+/// Whether any word in `words` matches a declared `redaction-rules` entry — i.e. whether this
+/// invocation is marked for redaction by the command's manifest (README:200/323). Pure and
+/// unit-testable; the [`Session`](crate::session::Session) calls it to decide, from the manifest
+/// rather than a hardcoded flag name, whether a `prompt-user` response (or any future redaction-ruled
+/// command's marked value) must be kept out of the transcript/logs. Empty rules ⇒ never redacts.
+pub fn flags_trigger_redaction(rules: &[String], words: &[String]) -> bool {
+    !rules.is_empty() && words.iter().any(|w| rules.iter().any(|r| r == w))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,6 +170,21 @@ mod tests {
         assert!(m.redaction_rules.is_empty());
         // help_text defaults to the synopsis.
         assert_eq!(m.help_text, "list directory contents");
+    }
+
+    #[test]
+    fn flags_trigger_redaction_is_manifest_driven() {
+        let w = |s: &str| s.split_whitespace().map(String::from).collect::<Vec<_>>();
+        // The built-in prompt-user rule.
+        let rules = vec!["--secret".to_string()];
+        assert!(flags_trigger_redaction(&rules, &w("prompt-user \"q\" --secret")));
+        assert!(!flags_trigger_redaction(&rules, &w("prompt-user \"q\"")));
+        // Empty rules never redact — even if the line carries a --secret-looking flag.
+        assert!(!flags_trigger_redaction(&[], &w("prompt-user \"q\" --secret")));
+        // The manifest is authoritative: a different declared rule drives a different trigger flag.
+        let custom = vec!["--password".to_string()];
+        assert!(flags_trigger_redaction(&custom, &w("login --password")));
+        assert!(!flags_trigger_redaction(&custom, &w("login --secret")));
     }
 
     #[test]

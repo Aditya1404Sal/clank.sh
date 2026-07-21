@@ -1738,14 +1738,15 @@ fn grease_install_rejects_sha256_mismatch() {
     });
 }
 
-/// A registry index with no sha256 for the package → record-only install, with a stderr note.
+/// A registry index that LISTS a package but omits its sha256 is REFUSED (the tamper vector: a
+/// stripped hash must not silently bypass content-addressing). Every indexed package must be hashed.
 #[test]
-fn grease_install_record_only_without_index_hash() {
+fn grease_install_rejects_indexed_package_without_hash() {
     on_rt(async {
         let _dirs = set_grease_dirs();
         let mut session = Session::new().await.unwrap();
         let pkg = serde_json::json!({"name":"loose","description":"d","body":"hi."});
-        // Index present but with no sha256 field for the package.
+        // Index present but with no sha256 field for the package → refuse.
         let index = serde_json::json!({"packages":[{"name":"loose","description":"d"}]});
         session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![
             ("/index.json", grease_json(index)),
@@ -1753,11 +1754,10 @@ fn grease_install_record_only_without_index_hash() {
         ])));
         session.run_line("grease registry add https://reg.example").await;
         let inst = session.eval_line("sudo grease install loose").await;
-        assert_eq!(inst.exit_code, 0);
-        let out = String::from_utf8(inst.stdout).unwrap();
-        assert!(out.contains("no integrity hash"), "expected record-only note, got: {out}");
-        assert!(out.contains("unverified"));
-        assert!(session.grease.is_prompt("loose"));
+        assert_eq!(inst.exit_code, 4, "indexed-but-unhashed must be refused");
+        let err = String::from_utf8(inst.stderr).unwrap();
+        assert!(err.contains("without a sha256"), "got: {err}");
+        assert!(!session.grease.is_prompt("loose"), "must not install");
     });
 }
 
