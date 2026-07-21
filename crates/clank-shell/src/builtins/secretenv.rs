@@ -70,6 +70,20 @@ pub fn is_secret_export(line: &str) -> bool {
     parse(line).is_some()
 }
 
+/// A log-safe rendering of a secret-export line: the value is replaced with the redaction placeholder
+/// so it never reaches `shell.log`. `None` if `line` is not a secret export (the caller logs it
+/// unchanged). This declaration line is the one place `mask_values` can't help — the secret isn't
+/// registered in the active set until the line actually runs, and the shell.log start/end events fire
+/// around that — so the value is stripped structurally here instead.
+pub fn redact_export_line(line: &str) -> Option<String> {
+    let export = parse(line)?;
+    Some(format!(
+        "export --secret {}={}",
+        export.name,
+        crate::runtime::secretenv::REDACTED
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -56,7 +56,7 @@ impl SimpleCommand for Model {
                  \x20 model default <id>      set the default model (writes ~/.config/ask/ask.toml)\n\
                  \x20 model info [<id>]       show details for a model (or the current default)\n\
                  \x20 model add <provider> [--key K]  store a native key, or point at the env var\n\
-                 \x20 model remove <provider> remove a provider (anthropic is built in)\n\n\
+                 \x20 model remove <provider> clear a stored provider key (native); anthropic stays built in\n\n\
                  Model ids use `provider/model`; the provider prefix may be omitted for unambiguous names.\n\
                  The catalog is a curated subset — the provider accepts other ids, passed through as-is.\n\
                  API keys: on native, `model add anthropic --key <k>` stores the key in ~/.config/ask/ask.toml;\n\
@@ -103,7 +103,7 @@ fn run(home: &str, argv: &[String]) -> (String, String, u8) {
         "default" => set_default(home, argv.get(1).map(String::as_str)),
         "info" => info(home, argv.get(1).map(String::as_str)),
         "add" => add(home, argv),
-        "remove" => remove(argv.get(1).map(String::as_str)),
+        "remove" => remove(home, argv.get(1).map(String::as_str)),
         other => (
             String::new(),
             format!("model: unknown subcommand '{other}' (try: list, default, info, add, remove)\n"),
@@ -231,14 +231,51 @@ fn add(home: &str, argv: &[String]) -> (String, String, u8) {
     }
 }
 
-fn remove(provider: Option<&str>) -> (String, String, u8) {
+/// `model remove <provider>` clears a stored provider key. anthropic is built in and cannot be
+/// removed as a provider, but its stored key (from `model add anthropic --key …`) CAN be cleared,
+/// reverting auth to `ANTHROPIC_API_KEY` — the useful, honest meaning of "remove" here. On the agent,
+/// keys are never stored, so it's an honest no-op message.
+fn remove(home: &str, provider: Option<&str>) -> (String, String, u8) {
+    let _ = home; // used only on native
     let p = provider.unwrap_or("");
-    let msg = if p == PROVIDER || p.is_empty() {
-        "model remove: anthropic is built in and cannot be removed.\n".to_string()
-    } else {
-        format!("model remove: no such provider '{p}' (only the built-in anthropic exists).\n")
-    };
-    (String::new(), msg, 1)
+    if !(p == PROVIDER || p.is_empty()) {
+        return (
+            String::new(),
+            format!("model remove: no such provider '{p}' (only the built-in anthropic exists).\n"),
+            1,
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        match crate::ai::config::remove_provider_key(home, PROVIDER) {
+            Ok(true) => (
+                "model remove: cleared the stored anthropic key from ~/.config/ask/ask.toml; auth \
+                 now falls back to ANTHROPIC_API_KEY. anthropic stays built in.\n"
+                    .to_string(),
+                String::new(),
+                0,
+            ),
+            Ok(false) => (
+                String::new(),
+                "model remove: no stored anthropic key to clear (anthropic is built in and reads \
+                 ANTHROPIC_API_KEY).\n"
+                    .to_string(),
+                1,
+            ),
+            Err(e) => (String::new(), format!("model remove: {e}\n"), 1),
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        (
+            String::new(),
+            "model remove: provider keys are not stored on the agent (anthropic reads \
+             ANTHROPIC_API_KEY via golem.yaml). anthropic is built in.\n"
+                .to_string(),
+            1,
+        )
+    }
 }
 
 /// Add the `anthropic/` prefix to a bare id; leave a `provider/model` id unchanged.

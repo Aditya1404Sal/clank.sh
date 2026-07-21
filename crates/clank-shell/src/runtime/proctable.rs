@@ -81,6 +81,19 @@ impl ProcState {
     }
 }
 
+/// The Golem agent-invocation identity fields surfaced in `/proc/<pid>/status` (README:252-258) for
+/// an [`ProcessKind::AgentInvocation`] row. Only the fields clank actually knows are carried: the
+/// agent type, the ordered constructor params, and the phantom UUID. (`agent-revision` and the
+/// await-mode idempotency-key are not surfaced by the golem host on this SDK path, so they are
+/// omitted rather than fabricated — consistent with the honest `--revision` stub.)
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentMeta {
+    pub agent_type: String,
+    /// Constructor params rendered as `k=v,k=v` (ordered), matching the invocation grammar.
+    pub agent_params: String,
+    pub phantom_uuid: Option<String>,
+}
+
 /// One process-table row: a single invocation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProcRow {
@@ -93,6 +106,9 @@ pub struct ProcRow {
     /// Logical start ordinal (monotonic within the session), not wall-clock — keeps the table
     /// fully deterministic under replay.
     pub start: u64,
+    /// For an `AgentInvocation` row: the Golem agent identity `/proc/<pid>/status` exposes. `None`
+    /// for every other process kind.
+    pub agent_meta: Option<AgentMeta>,
 }
 
 impl ProcRow {
@@ -115,6 +131,7 @@ pub fn root_row() -> ProcRow {
         argv: vec!["clank".to_string()],
         state: ProcState::S,
         start: 0,
+        agent_meta: None,
     }
 }
 
@@ -166,6 +183,7 @@ impl ProcessTable {
             argv,
             state: ProcState::R,
             start,
+            agent_meta: None,
         });
         pid
     }
@@ -185,8 +203,18 @@ impl ProcessTable {
             argv,
             state: ProcState::S,
             start,
+            agent_meta: None,
         });
         pid
+    }
+
+    /// Attach Golem agent-invocation identity to an existing row (spawned by [`spawn_bg`]), so
+    /// `/proc/<pid>/status` can surface the agent-type/params/phantom fields (README:252-258). No-op
+    /// if the PID is unknown.
+    pub fn set_agent_meta(&mut self, pid: u32, meta: AgentMeta) {
+        if let Some(row) = self.rows.iter_mut().find(|r| r.pid == pid) {
+            row.agent_meta = Some(meta);
+        }
     }
 
     /// Mark a process paused (`R → P`) — awaiting a `prompt-user` response. No-op if the PID is

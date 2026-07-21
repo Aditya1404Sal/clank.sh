@@ -476,7 +476,9 @@ impl Session {
         // ops, deep in run_command / McpClient::call / coreutils) routes through it.
         let _log = crate::logging::install(self.log_sink.clone());
         if !line.trim().is_empty() {
-            crate::logging::Record::new("start").field("line", line).emit(crate::logging::LogFile::Shell);
+            crate::logging::Record::new("start")
+                .field("line", log_safe_line(line).as_ref())
+                .emit(crate::logging::LogFile::Shell);
         }
         let result = self.eval_line_inner(line).await;
         self.log_line_outcome(line, &result);
@@ -489,7 +491,7 @@ impl Session {
             return;
         }
         let event = if result.pending_prompt.is_some() { "pause" } else { "end" };
-        let mut rec = crate::logging::Record::new(event).field("line", line);
+        let mut rec = crate::logging::Record::new(event).field("line", log_safe_line(line).as_ref());
         if result.pending_prompt.is_none() {
             rec = rec.field("exit", result.exit_code.to_string());
         }
@@ -1211,11 +1213,19 @@ impl Session {
     /// (`builtins::typecmd::help_for` does the same for the statically-intercepted commands.)
     fn pkg_help_for(&self, line: &str) -> Option<String> {
         let words = crate::ai::ask::dequote_words(line)?;
-        let name = match words.split_first() {
-            Some((first, rest)) if first == "sudo" => rest.first()?,
-            _ => words.first()?,
+        // Strip a leading `sudo` (it only pre-authorizes; help is resolved before the gate anyway).
+        let rest: &[String] = match words.split_first() {
+            Some((first, tail)) if first == "sudo" => tail,
+            _ => &words,
         };
-        if words.iter().any(|w| w == "--help") {
+        let name = rest.first()?;
+        if rest.iter().any(|w| w == "--help") {
+            return self.grease.pkg_help(name);
+        }
+        // `<agent> help` — the bare reserved help subcommand (README:840), for an installed AGENT
+        // package only, as exactly `<name> help`. Resolved HERE, before the authz gate, so help never
+        // triggers the agent's Confirm prompt (a prompt/script package's `help` is an ordinary arg).
+        if rest.len() == 2 && rest[1] == "help" && self.grease.is_agent(name) {
             return self.grease.pkg_help(name);
         }
         None
@@ -1513,6 +1523,19 @@ impl Session {
 /// command kinds exist (they'll be resolved from `$PATH` / the registry).
 fn classify(_line: &str) -> ProcessKind {
     ProcessKind::Builtin
+}
+
+/// A shell.log-safe rendering of `line`: an `export --secret NAME=VALUE` line has its VALUE stripped
+/// to `<redacted>` (README "never written to logs"). The declaration line is the one case the
+/// `mask_values` log filter can't cover — the secret isn't in the active set until the line runs, and
+/// the start/end events bracket that — so it is redacted structurally here. Every other line passes
+/// through untouched (registered secret *values* that appear in later log lines are masked centrally
+/// in `logging::append`).
+fn log_safe_line(line: &str) -> std::borrow::Cow<'_, str> {
+    match crate::builtins::secretenv::redact_export_line(line) {
+        Some(redacted) => std::borrow::Cow::Owned(redacted),
+        None => std::borrow::Cow::Borrowed(line),
+    }
 }
 
 /// Strip a leading `sudo ` token from a line (the command to actually run once `sudo`-elevated

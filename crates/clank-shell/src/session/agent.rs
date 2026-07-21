@@ -82,6 +82,12 @@ impl Session {
                     2,
                 );
             }
+            // The bare reserved word `help` (README:840) prints the agent's generated help, same as the
+            // `--help` flag and the empty-method form above — it must not be treated as a method name.
+            "help" => {
+                let help = self.grease.pkg_help(&name).unwrap_or_default();
+                return LineResult::continue_with_stdout(help.into_bytes());
+            }
             _ => {}
         }
 
@@ -154,7 +160,8 @@ impl Session {
                     Ok(handle) => {
                         // Spawn an S-state proc row for the pending invocation (README: all modes return
                         // a PID); retain the cancel token so `kill <pid>` can cancel it.
-                        let pid = self.spawn_agent_invocation_row(line, handle.cancel_token.clone());
+                        let pid =
+                            self.spawn_agent_invocation_row(line, &inv, handle.cancel_token.clone());
                         LineResult::continue_with_stdout(
                             format!("[{pid}] {name}: {}\n", handle.note).into_bytes(),
                         )
@@ -246,13 +253,33 @@ impl Session {
 
     /// Spawn an `S`-state `AgentInvocation` proc row for a triggered/scheduled invocation, and record
     /// its cancel token so `kill <pid>` can cancel it. Returns the PID.
-    fn spawn_agent_invocation_row(&mut self, line: &str, cancel_token: Option<String>) -> u32 {
+    fn spawn_agent_invocation_row(
+        &mut self,
+        line: &str,
+        inv: &crate::golem::agent::AgentInvocation,
+        cancel_token: Option<String>,
+    ) -> u32 {
         let argv: Vec<String> = line.split_whitespace().map(String::from).collect();
-        let pid = self.proc_table.lock().unwrap().spawn_bg(
+        // The agent identity `/proc/<pid>/status` will surface (README:252-258).
+        let agent_params = inv
+            .constructor
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let meta = crate::runtime::proctable::AgentMeta {
+            agent_type: inv.agent_type.clone(),
+            agent_params,
+            phantom_uuid: inv.phantom.clone(),
+        };
+        let mut table = self.proc_table.lock().unwrap();
+        let pid = table.spawn_bg(
             crate::runtime::process::ProcessKind::AgentInvocation,
             argv,
             crate::runtime::proctable::SHELL_ROOT_PID,
         );
+        table.set_agent_meta(pid, meta);
+        drop(table);
         self.pending_invocations.push(PendingInvocation { pid, cancel_token });
         pid
     }

@@ -94,9 +94,7 @@ fn cmdline(row: &ProcRow) -> String {
 
 /// `/proc/<pid>/status` — a grep-friendly `Key: Value` block. `grep State /proc/<pid>/status` works.
 fn status(row: &ProcRow) -> String {
-    // NOTE: when AgentInvocation rows exist, `/proc/<pid>/status` gains agent-type, agent-params,
-    // agent-revision, phantom-uuid, and idempotency-key fields here (README). No such rows yet.
-    format!(
+    let mut out = format!(
         "Pid:\t{}\n\
          PPid:\t{}\n\
          Kind:\t{:?}\n\
@@ -110,7 +108,19 @@ fn status(row: &ProcRow) -> String {
         row.state.long_name(),
         row.start,
         row.command(),
-    )
+    );
+    // For a Golem agent invocation, expose the agent identity (README:252-258). Only the fields the
+    // host surfaces on this SDK path are shown — agent-type, ordered constructor params, and the
+    // phantom UUID when present. (agent-revision and the await idempotency-key have no host field
+    // here, matching the honest `--revision` stub, so they are not emitted rather than fabricated.)
+    if let Some(meta) = &row.agent_meta {
+        out.push_str(&format!("AgentType:\t{}\n", meta.agent_type));
+        out.push_str(&format!("AgentParams:\t{}\n", meta.agent_params));
+        if let Some(uuid) = &meta.phantom_uuid {
+            out.push_str(&format!("PhantomUuid:\t{uuid}\n"));
+        }
+    }
+    out
 }
 
 /// `/proc/<pid>/environ` — the shell's current environment as sorted `KEY=VALUE` lines.
@@ -209,6 +219,35 @@ mod tests {
         // Running, since we didn't complete it.
         assert!(out.contains("R (running)"));
         assert!(out.contains("ls /tmp"));
+    }
+
+    #[test]
+    fn agent_invocation_status_exposes_agent_fields() {
+        let mut t = ProcessTable::new();
+        let pid = t.spawn_bg(
+            ProcessKind::AgentInvocation,
+            "greeter greet who=world --trigger".split_whitespace().map(String::from).collect(),
+            crate::runtime::proctable::SHELL_ROOT_PID,
+        );
+        t.set_agent_meta(
+            pid,
+            crate::runtime::proctable::AgentMeta {
+                agent_type: "GreeterAgent".into(),
+                agent_params: "name=greeter".into(),
+                phantom_uuid: Some("abc-123".into()),
+            },
+        );
+        let out = resolve(&format!("/proc/{pid}/status"), &t, &env()).unwrap();
+        assert!(out.contains("AgentType:\tGreeterAgent"), "got:\n{out}");
+        assert!(out.contains("AgentParams:\tname=greeter"), "got:\n{out}");
+        assert!(out.contains("PhantomUuid:\tabc-123"), "got:\n{out}");
+    }
+
+    #[test]
+    fn non_agent_row_status_omits_agent_fields() {
+        let (t, pid) = table_with_one("ls /tmp");
+        let out = resolve(&format!("/proc/{pid}/status"), &t, &env()).unwrap();
+        assert!(!out.contains("AgentType:"), "non-agent row must not show agent fields:\n{out}");
     }
 
     #[test]
