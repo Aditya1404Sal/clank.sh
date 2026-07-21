@@ -1,0 +1,62 @@
+# Authorization over COMPOUND lines: every top-level command is gated, not just the leading one.
+# `echo hi && rm -rf x` used to run unauthorized because the gate only saw the harmless `echo`.
+# Now the line is split on `;`/`&&`/`||`/`|`/`&` and gated on its STRICTEST segment; approving runs
+# the whole line, denying refuses all of it. A command inside `$(...)` is a documented gap (not split).
+
+run touch ${TMP}/victim
+
+# A destructive `rm` hidden behind `&&` after a harmless `echo` now gates on `rm` (sudo-only): the
+# WHOLE line is deferred (echo does NOT run yet), and the prompt names `rm`, not `echo`.
+run echo hi && rm -rf ${TMP}/victim
+out rm requires sudo authorization to remove files and directories. (y)es, (n)o
+prompt~ requires sudo authorization
+choices yes,no
+
+# Deny → the whole line is refused (echo didn't run either) and the file survives.
+answer no
+err clank: authorization denied
+exit 5
+
+run ls ${TMP}/victim
+out ${TMP}/victim
+
+# Approve → the whole line runs: `echo hi` prints, then `rm` deletes.
+run echo hi && rm -rf ${TMP}/victim
+out rm requires sudo authorization to remove files and directories. (y)es, (n)o
+prompt~ requires sudo authorization
+choices yes,no
+
+answer yes
+out hi
+exit 0
+
+run ls ${TMP}/victim
+err~ cannot-access
+exit 2
+
+# Two gated commands in one line (`curl` [confirm] + `rm` [sudo-only]): the prompt names them ALL,
+# tier follows the strictest (sudo-only → yes/no, no blanket "all"). Denying means neither runs — so
+# `curl` never touches the network and this stays deterministic.
+run touch ${TMP}/other
+run curl -s https://example.com && rm -rf ${TMP}/other
+out~ this line runs curl [confirm], rm [sudo-only]
+prompt~ rm [sudo-only]
+choices yes,no
+
+answer no
+err clank: authorization denied
+exit 5
+
+run ls ${TMP}/other
+out ${TMP}/other
+
+# Per-segment `sudo`: `sudo rm x` self-elevates the rm segment (its own sudo), and `echo` is allow —
+# so the whole line runs with no prompt. A leading sudo authorizes only the segment it leads.
+run touch ${TMP}/victim2
+run sudo rm ${TMP}/victim2 && echo done
+out done
+exit 0
+
+run ls ${TMP}/victim2
+err~ cannot-access
+exit 2

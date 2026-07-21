@@ -27,6 +27,10 @@ impl Session {
         pid: Option<u32>,
         sudo_grant: bool,
         ask_stdin: Option<String>,
+        // When the line has more than one gated command, the pre-rendered "rm [sudo-only], curl
+        // [confirm]" summary (from `authz::gated_commands_summary`) so the prompt names them all —
+        // approving the strictest runs the whole line. `None` for single-command lines.
+        multi_summary: Option<String>,
     ) -> LineResult {
         let name = command_name.unwrap_or("command");
         // Capability disclosure: a `grease install <pkg>` confirmation discloses what the package is
@@ -37,6 +41,9 @@ impl Session {
         let question = if let Some(question) = self.grease_install_disclosure(&gated_command, sudo_grant)
         {
             question
+        } else if let Some(summary) = multi_summary {
+            // A compound line with several gated commands: name them all, tier = the strictest.
+            authz::confirm_question_multi(&summary, sudo_grant)
         } else {
             let synopsis = self
                 .registry

@@ -131,6 +131,7 @@ impl Session {
                     pid,
                     sudo_grant,
                     Some(captured),
+                    None,
                 );
             }
         }
@@ -400,6 +401,61 @@ impl Session {
             }
         }
         authz::resolve(&self.registry, line)
+    }
+
+    /// Resolve authorization for a whole line by its STRICTEST top-level command segment (README
+    /// "Authorization" — a `confirm`/`sudo-only` command hidden behind `&&`/`;`/`|`/`&` after a
+    /// harmless leading command must still gate). Splits the line with [`authz::split_segments`],
+    /// resolves each segment with the MCP-aware [`Self::resolve_authz`], `decide`s each against
+    /// `allow_all`, and returns the most-restrictive segment's `(policy, elevated, command)` — so the
+    /// caller's existing `authz::decide(policy, elevated, allow_all)` reproduces the strictest
+    /// `Decision` unchanged. Also returns every non-`Allow` command with its tier, so the confirmation
+    /// can name all of them (approving the strictest runs the whole line).
+    ///
+    /// A single-segment line short-circuits to [`Self::resolve_authz`] — identical behavior, no
+    /// overhead — so nothing changes for the overwhelmingly common plain command.
+    pub(super) fn resolve_authz_strictest(
+        &self,
+        line: &str,
+        allow_all: bool,
+    ) -> (
+        crate::manifest::AuthorizationPolicy,
+        bool,
+        Option<String>,
+        Vec<(String, crate::manifest::AuthorizationPolicy)>,
+    ) {
+        let segments = authz::split_segments(line);
+        if segments.len() <= 1 {
+            let (policy, elevated, command) = self.resolve_authz(line);
+            let gated = match authz::decide(policy, elevated, allow_all) {
+                Decision::Allow => Vec::new(),
+                _ => command
+                    .clone()
+                    .map(|c| vec![(c, policy)])
+                    .unwrap_or_default(),
+            };
+            return (policy, elevated, command, gated);
+        }
+
+        // Multi-segment: resolve+decide each, track the strictest, and collect every gated command.
+        let mut strictest: Option<(u8, crate::manifest::AuthorizationPolicy, bool, Option<String>)> =
+            None;
+        let mut gated: Vec<(String, crate::manifest::AuthorizationPolicy)> = Vec::new();
+        for seg in segments {
+            let (policy, elevated, command) = self.resolve_authz(seg);
+            let decision = authz::decide(policy, elevated, allow_all);
+            if !matches!(decision, Decision::Allow) {
+                if let Some(name) = command.clone() {
+                    gated.push((name, policy));
+                }
+            }
+            let rank = authz::decision_rank(decision);
+            if strictest.as_ref().map(|(r, ..)| rank > *r).unwrap_or(true) {
+                strictest = Some((rank, policy, elevated, command));
+            }
+        }
+        let (_, policy, elevated, command) = strictest.expect("split_segments never returns empty");
+        (policy, elevated, command, gated)
     }
 
     /// Generated help for an MCP tool line ending in `--help` (or a bare `<server>`): the server's
@@ -868,8 +924,10 @@ impl Session {
 
         // Authorization pre-check (MCP-aware — an MCP tool line resolves to its Confirm manifest).
         // `command` has no leading `sudo` (a model line won't carry it), so elevation is driven
-        // entirely by `blanket_authorized` (confirm-tier only).
-        let (policy, elevated, _) = self.resolve_authz(&command);
+        // entirely by `blanket_authorized` (confirm-tier only). Gates on the STRICTEST segment so a
+        // compound model tool call (`echo ok && rm -rf /x`) is caught on `rm`, not the leading `echo`.
+        let (policy, elevated, _, _gated) =
+            self.resolve_authz_strictest(&command, blanket_authorized);
         match authz::decide(policy, elevated, blanket_authorized) {
             Decision::Allow => {}
             Decision::Confirm { sudo_grant } => {
