@@ -132,10 +132,17 @@ impl LogFile {
 
 /// Append one already-formatted line to `file` via the active [`LogSink`] (see the module docs on replay
 /// safety). No-op if no sink is installed (off-session). The sink adds the trailing newline.
+///
+/// Every line is first passed through [`crate::runtime::secretenv::mask_values`] so any registered
+/// `export --secret` VALUE that reached this record (e.g. echoed into an http.log body or an mcp.log
+/// argument while the secret set is installed) is masked to `<redacted>` — the README's "secrets
+/// redacted" / "never written to logs" contract, enforced centrally at the one write choke point. It
+/// is a no-op when no secret set is installed, so secret-free lines are unaffected.
 pub fn append(file: LogFile, line: &str) {
+    let masked = crate::runtime::secretenv::mask_values(line);
     ACTIVE.with(|a| {
         if let Some(sink) = a.borrow().as_ref() {
-            sink.append(file, line);
+            sink.append(file, &masked);
         }
     });
 }

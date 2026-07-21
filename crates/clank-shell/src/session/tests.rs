@@ -918,6 +918,18 @@ fn grease_install_then_invoke_a_golem_agent() {
         let help_s = String::from_utf8(help.stdout).unwrap();
         assert!(help_s.contains("ShoppingCart") && help_s.contains("add-item"), "help: {help_s}");
 
+        // `<agent> help` — the bare reserved word (README:840) prints the SAME generated help as
+        // `--help`, never treated as a method name (it used to error "unknown method 'help'").
+        let bare_help = session.eval_line("shopping-cart help").await;
+        assert_eq!(
+            bare_help.exit_code,
+            0,
+            "bare help stderr: {}",
+            String::from_utf8_lossy(&bare_help.stderr)
+        );
+        assert_eq!(String::from_utf8(bare_help.stdout).unwrap(), help_s, "`help` must match `--help`");
+        assert!(seen.lock().unwrap().is_none(), "`help` must not invoke the agent");
+
         // `sudo <agent> --help` must print the SAME help: sudo only pre-authorizes. It used to look up
         // a package named "sudo", find none, and fall through to the agent parser → exit 2 "unknown
         // flag --help before the method". This is the form that matters most: `ask`'s per-command
@@ -4285,6 +4297,33 @@ fn secret_export_line_redacted_in_transcript() {
         assert!(
             show_out.contains("export --secret CLANK_SECRET_TX=<redacted>"),
             "the export line should be recorded with its value redacted:\n{show_out}"
+        );
+    });
+}
+
+/// A `export --secret` declaration never writes its VALUE to shell.log (README "never written to
+/// logs"). The declaration is the one case the `mask_values` log filter can't cover — the secret
+/// isn't in the active set until the line runs — so the value is stripped structurally in the
+/// start/end events. The key name is preserved (only the value is sensitive).
+#[test]
+fn secret_export_value_absent_from_shell_log() {
+    let _secret_lock = crate::runtime::secretenv::TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    on_rt(async {
+        let cap = LogCapture::new("secretlog");
+        let mut session = Session::new().await.unwrap();
+        session
+            .eval_line("export --secret CLANK_LOG_SECRET=sk-logredact-456")
+            .await;
+        let log = cap.read(crate::logging::LogFile::Shell);
+        assert!(
+            !log.contains("sk-logredact-456"),
+            "secret value must never reach shell.log:\n{log}"
+        );
+        assert!(
+            log.contains("export --secret CLANK_LOG_SECRET=<redacted>"),
+            "the export line should be logged with its value redacted:\n{log}"
         );
     });
 }

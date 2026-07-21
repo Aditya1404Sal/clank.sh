@@ -118,6 +118,36 @@ pub fn save_provider_key(home: &str, provider: &str, key: &str) -> Result<(), St
     std::fs::write(&path, text).map_err(|e| format!("ask.toml write error: {e}"))
 }
 
+/// Clear any stored key for `provider` from `ask.toml`, preserving the default model and other
+/// provider entries. Returns `Ok(true)` if a key was present and removed, `Ok(false)` if there was
+/// nothing to clear. A section left with neither `key` nor `key_env` is dropped to keep the file
+/// tidy. Native only — the agent never stores keys, so it never calls this.
+pub fn remove_provider_key(home: &str, provider: &str) -> Result<bool, String> {
+    let Some(mut config) = load(home)? else {
+        return Ok(false); // no ask.toml → nothing stored
+    };
+    let removed = match config.providers.get_mut(provider) {
+        Some(section) if section.key.is_some() => {
+            section.key = None;
+            if section.key_env.is_none() {
+                config.providers.remove(provider);
+            }
+            true
+        }
+        _ => false,
+    };
+    if !removed {
+        return Ok(false);
+    }
+    let path = config_path(home);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("ask.toml: cannot create {dir:?}: {e}"))?;
+    }
+    let text = toml::to_string_pretty(&config).map_err(|e| format!("ask.toml serialize error: {e}"))?;
+    std::fs::write(&path, text).map_err(|e| format!("ask.toml write error: {e}"))?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,6 +178,41 @@ mod tests {
             default_model(h).unwrap().as_deref(),
             Some("anthropic/claude-sonnet-4-5")
         );
+    }
+
+    #[test]
+    fn remove_provider_key_clears_a_stored_key() {
+        let home = temp_home();
+        let h = home.to_str().unwrap();
+        save_provider_key(h, "anthropic", "sk-stored").unwrap();
+        assert_eq!(provider_key(h, "anthropic").as_deref(), Some("sk-stored"));
+        // Removing returns true and the key is gone.
+        assert_eq!(remove_provider_key(h, "anthropic").unwrap(), true);
+        assert_eq!(provider_key(h, "anthropic"), None);
+        // A second remove is a no-op (nothing stored).
+        assert_eq!(remove_provider_key(h, "anthropic").unwrap(), false);
+    }
+
+    #[test]
+    fn remove_provider_key_preserves_default_and_key_env() {
+        let home = temp_home();
+        let h = home.to_str().unwrap();
+        save_default_model(h, "anthropic/claude-opus-4-8").unwrap();
+        // A section with BOTH a key-env doc and a stored key: removing the key keeps the section.
+        let path = config_path(h);
+        std::fs::write(
+            &path,
+            "[ask]\ndefault-model = \"anthropic/claude-opus-4-8\"\n\
+             [providers.anthropic]\nkey-env = \"ANTHROPIC_API_KEY\"\nkey = \"sk-x\"\n",
+        )
+        .unwrap();
+        assert_eq!(remove_provider_key(h, "anthropic").unwrap(), true);
+        let cfg = load(h).unwrap().unwrap();
+        // Default model untouched; the section survives (its key-env doc remains); only the key is gone.
+        assert_eq!(cfg.ask.default_model.as_deref(), Some("anthropic/claude-opus-4-8"));
+        let section = cfg.providers.get("anthropic").expect("section kept for its key-env");
+        assert_eq!(section.key_env.as_deref(), Some("ANTHROPIC_API_KEY"));
+        assert_eq!(section.key, None);
     }
 
     #[test]
