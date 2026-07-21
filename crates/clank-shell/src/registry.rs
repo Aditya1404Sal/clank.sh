@@ -60,6 +60,11 @@ fn manual_manifests() -> Vec<Manifest> {
         Manifest::builtin("prompt-user", "pause and collect input from the human user")
             .with_scope(ExecutionScope::ShellInternal)
             .with_policy(AuthorizationPolicy::Allow)
+            // `--secret` marks the RESPONSE sensitive: it is never entered into the transcript, logs,
+            // or completion caches (README §200/323). Declaring the rule here makes the manifest field
+            // load-bearing — `Session::surface_prompt` reads it (via `manifest::flags_trigger_redaction`)
+            // to decide redaction, rather than hardcoding the flag name.
+            .with_redaction(vec!["--secret".to_string()])
             .with_help(
                 "prompt-user <question> [--choices a,b,...] [--confirm] [--secret] — pause the \
                  current process, present <question> to the human user, and return the response. \

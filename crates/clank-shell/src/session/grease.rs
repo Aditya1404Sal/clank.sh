@@ -138,8 +138,12 @@ impl Session {
         };
 
         // Content-addressed integrity: verify the fetched body against the registry's advertised hash.
-        // A mismatch is a hard reject (tamper/corruption); a missing index hash falls back to
-        // record-only (older/loose registries still work), with a stderr note.
+        // A mismatch is a hard reject (tamper/corruption). An index that LISTS this package but omits
+        // the hash is ALSO a hard reject — a published index must content-address every package, and a
+        // missing hash is the exact vector by which a tampered/MITM'd index would bypass verification
+        // (README:647 "content-addressed integrity for all package payloads"). Only a registry with no
+        // index entry at all (a raw/indexless registry with no integrity claim to check against) falls
+        // back to trust-on-first-use, recording the fetched digest for later verification.
         let actual = crate::grease::pkg::sha256_hex(&body);
         let mut note = Vec::new();
         match &entry.sha256 {
@@ -155,10 +159,24 @@ impl Session {
                     4,
                 );
             }
+            None if entry.found_in_index => {
+                return LineResult::from_outcome(
+                    Vec::new(),
+                    format!(
+                        "grease install: '{name}' is listed in the {registry} index without a sha256 \
+                         — refusing to install (every indexed package must be content-addressed)\n"
+                    )
+                    .into_bytes(),
+                    4,
+                );
+            }
             None => {
                 note.extend_from_slice(
-                    format!("grease: no integrity hash in {registry} index — recording fetched digest\n")
-                        .as_bytes(),
+                    format!(
+                        "grease: {registry} serves no index for '{name}' — trust-on-first-use, \
+                         recording the fetched digest\n"
+                    )
+                    .as_bytes(),
                 );
             }
         }
