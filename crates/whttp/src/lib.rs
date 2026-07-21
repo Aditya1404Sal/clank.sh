@@ -356,9 +356,19 @@ async fn fetch_once(
 /// Flatten an `http::HeaderMap` into `(name, value)` pairs, dropping any header whose value is not
 /// valid UTF-8 (non-ASCII header values are vanishingly rare and unusable as text anyway).
 fn collect_headers(map: &http::HeaderMap) -> Vec<(String, String)> {
-    map.iter()
+    // `HeaderMap::iter()` yields headers in an UNSPECIFIED (hash) order that can differ between two
+    // executions of the same request. On the durable agent that is a replay hazard: the first run
+    // records this Vec (e.g. as a `curl -I` eval result) in the oplog, and a later resume re-executes
+    // the request — a different iteration order produces a non-matching result and Golem refuses to
+    // resume (`Unexpected oplog entry`, INTERNAL_AGENT_RESUME_FAILED). Sort to a stable order so the
+    // recorded and replayed outputs are byte-identical. (curl/wget don't promise the wire order
+    // anyway, and a stable order also makes `-I`/`-i` output reproducible for tests and demos.)
+    let mut headers: Vec<(String, String)> = map
+        .iter()
         .filter_map(|(k, v)| v.to_str().ok().map(|v| (k.as_str().to_string(), v.to_string())))
-        .collect()
+        .collect();
+    headers.sort();
+    headers
 }
 
 #[cfg(test)]
