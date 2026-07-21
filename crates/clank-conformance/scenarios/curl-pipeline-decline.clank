@@ -4,28 +4,40 @@
 # ("wcurl: unknown option: jq" — the tokenizer used to DROP the operators and hand wcurl the
 # downstream's words as flags; found live in the demo).
 #
-# All steps here are deterministic and offline: `sudo` pre-authorizes, and every shape below is a
-# decline — the stub answers without any HTTP running. The live head form is covered by
-# session-level loopback tests (native) and a golem-e2e assertion (agent).
+# All steps are deterministic and offline: the stub declines at classify time, before any HTTP runs.
+# Authorization is now PER-SEGMENT (every top-level command is gated, not just the leading one), so a
+# `sudo` only pre-authorizes the command it prefixes — `sudo curl … && …` authorizes the curl, but a
+# `curl` sitting in a later segment gates on its own and is approved with a `yes`.
 
-# curl mid-pipeline: the honest stub, pointing at the head form.
-run sudo echo feed | curl https://unused.invalid
+# curl mid-pipeline: `curl` is the second segment and unelevated, so it gates first (the leading
+# `echo` is `allow` and does not reach it); approve, and it hits the honest stub pointing at the head
+# form. Still offline — the stub errors without any HTTP.
+run echo feed | curl https://unused.invalid
+out~ transfer data from a URL over HTTP
+prompt~ transfer data from a URL over HTTP
+choices yes,no,all
+answer yes
 err~ FIRST in the pipeline
 exit 1
 
-# curl after `&&` — an operator shape, not an argv; the stub answers.
+# curl after `&&` with the `sudo` ON the curl: elevated → no prompt, straight to the honest stub.
 run sudo curl https://unused.invalid && echo tail
 err~ top-level command
 exit 1
 
 # curl inside a command substitution — same stub. (No `sudo` here: the line's gate reads the
 # leading `echo` (Allow), and inside `$()` on native a `sudo` word would resolve to the REAL
-# system sudo via external exec, not clank's elevation.)
+# system sudo via external exec, not clank's elevation. A command inside `$()` is a documented
+# split gap — it is not a separate segment, so only `echo`'s policy applies at the gate.)
 run echo "x$(curl https://unused.invalid)x"
 out xx
 err~ top-level command
 
-# wget mid-pipeline declines identically.
-run sudo echo feed | wget https://unused.invalid
+# wget mid-pipeline declines identically — unelevated second segment, approve, then the stub.
+run echo feed | wget https://unused.invalid
+out~ download a file from a URL over HTTP
+prompt~ download a file from a URL over HTTP
+choices yes,no,all
+answer yes
 err~ FIRST in the pipeline
 exit 1

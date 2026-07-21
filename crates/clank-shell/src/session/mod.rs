@@ -681,6 +681,7 @@ impl Session {
                         pid,
                         sudo_grant,
                         None,
+                        None,
                     );
                 }
             }
@@ -772,12 +773,18 @@ impl Session {
         // is a clank authorization marker, not a real executable to dispatch to Brush.
         //
         // Resolution consults the static registry AND the dynamic MCP manifests (an installed server
-        // name resolves to its Confirm-policy manifest — MCP tool calls are outbound HTTP).
-        let (policy, elevated, command) = self.resolve_authz(line);
+        // name resolves to its Confirm-policy manifest — MCP tool calls are outbound HTTP). It also
+        // covers EVERY top-level command segment of a compound line (`echo ok && rm -rf /x` gates on
+        // `rm`, not the harmless leading `echo`) and returns the strictest segment's tuple plus the
+        // full list of gated commands.
+        let (policy, elevated, command, gated) =
+            self.resolve_authz_strictest(line, self.authz.allow_all);
         let effective = strip_sudo_prefix(line);
         let decision = authz::decide(policy, elevated, self.authz.allow_all);
         // ops.log: a `sudo-only` command is the destructive tier (rm / overwrite). Log the attempt with
-        // its authorization outcome — recorded even when denied, so a blocked destructive op still shows.
+        // its authorization outcome — recorded even when denied, so a blocked destructive op still
+        // shows. Fires whenever the STRICTEST segment is sudo-only (any destructive command in the
+        // line), so a destructive op buried behind an operator is audited too.
         if policy == crate::manifest::AuthorizationPolicy::SudoOnly {
             let outcome = match decision {
                 Decision::Allow => "authorized",
@@ -796,8 +803,18 @@ impl Session {
                 return self.finish_intercepted(pid, LineResult::denied());
             }
             Decision::Confirm { sudo_grant } => {
-                return self
-                    .surface_auth_confirm(command.as_deref(), effective, pid, sudo_grant, None);
+                // More than one gated command ⇒ name them all in the prompt (approving runs the whole
+                // line). A single gated command uses the existing per-command synopsis text.
+                let multi_summary = (gated.len() > 1)
+                    .then(|| authz::gated_commands_summary(&gated));
+                return self.surface_auth_confirm(
+                    command.as_deref(),
+                    effective,
+                    pid,
+                    sudo_grant,
+                    None,
+                    multi_summary,
+                );
             }
         }
 

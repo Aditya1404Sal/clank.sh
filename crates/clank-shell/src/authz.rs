@@ -8,9 +8,13 @@
 //! `prompt-user` uses (a yes/no/all confirmation), rather than a second mechanism; the gated command
 //! runs only once the human approves.
 //!
-//! **Scope (this increment): the leading command per line only.** No `;`/`&&`/`||`/`|` splitting —
-//! a compound line is gated on its first command word alone. Reliable splitting needs real
-//! quote/subshell awareness and is future work.
+//! **Scope: every top-level command in a line.** The line is split on the control operators
+//! `;` / `&&` / `||` / `|` / `&` / newline (quote- and subshell-aware, via Brush's tokenizer — see
+//! [`split_segments`]) and each segment is gated on its own policy; the line is gated on the
+//! STRICTEST segment ([`decision_rank`]). A subshell body `(rm x)` is covered (its leading word still
+//! resolves). A command nested inside a command substitution `$(...)` or backticks is part of a single
+//! word token and is NOT yet split out — recursive substitution parsing is future work, so such a
+//! command is currently gated only by the policy of the word that contains it.
 //!
 //! **`sudo` is human-authorization intent, not Unix credentials** (README: single user, no
 //! `/etc/sudoers`, no uid 0). A leading `sudo` token marks the invocation *elevated* — pre-authorized
@@ -131,6 +135,100 @@ fn command_words(line: &str) -> Vec<String> {
         .collect()
 }
 
+/// The control operators that separate one command from the next at the top level. A `Token::Operator`
+/// whose text is one of these ends the current command segment; everything else — redirects
+/// (`>`/`<`/`>>`/`2>`), subshell parens (`(`/`)`), the `;;` case terminator — stays WITHIN a segment so
+/// the segment's leading command still resolves.
+const SEGMENT_SEPARATORS: &[&str] = &["|", "|&", "||", "&", "&&", ";", "\n"];
+
+/// Split `line` into its top-level command segments as byte-exact substrings, cutting at each control
+/// operator (`;` `&&` `||` `|` `&` newline). Byte-exact via the tokenizer's source spans (the same
+/// technique as [`crate::builtins::http::split_http_head`]), so quoting inside a segment survives and a
+/// quoted operator (`echo "a && b"`) is a single `Word`, never a split point. Empty / whitespace-only
+/// segments (e.g. from a trailing `;`) are dropped.
+///
+/// A command inside `$(...)` / backticks is part of a single `Word` token and is therefore NOT split
+/// out (documented gap — see the module doc). A subshell `(rm x)` IS covered: `(` is an operator, so
+/// the segment's first `Word` is still `rm`.
+///
+/// A line that doesn't tokenize (or contains only separators) yields the whole line as one segment, so
+/// the caller always resolves *something* rather than silently skipping the gate.
+pub fn split_segments(line: &str) -> Vec<&str> {
+    let Ok(tokens) = tokenize_str(line) else {
+        return vec![line];
+    };
+    let mut segments = Vec::new();
+    let mut seg_start = 0usize;
+    for t in &tokens {
+        if let Token::Operator(op, span) = t {
+            if SEGMENT_SEPARATORS.contains(&op.as_str()) {
+                let (start, end) = (span.start.index, span.end.index);
+                if start <= line.len() && line.is_char_boundary(start) {
+                    let seg = line[seg_start..start].trim();
+                    if !seg.is_empty() {
+                        segments.push(seg);
+                    }
+                }
+                if end <= line.len() && line.is_char_boundary(end) {
+                    seg_start = end;
+                }
+            }
+        }
+    }
+    if seg_start <= line.len() {
+        let seg = line[seg_start..].trim();
+        if !seg.is_empty() {
+            segments.push(seg);
+        }
+    }
+    // A line of only separators (or empty) yields no segments; fall back to the whole line so the
+    // caller resolves an (all-`Allow`) default rather than skipping the gate entirely.
+    if segments.is_empty() {
+        segments.push(line.trim());
+    }
+    segments
+}
+
+/// A total order on [`Decision`] strictness, for aggregating a compound line onto its most-restrictive
+/// segment: `Allow` < `Confirm{sudo_grant:false}` < `Confirm{sudo_grant:true}` < `Deny`.
+pub fn decision_rank(d: Decision) -> u8 {
+    match d {
+        Decision::Allow => 0,
+        Decision::Confirm { sudo_grant: false } => 1,
+        Decision::Confirm { sudo_grant: true } => 2,
+        Decision::Deny => 3,
+    }
+}
+
+/// Render the "names every gated command with its tier" clause for a compound-line confirmation, e.g.
+/// `rm [sudo-only], curl [confirm]`. Shown when a line has more than one gated command so the human
+/// sees everything approving will run, not just the strictest.
+pub fn gated_commands_summary(gated: &[(String, AuthorizationPolicy)]) -> String {
+    gated
+        .iter()
+        .map(|(name, policy)| {
+            let tier = match policy {
+                AuthorizationPolicy::SudoOnly => "sudo-only",
+                AuthorizationPolicy::Confirm => "confirm",
+                AuthorizationPolicy::Allow => "allow",
+            };
+            format!("{name} [{tier}]")
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The confirmation prompt for a compound line with more than one gated command: names them all (via
+/// [`gated_commands_summary`]) so approval is informed. Choices still follow the strictest tier (via
+/// [`confirm_choices`]); `sudo_grant` picks the tail.
+pub fn confirm_question_multi(summary: &str, sudo_grant: bool) -> String {
+    if sudo_grant {
+        format!("this line runs {summary}; it requires sudo authorization. (y)es, (n)o")
+    } else {
+        format!("this line runs {summary}; approve? (y)es, (n)o, (a)ll")
+    }
+}
+
 /// The confirmation prompt text for a gated command, matching the README's example phrasing
 /// (`"<cmd> has requested permission to <synopsis>. (y)es, (n)o, (a)ll"`).
 pub fn confirm_question(command: &str, synopsis: &str, sudo_grant: bool) -> String {
@@ -207,5 +305,75 @@ mod tests {
     fn confirm_choices_differ_by_tier() {
         assert_eq!(confirm_choices(false), vec!["yes", "no", "all"]);
         assert_eq!(confirm_choices(true), vec!["yes", "no"]);
+    }
+
+    #[test]
+    fn split_segments_splits_on_control_operators() {
+        assert_eq!(split_segments("echo hi && rm -rf /x"), vec!["echo hi", "rm -rf /x"]);
+        assert_eq!(split_segments("a | b | c"), vec!["a", "b", "c"]);
+        assert_eq!(split_segments("a ; b ; c"), vec!["a", "b", "c"]);
+        assert_eq!(split_segments("a || b"), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn split_segments_drops_empty_trailing_segments() {
+        // A trailing `;` or `&` leaves no empty segment.
+        assert_eq!(split_segments("echo a ;"), vec!["echo a"]);
+        assert_eq!(split_segments("rm x &"), vec!["rm x"]);
+    }
+
+    #[test]
+    fn split_segments_does_not_split_quoted_operators() {
+        // A quoted `&&` is a single Word — not a split point.
+        assert_eq!(split_segments(r#"echo "a && b""#), vec![r#"echo "a && b""#]);
+        assert_eq!(split_segments("echo 'a ; b'"), vec!["echo 'a ; b'"]);
+    }
+
+    #[test]
+    fn split_segments_does_not_split_redirects() {
+        // `>` is a redirect operator, not a command separator.
+        assert_eq!(split_segments("echo x > f"), vec!["echo x > f"]);
+    }
+
+    #[test]
+    fn split_segments_leaves_command_substitution_as_one_segment() {
+        // Documented gap: a command inside `$(...)` is part of one word, not split out. The whole
+        // line is a single segment, so `rm` here is gated only by `echo`'s policy.
+        assert_eq!(split_segments("echo $(rm x)"), vec!["echo $(rm x)"]);
+    }
+
+    #[test]
+    fn split_segments_subshell_leading_command_resolves() {
+        // A subshell IS covered: the segment's leading command is `rm` (parens are operators).
+        let segs = split_segments("echo ok && (rm x)");
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[0], "echo ok");
+        // The second segment resolves to `rm` (operators filtered, first Word wins).
+        assert_eq!(leading_command(segs[1]).0, Some("rm".to_string()));
+    }
+
+    #[test]
+    fn split_segments_single_command_is_one_segment() {
+        assert_eq!(split_segments("rm -rf /x"), vec!["rm -rf /x"]);
+        assert_eq!(split_segments("sudo ask \"q\""), vec!["sudo ask \"q\""]);
+    }
+
+    #[test]
+    fn decision_rank_orders_by_strictness() {
+        assert!(decision_rank(Decision::Allow) < decision_rank(Decision::Confirm { sudo_grant: false }));
+        assert!(
+            decision_rank(Decision::Confirm { sudo_grant: false })
+                < decision_rank(Decision::Confirm { sudo_grant: true })
+        );
+        assert!(decision_rank(Decision::Confirm { sudo_grant: true }) < decision_rank(Decision::Deny));
+    }
+
+    #[test]
+    fn gated_summary_labels_each_command_with_its_tier() {
+        let gated = vec![
+            ("rm".to_string(), AuthorizationPolicy::SudoOnly),
+            ("curl".to_string(), AuthorizationPolicy::Confirm),
+        ];
+        assert_eq!(gated_commands_summary(&gated), "rm [sudo-only], curl [confirm]");
     }
 }

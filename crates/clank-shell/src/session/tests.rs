@@ -3691,12 +3691,16 @@ fn curl_headed_pipeline_approved_after_confirm() {
 }
 
 /// curl NOT at the head of the pipeline stays an honest stub error (exit 1) that now names the
-/// supported form — never the old flattened-argv "unknown option" junk.
+/// supported form — never the old flattened-argv "unknown option" junk. Under per-segment authz the
+/// unelevated `curl` (second segment; the leading `sudo` is on `echo`, not curl) gates first — so
+/// approve it, then assert the stub.
 #[test]
 fn curl_mid_pipeline_is_an_honest_stub_error() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
-        let result = session.eval_line("sudo echo feed | curl https://unused.invalid").await;
+        let gated = session.eval_line("echo feed | curl https://unused.invalid").await;
+        assert!(gated.pending_prompt.is_some(), "curl mid-pipeline should gate (unelevated)");
+        let result = session.answer_prompt(Some("yes".to_string())).await;
         assert_eq!(result.exit_code, 1);
         let stderr = String::from_utf8(result.stderr).unwrap();
         assert!(stderr.contains("FIRST in the pipeline"), "got: {stderr}");
