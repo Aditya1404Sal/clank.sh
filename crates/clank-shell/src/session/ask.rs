@@ -4,7 +4,28 @@
 
 use super::*;
 
+/// Read-only Brush builtins the model may call as tools even though clank keeps no manifest for them.
+/// They don't mutate parent-shell state, so the model-tool scope gate allows them explicitly rather
+/// than default-denying (see `run_ask`'s scope check). Everything else unregistered is refused.
+const MODEL_SAFE_BUILTINS: &[&str] = &["echo", "pwd", "test", "[", "true", "false", ":"];
+
 impl Session {
+    /// The execution scope of `name` across all manifest sources — the static registry, then MCP
+    /// servers, then grease packages (the same order [`Self::resolve_authz`] uses). `None` if no
+    /// manifest exists for it anywhere.
+    fn resolve_command_scope(&self, name: &str) -> Option<crate::manifest::ExecutionScope> {
+        if let Some(m) = self.registry.get(name) {
+            return Some(m.execution_scope);
+        }
+        if let Some(m) = self.mcp.manifest_for(name) {
+            return Some(m.execution_scope);
+        }
+        if let Some(m) = self.grease.manifest_for(name) {
+            return Some(m.execution_scope);
+        }
+        None
+    }
+
     /// Run the agentic `ask` loop: assemble the transcript-as-context first user message, then drive
     /// turns with the injected provider. In A1 the tool set is empty, so the model always answers in
     /// one turn (behavior-identical to the pre-loop `ask`); A2 adds the `shell` tool and makes this a
@@ -913,18 +934,36 @@ impl Session {
         for segment in authz::split_segments(&command) {
             let (_policy, _elevated, seg_cmd) = authz::resolve(&self.registry, segment);
             let Some(name) = seg_cmd.as_deref() else { continue };
-            let Some(m) = self.registry.get(name) else { continue };
-            if matches!(
-                m.execution_scope,
-                ExecutionScope::ShellInternal | ExecutionScope::ParentShell
-            ) {
-                trace.extend_from_slice(
-                    format!("[tool] $ {command}\n[tool] refused: shell-internal ({name})\n").as_bytes(),
-                );
-                return done_err(format!(
-                    "{name} is a shell-internal command, not available as a tool; it mutates \
-                     shell state ask cannot access"
-                ));
+            match self.resolve_command_scope(name) {
+                // Isolated command — safe to run as a tool.
+                Some(ExecutionScope::Subprocess) => {}
+                // Mutates parent-shell state the isolated tool can't reach — refuse.
+                Some(ExecutionScope::ShellInternal | ExecutionScope::ParentShell) => {
+                    trace.extend_from_slice(
+                        format!("[tool] $ {command}\n[tool] refused: shell-internal ({name})\n")
+                            .as_bytes(),
+                    );
+                    return done_err(format!(
+                        "{name} is a shell-internal command, not available as a tool; it mutates \
+                         shell state ask cannot access"
+                    ));
+                }
+                // Not in any manifest, but a known read-only Brush builtin the model legitimately
+                // uses (echo/test/pwd/…) — allow.
+                None if MODEL_SAFE_BUILTINS.contains(&name) => {}
+                // Truly unknown — DEFAULT-DENY. clank can't establish it's subprocess-safe, and an
+                // unregistered state-mutator must not slip through the model-tool boundary just
+                // because it has no manifest. (The human path is unaffected — this gate is model-only.)
+                None => {
+                    trace.extend_from_slice(
+                        format!("[tool] $ {command}\n[tool] refused: unknown command ({name})\n")
+                            .as_bytes(),
+                    );
+                    return done_err(format!(
+                        "{name} is not a recognized command; only known subprocess-safe commands may \
+                         be called as tools"
+                    ));
+                }
             }
         }
 
