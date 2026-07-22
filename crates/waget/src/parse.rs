@@ -259,8 +259,14 @@ mod tests {
     }
 
     #[test]
-    fn accepted_no_ops_do_not_error() {
-        assert!(parse(&argv(&["--no-check-certificate", "-nv", "https://x/f"])).is_ok());
+    fn accepted_no_ops_stay_no_ops() {
+        // Audit P3-6: assert the accepted no-op flags didn't error AND didn't flip real state — a
+        // regression that made `-nv`/`--no-check-certificate` consume the URL or set quiet/
+        // server_response would still have passed the old `.is_ok()`-only check.
+        let r = parse(&argv(&["--no-check-certificate", "-nv", "https://x/f"])).unwrap();
+        assert_eq!(r.url, "https://x/f");
+        assert!(!r.quiet, "-nv must not set quiet (that is -q)");
+        assert!(!r.server_response, "the no-ops must not set server_response (that is -S)");
     }
 
     #[test]

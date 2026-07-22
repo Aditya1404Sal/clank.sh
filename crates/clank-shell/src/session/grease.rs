@@ -384,8 +384,16 @@ impl Session {
         let mut installed_prompts = Vec::new();
         for p in &prompt_specs {
             let args = serde_json::json!({});
-            let body_text = client.get_prompt(&p.name, args, session.as_deref()).await.unwrap_or_default();
-            installed_prompts.push((p.clone(), body_text));
+            // A failed `prompts/get` must NOT be coerced to an empty body — that would persist an
+            // empty prompt package and the install would look successful, so the user later runs the
+            // prompt and gets a silently empty result. Skip the prompt and note it (audit P3-4). A
+            // legitimately empty body (`Ok("")`) still installs.
+            match client.get_prompt(&p.name, args, session.as_deref()).await {
+                Ok(body_text) => installed_prompts.push((p.clone(), body_text)),
+                Err(e) => note.extend_from_slice(
+                    format!("grease: skipping prompt '{}' — fetch failed: {e:?}\n", p.name).as_bytes(),
+                ),
+            }
         }
 
         // Materialize selected resources (static files under /mnt/mcp/<server>/) + resource templates

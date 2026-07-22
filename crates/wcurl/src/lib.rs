@@ -64,6 +64,10 @@ pub async fn run(args: &[String]) -> Outcome {
     hreq.headers = req.headers.clone();
     hreq.body = body;
     hreq.follow_redirects = req.location;
+    // Pin curl's redirect cap explicitly rather than inheriting `whttp::Request::new`'s default —
+    // otherwise `curl -L`'s bound is an invisible dependency on a constant in another crate, and it
+    // silently diverges from waget (which sets 20). 50 matches curl's own default (audit P3-5).
+    hreq.max_redirects = 50;
     hreq.connect_timeout = req.connect_timeout.map(std::time::Duration::from_secs_f64);
     hreq.timeout = req.max_time.map(std::time::Duration::from_secs_f64);
 
