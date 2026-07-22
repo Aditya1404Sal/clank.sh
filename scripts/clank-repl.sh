@@ -15,7 +15,7 @@
 #   --deploy        build + start a throwaway local Golem server and deploy clank first, then REPL,
 #                   then tear it all down on exit. Without this the REPL ATTACHES to whatever server
 #                   is already running + deployed (do `golem -Y build && golem server run &` then
-#                   `golem -Y deploy` first — see USAGE.md "Running clank on a Golem agent").
+#                   `golem -Y deploy` first — see docs/USAGE.md "Running clank on a Golem agent").
 #   --takeover      (--deploy only) kill any golem server already bound to the port instead of refusing.
 #   --keep          (--deploy only) leave the server + data dir up after the REPL exits.
 #
@@ -147,7 +147,7 @@ else
   # Attach mode: verify a server is actually reachable before we start the loop.
   if ! golem component list >/dev/null 2>&1; then
     warn "No golem server reachable on port $ROUTER_PORT."
-    echo "  Start one and deploy clank first (see USAGE.md 'Running clank on a Golem agent'):" >&2
+    echo "  Start one and deploy clank first (see docs/USAGE.md 'Running clank on a Golem agent'):" >&2
     echo "    golem -Y build && golem server run &        # then, once it is ready:" >&2
     echo "    golem -Y deploy" >&2
     echo "  …or re-run this script with --deploy to do all of that in a throwaway server." >&2
