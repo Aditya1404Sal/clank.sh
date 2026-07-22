@@ -311,6 +311,12 @@ async fn fetch_once(
     // `redirect(none)` is load-bearing: the shared loop above is the single source of redirect
     // behavior across both targets, so reqwest's default auto-follow must be off.
     let mut cb = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+    // Apply a DEFAULT bound when the caller passed none. An unbounded outbound request is a real
+    // hazard for a long-lived/durable host: a hung peer holds the connection forever, and because a
+    // durable agent serializes invocations, it wedges every request queued behind it (audit P2-4).
+    // Callers that want a different bound (wcurl `-m`, waget `-T`) still override these.
+    let connect_timeout = connect_timeout.or(Some(Duration::from_secs(30)));
+    let timeout = timeout.or(Some(Duration::from_secs(300)));
     if let Some(d) = connect_timeout {
         cb = cb.connect_timeout(d);
     }
