@@ -10,10 +10,18 @@
 //! fields — `execution_scope`, `authorization_policy` — that Brush's string-only `get_content`
 //! surface cannot.
 //!
-//! Scope note (increment 1): the type is complete, but `subcommands` is always empty (no clank
-//! builtin has subcommands yet) and `authorization_policy` is *recorded, not enforced*.
+//! `authorization_policy` is enforced at the pre-Brush authz gate (`crate::authz`, per top-level
+//! command in a compound line); `execution_scope` is enforced at exactly one point — the `ask`
+//! model-tool boundary (`ShellInternal`/`ParentShell` commands are refused as model tools, since a
+//! subprocess-like tool can't reach parent-shell state); `redaction_rules` drive prompt-user
+//! redaction. `subcommands` is populated for `mcp`/`grease`/`golem` (subcommand-aware gating).
 
-/// Where a command runs relative to the shell — the README's three execution scopes.
+/// What session state a command may touch — the README's three execution scopes. Since clank has no
+/// OS process model (wasip2 can't spawn; native runs in-process too), "subprocess" means *isolated
+/// from parent-shell state*, not a real fork. This is a classification, not a dispatch router (lines
+/// are routed by interception pattern, not by reading this field). Its one production use is the
+/// `ask` model-tool gate: only `Subprocess` commands may be called by the model — a `ShellInternal`/
+/// `ParentShell` command would mutate state the isolated tool can't reach (see `session::run_ask`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExecutionScope {
     /// Runs in the parent shell context and mutates shell state; cannot be overridden.
@@ -27,8 +35,9 @@ pub enum ExecutionScope {
     Subprocess,
 }
 
-/// The authorization policy an agent must satisfy to invoke a command. Recorded on every manifest;
-/// **not enforced** in this increment (no `confirm` prompt, no `sudo-only` refusal yet).
+/// The authorization policy required to invoke a command. Enforced at the pre-Brush authz gate
+/// (`crate::authz::decide`), per top-level command in a compound line, for both a human line and the
+/// model's per-tool-call gate. `sudo` (or a session-wide "all", for `Confirm` only) pre-authorizes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AuthorizationPolicy {
     /// May be invoked freely.
