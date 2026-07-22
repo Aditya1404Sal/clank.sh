@@ -102,8 +102,10 @@ mcp tools deepwiki
 ```
 → `installed MCP server 'deepwiki' (3 tools)` and the three real tool schemas.
 
-> Tool *invocation* doesn't resolve natively (the generated command dir isn't on the native `$PATH`).
-> Do that on the agent, in Demo 2.
+> Tool *invocation* works natively too — `sudo deepwiki <tool> --args '…'` dispatches directly
+> (recognition routes at the Session layer, not via `$PATH`), and it survives a restart (the tool
+> list is cached in the config and reconstructed). `mcp reload` is only for picking up server-side
+> changes or recovering a failed install.
 
 ### The transcript is first-class
 
@@ -285,8 +287,6 @@ Reconnecting is always safe — agent state is durable, nothing is lost.
 
 - `curl` composes only as the pipeline HEAD (`curl … | jq`); mid-pipeline stays an honest decline —
   one Session-layer stage per line.
-- Native MCP tool *invocation* still doesn't dispatch cross-restart (recognition and help survive;
-  the live call needs the session that installed it or `mcp reload`).
 - Script-fed native sessions over-count uu pipelines (shared buffered stdin); interactive is correct.
 
 **Test story:** one scenario corpus, two targets — `cargo test -p clank-conformance --test native`
