@@ -33,25 +33,28 @@ futures = "0.3"
 # uucore, and a wasi `set_permissions` skip in uu_cp. Patch uucore AND every uu_* command crate
 # clank registers — the published uu_* crates only share the patched `uucore`, so a fix inside a
 # command crate (e.g. cp) is only picked up when that command crate itself comes from the fork.
-uucore = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
-uu_cat = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
-uu_ls = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
-uu_wc = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
-uu_head = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
-uu_sort = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
-uu_mkdir = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
-uu_rm = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
-uu_mv = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
-uu_cp = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
-uu_env = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
-uu_cut = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
-uu_tr = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
-uu_uniq = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
-uu_tail = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
-uu_tee = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
-uu_touch = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
-uu_sleep = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
-uu_printf = { git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat" }
+# Pinned to an exact REV (not the `wasip2-oscompat` branch) so the build is reproducible from source
+# control alone — a branch pin silently advances to branch-tip on a fresh resolve (audit P2-7). Bump
+# deliberately when the fork moves; mirror the fork so a delete/force-push can't break the build.
+uucore = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
+uu_cat = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
+uu_ls = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
+uu_wc = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
+uu_head = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
+uu_sort = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
+uu_mkdir = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
+uu_rm = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
+uu_mv = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
+uu_cp = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
+uu_env = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
+uu_cut = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
+uu_tr = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
+uu_uniq = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
+uu_tail = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
+uu_tee = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
+uu_touch = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
+uu_sleep = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
+uu_printf = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
 # Published brush-core 0.5.0 stores redirect targets as `OpenFile::File(std::fs::File)` and clones
 # them via `File::try_clone()`, which is Unsupported on wasm32-wasip2 — so `echo > file` silently
 # discards the write. Upstream `main` refactored `OpenFile::File` to `Arc<File>` (clone = `Arc::clone`,

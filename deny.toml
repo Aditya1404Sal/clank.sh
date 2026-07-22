@@ -1,0 +1,43 @@
+# `cargo deny check` configuration. NOT part of the build — run explicitly in CI / at release.
+# Formalizes the supply-chain posture the audit called out (P2-5, P2-7): advisories are surfaced,
+# licenses are allowlisted, and the only permitted git sources are the two deliberately-pinned forks.
+
+[advisories]
+version = 2
+yanked = "warn"
+# Report every RUSTSEC advisory. Add `ignore = ["RUSTSEC-YYYY-NNNN"]` here only after triage, with a
+# comment justifying why the advisory does not apply.
+ignore = []
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+]
+
+[bans]
+# A shell that vendors a large dependency tree should notice version drift and stray wildcards.
+multiple-versions = "warn"
+wildcards = "warn"
+
+[sources]
+# Only crates.io and the two known, deliberately-pinned forks are allowed. Any OTHER git source is a
+# hard fail — this is the enforcement mechanism behind P2-7: pulling in a fork must be an explicit,
+# reviewed decision, not something a stray dependency edit can do silently.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = [
+    "https://github.com/Aditya1404Sal/coreutils",
+    "https://github.com/Aditya1404Sal/brush",
+]

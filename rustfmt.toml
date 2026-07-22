@@ -1,0 +1,8 @@
+# Pin the edition so `cargo fmt` is deterministic across contributor toolchains. Style otherwise
+# follows rustfmt defaults; tighten here once the project settles a house style (audit P2-5 / C1).
+#
+# Note: the always-on `[workspace.lints]` the audit also recommends (e.g. clippy `unwrap_used`) is
+# deliberately NOT enabled yet — turning it on before the ~470-site panic surface is triaged would
+# bury the build in warnings. Run it explicitly for now:
+#   cargo clippy --workspace -- -W clippy::unwrap_used -W clippy::pedantic
+edition = "2021"
