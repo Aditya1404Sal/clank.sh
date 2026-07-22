@@ -3,6 +3,10 @@
 
 use super::*;
 
+/// The most fire-and-forget (`--trigger`/`--schedule`) invocations tracked at once. Beyond this the
+/// oldest is presumed complete and reaped — see [`Session::spawn_agent_invocation_row`].
+const MAX_PENDING_INVOCATIONS: usize = 64;
+
 impl Session {
     /// Whether `line`'s leading word is an installed Golem agent. Drives the `run_agent` dispatch.
     /// Top-level only (a remote invocation awaits under the Session reactor; not reachable from Brush's
@@ -281,6 +285,17 @@ impl Session {
         table.set_agent_meta(pid, meta);
         drop(table);
         self.pending_invocations.push(PendingInvocation { pid, cancel_token });
+        // Bound the fire-and-forget tracking. A `--trigger`/`--schedule` invocation has no
+        // remote-completion signal, so without this its `S` row and `pending_invocations` entry would
+        // linger forever — unbounded growth in a long-lived durable agent. When the tracked set
+        // exceeds the cap, presume the OLDEST invocation done and reap it: complete its row (`S → Z`,
+        // which the proc-table prune then bounds) and drop it from tracking. Deterministic (oldest
+        // first), so oplog replay converges to the same bounded state. `kill` on an evicted pid then
+        // reports "already dispatched", which is the honest answer for a fire-and-forget call.
+        while self.pending_invocations.len() > MAX_PENDING_INVOCATIONS {
+            let old = self.pending_invocations.remove(0);
+            self.proc_table.lock().unwrap().complete(old.pid);
+        }
         pid
     }
 }

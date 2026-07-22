@@ -40,6 +40,12 @@ pub const SHELL_ROOT_PID: u32 = 1;
 /// The first PID handed out to a real (spawned) process. PID 1 is reserved for the root.
 pub const FIRST_PID: u32 = 2;
 
+/// The most rows the table retains. `ps`/`/proc` present a bounded recent view — beyond this, the
+/// oldest terminal (`Z`) rows are evicted ([`ProcessTable::prune`]) so a long-lived durable agent
+/// (thousands of eval lines, fire-and-forget invocations) can't grow the table without limit.
+/// Generous enough that normal interactive use never evicts a row still of interest.
+const MAX_ROWS: usize = 512;
+
 /// Process state, the README's five. `R` (running), `Z` (completed), `P` (prompt-paused), and `S`
 /// (a background job parked on async work) are reachable; `T` remains defined-but-unreachable
 /// until suspension exists.
@@ -240,14 +246,36 @@ impl ProcessTable {
     }
 
     /// Mark a process complete (`R → Z`; `P → Z` for a still-paused row; `S → Z` for a reaped or
-    /// killed background job). No-op if the PID is unknown or already terminal. Z rows are not
-    /// reaped in this increment — they accumulate (reaping arrives with `wait`/`/proc`).
+    /// killed background job). No-op if the PID is unknown or already terminal. Terminal (`Z`) rows
+    /// are bounded by [`prune`](Self::prune) so a long-lived durable agent doesn't accumulate them
+    /// without limit.
     pub fn complete(&mut self, pid: u32) {
         if let Some(row) = self.rows.iter_mut().find(|r| r.pid == pid) {
             if matches!(row.state, ProcState::R | ProcState::P | ProcState::S) {
                 row.state = ProcState::Z;
             }
         }
+        self.prune();
+    }
+
+    /// Cap the table: a `ps`/`/proc` process table is a bounded, best-effort recent view, not an
+    /// append-only log. When over [`MAX_ROWS`], drop the OLDEST terminal (`Z`) rows — never a live
+    /// row (`R`/`S`/`P`), and never PID 1 (the synthetic root isn't stored). Rows are held in start
+    /// order, so this evicts the longest-completed first; deterministic, so oplog replay converges to
+    /// the same bounded table.
+    fn prune(&mut self) {
+        if self.rows.len() <= MAX_ROWS {
+            return;
+        }
+        let mut to_drop = self.rows.len() - MAX_ROWS;
+        self.rows.retain(|r| {
+            if to_drop > 0 && r.state == ProcState::Z {
+                to_drop -= 1;
+                false
+            } else {
+                true
+            }
+        });
     }
 
     /// The rows, oldest first (for tests and rendering).
@@ -390,6 +418,32 @@ mod tests {
             assert_eq!(r.ppid, SHELL_ROOT_PID);
             assert_eq!(r.state, ProcState::R);
         }
+    }
+
+    #[test]
+    fn table_is_bounded_by_pruning_oldest_zombies() {
+        let mut t = ProcessTable::new();
+        // Far more completed foreground rows than the cap.
+        for i in 0..(MAX_ROWS + 200) {
+            let pid = t.spawn(ProcessKind::Builtin, argv(&format!("cmd{i}")));
+            t.complete(pid);
+        }
+        assert!(t.rows().len() <= MAX_ROWS, "table must stay bounded, got {}", t.rows().len());
+    }
+
+    #[test]
+    fn prune_never_evicts_a_live_row() {
+        let mut t = ProcessTable::new();
+        // A live (S) background row.
+        let live = t.spawn_bg(ProcessKind::AgentInvocation, argv("live"), SHELL_ROOT_PID);
+        // Pile on completed rows well past the cap.
+        for i in 0..(MAX_ROWS + 200) {
+            let pid = t.spawn(ProcessKind::Builtin, argv(&format!("x{i}")));
+            t.complete(pid);
+        }
+        assert!(t.rows().len() <= MAX_ROWS);
+        assert!(t.find(live).is_some(), "a live S row must survive pruning");
+        assert_eq!(t.find(live).unwrap().state, ProcState::S);
     }
 
     #[test]

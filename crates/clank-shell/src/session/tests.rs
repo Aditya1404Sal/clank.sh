@@ -1035,6 +1035,33 @@ fn agent_trigger_mode_and_kill() {
     });
 }
 
+/// Fire-and-forget tracking is BOUNDED: a `--trigger`/`--schedule` invocation has no
+/// remote-completion signal, so its row would linger forever. Firing many past the cap evicts the
+/// oldest (presumed done), so `pending_invocations` never grows without limit.
+#[test]
+fn trigger_invocation_tracking_is_bounded() {
+    on_rt(async {
+        let _dirs = set_grease_dirs();
+        let mut session = Session::new().await.unwrap();
+        let seen = std::sync::Arc::new(Mutex::new(None));
+        session.set_agent_invoker(Box::new(FakeAgentInvoker { reply: String::new(), seen: seen.clone() }));
+        install_shopping_cart(&mut session).await;
+
+        // Fire well past the cap (MAX_PENDING_INVOCATIONS = 64).
+        for i in 0..80 {
+            let r = session
+                .eval_line(&format!("sudo shopping-cart --userid jd --trigger add-item -- --sku s{i}"))
+                .await;
+            assert_eq!(r.exit_code, 0, "trigger {i}: {}", String::from_utf8_lossy(&r.stderr));
+        }
+        assert!(
+            session.pending_invocations.len() <= 64,
+            "fire-and-forget tracking must stay bounded, got {}",
+            session.pending_invocations.len()
+        );
+    });
+}
+
 /// `--schedule` reaches Schedule mode with a cancel token; `kill` reports it cancelled.
 #[test]
 fn agent_schedule_mode_and_kill_cancels() {
@@ -3256,6 +3283,34 @@ fn ask_compound_tool_call_cannot_smuggle_a_shell_internal_command() {
         let msg = tr.outcome.expect_err("a compound line hiding `cd` must be refused");
         assert!(msg.contains("shell-internal"), "got: {msg}");
         assert!(msg.contains("cd"), "the offending command should be named: {msg}");
+    });
+}
+
+/// The model-tool gate DEFAULT-DENIES an unregistered command (clank can't establish it's
+/// subprocess-safe, and an unknown state-mutator must not slip through), but still allows known
+/// read-only Brush builtins like `echo` that clank keeps no manifest for.
+#[test]
+fn ask_unknown_tool_command_is_denied_but_safe_builtins_run() {
+    on_rt(async {
+        let mut session = Session::new().await.unwrap();
+        let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+        session.set_ask_provider(Box::new(FakeProvider::scripted(
+            vec![
+                shell_tool_call("c1", "frobnicate --wibble"),
+                shell_tool_call("c2", "echo hello"),
+                crate::ai::ask::AskResponse::text("done"),
+            ],
+            seen.clone(),
+        )));
+
+        session.eval_line(r#"sudo ask "go""#).await;
+        // Unknown command → refused.
+        let d = last_tool_result(&seen, "c1").expect("a tool result for c1");
+        let msg = d.outcome.expect_err("an unknown command must be denied");
+        assert!(msg.contains("not a recognized command"), "got: {msg}");
+        // `echo` (known-safe builtin, no manifest) → runs.
+        let e = last_tool_result(&seen, "c2").expect("a tool result for c2");
+        assert!(e.outcome.is_ok(), "echo should run as a tool, got: {:?}", e.outcome);
     });
 }
 
