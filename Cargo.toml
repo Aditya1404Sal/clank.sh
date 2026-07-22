@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/clank-shell", "crates/clank-agent", "crates/clank-conformance", "crates/greeter-agent", "crates/whttp", "crates/wcurl", "crates/waget"]
+members = ["crates/clank-shell", "crates/clank-agent", "crates/clank-conformance", "crates/greeter-agent", "crates/whttp", "crates/wcurl", "crates/waget", "crates/grease-tool"]
 
 [workspace.package]
 edition = "2021"
