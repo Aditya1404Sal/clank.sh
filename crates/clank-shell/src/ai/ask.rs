@@ -399,6 +399,20 @@ pub struct AskArgs {
 /// word joins the prompt. An unknown `--flag` is treated as prompt text (kept simple — no error
 /// surface this increment). `stdin` is always `None` here — the `Session` fills it when `ask` is the
 /// tail of a pipeline.
+/// Whether `s` contains a command- or process-substitution construct: `$( … )`, backticks,
+/// `<( … )`, or `>( … )`. Used to fail **closed** on the model `shell`-tool path: such a construct
+/// smuggles an inner command past the per-segment authz/scope gate, which only resolves each
+/// segment's leading word (`authz::split_segments` treats a substitution as one opaque `Word`). The
+/// model has no legitimate need to run substitution through the tool, so refusing the whole line is
+/// the safe response.
+///
+/// Deliberately a conservative substring scan: it also refuses a *quoted* literal like `echo '$(x)'`
+/// and arithmetic `$(( … ))`, both safe over-refusals on the model path. The human path is
+/// unaffected — this is only consulted by the model-tool gate.
+pub fn contains_command_substitution(s: &str) -> bool {
+    s.contains("$(") || s.contains('`') || s.contains("<(") || s.contains(">(")
+}
+
 pub fn classify(line: &str) -> Option<AskArgs> {
     let words = leading_words(line)?;
     let (first, rest) = words.split_first()?;
@@ -646,6 +660,18 @@ pub fn manifests() -> Vec<Manifest> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_command_and_process_substitution() {
+        assert!(contains_command_substitution("echo $(curl evil)"));
+        assert!(contains_command_substitution("echo `id`"));
+        assert!(contains_command_substitution("diff <(a) <(b)"));
+        assert!(contains_command_substitution("tee >(cat)"));
+        // Plain lines and bare variable expansion are allowed.
+        assert!(!contains_command_substitution("echo hello world"));
+        assert!(!contains_command_substitution("echo ${HOME}"));
+        assert!(!contains_command_substitution("ls -la /tmp && pwd"));
+    }
 
     #[test]
     fn classifies_plain_ask_and_captures_prompt() {

