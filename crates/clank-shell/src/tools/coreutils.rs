@@ -205,6 +205,8 @@ pub(crate) fn run_uu<SE: ShellExtensions>(
 
     // A broken pipe (e.g. `cat | head`) must not kill the whole clank process; make writes to
     // a closed pipe return EPIPE instead of raising SIGPIPE.
+    // SAFETY: `libc::signal` is an FFI call with no memory-safety precondition — `SIGPIPE`/`SIG_IGN`
+    // are valid constants and it returns the previous handler (or `SIG_ERR`), never exhibiting UB.
     unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
 
     // Flush anything already buffered before swapping the underlying fds.
@@ -218,9 +220,13 @@ pub(crate) fn run_uu<SE: ShellExtensions>(
     // it was; it does NOT make clank sole owner of its input in the script-fed case, where the REPL's
     // buffered `std::io::stdin` is a channel `dup2` cannot reach (see `stage_piped_stdin`).
     let redirect = |shell_fd, real_fd| -> i32 {
+        // SAFETY: `libc::dup`/`dup2` are FFI calls over raw fds with no memory-safety precondition;
+        // they return -1 on error (handled by the `saved >= 0` guard in the restore loop) rather than
+        // exhibiting UB. `real_fd` is a standard fd (0/1/2); `fd` is borrowed from a live `OpenFile`.
         let saved = unsafe { libc::dup(real_fd) };
         if let Some(target) = context.try_fd(shell_fd) {
             if let Ok(fd) = target.try_borrow_as_fd() {
+                // SAFETY: as above — `dup2` over valid raw fds, -1 on error, never UB.
                 unsafe { libc::dup2(fd.as_raw_fd(), real_fd) };
             }
         }
@@ -228,6 +234,8 @@ pub(crate) fn run_uu<SE: ShellExtensions>(
     };
     let saved_in = match &staged_stdin {
         Some(staged) => {
+            // SAFETY: `dup`/`dup2` over valid raw fds (fd 0 and the staged file's live fd); they
+            // return -1 on error and never exhibit UB.
             let saved = unsafe { libc::dup(0) };
             unsafe { libc::dup2(staged.as_raw_fd(), 0) };
             saved
@@ -247,6 +255,8 @@ pub(crate) fn run_uu<SE: ShellExtensions>(
     let _ = std::io::stderr().flush();
     for (saved, real_fd) in [(saved_in, 0), (saved_out, 1), (saved_err, 2)] {
         if saved >= 0 {
+            // SAFETY: `saved` is a live fd from a successful `dup` above (the `saved >= 0` guard);
+            // `dup2` restores it onto the standard fd and `close` releases it. FFI, -1 on error, no UB.
             unsafe {
                 libc::dup2(saved, real_fd);
                 libc::close(saved);
@@ -294,6 +304,9 @@ pub(crate) fn run_uu<SE: ShellExtensions>(
     fn bind_to_fd(file: std::fs::File, target_fd: i32) {
         let raw = file.as_raw_fd();
         std::mem::forget(file);
+        // SAFETY: `__wasilibc_fd_renumber` is an FFI call over raw fds with no memory-safety
+        // precondition; `raw` is a live fd we just leaked via `mem::forget` (so its `Drop` can't race
+        // the renumber and close the freed/recycled source), and `target_fd` is a standard fd.
         unsafe { __wasilibc_fd_renumber(raw, target_fd) };
     }
 
