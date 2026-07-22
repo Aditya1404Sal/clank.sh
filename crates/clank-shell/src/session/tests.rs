@@ -1930,6 +1930,34 @@ fn mcp_add_installs_and_surfaces_the_server() {
     });
 }
 
+/// Native cross-restart MCP DISPATCH: after a restart (a fresh Session reconstructs the server from
+/// the config cache), a live tool call works with the transport re-injected — WITHOUT `mcp reload`.
+/// Dispatch is a stateless `tools/call` from the reconstructed config URL + `mcp_http`; it needs no
+/// open session (session_id falls back to None). This pins that the pre-cache "needs reload" caveat
+/// no longer applies.
+#[test]
+fn mcp_dispatch_survives_restart_without_reload() {
+    on_rt(async {
+        let _dirs = set_mcp_dirs();
+        {
+            // Session 1: install `demo`, caching its tools in the on-disk config.
+            let mut session = Session::new().await.unwrap();
+            session.set_mcp_http(Box::new(FakeMcpHttp::new(mcp_install_script())));
+            let add = session.eval_line("sudo mcp add demo https://x/mcp").await;
+            assert_eq!(add.exit_code, 0, "add: {}", String::from_utf8_lossy(&add.stderr));
+        }
+        // Restart: a brand-new Session (reconstruction runs), transport re-injected as native::run
+        // does AFTER Session::new. Serve ONLY the tools/call response — no re-initialize.
+        let mut fresh = Session::new().await.unwrap();
+        fresh.set_mcp_http(Box::new(FakeMcpHttp::new(vec![mcp_call_response("echoed: hi")])));
+
+        // Dispatch WITHOUT `mcp reload`.
+        let out = fresh.eval_line("sudo demo echo --text hi").await;
+        assert_eq!(out.exit_code, 0, "dispatch: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(String::from_utf8(out.stdout).unwrap().contains("echoed: hi"));
+    });
+}
+
 /// A NEW process reconstructs a plain `mcp add` server from its on-disk config — no network. The
 /// install caches the tool list in the config; the second Session (fresh, NO transport installed)
 /// still knows the server and its tools. Before this, `McpState` was in-memory only and a native

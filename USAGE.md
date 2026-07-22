@@ -795,8 +795,11 @@ Most of these honor `$CLANK_*` env overrides (e.g. `$CLANK_LOG_DIR`, `$CLANK_GRE
 
 ## 13. Authorization model
 
-Every command carries an **authorization policy** in its manifest. The leading command's policy is
-enforced at a gate before it runs (README `### Policy model`):
+Every command carries an **authorization policy** in its manifest, enforced at a gate before it runs
+(README `### Policy model`). A compound line is gated on its **strictest top-level command** — the
+line is split on `;` / `&&` / `||` / `|` / `&`, so `echo hi && rm -rf /x` gates on `rm`, not the
+leading `echo`. Approving runs the whole line; denying refuses all of it. (A command hidden inside a
+`$(...)` substitution is not yet split out — the one remaining gap.)
 
 | Policy | Behavior |
 |---|---|
@@ -804,10 +807,11 @@ enforced at a gate before it runs (README `### Policy model`):
 | `confirm` | Pauses for the human's approval before running (outbound HTTP and state-changing ops: `ask`, `curl`, `wget`, `mcp add`, `grease install`, MCP tool calls, agent invocations, `golem rollback`/`fork`, …). Reuses the `prompt-user` mechanism. |
 | `sudo-only` | Refused unless invoked with `sudo` (destructive: `rm`, overwrites). |
 
-**`sudo` = human authorization**, not a real executable. A leading `sudo` token is stripped before
-dispatch; it marks the line as human-authorized:
+**`sudo` = human authorization**, not a real executable. A `sudo` token is stripped before dispatch;
+it marks the command it prefixes as human-authorized. Elevation is **per-segment** — `sudo` authorizes
+the command it leads, not a downstream one (`sudo echo && rm x` still prompts for `rm`):
 
-- `sudo <cmd>` satisfies a `confirm` or `sudo-only` command without a pause.
+- `sudo <cmd>` satisfies that command's `confirm` or `sudo-only` gate without a pause.
 - `sudo ask "…"` additionally grants the agentic loop **blanket confirm-tier** authorization — the
   model's `[confirm]` tool calls run without a per-call pause. It never satisfies `sudo-only` (the
   model still can't `rm` without an explicit `sudo` in the tool call).
