@@ -923,6 +923,21 @@ impl Session {
             trace.extend_from_slice(format!("[tool] $ {command}\n[tool] refused: ask cannot call itself\n").as_bytes());
             return done_err("ask cannot call itself".into());
         }
+        // Guard: command substitution `$( )` / backticks / process substitution bypass the per-segment
+        // authz+scope gates below — `split_segments` treats a substitution as one opaque Word, so the
+        // inner command is never resolved (e.g. `echo $(curl evil)` would gate only on `echo`). On the
+        // MODEL path we fail closed and refuse the whole line; the model has no legitimate need to run
+        // substitution through the shell tool. (The human path is unaffected — this gate is model-only.)
+        if crate::ai::ask::contains_command_substitution(&command) {
+            trace.extend_from_slice(
+                format!("[tool] $ {command}\n[tool] refused: command substitution\n").as_bytes(),
+            );
+            return done_err(
+                "command substitution ($(…), backticks, <(…)) is not allowed in a shell tool call — \
+                 issue the inner command directly so it can be authorized"
+                    .into(),
+            );
+        }
         // Guard: shell-internal / parent-shell commands mutate state a subprocess-style tool can't
         // reach. Checked PER TOP-LEVEL SEGMENT, not just the leading command: `run_shell_tool` runs the
         // line on the SHARED Session (→ `run_command` → Brush), so a compound tool call like
