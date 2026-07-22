@@ -781,12 +781,18 @@ mod sed {
         let mut count = 0;
         let mut out = String::new();
         let mut last = 0;
-        for m in re.find_iter(text) {
+        // Iterate `captures_iter` (not `find_iter` + a re-`captures` of the isolated match slice): the
+        // captures are computed in FULL context, so a context-dependent zero-width assertion (`\b`,
+        // `\B`, `^`, `$`, lookaround) evaluates correctly. Re-running `captures` on the isolated slice
+        // could return `None` — the assertion flips at the slice edge (e.g. `\B` in `aX` vs `"X"`) —
+        // and panic on `unwrap`, which on the wasm agent traps the durable instance (audit P0-2).
+        for caps in re.captures_iter(text) {
             count += 1;
             if count == n {
+                // Group 0 (the whole match) is always present for a `Captures` from `captures_iter`.
+                let m = caps.get(0).expect("capture group 0 is always present in a match");
                 out.push_str(&text[last..m.start()]);
                 let mut expanded = String::new();
-                let caps = re.captures(&text[m.start()..m.end()]).unwrap();
                 caps.expand(replacement, &mut expanded);
                 out.push_str(&expanded);
                 last = m.end();
@@ -981,6 +987,14 @@ mod tests {
         assert_eq!(sed_run(&["s/a/X/"], "aa\naa\n"), "Xa\nXa\n");
         assert_eq!(sed_run(&["s/a/X/g"], "aa\naa\n"), "XX\nXX\n");
         assert_eq!(sed_run(&["s/a/X/2"], "aaa\n"), "aXa\n");
+    }
+
+    #[test]
+    fn sed_nth_with_context_dependent_assertion_does_not_panic() {
+        // Audit P0-2: `s/\BX/Y/1` re-ran captures on the isolated match slice, where `\B` (true in
+        // `aX`) is false at the slice edge → `None` → panic (a durable-agent trap on wasm). The
+        // captures-in-context fix must produce the substitution without panicking.
+        assert_eq!(sed_run(&["s/\\BX/Y/1"], "aX\n"), "aY\n");
     }
 
     #[test]
