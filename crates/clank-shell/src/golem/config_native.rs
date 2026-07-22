@@ -9,7 +9,7 @@
 //! addressed by app/env/agent-type, not a raw worker id).
 
 /// A resolved Golem cluster configuration for the native REST path.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ClusterConfig {
     /// Base URL of the Golem worker/agent service, e.g. `http://localhost:9881` (no trailing slash).
     pub url: String,
@@ -20,6 +20,19 @@ pub struct ClusterConfig {
     pub app_name: String,
     /// The Golem environment name (`envName` in the invoke request), e.g. `local`.
     pub env_name: String,
+}
+
+impl std::fmt::Debug for ClusterConfig {
+    /// Redacts the bearer `token` so it can never reach a `{:?}` sink (a log line, `dbg!`, a panic
+    /// message, or the `Debug` of any containing struct). Presence is preserved; the value is not.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClusterConfig")
+            .field("url", &self.url)
+            .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+            .field("app_name", &self.app_name)
+            .field("env_name", &self.env_name)
+            .finish()
+    }
 }
 
 /// Environment variables that configure the native cluster path.

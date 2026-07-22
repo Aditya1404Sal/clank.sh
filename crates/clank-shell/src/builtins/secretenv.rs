@@ -84,6 +84,74 @@ pub fn redact_export_line(line: &str) -> Option<String> {
     ))
 }
 
+/// Flags whose FOLLOWING argument (or `=`-joined value) is a credential that must never reach the
+/// logs — `model add <provider> --key <KEY>`, cluster `--token`, and the like. (`export --secret`'s
+/// `NAME=VALUE` shape is handled separately by [`redact_export_line`].)
+///
+/// Note: `grease registry add … --key <PUBKEY>` carries a *public* key, so redacting it here is a
+/// harmless false positive — we deliberately over-redact a public value rather than risk leaking a
+/// private one, since `--key` is overloaded across commands.
+const SECRET_FLAGS: &[&str] = &["--key", "--token", "--password", "--api-key", "--auth-token"];
+
+/// Redact the argument of any credential-bearing flag (see [`SECRET_FLAGS`]) in `line`, covering both
+/// `--key VALUE` and `--key=VALUE`. Byte-exact via the tokenizer's source spans (like
+/// [`redact_export_line`] / [`crate::builtins::http::split_http_head`]), so the rest of the line —
+/// spacing, quoting, other args — is preserved. Returns `Some(redacted)` if anything was redacted,
+/// `None` if the line carries no secret flag.
+///
+/// This is the log-safety guard for commands like `model add anthropic --key <KEY>`, whose shell.log
+/// start/end events would otherwise record the credential verbatim — `mask_values` can't help there,
+/// because the value isn't a registered secret when those events fire.
+pub fn redact_secret_flag_args(line: &str) -> Option<String> {
+    let tokens = tokenize_str(line).ok()?;
+    // (unquoted value, raw-span start, raw-span end) for each Word, in order.
+    let words: Vec<(String, usize, usize)> = tokens
+        .iter()
+        .filter_map(|t| match t {
+            Token::Word(s, span) => Some((unquote_str(s), span.start.index, span.end.index)),
+            Token::Operator(_, _) => None,
+        })
+        .collect();
+
+    let redacted = crate::runtime::secretenv::REDACTED;
+    // Byte ranges over the ORIGINAL line to overwrite, with their replacement text.
+    let mut ranges: Vec<(usize, usize, String)> = Vec::new();
+    let mut i = 0;
+    while i < words.len() {
+        let (w, start, end) = &words[i];
+        // `--flag=value` form: redact only the value, keep the flag.
+        if let Some(eq) = w.find('=') {
+            let flag = &w[..eq];
+            if SECRET_FLAGS.contains(&flag) {
+                ranges.push((*start, *end, format!("{flag}={redacted}")));
+                i += 1;
+                continue;
+            }
+        }
+        // `--flag value` form: redact the NEXT word.
+        if SECRET_FLAGS.contains(&w.as_str()) {
+            if let Some((_, ns, ne)) = words.get(i + 1) {
+                ranges.push((*ns, *ne, redacted.to_string()));
+                i += 2;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    if ranges.is_empty() {
+        return None;
+    }
+    let mut out = line.to_string();
+    ranges.sort_by_key(|r| r.0);
+    // Apply high-offset-first so earlier ranges' indices stay valid.
+    for (s, e, rep) in ranges.into_iter().rev() {
+        if e <= out.len() && out.is_char_boundary(s) && out.is_char_boundary(e) {
+            out.replace_range(s..e, &rep);
+        }
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,6 +208,35 @@ mod tests {
     fn is_secret_export_matches_parse() {
         assert!(is_secret_export("export --secret K=v"));
         assert!(!is_secret_export("export K=v"));
+    }
+
+    #[test]
+    fn redacts_model_add_key_argument() {
+        // The P0 leak: `model add … --key <KEY>` must not reach shell.log verbatim.
+        let r = redact_secret_flag_args("model add anthropic --key sk-ant-SECRET123").unwrap();
+        assert_eq!(r, "model add anthropic --key <redacted>");
+        assert!(!r.contains("sk-ant-SECRET123"));
+    }
+
+    #[test]
+    fn redacts_flag_equals_value_and_token_form() {
+        assert_eq!(
+            redact_secret_flag_args("model add anthropic --key=sk-SECRET").unwrap(),
+            "model add anthropic --key=<redacted>"
+        );
+        assert_eq!(
+            redact_secret_flag_args("golem cluster add prod --token tok-SECRET").unwrap(),
+            "golem cluster add prod --token <redacted>"
+        );
+    }
+
+    #[test]
+    fn redact_secret_flag_args_preserves_quoting_and_ignores_non_secret_flags() {
+        // A quoted value is still fully redacted; a line with no secret flag is left alone.
+        let r = redact_secret_flag_args(r#"model add anthropic --key "sk with spaces""#).unwrap();
+        assert!(!r.contains("sk with spaces") && r.contains("<redacted>"));
+        assert!(redact_secret_flag_args("ls -la /tmp").is_none());
+        assert!(redact_secret_flag_args("model list").is_none());
     }
 
     #[test]

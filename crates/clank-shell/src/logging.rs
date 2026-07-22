@@ -235,23 +235,10 @@ pub fn bound_tail(buf: &mut String, max_bytes: usize) {
     buf.drain(..start);
 }
 
-/// Header names whose values are secrets and must never reach `http.log`. Matched case-insensitively.
-const SECRET_HEADERS: &[&str] = &["authorization", "x-api-key", "api-key", "cookie", "set-cookie"];
-
 /// Query-parameter names whose values are secrets and must be masked out of a logged URL. Matched
 /// case-insensitively against the part before `=`.
 const SECRET_QUERY_PARAMS: &[&str] =
     &["token", "access_token", "api_key", "apikey", "key", "secret", "password", "sig", "signature"];
-
-/// Redact a header value if its name is a known secret-bearing header, else pass it through. Used by the
-/// http.log emitter so LLM/MCP/registry calls never log API keys or auth tokens.
-pub fn redact_header<'a>(name: &str, value: &'a str) -> std::borrow::Cow<'a, str> {
-    if SECRET_HEADERS.iter().any(|h| h.eq_ignore_ascii_case(name)) {
-        std::borrow::Cow::Borrowed("<redacted>")
-    } else {
-        std::borrow::Cow::Borrowed(value)
-    }
-}
 
 /// Mask secret query-parameter values in a URL before it is logged, e.g.
 /// `https://h/mcp?token=sk-abc&x=1` → `https://h/mcp?token=<redacted>&x=1`. Anything before the `?` is
@@ -272,18 +259,6 @@ pub fn redact_url(url: &str) -> String {
         .collect::<Vec<_>>()
         .join("&");
     format!("{base}?{masked}")
-}
-
-/// Redact any occurrence of the given secret substrings inside a free-text blob (e.g. a request body or
-/// an error message that may echo a token). Each non-empty secret is replaced with `<redacted>`.
-pub fn redact_text(text: &str, secrets: &[&str]) -> String {
-    let mut out = text.to_string();
-    for s in secrets {
-        if !s.is_empty() {
-            out = out.replace(s, "<redacted>");
-        }
-    }
-    out
 }
 
 #[cfg(test)]
@@ -368,13 +343,6 @@ mod tests {
     }
 
     #[test]
-    fn secret_headers_are_redacted() {
-        assert_eq!(redact_header("Authorization", "Bearer sk-abc"), "<redacted>");
-        assert_eq!(redact_header("x-api-key", "sk-123"), "<redacted>");
-        assert_eq!(redact_header("Content-Type", "application/json"), "application/json");
-    }
-
-    #[test]
     fn bound_tail_keeps_whole_recent_lines_under_the_cap() {
         // Under the cap → untouched.
         let mut s = "a\nb\nc\n".to_string();
@@ -421,11 +389,4 @@ mod tests {
         assert_eq!(redact_url("https://h/p?page=2"), "https://h/p?page=2");
     }
 
-    #[test]
-    fn redact_text_masks_known_secrets() {
-        let out = redact_text("url?token=sk-abc123&x=1", &["sk-abc123"]);
-        assert_eq!(out, "url?token=<redacted>&x=1");
-        // An empty secret is a no-op (doesn't blank the whole string).
-        assert_eq!(redact_text("hello", &[""]), "hello");
-    }
 }

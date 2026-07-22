@@ -41,7 +41,7 @@ pub struct AskSection {
 
 /// A `[providers.<name>]` section: the doc-only `key-env` (which env var holds the key) plus, on
 /// native, an optional stored `key` value the native `ask` provider reads (README §444).
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct ProviderSection {
     /// Documentation: the env var this provider's key comes from (e.g. `ANTHROPIC_API_KEY`).
@@ -51,6 +51,17 @@ pub struct ProviderSection {
     /// agent, which reads the key from its environment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+}
+
+impl std::fmt::Debug for ProviderSection {
+    /// Redacts the stored API `key` so it can never reach a `{:?}` sink (a log line, `dbg!`, a panic
+    /// message, or the `Debug` of any containing struct). Presence is preserved; the value is not.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderSection")
+            .field("key_env", &self.key_env)
+            .field("key", &self.key.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 /// The `ask.toml` path under a given home directory: `<home>/.config/ask/ask.toml`.
