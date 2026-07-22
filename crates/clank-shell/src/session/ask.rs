@@ -352,7 +352,13 @@ impl Session {
         }
         let model = match self.resolve_ask_model(None) {
             Ok((model, _warning)) => model,
-            Err(_) => return, // no valid model → keep the count marker
+            Err(_) => {
+                // No model to summarize with (no provider / no key / bad model id). Discard the
+                // pending text so a durable agent doesn't hold it forever; keep the count marker.
+                // See audit P1-3.
+                self.transcript.lock().unwrap().discard_dropped_span();
+                return;
+            }
         };
         if let Ok(Some(summary)) = self.summarize_text(&dropped_text, &model).await {
             self.transcript.lock().unwrap().set_marker_summary(summary);

@@ -226,6 +226,16 @@ impl Transcript {
             self.last_dropped.extend_from_slice(command.as_bytes());
             self.last_dropped.push(b'\n');
             self.last_dropped.extend_from_slice(output);
+            // Bound the buffer. On a durable agent whose summarizer never succeeds (no LLM provider,
+            // no API key, or a persistent egress error) this would otherwise grow without limit as
+            // entries are compacted — an unbounded RAM leak that `clear()` doesn't reclaim. Keep the
+            // most recent bytes (the text is later read via `from_utf8_lossy`, which tolerates a
+            // mid-char cut). See audit P1-3.
+            const LAST_DROPPED_CAP: usize = 128 * 1024;
+            if self.last_dropped.len() > LAST_DROPPED_CAP {
+                let cut = self.last_dropped.len() - LAST_DROPPED_CAP;
+                self.last_dropped.drain(..cut);
+            }
         }
     }
 
@@ -264,6 +274,13 @@ impl Transcript {
     /// next `context show`).
     pub fn clear(&mut self) {
         self.entries.clear();
+    }
+
+    /// Discard the pending dropped-span TEXT (the elision count marker is untouched). Used when the
+    /// span can never be summarized — no model is configured — so the buffer isn't held for the
+    /// life of a durable agent. See audit P1-3.
+    pub fn discard_dropped_span(&mut self) {
+        self.last_dropped.clear();
     }
 
     /// Drop the oldest `n` `Command` entries, folding each into the leading [`Entry::Elided`] marker
@@ -648,6 +665,40 @@ mod tests {
         // Writing a summary drains the pending span — no re-summarize.
         t.set_marker_summary("did aaaa".to_string());
         assert!(t.pending_summary().is_none());
+    }
+
+    #[test]
+    fn stash_dropped_buffer_is_bounded() {
+        // Audit P1-3: a durable agent that never summarizes must not accumulate the dropped-span
+        // text without limit. Evict far more than the cap and confirm the pending span stays bounded.
+        let mut t = Transcript::with_budget(2);
+        let big = vec![b'x'; 50 * 1024];
+        for i in 0..8 {
+            record(&mut t, &format!("cmd{i}"), big.as_slice()); // 6 evictions × ~50KB stashed
+        }
+        let (_count, dropped) = t.pending_summary().expect("a span is pending");
+        assert!(
+            dropped.len() <= 130 * 1024,
+            "dropped span not bounded: {} bytes (would be ~300KB unbounded)",
+            dropped.len()
+        );
+    }
+
+    #[test]
+    fn discard_dropped_span_clears_text_but_keeps_the_count() {
+        // P1-3: the no-model path discards the pending text (never summarizable) while keeping the
+        // count marker.
+        let mut t = Transcript::with_budget(4);
+        record(&mut t, "aaaa", b"aaaa");
+        record(&mut t, "bbbb", b"bbbb");
+        record(&mut t, "cccc", b"cccc"); // evicts "aaaa" → a span is pending
+        assert!(t.pending_summary().is_some());
+        t.discard_dropped_span();
+        assert!(t.pending_summary().is_none(), "text discarded");
+        assert!(
+            String::from_utf8(t.render()).unwrap().contains("earlier entries dropped"),
+            "the count marker survives"
+        );
     }
 
     #[test]
