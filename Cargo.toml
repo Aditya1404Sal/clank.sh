@@ -9,6 +9,7 @@ members = [
     "crates/whttp",
     "crates/wcurl",
     "crates/waget",
+    "crates/grease-tool",
 ]
 # main-rc-1: exclude the vendored golem clone so its crates (golem-schema, etc.) resolve their
 # `{ workspace = true }` deps against THEIR OWN workspace (golem-stuff/golem/), not clank's root.

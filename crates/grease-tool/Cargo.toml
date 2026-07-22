@@ -1,0 +1,33 @@
+[package]
+name = "grease-tool"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# `grease-populate` — an interactive authoring tool + live HTTP server for a grease registry. One
+# process: it serves the registry directory over HTTP AND walks you through authoring every package
+# kind (prompt/script/skill/agent/mcp), signing + hashing + transparency-logging each with the SAME
+# `clank_shell::grease::pkg` crypto the durable agent verifies with. Native-only dev tool.
+[[bin]]
+name = "grease-populate"
+path = "src/main.rs"
+
+[dependencies]
+# The single source of truth for the package schemas + content hash + verify helpers. default-features
+# = false drops the repl-driver / wasi:cli export we don't need — we only touch `grease::pkg`.
+clank-shell = { path = "../clank-shell", default-features = false }
+# Signing (SigningKey/Signer) — the lib pulls ed25519-dalek verify-only; the default features here add
+# the signing half, exactly as the grease-fixture example does.
+ed25519-dalek = { version = "2" }
+base64 = "0.22"
+# The RFC-6962 single-leaf `leaf_hash` (sha256(0x00 ‖ data)) — the lib's leaf-hash is private, so we
+# replicate it exactly as the grease-fixture example does.
+sha2 = "0.11.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The interactive TUI (Select / Text / Editor / Confirm). `editor` feature enables the $EDITOR-backed
+# multi-line `Editor` prompt used for prompt/script bodies.
+inquire = { version = "0.7", features = ["editor"] }
+anyhow = "1"
