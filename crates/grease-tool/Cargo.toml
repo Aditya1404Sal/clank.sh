@@ -6,6 +6,9 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[lints]
+workspace = true
+
 # `grease-populate` — an interactive authoring tool + live HTTP server for a grease registry. One
 # process: it serves the registry directory over HTTP AND walks you through authoring every package
 # kind (prompt/script/skill/agent/mcp), signing + hashing + transparency-logging each with the SAME

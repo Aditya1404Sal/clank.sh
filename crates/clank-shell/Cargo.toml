@@ -6,6 +6,9 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[lints]
+workspace = true
+
 [lib]
 # cdylib → the wasm component; rlib → linked by the native `clank` binary.
 crate-type = ["cdylib", "rlib"]

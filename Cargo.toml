@@ -12,6 +12,20 @@ wasip3 = "0.7"
 wit-bindgen = { version = "0.57", default-features = false, features = ["async"] }
 futures = "0.3"
 
+# Workspace-wide lints (audit C1, full set). Every member opts in via `[lints] workspace = true`.
+# Warn-level only: these surface debt on every build without breaking it; burn down over time.
+[workspace.lints.rust]
+unsafe_code = "warn"     # not "forbid": clank has ~7 real SAFETY-documented unsafe blocks
+unreachable_pub = "warn" # surfaces the pub-vs-pub(crate) gap (audit C3); tighten after R1 settles
+missing_docs = "warn"    # clank-shell is a real library (rlib consumed by agent/conformance)
+
+[workspace.lints.clippy]
+# Groups sit at lower priority so the individual lints below always win (cargo's required form).
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn" # the highest-value lint for THIS codebase — ~470 non-test unwrap/expect sites
+expect_used = "warn"
+
 # uucore's upstream 0.9.0 fails to build on wasm32-wasip2 (uses the unstable `wasip2` std
 # feature). Our fork adds a stable encoded-bytes shim. This redirects every transitive uucore
 # (via the uu_* coreutils crates) to the patched fork on both targets.

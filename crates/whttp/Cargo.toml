@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lints]
+workspace = true
+
 # The shared HTTP transport for `wcurl`/`waget` (the "fourth crate" their duplicated seams
 # anticipated). A cfg-gated WASI-HTTP (wstd) / reqwest client plus TARGET-AGNOSTIC redirect
 # following and timeouts — so both command clients behave identically on native and the

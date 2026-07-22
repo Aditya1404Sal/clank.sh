@@ -16,6 +16,9 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[lints]
+workspace = true
+
 [dependencies]
 # Session core only — `repl-driver` (the default feature) is the wasm `wasi:cli/run` export,
 # dropped here the same way clank-agent drops it.

@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lints]
+workspace = true
+
 # Both a library (embedded by clank-shell and any other wasm component) and a standalone CLI binary.
 [lib]
 path = "src/lib.rs"
