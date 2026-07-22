@@ -996,7 +996,7 @@ fi
 
 # --- Gated: a Golem-AGENT package install + a REAL wRPC round-trip. Under --with-grease the fixture
 #     serves a `greeter` package pointing at the `GreeterAgent` deployed alongside clank:agent
-#     (crates/greeter-agent), so `greeter … greet …` actually invokes it in the cluster via
+#     (fixtures/greeter-agent), so `greeter … greet …` actually invokes it in the cluster via
 #     WasmRpcInvoker::invoke_and_await and returns its greeting — the end-to-end proof the AGENT block
 #     used to lack. No API key needed (pure wRPC, no LLM). Set GREASE_AGENT_URL + GREASE_AGENT_PKG.
 if [[ -n "${GREASE_AGENT_URL:-}" && -n "${GREASE_AGENT_PKG:-}" ]]; then
