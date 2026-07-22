@@ -1525,16 +1525,23 @@ fn classify(_line: &str) -> ProcessKind {
     ProcessKind::Builtin
 }
 
-/// A shell.log-safe rendering of `line`: an `export --secret NAME=VALUE` line has its VALUE stripped
-/// to `<redacted>` (README "never written to logs"). The declaration line is the one case the
+/// A shell.log-safe rendering of `line`: strips the VALUE of an `export --secret NAME=VALUE` AND the
+/// argument of any credential-bearing flag (`model add … --key <KEY>`, cluster `--token`, …) to
+/// `<redacted>` (README "never written to logs"). These declaration lines are the cases the
 /// `mask_values` log filter can't cover — the secret isn't in the active set until the line runs, and
-/// the start/end events bracket that — so it is redacted structurally here. Every other line passes
+/// the start/end events bracket that — so they are redacted structurally here. Every other line passes
 /// through untouched (registered secret *values* that appear in later log lines are masked centrally
 /// in `logging::append`).
 fn log_safe_line(line: &str) -> std::borrow::Cow<'_, str> {
-    match crate::builtins::secretenv::redact_export_line(line) {
-        Some(redacted) => std::borrow::Cow::Owned(redacted),
-        None => std::borrow::Cow::Borrowed(line),
+    // `export --secret` first (its NAME=VALUE shape), then any `--key`/`--token`-style flag argument.
+    let export = crate::builtins::secretenv::redact_export_line(line);
+    let base = export.as_deref().unwrap_or(line);
+    match crate::builtins::secretenv::redact_secret_flag_args(base) {
+        Some(flagged) => std::borrow::Cow::Owned(flagged),
+        None => match export {
+            Some(e) => std::borrow::Cow::Owned(e),
+            None => std::borrow::Cow::Borrowed(line),
+        },
     }
 }
 
