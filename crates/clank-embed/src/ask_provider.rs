@@ -85,6 +85,18 @@ async fn send(api_key: &str, body: Vec<u8>) -> Result<(u16, String), String> {
         .map_err(|e| format!("request failed: {e}"))?;
 
     let status = response.status().as_u16();
+    // Reject an over-cap body BEFORE materializing it, when the (untrusted) LLM endpoint declares its
+    // size — the post-hoc check alone bounds the returned value, not peak allocation (audit P1-4).
+    if let Some(len) = response
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<usize>().ok())
+    {
+        if len > MAX_BODY {
+            return Err(format!("response Content-Length {len} exceeds {MAX_BODY} bytes"));
+        }
+    }
     let bytes = response
         .body_mut()
         .contents()

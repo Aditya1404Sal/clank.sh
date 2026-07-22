@@ -61,6 +61,19 @@ impl McpHttp for WstdMcpHttp {
                 )
             })
             .collect();
+        // Reject an over-cap body BEFORE materializing it, when the (untrusted) server declares its
+        // size — the post-hoc check alone only bounds the returned value, not peak allocation, so a
+        // huge declared body would OOM the durable worker first (audit P1-4). A server that omits
+        // Content-Length still hits the post-hoc backstop.
+        if let Some(len) = resp_headers
+            .iter()
+            .find(|(k, _)| k == "content-length")
+            .and_then(|(_, v)| v.trim().parse::<usize>().ok())
+        {
+            if len > MAX_BODY {
+                return Err(format!("response Content-Length {len} exceeds {MAX_BODY} bytes"));
+            }
+        }
         let bytes = response
             .body_mut()
             .contents()
