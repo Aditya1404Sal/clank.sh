@@ -902,23 +902,29 @@ impl Session {
             trace.extend_from_slice(format!("[tool] $ {command}\n[tool] refused: ask cannot call itself\n").as_bytes());
             return done_err("ask cannot call itself".into());
         }
-        // Guard: shell-internal / parent-shell commands mutate state a subprocess tool can't reach.
-        // (`prompt-user` as a bare shell line lands here too — it's ShellInternal — and is refused;
-        // the model reaches the human through the dedicated `prompt_user` tool above instead.)
-        let (_policy, _elevated, cmd_name) = authz::resolve(&self.registry, &command);
-        if let Some(name) = cmd_name.as_deref() {
-            if let Some(m) = self.registry.get(name) {
-                use crate::manifest::ExecutionScope;
-                if matches!(
-                    m.execution_scope,
-                    ExecutionScope::ShellInternal | ExecutionScope::ParentShell
-                ) {
-                    trace.extend_from_slice(format!("[tool] $ {command}\n[tool] refused: shell-internal\n").as_bytes());
-                    return done_err(format!(
-                        "{name} is a shell-internal command, not available as a tool; it mutates \
-                         shell state ask cannot access"
-                    ));
-                }
+        // Guard: shell-internal / parent-shell commands mutate state a subprocess-style tool can't
+        // reach. Checked PER TOP-LEVEL SEGMENT, not just the leading command: `run_shell_tool` runs the
+        // line on the SHARED Session (→ `run_command` → Brush), so a compound tool call like
+        // `ls && cd /etc` must not smuggle a state-mutating builtin (`cd`/`export`/`unset`/`alias`)
+        // past this gate behind a harmless leading command — it would take effect on the real shell.
+        // (`prompt-user` as a bare shell line lands here too — ShellInternal, refused; the model
+        // reaches the human through the dedicated `prompt_user` tool above instead.)
+        use crate::manifest::ExecutionScope;
+        for segment in authz::split_segments(&command) {
+            let (_policy, _elevated, seg_cmd) = authz::resolve(&self.registry, segment);
+            let Some(name) = seg_cmd.as_deref() else { continue };
+            let Some(m) = self.registry.get(name) else { continue };
+            if matches!(
+                m.execution_scope,
+                ExecutionScope::ShellInternal | ExecutionScope::ParentShell
+            ) {
+                trace.extend_from_slice(
+                    format!("[tool] $ {command}\n[tool] refused: shell-internal ({name})\n").as_bytes(),
+                );
+                return done_err(format!(
+                    "{name} is a shell-internal command, not available as a tool; it mutates \
+                     shell state ask cannot access"
+                ));
             }
         }
 

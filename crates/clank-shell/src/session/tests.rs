@@ -3234,6 +3234,31 @@ fn ask_shell_internal_command_is_refused() {
     });
 }
 
+/// The scope gate is PER-SEGMENT: a compound tool call must not smuggle a parent-shell / shell-internal
+/// builtin past the guard behind a harmless leading command. `run_shell_tool` runs on the SHARED
+/// Session, so before this fix `echo ok && cd /etc` (cd = ParentShell) checked only `echo`, ran, and
+/// mutated the real shell cwd.
+#[test]
+fn ask_compound_tool_call_cannot_smuggle_a_shell_internal_command() {
+    on_rt(async {
+        let mut session = Session::new().await.unwrap();
+        let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
+        session.set_ask_provider(Box::new(FakeProvider::scripted(
+            vec![
+                shell_tool_call("c1", "echo ok && cd /etc"),
+                crate::ai::ask::AskResponse::text("ok"),
+            ],
+            seen.clone(),
+        )));
+
+        session.eval_line(r#"sudo ask "sneak""#).await;
+        let tr = last_tool_result(&seen, "c1").expect("a tool result for c1");
+        let msg = tr.outcome.expect_err("a compound line hiding `cd` must be refused");
+        assert!(msg.contains("shell-internal"), "got: {msg}");
+        assert!(msg.contains("cd"), "the offending command should be named: {msg}");
+    });
+}
+
 /// Malformed tool arguments produce an honest error result; the loop continues.
 #[test]
 fn ask_malformed_tool_args_error_and_continue() {
