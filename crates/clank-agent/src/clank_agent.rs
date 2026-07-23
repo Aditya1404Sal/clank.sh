@@ -8,7 +8,7 @@ use golem_rust::{agent_definition, agent_implementation};
 /// positional `EvalResult` record. The engine behind them lives in `clank-embed` (which any Golem
 /// agent can embed); this crate is just clank's own agent type wired with the full provider set.
 #[agent_definition]
-pub trait ClankAgent {
+pub(crate) trait ClankAgent {
     fn new(name: String) -> Self;
 
     /// Evaluate a bash-compatible command line and return structured process output. If the command
@@ -27,7 +27,7 @@ pub trait ClankAgent {
     async fn abort_prompt(&mut self) -> EvalResult;
 }
 
-pub struct ClankAgentImpl {
+pub(crate) struct ClankAgentImpl {
     _name: String,
     /// The embedded shell — durable across invocations; the Session builds lazily on first eval
     /// (`Session::new` is async, this constructor is sync) with clank's full provider set.

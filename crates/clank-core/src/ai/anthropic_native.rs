@@ -31,6 +31,8 @@ pub struct ReqwestAnthropicProvider {
 }
 
 impl ReqwestAnthropicProvider {
+    /// Construct a native provider with a default `reqwest` client (rustls TLS).
+    #[must_use]
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
             .build()

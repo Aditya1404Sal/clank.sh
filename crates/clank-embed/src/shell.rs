@@ -22,6 +22,7 @@ pub struct EmbeddedShell {
     session: Option<Session>,
     /// Deferred provider/setup hook, applied once when the Session is first built. `FnOnce` with no
     /// `Send` bound: the provider seams are `?Send` and the wasm agent is single-threaded.
+    #[allow(clippy::type_complexity)] // the boxed FnOnce setup hook is inherent, and documented above
     setup: Option<Box<dyn FnOnce(&mut Session)>>,
 }
 
@@ -52,6 +53,8 @@ impl EmbeddedShell {
     /// replays; see [`crate::log_sink`]).
     pub fn with_durable_log_sink() -> Self {
         Self::with_setup(|s| {
+            // `set_log_sink` takes `Arc`; the sink is `?Send`+`?Sync` and the agent is single-threaded.
+            #[allow(clippy::arc_with_non_send_sync)]
             s.set_log_sink(std::sync::Arc::new(crate::log_sink::DurableLogSink::new()));
         })
     }
@@ -72,6 +75,8 @@ impl EmbeddedShell {
             // The durable Golem cluster interface backing the `golem` command.
             s.set_golem_cluster(Box::new(crate::golem_cluster::GolemApiCluster));
             // The replay-safe /var/log sink (whole-file rewrite; appends duplicate under replay).
+            // `set_log_sink` takes `Arc`; the sink is `?Send`+`?Sync` and the agent is single-threaded.
+            #[allow(clippy::arc_with_non_send_sync)]
             s.set_log_sink(std::sync::Arc::new(crate::log_sink::DurableLogSink::new()));
         })
     }

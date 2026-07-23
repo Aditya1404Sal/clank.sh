@@ -69,11 +69,9 @@ impl McpHttp for WstdMcpHttp {
             .iter()
             .find(|(k, _)| k == "content-length")
             .and_then(|(_, v)| v.trim().parse::<usize>().ok())
-        {
-            if len > MAX_BODY {
+            && len > MAX_BODY {
                 return Err(format!("response Content-Length {len} exceeds {MAX_BODY} bytes"));
             }
-        }
         let bytes = response
             .body_mut()
             .contents()

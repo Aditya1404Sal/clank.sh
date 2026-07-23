@@ -104,6 +104,7 @@ fn turn_to_message(turn: &AskTurn) -> Value {
 /// Parse a successful Anthropic Messages response body into the neutral [`AskResponse`]: concatenate
 /// `text` blocks, collect `tool_use` blocks as [`AskToolCall`]s, and read `stop_reason` for
 /// `finished_for_tools`.
+#[must_use]
 pub fn parse_response(v: &Value) -> AskResponse {
     let mut texts: Vec<String> = Vec::new();
     let mut tool_calls: Vec<AskToolCall> = Vec::new();
@@ -123,9 +124,7 @@ pub fn parse_response(v: &Value) -> AskResponse {
                         // Re-serialize the parsed input object back to a JSON string (the neutral
                         // type carries arguments as a string).
                         arguments_json: block
-                            .get("input")
-                            .map(|i| i.to_string())
-                            .unwrap_or_else(|| "{}".to_string()),
+                            .get("input").map_or_else(|| "{}".to_string(), std::string::ToString::to_string),
                     });
                 }
                 _ => {}
@@ -146,6 +145,7 @@ pub fn parse_response(v: &Value) -> AskResponse {
 /// Extract a human-readable detail from a non-2xx Anthropic response body. Anthropic error bodies are
 /// JSON `{"error":{"message":...}}`; surface that message if present, else the raw body truncated. The
 /// api key is never echoed back by the API, so this can't leak it.
+#[must_use]
 pub fn parse_error(body: &str) -> String {
     serde_json::from_str::<Value>(body)
         .ok()
@@ -155,6 +155,7 @@ pub fn parse_error(body: &str) -> String {
 
 /// Serialize a [`build_request`] body to bytes. A byte-level entry point so a transport that doesn't
 /// itself depend on `serde_json` (the wasm agent) can build the request through this module alone.
+#[must_use]
 pub fn serialize_request(body: &Value) -> Vec<u8> {
     serde_json::to_vec(body).unwrap_or_default()
 }
@@ -162,6 +163,7 @@ pub fn serialize_request(body: &Value) -> Vec<u8> {
 /// Parse a successful Anthropic response body (as text) into the neutral [`AskResponse`]. Wraps
 /// [`parse_response`] with the JSON decode so a `serde_json`-free transport can parse through this
 /// module; a malformed body becomes an [`AskResponse::error`].
+#[must_use]
 pub fn parse_response_body(text: &str) -> AskResponse {
     match serde_json::from_str::<Value>(text) {
         Ok(v) => parse_response(&v),
