@@ -139,13 +139,16 @@ impl Drop for ShellCwd {
 ///
 /// Two limits worth knowing, neither of them new here:
 ///
-/// - This only rebinds the *fd*. When clank itself is script-fed (`clank < script`) the REPL reads
-///   through the process-global buffered [`std::io::stdin`] (`native.rs`), which has already pulled
-///   later script lines into userspace — a uu consumer drains that buffer in addition to the staged
-///   pipe, so `ls | wc -l` over-counts by the number of unconsumed lines and the rest of the script
-///   is skipped. `dup2` cannot reach bytes that are already in a `BufReader`. The pre-fix code was
-///   broken here too (it saw *only* the leftover lines); fixing it properly means moving the REPL
-///   off the shared buffered stdin.
+/// - This only rebinds the *fd*, and `dup2` cannot reach bytes already sitting in a `BufReader`. A uu
+///   consumer (`wc`/`cat`/`sort`/…) reads its input through the process-global buffered
+///   [`std::io::stdin`] — the same singleton the REPL used to read with `read_line`. That
+///   `read_line` eagerly pulled the whole remaining feed into the shared userspace buffer, so a uu
+///   consumer drained it *in addition to* the staged pipe: `ls | wc -l` over-counted by the queued
+///   lines AND swallowed them, so `printf 'ls | wc -l\necho hi\n' | clank` (and `clank < script`)
+///   lost `echo hi`. FIXED by moving the REPL off the shared buffered stdin: `native.rs`'s
+///   `read_line_raw` reads the shell's own input unbuffered (one byte off fd 0), so no later line is
+///   ever pre-pulled into the singleton buffer a uu consumer can steal. (Interactive reedline never
+///   touched `io::stdin` — it reads via crossterm — so only the piped/script-fed REPL was affected.)
 /// - The upstream is drained to EOF, so an unbounded producer (`yes | head -1`) never completes —
 ///   `head` cannot early-exit and hand the producer an EPIPE, because the drain has to finish before
 ///   the lock is taken. Bounded input, the shell's normal case, is unaffected.
@@ -157,9 +160,24 @@ fn stage_piped_stdin<SE: ShellExtensions>(
     use brush_core::openfiles::{OpenFile, OpenFiles};
     use std::io::Seek;
 
-    let Some(mut source @ OpenFile::PipeReader(_)) = context.try_fd(OpenFiles::STDIN_FD) else {
-        return None;
+    use std::os::fd::AsRawFd;
+    let mut source = context.try_fd(OpenFiles::STDIN_FD)?;
+    // Stage a pipeline stage's `PipeReader` (always safe), OR a genuine `< file` / here-doc redirect
+    // — an `OpenFile::File` the redirect opened on a FRESH fd. The shell's own inherited stdin must
+    // NEVER be staged: it arrives as `OpenFile::Stdin` when clank is pipe-fed, or as an
+    // `OpenFile::File` on **fd 0** when clank is `< script`-fed; draining either swallows the rest of
+    // the session. A redirect-opened file is the only `File` whose fd is not 0, which is exactly what
+    // separates it from the inherited stdin.
+    let stageable = match &source {
+        OpenFile::PipeReader(_) => true,
+        OpenFile::File(_) => source
+            .try_borrow_as_fd()
+            .is_ok_and(|fd| fd.as_raw_fd() != 0),
+        _ => false,
     };
+    if !stageable {
+        return None;
+    }
 
     // Unique per process AND per call: two pipeline stages stage their stdin concurrently.
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
