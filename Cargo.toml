@@ -1,12 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/clank-core", "crates/clank-cli", "crates/clank-agent", "crates/clank-conformance", "utilities/whttp", "utilities/wcurl", "utilities/waget", "crates/grease-tool", "fixtures/greeter-agent"]
+members = ["crates/clank-core", "crates/clank-cli", "crates/clank-agent", "crates/clank-conformance", "utilities/whttp", "utilities/wcurl", "utilities/waget", "dev-tools/grease-tool", "fixtures/greeter-agent"]
 # default-members excludes the two wasm-only component crates, so a bare native `cargo build`
 # is green: greeter-agent is an e2e fixture (the second implementer of the embed surface), and
 # clank-agent's cdylib links only for wasm32-wasip2 (its golem/wasi host imports are undefined
 # natively — the link has never succeeded on native). `--workspace`, explicit `-p`, and the
 # golem deploy path still build both for wasm.
-default-members = ["crates/clank-core", "crates/clank-cli", "crates/clank-conformance", "utilities/whttp", "utilities/wcurl", "utilities/waget", "crates/grease-tool"]
+default-members = ["crates/clank-core", "crates/clank-cli", "crates/clank-conformance", "utilities/whttp", "utilities/wcurl", "utilities/waget", "dev-tools/grease-tool"]
 
 [workspace.package]
 edition = "2021"

@@ -20,7 +20,7 @@ path = "src/main.rs"
 [dependencies]
 # The single source of truth for the package schemas + content hash + verify helpers. default-features
 # = false drops the repl-driver / wasi:cli export we don't need — we only touch `grease::pkg`.
-clank-core = { path = "../clank-core", default-features = false }
+clank-core = { path = "../../crates/clank-core", default-features = false }
 # Signing (SigningKey/Signer) — the lib pulls ed25519-dalek verify-only; the default features here add
 # the signing half, exactly as the grease-fixture example does.
 ed25519-dalek = { version = "2" }
