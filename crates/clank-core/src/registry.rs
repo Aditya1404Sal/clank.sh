@@ -212,7 +212,7 @@ impl CommandRegistry {
     /// programming error (the same name can't resolve to two manifests).
     fn insert(&mut self, manifest: Manifest) {
         let name = manifest.name.clone();
-        assert!(!self.by_name.insert(name.clone(), manifest).is_some(), "duplicate manifest for command '{name}' in the clank registry")
+        assert!(self.by_name.insert(name.clone(), manifest).is_none(), "duplicate manifest for command '{name}' in the clank registry");
     }
 }
 

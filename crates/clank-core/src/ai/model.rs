@@ -79,9 +79,7 @@ impl SimpleCommand for Model {
         let home = context
             .shell
             .env()
-            .get_str("HOME", context.shell)
-            .map(std::borrow::Cow::into_owned)
-            .unwrap_or_else(|| "/home/user".to_string());
+            .get_str("HOME", context.shell).map_or_else(|| "/home/user".to_string(), std::borrow::Cow::into_owned);
 
         let (stdout, stderr, code) = run(&home, &argv);
         if !stdout.is_empty() {

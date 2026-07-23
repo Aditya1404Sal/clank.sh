@@ -33,7 +33,7 @@ fn encode_args(args: &[(String, String)]) -> DataValue {
 fn parse_phantom(phantom: &Option<String>) -> Option<golem_rust::golem_wasm::golem_core_1_5_x::types::Uuid> {
     use golem_rust::golem_wasm::golem_core_1_5_x::types::Uuid;
     let s = phantom.as_ref()?;
-    let hex: String = s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+    let hex: String = s.chars().filter(char::is_ascii_hexdigit).collect();
     if hex.len() != 32 {
         return None;
     }
@@ -64,7 +64,7 @@ fn render_result(value: DataValue) -> String {
 }
 
 /// An [`AgentInvoker`] backed by the durable `WasmRpc` client.
-pub struct WasmRpcInvoker;
+pub(crate) struct WasmRpcInvoker;
 
 #[async_trait::async_trait(?Send)]
 impl AgentInvoker for WasmRpcInvoker {

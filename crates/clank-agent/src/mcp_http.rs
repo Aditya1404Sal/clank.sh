@@ -16,7 +16,7 @@ use clank_core::mcp::client::{HttpResponse, McpHttp};
 const MAX_BODY: usize = 4 * 1024 * 1024;
 
 /// An [`McpHttp`] backed by the durable `wstd` client.
-pub struct WstdMcpHttp;
+pub(crate) struct WstdMcpHttp;
 
 #[async_trait::async_trait(?Send)]
 impl McpHttp for WstdMcpHttp {

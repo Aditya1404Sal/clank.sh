@@ -14,6 +14,7 @@ pub enum BackendKind {
 }
 
 impl BackendKind {
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             BackendKind::Native => "native",

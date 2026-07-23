@@ -2,7 +2,7 @@
 //! `context summarize`/auto-compaction summarization, and model resolution. A few core helpers
 //! (`shell_home`, `resolve_authz`, `mcp_help_for`) ride along here and are re-exported to `super`.
 
-use super::*;
+use super::{Session, LineResult, AskLoopState, authz, Decision, ask_reconstruct, Transcript, ReplState, ShellBuilderExt, DEFAULT_HOME, ASK_MAX_ITERATIONS, ToolStep, AskPause, AskPauseKind, PendingPrompt, PendingKind, Resolution, truncate_tool_output};
 
 /// Read-only Brush builtins the model may call as tools even though clank keeps no manifest for them.
 /// They don't mutate parent-shell state, so the model-tool scope gate allows them explicitly rather
@@ -401,9 +401,7 @@ impl Session {
     fn shell_home(&self) -> String {
         self.shell
             .env()
-            .get_str("HOME", &self.shell)
-            .map(std::borrow::Cow::into_owned)
-            .unwrap_or_else(|| DEFAULT_HOME.to_string())
+            .get_str("HOME", &self.shell).map_or_else(|| DEFAULT_HOME.to_string(), std::borrow::Cow::into_owned)
     }
 
     /// Resolve a line's authorization policy, consulting the static registry AND the dynamic MCP
@@ -475,7 +473,7 @@ impl Session {
                 }
             }
             let rank = authz::decision_rank(decision);
-            if strictest.as_ref().map_or(true, |(r, ..)| rank > *r) {
+            if strictest.as_ref().is_none_or(|(r, ..)| rank > *r) {
                 strictest = Some((rank, policy, elevated, command));
             }
         }
@@ -645,7 +643,7 @@ impl Session {
         // stderr so it isn't lost (README: "raw model response emitted to stderr").
         if state.json {
             let candidate = crate::ai::ask::strip_json_fence(&final_text);
-            if let Ok(_) = serde_json::from_str::<serde_json::Value>(candidate) {
+            if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
                 return LineResult::from_outcome(
                     candidate.as_bytes().to_vec(),
                     state.trace,

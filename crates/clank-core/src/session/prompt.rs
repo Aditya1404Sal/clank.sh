@@ -1,7 +1,7 @@
 //! `Session` methods for the human-in-the-loop pause machinery: surfacing `prompt-user` and
 //! authorization-confirmation pauses (`P` state), and resolving them via `answer_prompt`.
 
-use super::*;
+use super::{Session, LineResult, promptuser, PendingKind, authz, PendingPrompt, Pending, Flow, AnswerInput, Resolution, is_context_summarize};
 
 impl Session {
     /// Handle a `prompt-user` line: parse it, record the pending prompt (durable state), leave the

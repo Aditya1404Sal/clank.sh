@@ -3,7 +3,7 @@ use golem_rust::{Schema, agent_definition, agent_implementation};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Schema, Serialize, Deserialize)]
-pub struct EvalResult {
+pub(crate) struct EvalResult {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: u8,
@@ -15,7 +15,7 @@ pub struct EvalResult {
 
 /// The wire view of a pending `prompt-user` question surfaced to the caller.
 #[derive(Clone, Debug, Schema, Serialize, Deserialize)]
-pub struct PendingPromptView {
+pub(crate) struct PendingPromptView {
     /// The question (with any piped markdown prepended) to present to the human.
     pub question: String,
     /// If present, the response must be one of these values.
@@ -25,7 +25,7 @@ pub struct PendingPromptView {
 /// A durable shell instance. The constructor parameter `name` is the agent identity, so distinct
 /// names are isolated instances (each with its own shell state, transcript, and filesystem).
 #[agent_definition]
-pub trait ClankAgent {
+pub(crate) trait ClankAgent {
     fn new(name: String) -> Self;
 
     /// Evaluate a bash-compatible command line and return structured process output. If the command
@@ -44,7 +44,7 @@ pub trait ClankAgent {
     async fn abort_prompt(&mut self) -> EvalResult;
 }
 
-pub struct ClankAgentImpl {
+pub(crate) struct ClankAgentImpl {
     _name: String,
     /// The live shell session — durable across invocations. Built lazily on first eval
     /// because `Session::new` is async and the constructor is sync.

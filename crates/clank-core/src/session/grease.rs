@@ -1,7 +1,7 @@
 //! `Session` methods for the grease package manager: install/remove/list/info/search/update
 //! and registry management. Shared install helpers + integrity types live in `super` (mod.rs).
 
-use super::*;
+use super::{Session, LineResult, skill_info_text, mcp_info_text, IndexEntry, fetch_index_entry, verify_log_inclusion, InstallIntegrity, is_markdown_frontmatter, materialize_mcp_resources, write_install_marker};
 
 impl Session {
     /// Dispatch a parsed `grease` command.

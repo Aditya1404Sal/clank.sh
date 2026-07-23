@@ -106,12 +106,14 @@ impl std::error::Error for ParseError {}
 
 /// Substitute the runtime variables into scenario text. `${TMP}` is the per-scenario
 /// sandbox dir — substituted in payloads AND expectation text so paths echo back verbatim.
+#[must_use]
 pub fn substitute(text: &str, tmp: &str) -> String {
     text.replace("${TMP}", tmp)
 }
 
 impl Step {
     /// A copy of this step with runtime variables resolved.
+    #[must_use]
     pub fn resolved(&self, tmp: &str) -> Step {
         let sub = |s: &str| substitute(s, tmp);
         Step {
@@ -345,7 +347,7 @@ pub fn parse(name: &str, path: &Path, text: &str) -> Result<Scenario, ParseError
                 // Items are VERBATIM between commas (no trimming) per the payload rule;
                 // a choice containing a comma is inexpressible — documented in README.
                 let list: Vec<String> = payload.unwrap_or_default().split(',').map(str::to_string).collect();
-                if list.iter().any(|c| c.is_empty()) {
+                if list.iter().any(std::string::String::is_empty) {
                     return Err(err(n, "`choices` takes a non-empty comma-separated list".into()));
                 }
                 step.expect.choices = Some(list);
@@ -442,7 +444,7 @@ mod tests {
     #[test]
     fn bare_out_means_one_empty_line() {
         let s = parse_ok("run echo\nout \n");
-        assert_eq!(s.steps[0].expect.stdout.exact, Some(vec!["".into()]));
+        assert_eq!(s.steps[0].expect.stdout.exact, Some(vec![String::new()]));
     }
 
     #[test]

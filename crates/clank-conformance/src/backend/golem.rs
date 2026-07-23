@@ -49,8 +49,7 @@ impl GolemBackend {
         let timeout = std::env::var("CLANK_CONFORMANCE_STEP_TIMEOUT_SECS")
             .ok()
             .and_then(|s| s.parse().ok())
-            .map(Duration::from_secs)
-            .unwrap_or(Duration::from_secs(60));
+            .map_or(Duration::from_mins(1), Duration::from_secs);
 
         Ok(Self {
             rt: tokio::runtime::Builder::new_current_thread()
@@ -67,7 +66,7 @@ impl GolemBackend {
     fn invoke(&self, method: &str, payload: Option<&str>) -> anyhow::Result<Outcome> {
         let mut argv: Vec<String> = ["agent", "invoke", "-q", "--format", "json"]
             .iter()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
         argv.push(self.agent_id.clone());
         argv.push(method.to_string());
@@ -126,7 +125,7 @@ impl ShellBackend for GolemBackend {
         }
     }
 
-    fn tmp(&self) -> &str {
+    fn tmp(&self) -> &'static str {
         // A fresh agent per scenario means a fresh VFS — a fixed path is collision-free.
         // (A fresh agent has NO /tmp; the harness's injected `mkdir -p` step creates it.)
         "/tmp/w"
@@ -143,6 +142,7 @@ impl ShellBackend for GolemBackend {
 ///
 /// `$` is NOT escaped — `\$` is an invalid WAVE escape that silently degrades the whole
 /// argument to a raw string (the e2e's documented trap). Control characters use `\u{…}`.
+#[must_use]
 pub fn wit_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');

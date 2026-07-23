@@ -1,7 +1,7 @@
 //! `Session` methods for MCP: the `mcp` management command, tool/resource/template dispatch,
 //! session management, and the `/mnt/mcp` dynamic-read + `mcp watch` paths.
 
-use super::*;
+use super::{Session, LineResult, prompt_leading_word, fill_uri_template};
 
 impl Session {
     /// Dispatch a parsed `mcp` management command. HTTP-performing subcommands (`add`, `reload`,

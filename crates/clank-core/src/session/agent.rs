@@ -1,7 +1,7 @@
 //! `Session` methods for Golem agent invocation (`<agent> [flags] <method>`) and the `golem`
 //! cluster command. Invocation parsing (`parse_agent_line`) + types live in `super` (mod.rs).
 
-use super::*;
+use super::{Session, prompt_leading_word, LineResult, parse_agent_line, ParsedAgentLine, PendingInvocation};
 
 /// The most fire-and-forget (`--trigger`/`--schedule`) invocations tracked at once. Beyond this the
 /// oldest is presumed complete and reaped — see [`Session::spawn_agent_invocation_row`].

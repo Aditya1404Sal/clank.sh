@@ -19,7 +19,7 @@
 use clank_core::golem::cluster::GolemCluster;
 
 /// A [`GolemCluster`] backed by the durable `golem:api` host bindings.
-pub struct GolemApiCluster;
+pub(crate) struct GolemApiCluster;
 
 /// Render this instance's own metadata (used for `golem oplog`/`status` anchoring + a liveness check).
 fn self_metadata_text() -> String {

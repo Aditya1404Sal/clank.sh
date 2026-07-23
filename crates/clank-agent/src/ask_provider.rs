@@ -27,7 +27,7 @@ use golem_ai_llm_anthropic::{AnthropicConfig, DurableAnthropic};
 const MAX_TOKENS: u32 = 4096;
 
 /// An [`AskProvider`] backed by the durable Anthropic provider.
-pub struct DurableAnthropicProvider;
+pub(crate) struct DurableAnthropicProvider;
 
 #[async_trait::async_trait(?Send)]
 impl AskProvider for DurableAnthropicProvider {

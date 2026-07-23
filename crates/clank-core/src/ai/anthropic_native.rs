@@ -232,9 +232,7 @@ fn parse_response(v: &Value) -> AskResponse {
                         // Re-serialize the parsed input object back to a JSON string (the neutral
                         // type carries arguments as a string).
                         arguments_json: block
-                            .get("input")
-                            .map(std::string::ToString::to_string)
-                            .unwrap_or_else(|| "{}".to_string()),
+                            .get("input").map_or_else(|| "{}".to_string(), std::string::ToString::to_string),
                     });
                 }
                 _ => {}

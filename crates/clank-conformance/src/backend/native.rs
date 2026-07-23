@@ -33,7 +33,7 @@ impl NativeBackend {
         let guard = NATIVE_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let env_snapshot: HashMap<OsString, OsString> = std::env::vars_os().collect();
 

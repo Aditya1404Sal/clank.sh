@@ -63,9 +63,7 @@ fn build_trials(kind: BackendKind, golem_enabled: bool) -> Vec<Trial> {
     let mut trials = Vec::with_capacity(paths.len());
     for path in paths {
         let stem = path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
+            .file_stem().map_or_else(|| path.display().to_string(), |s| s.to_string_lossy().into_owned());
 
         // The stem becomes the golem agent id and is interpolated into the injected
         // `mkdir -p` step — enforce the safe charset at the source.
