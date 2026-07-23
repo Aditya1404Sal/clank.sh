@@ -550,6 +550,7 @@ dependencies = [
  "brush-parser",
  "chrono",
  "clap",
+ "crossterm 0.28.1",
  "diffy",
  "ed25519-dalek",
  "futures",

@@ -135,22 +135,37 @@ async fn run_interactive(session: &mut Session) -> Result<(), Box<dyn std::error
 
     let mut editor = build_editor();
     let mut last_ok = true;
+    let mut read_failures = 0u8;
 
     loop {
         let prompt = StarshipPrompt::new(last_ok);
         let buffer = match editor.read_line(&prompt) {
-            Ok(Signal::Success(buffer)) => buffer,
+            Ok(Signal::Success(buffer)) => {
+                read_failures = 0;
+                buffer
+            }
             // Ctrl-C cancels the current line (like every shell) rather than killing the session.
-            Ok(Signal::CtrlC) => continue,
+            Ok(Signal::CtrlC) => {
+                read_failures = 0;
+                continue;
+            }
             // Ctrl-D on an empty line leaves the shell.
             Ok(Signal::CtrlD) => break,
-            // The line editor couldn't drive this terminal (e.g. no cursor-position reporting).
-            // Drop it — its `Drop` restores cooked mode — and finish on the plain loop rather than
-            // dying, so the shell still works on a barebones terminal.
+            // A read error here is almost always a transient cursor-position-query timeout: right
+            // after a long command (e.g. `ask`) the terminal answers reedline's `\x1b[6n` too late,
+            // and that late reply would otherwise leak into the next line as `^[[..R`. Discard any
+            // stray terminal input and retry rather than downgrading the whole session — only fall
+            // back to the plain loop if it keeps failing (a terminal that truly can't report the
+            // cursor). The next `read_line`'s own query consumes any late reply still buffered.
             Err(e) => {
-                eprintln!("clank: line editor unavailable ({e}); falling back to basic input.");
-                drop(editor);
-                return run_plain(session).await;
+                read_failures += 1;
+                drain_terminal_input();
+                if read_failures >= 4 {
+                    eprintln!("clank: line editor unavailable ({e}); falling back to basic input.");
+                    drop(editor);
+                    return run_plain(session).await;
+                }
+                continue;
             }
         };
         let mut line_str = buffer.trim_end_matches(['\n', '\r']).to_string();
@@ -548,6 +563,22 @@ fn inject_native_providers(session: &mut Session) {
             crate::golem::rest_native::NativeHttpAgentInvoker::new(cfg),
         ));
     }
+}
+
+/// Discard any bytes the terminal has buffered on stdin — a stray cursor-position reply that
+/// arrived after a query timed out, or keystrokes typed while a long command ran — so they can't
+/// pollute the next line-editor read. Best-effort: any terminal error just skips the drain.
+fn drain_terminal_input() {
+    use crossterm::{event, terminal};
+    if terminal::enable_raw_mode().is_err() {
+        return;
+    }
+    while matches!(event::poll(std::time::Duration::ZERO), Ok(true)) {
+        if event::read().is_err() {
+            break;
+        }
+    }
+    let _ = terminal::disable_raw_mode();
 }
 
 /// Write all `bytes` to stdout and flush. Takes a fresh stdout handle each call so no lock is
