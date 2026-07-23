@@ -766,6 +766,8 @@ impl Env {
         let split: Vec<String> = if self.fs == " " {
             line.split_whitespace().map(String::from).collect()
         } else if self.fs.chars().count() == 1 {
+            // Guarded: `chars().count() == 1` above guarantees exactly one char.
+            #[allow(clippy::unwrap_used)]
             let c = self.fs.chars().next().unwrap();
             line.split(c).map(String::from).collect()
         } else {
@@ -1001,16 +1003,16 @@ fn format_printf(format: &str, values: &[Value]) -> AwkResult<String> {
                     chars.next();
                 }
                 let mut width = String::new();
-                while chars.peek().is_some_and(char::is_ascii_digit) {
-                    width.push(chars.next().unwrap());
+                while let Some(c) = chars.next_if(char::is_ascii_digit) {
+                    width.push(c);
                 }
                 let width: Option<usize> = width.parse().ok();
                 let mut prec: Option<usize> = None;
                 if chars.peek() == Some(&'.') {
                     chars.next();
                     let mut p = String::new();
-                    while chars.peek().is_some_and(char::is_ascii_digit) {
-                        p.push(chars.next().unwrap());
+                    while let Some(c) = chars.next_if(char::is_ascii_digit) {
+                        p.push(c);
                     }
                     prec = Some(p.parse().unwrap_or(0));
                 }

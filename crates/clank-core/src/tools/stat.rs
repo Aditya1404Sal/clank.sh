@@ -72,7 +72,7 @@ fn resolve(path: &str, follow: bool) -> Result<StatInfo, String> {
         }
         let environ = crate::runtime::procfs::current_environ();
         let content = crate::runtime::proctable::active()
-            .map(|t| crate::runtime::procfs::resolve(path, &t.lock().unwrap(), &environ))
+            .map(|t| crate::runtime::procfs::resolve(path, &t.lock().unwrap_or_else(std::sync::PoisonError::into_inner), &environ))
             .and_then(Result::ok)
             .ok_or_else(not_found)?;
         return Ok(StatInfo::virtual_file(path, content.len() as u64));

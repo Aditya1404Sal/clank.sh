@@ -597,7 +597,7 @@ impl SimpleCommand for Cat {
             } else if crate::runtime::procfs::is_proc_path(op) {
                 let resolved = table
                     .as_ref()
-                    .map(|t| crate::runtime::procfs::resolve(op, &t.lock().unwrap(), &environ));
+                    .map(|t| crate::runtime::procfs::resolve(op, &t.lock().unwrap_or_else(std::sync::PoisonError::into_inner), &environ));
                 if let Some(Ok(content)) = resolved {
                     let _ = out.write_all(content.as_bytes());
                 } else {

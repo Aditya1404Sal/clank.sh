@@ -339,7 +339,7 @@ fn read_named_input(file: &str, environ: &[(String, String)]) -> Result<Vec<u8>,
     } else if crate::runtime::procfs::is_proc_path(file) {
         crate::runtime::proctable::active()
             .and_then(|t| {
-                crate::runtime::procfs::resolve(file, &t.lock().unwrap(), environ).ok()
+                crate::runtime::procfs::resolve(file, &t.lock().unwrap_or_else(std::sync::PoisonError::into_inner), environ).ok()
             })
             .map(String::into_bytes)
             .ok_or_else(|| format!("{file}: No such file or directory"))
@@ -791,6 +791,8 @@ mod sed {
             count += 1;
             if count == n {
                 // Group 0 (the whole match) is always present for a `Captures` from `captures_iter`.
+                // `get(0)` is the whole match, always present for a successful match.
+                #[allow(clippy::expect_used)]
                 let m = caps.get(0).expect("capture group 0 is always present in a match");
                 out.push_str(&text[last..m.start()]);
                 let mut expanded = String::new();

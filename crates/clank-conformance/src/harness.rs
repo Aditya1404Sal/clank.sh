@@ -98,8 +98,8 @@ fn build_trials(kind: BackendKind, golem_enabled: bool) -> Vec<Trial> {
         // running a scenario that cannot validly run on this tier.
         let not_runnable: Option<String> = if kind == BackendKind::Golem && !golem_enabled {
             Some("golem tier disabled — run scripts/conformance-golem.sh (or set CLANK_CONFORMANCE_GOLEM=1 against a running server)".into())
-        } else if scenario.only.is_some_and(|only| only != kind) {
-            Some(format!("scenario is @only {} — not runnable on the {} tier", scenario.only.unwrap().label(), kind.label()))
+        } else if let Some(only) = scenario.only.filter(|&only| only != kind) {
+            Some(format!("scenario is @only {} — not runnable on the {} tier", only.label(), kind.label()))
         } else if !scenario.requires.is_empty() {
             // Tier-gated scenarios (`@requires network|llm|grease|mcp`) stay visible-but-
             // ignored until those tiers are wired into the harness.

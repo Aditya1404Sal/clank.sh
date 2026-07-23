@@ -69,7 +69,7 @@ impl Session {
         let base_transcript = if args.fresh {
             String::new()
         } else {
-            String::from_utf8_lossy(&self.transcript.lock().unwrap().render()).into_owned()
+            String::from_utf8_lossy(&self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).render()).into_owned()
         };
 
         // Resolve the model: `--model` > ask.toml default > built-in DEFAULT_MODEL. Strip the
@@ -164,9 +164,9 @@ impl Session {
         self.next_ask_stdin = Some(captured);
         let result = self.run_ask(args, blanket).await;
         if let Some(pid) = pid {
-            self.proc_table.lock().unwrap().complete(pid);
+            self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(pid);
         }
-        self.transcript.lock().unwrap().record_output(&result.terminal_output());
+        self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record_output(&result.terminal_output());
         result
     }
 
@@ -199,10 +199,13 @@ impl Session {
         let (model, _warning) = self.resolve_ask_model(args.model.as_deref())?;
         let transcript = match args.seed {
             crate::ai::ask::ReplSeed::Fresh => Transcript::new(),
-            crate::ai::ask::ReplSeed::Inherit => self.transcript.lock().unwrap().clone(),
+            crate::ai::ask::ReplSeed::Inherit => self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone(),
         };
-        self.repl = Some(ReplState { transcript, model });
-        Ok(self.repl.as_ref().unwrap().model.clone())
+        self.repl = Some(ReplState {
+            transcript,
+            model: model.clone(),
+        });
+        Ok(model)
     }
 
     /// The active REPL's model id, for the `[model]>` prompt. `None` if no REPL is active.
@@ -289,7 +292,7 @@ impl Session {
     /// (`$(...)`/pipe) hits the honest error in `apply_context`.
     pub(super) async fn run_context_summarize(&mut self) -> LineResult {
         // Render before awaiting so the transcript lock is never held across the model call.
-        let rendered = String::from_utf8_lossy(&self.transcript.lock().unwrap().render()).into_owned();
+        let rendered = String::from_utf8_lossy(&self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).render()).into_owned();
         if rendered.trim().is_empty() {
             return LineResult::from_outcome(b"(transcript is empty)\n".to_vec(), Vec::new(), 0);
         }
@@ -351,7 +354,7 @@ impl Session {
     /// left as-is — the decided fallback, so recording never blocks or fails.
     pub(super) async fn compact_dropped_span(&mut self) {
         // Snapshot the pending dropped span without holding the lock across the await.
-        let pending = self.transcript.lock().unwrap().pending_summary();
+        let pending = self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).pending_summary();
         let Some((_count, dropped_text)) = pending else {
             return;
         };
@@ -362,11 +365,11 @@ impl Session {
             // No model to summarize with (no provider / no key / bad model id). Discard the
             // pending text so a durable agent doesn't hold it forever; keep the count marker.
             // See audit P1-3.
-            self.transcript.lock().unwrap().discard_dropped_span();
+            self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).discard_dropped_span();
             return;
         };
         if let Ok(Some(summary)) = self.summarize_text(&dropped_text, &model).await {
-            self.transcript.lock().unwrap().set_marker_summary(summary);
+            self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).set_marker_summary(summary);
         }
     }
 
@@ -484,6 +487,9 @@ impl Session {
                 strictest = Some((rank, policy, elevated, command));
             }
         }
+        // Invariant: `split_segments` never returns empty, so the loop above set `strictest` at
+        // least once.
+        #[allow(clippy::expect_used)]
         let (_, policy, elevated, command) = strictest.expect("split_segments never returns empty");
         (policy, elevated, command, gated)
     }
@@ -553,7 +559,7 @@ impl Session {
                 );
                 self.ask_provider = Some(provider);
                 if let Some(pid) = pid {
-                    self.proc_table.lock().unwrap().complete(pid);
+                    self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(pid);
                 }
                 // Under `--json` a truncated loop can't have produced a validated JSON answer, so
                 // honor the exit-6 contract rather than a bare exit 0.
@@ -573,7 +579,7 @@ impl Session {
             if let Some(err) = resp.error {
                 self.ask_provider = Some(provider);
                 if let Some(pid) = pid {
-                    self.proc_table.lock().unwrap().complete(pid);
+                    self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(pid);
                 }
                 let mut stderr = state.trace;
                 stderr.extend_from_slice(err.as_bytes());
@@ -631,7 +637,7 @@ impl Session {
             // tool execution above). A nested prompt tool call has already returned it to `self`.
             let Some(p) = self.ask_provider.take() else {
                 if let Some(pid) = pid {
-                    self.proc_table.lock().unwrap().complete(pid);
+                    self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(pid);
                 }
                 return LineResult::from_outcome(
                     Vec::new(),
@@ -644,7 +650,7 @@ impl Session {
 
         self.ask_provider = Some(provider);
         if let Some(pid) = pid {
-            self.proc_table.lock().unwrap().complete(pid);
+            self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(pid);
         }
 
         // `--json`: enforce the output contract. Valid JSON (after stripping a stray code fence) ⇒
@@ -732,7 +738,7 @@ impl Session {
         // exit 130 with the trace so far. The paused row is reaped here.
         if matches!(resolution, Resolution::Aborted) {
             if let Some(pid) = pid {
-                self.proc_table.lock().unwrap().complete(pid);
+                self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(pid);
             }
             state.trace.extend_from_slice(b"[ask] aborted by user\n");
             return LineResult::from_outcome(Vec::new(), state.trace, 130);

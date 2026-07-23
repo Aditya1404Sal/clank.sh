@@ -530,7 +530,7 @@ impl Session {
                     .any(|t| matches!(t, crate::builtins::kill::Target::Pid(p) if *p == pp))
             );
             if kills_pending {
-                self.transcript.lock().unwrap().record_command(line);
+                self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record_command(line);
                 return self.answer_prompt(None).await;
             }
             // Re-surface the still-outstanding prompt (NOT a bare stderr, which carries
@@ -573,10 +573,10 @@ impl Session {
             Some(secret) if !secret.value.is_empty() => {
                 let redacted =
                     line.replace(&secret.value, crate::runtime::secretenv::REDACTED);
-                self.transcript.lock().unwrap().record_command(&redacted);
+                self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record_command(&redacted);
             }
             _ => {
-                self.transcript.lock().unwrap().record_command(line);
+                self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record_command(line);
             }
         }
 
@@ -614,6 +614,9 @@ impl Session {
         // guards clear the slots on drop. The manifests/index/prompt are read-only surfaces, so sharing
         // one `Arc` across lines is safe.
         let (dynreg, mcpfs, sysprompt) = {
+            // Invariant: Some by this point — the block just above sets it when the cap key changed,
+            // and leaves the existing value otherwise.
+            #[allow(clippy::expect_used)]
             let cap = self.cap_cache.as_ref().expect("cap_cache just populated");
             (cap.dynreg.clone(), cap.mcpfs.clone(), cap.sysprompt.clone())
         };
@@ -631,7 +634,7 @@ impl Session {
                 None
             } else {
                 let kind = classify(line);
-                Some(self.proc_table.lock().unwrap().spawn(kind, argv))
+                Some(self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).spawn(kind, argv))
             }
         };
 
@@ -685,7 +688,7 @@ impl Session {
                     // Inspection output — reap the row but do NOT record it back (like `context show`).
                     let result = self.run_context_summarize().await;
                     if let Some(pid) = pid {
-                        self.proc_table.lock().unwrap().complete(pid);
+                        self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(pid);
                     }
                     return result;
                 }
@@ -706,9 +709,9 @@ impl Session {
         }
 
         // `context show` output is intentionally not recorded back into the transcript.
-        if let Some(bytes) = dispatch_context(&mut self.transcript.lock().unwrap(), line) {
+        if let Some(bytes) = dispatch_context(&mut self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner), line) {
             if let Some(pid) = pid {
-                self.proc_table.lock().unwrap().complete(pid);
+                self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(pid);
             }
             return LineResult::continue_with_stdout(bytes);
         }
@@ -842,7 +845,7 @@ impl Session {
         // `resolve_auth_confirm`, which passes `false`).
         let blanket = elevated || self.authz.allow_all;
         let result = self.run_command(&effective, pid, blanket).await;
-        self.transcript.lock().unwrap().record_output(&result.terminal_output());
+        self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record_output(&result.terminal_output());
         // If recording just evicted old entries to stay under budget, upgrade the leading count marker
         // into a model-generated summary block (no-op when nothing was dropped or no provider exists).
         self.compact_dropped_span().await;
@@ -960,7 +963,7 @@ impl Session {
             }
         };
         if let Some(pid) = pid {
-            self.proc_table.lock().unwrap().complete(pid);
+            self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(pid);
         }
         result
     }
@@ -1001,7 +1004,7 @@ impl Session {
         for (job, _result) in results {
             if let Some(idx) = self.bg_jobs.iter().position(|b| b.job_id == job.id) {
                 let bg = self.bg_jobs.remove(idx);
-                self.proc_table.lock().unwrap().complete(bg.pid);
+                self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(bg.pid);
             }
         }
     }
@@ -1025,7 +1028,7 @@ impl Session {
             let bg_pid = self
                 .proc_table
                 .lock()
-                .unwrap()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .spawn_bg(crate::runtime::process::ProcessKind::Builtin, argv, ppid);
             self.bg_jobs.push(BgJob {
                 job_id,
@@ -1076,7 +1079,7 @@ impl Session {
                     // guaranteed — documented.)
                     if let Some(idx) = self.pending_invocations.iter().position(|p| p.pid == *pid) {
                         let inv = self.pending_invocations.remove(idx);
-                        self.proc_table.lock().unwrap().complete(*pid);
+                        self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(*pid);
                         let msg = if inv.cancel_token.is_some() {
                             format!("[{pid}] cancelled (queued/scheduled invocation)\n")
                         } else {
@@ -1109,7 +1112,7 @@ impl Session {
             let mapping_idx = self.bg_jobs.iter().position(|b| b.job_id == job_id);
             let killed_pid = mapping_idx.map(|i| self.bg_jobs.remove(i).pid);
             if let Some(killed_pid) = killed_pid {
-                self.proc_table.lock().unwrap().complete(killed_pid);
+                self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(killed_pid);
                 stdout.extend_from_slice(
                     format!("[{job_id}] {killed_pid} Killed\t{}\n", job.command_line).as_bytes(),
                 );
@@ -1341,9 +1344,9 @@ impl Session {
     /// through `run_command`, e.g. an authorization denial).
     fn finish_intercepted(&mut self, pid: Option<u32>, result: LineResult) -> LineResult {
         if let Some(pid) = pid {
-            self.proc_table.lock().unwrap().complete(pid);
+            self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(pid);
         }
-        self.transcript.lock().unwrap().record_output(&result.terminal_output());
+        self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record_output(&result.terminal_output());
         result
     }
 
@@ -1523,8 +1526,8 @@ impl Session {
         let result = self.rt.block_on(fut);
         drop(params);
 
-        let stdout = std::mem::take(&mut *stdout_buf.lock().unwrap());
-        let stderr = std::mem::take(&mut *stderr_buf.lock().unwrap());
+        let stdout = std::mem::take(&mut *stdout_buf.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+        let stderr = std::mem::take(&mut *stderr_buf.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
         finish(result, stdout, stderr)
     }
 }
@@ -2350,7 +2353,7 @@ impl std::io::Read for BufSink {
 #[cfg(target_arch = "wasm32")]
 impl std::io::Write for BufSink {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(data);
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).extend_from_slice(data);
         Ok(data.len())
     }
     fn flush(&mut self) -> std::io::Result<()> {

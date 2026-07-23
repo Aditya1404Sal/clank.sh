@@ -11,6 +11,10 @@
 //!
 //! Usage: `cargo run -q --example grease-fixture -- <output-dir>`
 
+// A demo/fixture generator: fail-fast `expect` on bad usage or I/O is the appropriate style here,
+// not `Result` plumbing.
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
 use base64::Engine as _;
 use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};

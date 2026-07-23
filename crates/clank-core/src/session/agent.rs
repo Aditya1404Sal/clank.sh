@@ -278,7 +278,7 @@ impl Session {
             agent_params,
             phantom_uuid: inv.phantom.clone(),
         };
-        let mut table = self.proc_table.lock().unwrap();
+        let mut table = self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let pid = table.spawn_bg(
             crate::runtime::process::ProcessKind::AgentInvocation,
             argv,
@@ -296,7 +296,7 @@ impl Session {
         // reports "already dispatched", which is the honest answer for a fire-and-forget call.
         while self.pending_invocations.len() > MAX_PENDING_INVOCATIONS {
             let old = self.pending_invocations.remove(0);
-            self.proc_table.lock().unwrap().complete(old.pid);
+            self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(old.pid);
         }
         pid
     }

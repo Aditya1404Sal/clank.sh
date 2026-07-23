@@ -64,6 +64,8 @@ impl ClankAgent for ClankAgentImpl {
         if let Err(result) = self.ensure_session().await {
             return result;
         }
+        // `ensure_session` (above) returned Ok, so `session` is Some.
+        #[allow(clippy::unwrap_used)]
         let result = self.session.as_mut().unwrap().eval_line(&cmd).await;
         eval_result(result)
     }
@@ -72,6 +74,8 @@ impl ClankAgent for ClankAgentImpl {
         if let Err(result) = self.ensure_session().await {
             return result;
         }
+        // `ensure_session` (above) returned Ok, so `session` is Some.
+        #[allow(clippy::unwrap_used)]
         let result = self
             .session
             .as_mut()
@@ -85,6 +89,8 @@ impl ClankAgent for ClankAgentImpl {
         if let Err(result) = self.ensure_session().await {
             return result;
         }
+        // `ensure_session` (above) returned Ok, so `session` is Some.
+        #[allow(clippy::unwrap_used)]
         let result = self.session.as_mut().unwrap().answer_prompt(None).await;
         eval_result(result)
     }

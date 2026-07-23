@@ -34,7 +34,7 @@ pub fn lookup(name: &str) -> Option<Manifest> {
     ACTIVE.with(|slot| {
         slot.borrow()
             .as_ref()
-            .and_then(|arc| arc.lock().unwrap().iter().find(|m| m.name == name).cloned())
+            .and_then(|arc| arc.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().find(|m| m.name == name).cloned())
     })
 }
 

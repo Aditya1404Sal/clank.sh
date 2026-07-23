@@ -20,6 +20,8 @@ fn block_on(fut: impl std::future::Future<Output = wcurl::Outcome>) -> wcurl::Ou
 
 #[cfg(not(target_arch = "wasm32"))]
 fn block_on(fut: impl std::future::Future<Output = wcurl::Outcome>) -> wcurl::Outcome {
+    // Runtime construction failure is unrecoverable in the standalone CLI: fail fast.
+    #[allow(clippy::expect_used)]
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
