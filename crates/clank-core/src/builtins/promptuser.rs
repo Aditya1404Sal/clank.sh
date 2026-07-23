@@ -24,6 +24,7 @@ use brush_parser::{tokenize_str, unquote_str, Token};
 /// [`crate::dispatch_context`]'s "leading word" detection, but uses Brush's own tokenizer instead
 /// of `split_whitespace()` since `prompt-user`'s question argument is routinely a quoted string
 /// containing spaces (every README example quotes it).
+#[must_use]
 pub fn is_prompt_user(line: &str) -> bool {
     leading_word(line).as_deref() == Some("prompt-user")
 }
@@ -129,6 +130,7 @@ impl PromptUserArgs {
     /// Convert parsed args into a [`PendingPrompt`]. `stdin_md`, if present, is prepended to the
     /// question verbatim (README: piped stdin is rendered as markdown before the question; real
     /// markdown rendering is deferred — clank has no rich terminal yet).
+    #[must_use]
     pub fn into_pending(self, stdin_md: Option<&str>) -> PendingPrompt {
         let question = match stdin_md {
             Some(md) => format!("{md}\n{}", self.question),
@@ -166,6 +168,7 @@ pub enum Resolution {
 
 /// Resolve a [`PendingPrompt`] against a delivered answer. A response is validated against the
 /// prompt's `choices`; a non-matching response leaves the prompt pending (the caller can re-ask).
+#[must_use]
 pub fn resolve(pending: &PendingPrompt, answer: AnswerInput) -> Resolution {
     match answer {
         AnswerInput::Abort => Resolution::Aborted,
@@ -277,7 +280,7 @@ mod tests {
         for (input, want) in [("y", "yes\n"), ("n", "no\n"), ("a", "all\n"), ("YES", "yes\n")] {
             match resolve(&pending, AnswerInput::Response(input.to_string())) {
                 Resolution::Answered { stdout, .. } => {
-                    assert_eq!(stdout, want.as_bytes(), "input {input:?}")
+                    assert_eq!(stdout, want.as_bytes(), "input {input:?}");
                 }
                 other => panic!("expected Answered for {input:?}, got {other:?}"),
             }

@@ -25,6 +25,7 @@ pub const INTERCEPTED: &[&str] =
     &["prompt-user", "curl", "wget", "context", "ask", "kill", "mcp", "grease", "golem"];
 
 /// Whether `name` is a clank-intercepted command (one Brush can't resolve).
+#[must_use]
 pub fn is_intercepted(name: &str) -> bool {
     INTERCEPTED.contains(&name)
 }
@@ -89,6 +90,7 @@ fn parse(line: &str) -> Option<TypeInvocation> {
 ///
 /// Output shape matches Brush's `type` wording exactly (`"<name> is a shell builtin"`; `-t` →
 /// `"builtin"`) so the two resolvers are indistinguishable to a caller. Returns `(stdout, exit_code)`.
+#[must_use]
 pub fn dispatch(line: &str, registry: &CommandRegistry) -> Option<(String, u8)> {
     let inv = parse(line)?;
     // No names (`type` alone / `type -t`) → let Brush handle its own usage/error.
@@ -129,6 +131,7 @@ pub fn dispatch(line: &str, registry: &CommandRegistry) -> Option<(String, u8)> 
 /// confirmation, `sudo greeter --help` failing as "unknown flag --help before the method"). That path
 /// is not hypothetical: `ask`'s per-command authorization re-runs an approved command WITH the sudo
 /// grant applied, so the model asking for `<cmd> --help` was the one that hit it.
+#[must_use]
 pub fn help_for(line: &str, registry: &CommandRegistry) -> Option<String> {
     let words = words(line)?;
     let words = match words.split_first() {

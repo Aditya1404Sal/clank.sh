@@ -64,6 +64,7 @@ pub struct Response {
 
 impl Response {
     /// Case-insensitive header lookup (the first match wins).
+    #[must_use]
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
@@ -316,7 +317,7 @@ async fn fetch_once(
     // durable agent serializes invocations, it wedges every request queued behind it (audit P2-4).
     // Callers that want a different bound (wcurl `-m`, waget `-T`) still override these.
     let connect_timeout = connect_timeout.or(Some(Duration::from_secs(30)));
-    let timeout = timeout.or(Some(Duration::from_secs(300)));
+    let timeout = timeout.or(Some(Duration::from_mins(5)));
     if let Some(d) = connect_timeout {
         cb = cb.connect_timeout(d);
     }

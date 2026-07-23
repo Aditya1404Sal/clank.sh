@@ -29,7 +29,7 @@ impl Find {
 
 /// Translate a shell glob (`*`, `?`, `[...]`) to an anchored regex. `-name` matches basenames
 /// (which contain no `/`), so `*` mapping to `.*` is exact; for `-path`, GNU find's `*` crosses
-/// `/` anyway (fnmatch without FNM_PATHNAME), so the same mapping is correct there too.
+/// `/` anyway (fnmatch without `FNM_PATHNAME`), so the same mapping is correct there too.
 fn glob_to_regex(glob: &str, ignore_case: bool) -> Result<regex::Regex, regex::Error> {
     let mut re = String::from(if ignore_case { "(?i)^" } else { "^" });
     for c in glob.chars() {
@@ -172,7 +172,7 @@ fn walk(path: &str, depth: usize, opts: &FindOpts, out: &mut dyn Write, errs: &m
         match std::fs::read_dir(path) {
             Ok(rd) => {
                 let mut children: Vec<String> = rd
-                    .filter_map(|e| e.ok())
+                    .filter_map(std::result::Result::ok)
                     .map(|e| e.path().to_string_lossy().into_owned())
                     .collect();
                 children.sort();
@@ -267,7 +267,7 @@ impl SimpleCommand for Find {
         for e in errs {
             let _ = writeln!(context.stderr(), "find: {e}");
         }
-        Ok(ExecutionResult::new(if failed { 1 } else { 0 }))
+        Ok(ExecutionResult::new(u8::from(failed)))
     }
 }
 

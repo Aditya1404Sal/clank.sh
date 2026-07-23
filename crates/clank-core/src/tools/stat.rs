@@ -287,7 +287,7 @@ impl SimpleCommand for Stat {
                 }
             }
         }
-        Ok(ExecutionResult::new(if failed { 1 } else { 0 }))
+        Ok(ExecutionResult::new(u8::from(failed)))
     }
 }
 

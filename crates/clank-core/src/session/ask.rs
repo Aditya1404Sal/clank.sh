@@ -197,6 +197,7 @@ impl Session {
     }
 
     /// The active REPL's model id, for the `[model]>` prompt. `None` if no REPL is active.
+    #[must_use]
     pub fn repl_model(&self) -> Option<String> {
         self.repl.as_ref().map(|r| r.model.clone())
     }
@@ -350,15 +351,12 @@ impl Session {
         if dropped_text.trim().is_empty() {
             return;
         }
-        let model = match self.resolve_ask_model(None) {
-            Ok((model, _warning)) => model,
-            Err(_) => {
-                // No model to summarize with (no provider / no key / bad model id). Discard the
-                // pending text so a durable agent doesn't hold it forever; keep the count marker.
-                // See audit P1-3.
-                self.transcript.lock().unwrap().discard_dropped_span();
-                return;
-            }
+        let model = if let Ok((model, _warning)) = self.resolve_ask_model(None) { model } else {
+            // No model to summarize with (no provider / no key / bad model id). Discard the
+            // pending text so a durable agent doesn't hold it forever; keep the count marker.
+            // See audit P1-3.
+            self.transcript.lock().unwrap().discard_dropped_span();
+            return;
         };
         if let Ok(Some(summary)) = self.summarize_text(&dropped_text, &model).await {
             self.transcript.lock().unwrap().set_marker_summary(summary);
@@ -404,7 +402,7 @@ impl Session {
         self.shell
             .env()
             .get_str("HOME", &self.shell)
-            .map(|h| h.into_owned())
+            .map(std::borrow::Cow::into_owned)
             .unwrap_or_else(|| DEFAULT_HOME.to_string())
     }
 
@@ -477,7 +475,7 @@ impl Session {
                 }
             }
             let rank = authz::decision_rank(decision);
-            if strictest.as_ref().map(|(r, ..)| rank > *r).unwrap_or(true) {
+            if strictest.as_ref().map_or(true, |(r, ..)| rank > *r) {
                 strictest = Some((rank, policy, elevated, command));
             }
         }
@@ -647,23 +645,20 @@ impl Session {
         // stderr so it isn't lost (README: "raw model response emitted to stderr").
         if state.json {
             let candidate = crate::ai::ask::strip_json_fence(&final_text);
-            match serde_json::from_str::<serde_json::Value>(candidate) {
-                Ok(_) => {
-                    return LineResult::from_outcome(
-                        candidate.as_bytes().to_vec(),
-                        state.trace,
-                        0,
-                    );
+            if let Ok(_) = serde_json::from_str::<serde_json::Value>(candidate) {
+                return LineResult::from_outcome(
+                    candidate.as_bytes().to_vec(),
+                    state.trace,
+                    0,
+                );
+            } else {
+                let mut stderr = state.trace;
+                stderr.extend_from_slice(b"ask: --json: model did not return valid JSON\n");
+                stderr.extend_from_slice(final_text.as_bytes());
+                if !final_text.ends_with('\n') {
+                    stderr.push(b'\n');
                 }
-                Err(_) => {
-                    let mut stderr = state.trace;
-                    stderr.extend_from_slice(b"ask: --json: model did not return valid JSON\n");
-                    stderr.extend_from_slice(final_text.as_bytes());
-                    if !final_text.ends_with('\n') {
-                        stderr.push(b'\n');
-                    }
-                    return LineResult::from_outcome(Vec::new(), stderr, 6);
-                }
+                return LineResult::from_outcome(Vec::new(), stderr, 6);
             }
         }
 

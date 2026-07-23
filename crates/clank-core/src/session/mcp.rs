@@ -494,11 +494,11 @@ impl Session {
         for i in 0..POLLS {
             match client.read_resource(uri, session.as_deref()).await {
                 Ok(content) => {
-                    if last.as_deref() != Some(content.as_str()) {
+                    if last.as_deref() == Some(content.as_str()) {
+                        out.push_str(&format!("[poll {}] (unchanged)\n", i + 1));
+                    } else {
                         out.push_str(&format!("[poll {}] {}\n", i + 1, content.trim_end()));
                         last = Some(content);
-                    } else {
-                        out.push_str(&format!("[poll {}] (unchanged)\n", i + 1));
                     }
                 }
                 Err(e) => {

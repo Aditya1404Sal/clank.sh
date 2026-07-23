@@ -122,18 +122,21 @@ impl Manifest {
     }
 
     /// Override the execution scope (builder-style).
+    #[must_use]
     pub fn with_scope(mut self, scope: ExecutionScope) -> Self {
         self.execution_scope = scope;
         self
     }
 
     /// Override the authorization policy (builder-style).
+    #[must_use]
     pub fn with_policy(mut self, policy: AuthorizationPolicy) -> Self {
         self.authorization_policy = policy;
         self
     }
 
     /// Attach the input parameter schema (builder-style).
+    #[must_use]
     pub fn with_params(mut self, params: Vec<ParamSpec>) -> Self {
         self.input_schema = params;
         self
@@ -148,6 +151,7 @@ impl Manifest {
     /// Declare the parameter names whose values must be redacted from every rendered surface
     /// (`ps`, logs, history, transcript, completion caches, provider manifests) — builder-style.
     /// See [`redaction_rules`](Self::redaction_rules).
+    #[must_use]
     pub fn with_redaction(mut self, rules: Vec<String>) -> Self {
         self.redaction_rules = rules;
         self
@@ -159,6 +163,7 @@ impl Manifest {
 /// unit-testable; the [`Session`](crate::session::Session) calls it to decide, from the manifest
 /// rather than a hardcoded flag name, whether a `prompt-user` response (or any future redaction-ruled
 /// command's marked value) must be kept out of the transcript/logs. Empty rules ⇒ never redacts.
+#[must_use]
 pub fn flags_trigger_redaction(rules: &[String], words: &[String]) -> bool {
     !rules.is_empty() && words.iter().any(|w| rules.iter().any(|r| r == w))
 }

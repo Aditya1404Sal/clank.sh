@@ -80,7 +80,7 @@ impl SimpleCommand for Which {
             }
         }
 
-        let code = if names.is_empty() || all_found { 0 } else { 1 };
+        let code = u8::from(!(names.is_empty() || all_found));
         Ok(ExecutionResult::new(code))
     }
 }

@@ -65,6 +65,7 @@ pub enum ProcState {
 
 impl ProcState {
     /// The single-letter code shown in `ps`'s STAT column and `/proc/<pid>/status`.
+    #[must_use]
     pub fn code(self) -> char {
         match self {
             ProcState::R => 'R',
@@ -76,6 +77,7 @@ impl ProcState {
     }
 
     /// The long name shown alongside the code in `/proc/<pid>/status` (`R (running)`).
+    #[must_use]
     pub fn long_name(self) -> &'static str {
         match self {
             ProcState::R => "running",
@@ -122,6 +124,7 @@ impl ProcRow {
     /// masked so a secret never leaks through `ps` COMMAND, `/proc/<pid>/cmdline`, or the `Cmd:` line
     /// of `/proc/<pid>/status` — the display chokepoint all three render through. See
     /// [`crate::runtime::secretenv`].
+    #[must_use]
     pub fn command(&self) -> String {
         crate::runtime::secretenv::mask_values(&self.argv.join(" "))
     }
@@ -129,6 +132,7 @@ impl ProcRow {
 
 /// The canonical synthetic shell-root row (PID 1). It is not stored in the table — both `ps` (via
 /// the renderers) and `/proc` (via [`ProcessTable::find`]) source it here so they can't drift.
+#[must_use]
 pub fn root_row() -> ProcRow {
     ProcRow {
         pid: SHELL_ROOT_PID,
@@ -171,6 +175,7 @@ impl Default for ProcessTable {
 }
 
 impl ProcessTable {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -279,12 +284,14 @@ impl ProcessTable {
     }
 
     /// The rows, oldest first (for tests and rendering).
+    #[must_use]
     pub fn rows(&self) -> &[ProcRow] {
         &self.rows
     }
 
     /// Look up a process by PID, including the synthetic root (PID 1), which is not a stored row.
     /// This is the single place PID-1 handling lives, so `ps` and `/proc` can't disagree about it.
+    #[must_use]
     pub fn find(&self, pid: u32) -> Option<ProcRow> {
         if pid == SHELL_ROOT_PID {
             return Some(root_row());
@@ -293,6 +300,7 @@ impl ProcessTable {
     }
 
     /// Render the table in the given `ps` mode, including the synthetic root row.
+    #[must_use]
     pub fn render_ps(&self, mode: PsMode) -> String {
         match mode {
             PsMode::Default => self.render_default(),
@@ -382,6 +390,7 @@ pub fn install(table: Arc<Mutex<ProcessTable>>) -> InstallGuard {
 }
 
 /// The currently-installed process table, if a line is executing on this thread.
+#[must_use]
 pub fn active() -> Option<Arc<Mutex<ProcessTable>>> {
     ACTIVE.with(|slot| slot.borrow().clone())
 }
@@ -515,7 +524,7 @@ mod tests {
         assert!(out.contains("clank"));
         // The completed command shows as Z.
         let cmd_line = out.lines().find(|l| l.contains("echo hi")).unwrap();
-        assert!(cmd_line.contains("Z"));
+        assert!(cmd_line.contains('Z'));
     }
 
     #[test]

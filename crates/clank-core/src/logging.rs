@@ -40,6 +40,7 @@ pub const DEFAULT_LOG_DIR: &str = "/var/log";
 pub const LOG_DIR_ENV: &str = "CLANK_LOG_DIR";
 
 /// The log directory: `$CLANK_LOG_DIR` if set, else `/var/log`.
+#[must_use]
 pub fn log_dir() -> PathBuf {
     PathBuf::from(std::env::var(LOG_DIR_ENV).unwrap_or_else(|_| DEFAULT_LOG_DIR.to_string()))
 }
@@ -49,7 +50,7 @@ pub fn log_dir() -> PathBuf {
 #[cfg(test)]
 pub fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// A destination for log lines. Implemented by [`DefaultLogSink`] (native/tests: append directly) and by
@@ -120,6 +121,7 @@ pub enum LogFile {
 
 impl LogFile {
     /// The fixed filename under [`log_dir`].
+    #[must_use]
     pub fn filename(self) -> &'static str {
         match self {
             LogFile::Shell => "shell.log",
@@ -157,6 +159,7 @@ pub struct Record {
 }
 
 impl Record {
+    #[must_use]
     pub fn new(kind: &'static str) -> Self {
         Self { kind, fields: Vec::new() }
     }
@@ -244,6 +247,7 @@ const SECRET_QUERY_PARAMS: &[&str] =
 /// `https://h/mcp?token=sk-abc&x=1` → `https://h/mcp?token=<redacted>&x=1`. Anything before the `?` is
 /// untouched. A parameter whose name (case-insensitive) is in [`SECRET_QUERY_PARAMS`] has its value
 /// replaced. Non-secret params and a URL with no query string pass through unchanged.
+#[must_use]
 pub fn redact_url(url: &str) -> String {
     let Some((base, query)) = url.split_once('?') else {
         return url.to_string();
@@ -334,10 +338,10 @@ mod tests {
             .field("line", "echo \"hi\"\nrm -rf /\tC:\\path")
             .render();
         assert!(!line.contains('\n'), "no raw newline may survive: {line:?}");
-        assert!(line.contains(r#"\n"#), "the newline is escaped: {line}");
+        assert!(line.contains(r"\n"), "the newline is escaped: {line}");
         assert!(line.contains(r#"\""#), "the quote is escaped: {line}");
-        assert!(line.contains(r#"\\"#), "the backslash is escaped: {line}");
-        assert!(line.contains(r#"\t"#), "the tab is escaped: {line}");
+        assert!(line.contains(r"\\"), "the backslash is escaped: {line}");
+        assert!(line.contains(r"\t"), "the tab is escaped: {line}");
         // Exactly one line.
         assert_eq!(line.lines().count(), 1);
     }

@@ -42,6 +42,7 @@ pub(crate) fn registry() -> &'static CommandRegistry {
 }
 
 /// Whether `path` is under the virtual `/bin` namespace. (`/bin` itself and `/bin/` count too.)
+#[must_use]
 pub fn is_bin_path(path: &str) -> bool {
     path == "/bin" || path.starts_with(BIN_ROOT)
 }

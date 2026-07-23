@@ -61,7 +61,7 @@ pub(crate) fn classify(line: &str) -> Option<Result<GreaseCommand, String>> {
 }
 
 fn parse(args: &[String]) -> Result<GreaseCommand, String> {
-    let sub = args.first().map(String::as_str).unwrap_or("list");
+    let sub = args.first().map_or("list", String::as_str);
     match sub {
         "registry" => parse_registry(&args[1..]),
         "install" | "add" => {
@@ -127,7 +127,7 @@ fn parse_registry(args: &[String]) -> Result<GreaseCommand, String> {
             let url = url.ok_or("grease registry add: needs a <url>")?;
             Ok(GreaseCommand::RegistryAdd { url, key })
         }
-        Some("remove") | Some("rm") => {
+        Some("remove" | "rm") => {
             let url = args.get(1).ok_or("grease registry remove: needs a <url>")?;
             Ok(GreaseCommand::RegistryRemove { url: url.clone() })
         }

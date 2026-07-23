@@ -40,7 +40,7 @@ use crate::manifest::{AuthorizationPolicy, ExecutionScope, Manifest};
 ///   the bg-job mapping, proc table, and pending prompt; Brush's own kill is nix/unix-gated). See
 ///   `killcmd`.
 /// - `cd`, `export`, `exec`, `exit`, `unset`, `source` (parent-shell) and `alias`, `jobs`, `fg`, `bg`,
-///   `history`, `read`, `wait` (shell-internal) — Brush-native BashMode builtins, like `type`/`command`
+///   `history`, `read`, `wait` (shell-internal) — Brush-native `BashMode` builtins, like `type`/`command`
 ///   above. clank adds manifests so `man`/`/bin`/help and the execution-scope classification cover them;
 ///   they dispatch through Brush unchanged (the manifest is metadata only). This completes the
 ///   "special-builtin / parent-shell + shell-internal classification" that `build()` had deferred.
@@ -175,11 +175,13 @@ pub struct CommandRegistry {
 
 impl CommandRegistry {
     /// Look up a command's manifest by name.
+    #[must_use]
     pub fn get(&self, name: &str) -> Option<&Manifest> {
         self.by_name.get(name)
     }
 
     /// Whether a command with this name is registered.
+    #[must_use]
     pub fn contains(&self, name: &str) -> bool {
         self.by_name.contains_key(name)
     }
@@ -195,11 +197,13 @@ impl CommandRegistry {
     }
 
     /// Number of registered commands.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.by_name.len()
     }
 
     /// Whether the registry is empty.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.by_name.is_empty()
     }
@@ -208,18 +212,17 @@ impl CommandRegistry {
     /// programming error (the same name can't resolve to two manifests).
     fn insert(&mut self, manifest: Manifest) {
         let name = manifest.name.clone();
-        if self.by_name.insert(name.clone(), manifest).is_some() {
-            panic!("duplicate manifest for command '{name}' in the clank registry");
-        }
+        assert!(!self.by_name.insert(name.clone(), manifest).is_some(), "duplicate manifest for command '{name}' in the clank registry")
     }
 }
 
 /// Build the registry from the manifests authored alongside clank's builtins.
 ///
 /// Clank-authored builtins carry their manifests next to their registration; the Brush-native
-/// BashMode builtins (`cd`, `export`, `type`, `alias`, …) have hand-authored manifests in
+/// `BashMode` builtins (`cd`, `export`, `type`, `alias`, …) have hand-authored manifests in
 /// [`manual_manifests`] classifying them as `parent-shell` / `shell-internal`. (`echo` and other
 /// Brush builtins without a clank manifest simply fall back to Brush's own help.)
+#[must_use]
 pub fn build() -> CommandRegistry {
     let mut registry = CommandRegistry::default();
     for manifest in crate::tools::coreutils::manifests() {
@@ -312,7 +315,7 @@ mod tests {
             // MANUAL_MANIFESTS covers commands with a manifest but no `.builtins()` registration
             // (see its doc comment for why each entry is legitimate) — union them into the
             // expected set rather than requiring a `SimpleCommand` for every manifest.
-            .chain(MANUAL_MANIFESTS.iter().map(|s| s.to_string()))
+            .chain(MANUAL_MANIFESTS.iter().map(std::string::ToString::to_string))
             .collect();
 
         let registry = build();

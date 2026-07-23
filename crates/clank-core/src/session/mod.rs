@@ -164,6 +164,7 @@ pub struct LineResult {
 
 impl LineResult {
     /// Bytes as a terminal would display them through the legacy `run_line` API.
+    #[must_use]
     pub fn terminal_output(&self) -> Vec<u8> {
         let mut output = self.stdout.clone();
         output.extend_from_slice(&self.stderr);
@@ -237,7 +238,7 @@ pub struct Session {
     authz: AuthzState,
     /// Live background jobs: the Brush job id ↔ clank PID mapping `kill <pid>` resolves through.
     /// Deterministic under Golem replay — derived purely from the replayed line history, like the
-    /// process table (the JoinHandles themselves are rebuilt by re-execution).
+    /// process table (the `JoinHandles` themselves are rebuilt by re-execution).
     bg_jobs: Vec<BgJob>,
     /// The injected LLM provider for `ask`. Installed by the agent build (a durable Anthropic
     /// provider); `None` on native and until injected, in which case `ask` degrades to a clean
@@ -429,6 +430,7 @@ impl Session {
     }
 
     /// The command registry — clank's inventory of command manifests.
+    #[must_use]
     pub fn registry(&self) -> &CommandRegistry {
         &self.registry
     }
@@ -1036,15 +1038,12 @@ impl Session {
         for target in &args.targets {
             let job_id = match target {
                 Target::Job(spec) => {
-                    match self.shell.jobs_mut().resolve_job_spec(spec).map(|j| j.id) {
-                        Some(id) => id,
-                        None => {
-                            stderr.extend_from_slice(
-                                format!("kill: {spec}: no such job\n").as_bytes(),
-                            );
-                            any_missed = true;
-                            continue;
-                        }
+                    if let Some(id) = self.shell.jobs_mut().resolve_job_spec(spec).map(|j| j.id) { id } else {
+                        stderr.extend_from_slice(
+                            format!("kill: {spec}: no such job\n").as_bytes(),
+                        );
+                        any_missed = true;
+                        continue;
                     }
                 }
                 Target::Pid(pid) => {
@@ -1075,15 +1074,12 @@ impl Session {
                         stdout.extend_from_slice(msg.as_bytes());
                         continue;
                     }
-                    match self.bg_jobs.iter().find(|b| b.pid == *pid) {
-                        Some(bg) => bg.job_id,
-                        None => {
-                            stderr.extend_from_slice(
-                                format!("kill: ({pid}) - No such process\n").as_bytes(),
-                            );
-                            any_missed = true;
-                            continue;
-                        }
+                    if let Some(bg) = self.bg_jobs.iter().find(|b| b.pid == *pid) { bg.job_id } else {
+                        stderr.extend_from_slice(
+                            format!("kill: ({pid}) - No such process\n").as_bytes(),
+                        );
+                        any_missed = true;
+                        continue;
                     }
                 }
             };
@@ -1381,6 +1377,7 @@ impl Session {
     }
 
     /// Whether a `prompt-user` question is currently awaiting a response.
+    #[must_use]
     pub fn has_pending_prompt(&self) -> bool {
         self.pending.is_some()
     }
@@ -1394,6 +1391,7 @@ impl Session {
     ///
     /// The native REPL uses it to drive PS2 continuation; `eval_line_inner` uses it to answer
     /// incomplete input honestly instead of letting the fatal-parse path end the session.
+    #[must_use]
     pub fn line_is_incomplete(&self, line: &str) -> bool {
         match self.shell.parse_string(line) {
             Err(brush_parser::ParseError::Tokenizing { ref inner, .. }) if inner.is_incomplete() => {
@@ -1635,7 +1633,7 @@ struct IndexEntry {
 /// the exit code. curl/wget bypass the `McpHttp` seam (their own `wstd`/`reqwest` fetch), so they're
 /// logged here at the dispatch site rather than by the `LoggingMcpHttp` decorator.
 fn log_http_tool(tool: &str, args: &[String], exit_code: u8) {
-    let url = args.iter().find(|a| !a.starts_with('-')).map(String::as_str).unwrap_or("");
+    let url = args.iter().find(|a| !a.starts_with('-')).map_or("", String::as_str);
     crate::logging::Record::new("http")
         .field("tool", tool)
         .field("url", crate::logging::redact_url(url))
@@ -2144,11 +2142,11 @@ fn build_mcp_arguments(
         let coerced = match (ty, value) {
             (Some("boolean"), None) => Value::Bool(true),
             (Some("boolean"), Some(v)) => Value::Bool(v == "true" || v == "1" || v == "yes"),
-            (Some("integer"), Some(v)) | (Some("number"), Some(v)) => v
+            (Some("integer" | "number"), Some(v)) => v
                 .parse::<f64>()
                 .map(|n| serde_json::json!(n))
                 .map_err(|_| format!("--{key}: '{v}' is not a number"))?,
-            (Some("array"), Some(v)) | (Some("object"), Some(v)) => serde_json::from_str(v)
+            (Some("array" | "object"), Some(v)) => serde_json::from_str(v)
                 .map_err(|e| format!("--{key}: expected JSON: {e}"))?,
             (_, Some(v)) => Value::String(v.clone()),
             // A bare flag with no schema type: treat as a present boolean.

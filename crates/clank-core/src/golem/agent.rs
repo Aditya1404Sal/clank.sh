@@ -46,6 +46,7 @@ pub struct AgentInvocation {
 
 impl AgentInvocation {
     /// A bare await-mode invocation (no wrapper flags) — the common case + test helper.
+    #[must_use]
     pub fn new(
         agent_type: String,
         constructor: Vec<(String, String)>,

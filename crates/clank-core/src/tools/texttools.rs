@@ -214,7 +214,7 @@ fn run_jq(
         }
     }
 
-    Ok(if failed { 1 } else { 0 })
+    Ok(i32::from(failed))
 }
 
 /// Parsed `grep` invocation. Flags may appear anywhere (GNU permutes); short flags cluster
@@ -349,7 +349,7 @@ fn collect_files_recursive(root: &str, acc: &mut Vec<String>, errs: &mut Vec<Str
         Ok(md) if md.is_dir() => match std::fs::read_dir(root) {
             Ok(rd) => {
                 let mut children: Vec<String> = rd
-                    .filter_map(|e| e.ok())
+                    .filter_map(std::result::Result::ok)
                     .map(|e| e.path().to_string_lossy().into_owned())
                     .collect();
                 children.sort();
@@ -468,23 +468,20 @@ fn run_grep(
         let mut printer = printer_builder.build_no_color(&mut *out);
         for (label, bytes) in &inputs {
             let display = label.as_deref().unwrap_or("(standard input)");
-            let result = match label {
-                Some(file) => {
-                    let mut sink = printer.sink_with_path(&matcher, file);
-                    let r = searcher.search_slice(&matcher, bytes, &mut sink);
-                    if sink.has_match() {
-                        matched = true;
-                    }
-                    r
+            let result = if let Some(file) = label {
+                let mut sink = printer.sink_with_path(&matcher, file);
+                let r = searcher.search_slice(&matcher, bytes, &mut sink);
+                if sink.has_match() {
+                    matched = true;
                 }
-                None => {
-                    let mut sink = printer.sink(&matcher);
-                    let r = searcher.search_slice(&matcher, bytes, &mut sink);
-                    if sink.has_match() {
-                        matched = true;
-                    }
-                    r
+                r
+            } else {
+                let mut sink = printer.sink(&matcher);
+                let r = searcher.search_slice(&matcher, bytes, &mut sink);
+                if sink.has_match() {
+                    matched = true;
                 }
+                r
             };
             if let Err(e) = result {
                 let _ = writeln!(err, "grep: {display}: {e}");
@@ -495,11 +492,7 @@ fn run_grep(
 
     Ok(if failed {
         2
-    } else if matched {
-        0
-    } else {
-        1
-    })
+    } else { i32::from(!matched) })
 }
 
 fn run_sed(
@@ -889,7 +882,7 @@ fn run_diff(
         .header(&args[0], &args[1])
         .to_string();
     write!(out, "{rendered}")?;
-    Ok(if rendered.is_empty() { 0 } else { 1 })
+    Ok(i32::from(!rendered.is_empty()))
 }
 
 fn run_patch(
@@ -927,15 +920,12 @@ fn run_file(
             writeln!(out, "{file}: directory")?;
             continue;
         }
-        match infer::get_from_path(path)? {
-            Some(kind) => writeln!(out, "{file}: {} ({})", kind.mime_type(), kind.extension())?,
-            None => {
-                let bytes = std::fs::read(path)?;
-                if std::str::from_utf8(&bytes).is_ok() {
-                    writeln!(out, "{file}: text/plain")?;
-                } else {
-                    writeln!(out, "{file}: data")?;
-                }
+        if let Some(kind) = infer::get_from_path(path)? { writeln!(out, "{file}: {} ({})", kind.mime_type(), kind.extension())? } else {
+            let bytes = std::fs::read(path)?;
+            if std::str::from_utf8(&bytes).is_ok() {
+                writeln!(out, "{file}: text/plain")?;
+            } else {
+                writeln!(out, "{file}: data")?;
             }
         }
     }

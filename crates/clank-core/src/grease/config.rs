@@ -55,21 +55,25 @@ pub struct RegistryEntry {
 pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// The config directory, honoring `$CLANK_GREASE_ETC`.
+#[must_use]
 pub fn etc_dir() -> PathBuf {
     PathBuf::from(std::env::var("CLANK_GREASE_ETC").unwrap_or_else(|_| DEFAULT_ETC.to_string()))
 }
 
 /// The payload store directory, honoring `$CLANK_GREASE_STORE`.
+#[must_use]
 pub fn store_dir() -> PathBuf {
     PathBuf::from(std::env::var("CLANK_GREASE_STORE").unwrap_or_else(|_| DEFAULT_STORE.to_string()))
 }
 
 /// The prompt bin directory, honoring `$CLANK_GREASE_BIN`.
+#[must_use]
 pub fn bin_dir() -> PathBuf {
     PathBuf::from(std::env::var("CLANK_GREASE_BIN").unwrap_or_else(|_| DEFAULT_BIN.to_string()))
 }
 
 /// The script bin directory (`/usr/bin`), honoring `$CLANK_GREASE_SCRIPT_BIN`.
+#[must_use]
 pub fn script_bin_dir() -> PathBuf {
     PathBuf::from(
         std::env::var("CLANK_GREASE_SCRIPT_BIN").unwrap_or_else(|_| DEFAULT_SCRIPT_BIN.to_string()),
@@ -77,11 +81,13 @@ pub fn script_bin_dir() -> PathBuf {
 }
 
 /// The skills directory (`/usr/share/skills`), honoring `$CLANK_GREASE_SKILLS`.
+#[must_use]
 pub fn skills_dir() -> PathBuf {
     PathBuf::from(std::env::var("CLANK_GREASE_SKILLS").unwrap_or_else(|_| DEFAULT_SKILLS.to_string()))
 }
 
 /// The MCP resource mount root (`/mnt/mcp`), honoring `$CLANK_GREASE_MCP_MOUNT`.
+#[must_use]
 pub fn mcp_mount_dir() -> PathBuf {
     PathBuf::from(
         std::env::var("CLANK_GREASE_MCP_MOUNT").unwrap_or_else(|_| DEFAULT_MCP_MOUNT.to_string()),
@@ -89,6 +95,7 @@ pub fn mcp_mount_dir() -> PathBuf {
 }
 
 /// The Golem-agent bin directory (`/usr/lib/agents/bin`), honoring `$CLANK_GREASE_AGENT_BIN`.
+#[must_use]
 pub fn agent_bin_dir() -> PathBuf {
     PathBuf::from(
         std::env::var("CLANK_GREASE_AGENT_BIN").unwrap_or_else(|_| DEFAULT_AGENT_BIN.to_string()),
@@ -102,6 +109,7 @@ fn registries_path() -> PathBuf {
 
 /// Whether `name` is a valid kebab-case package name (`[a-z0-9-]+`, not empty, no leading/trailing `-`).
 /// Same rule as [`crate::mcp::config::is_valid_name`].
+#[must_use]
 pub fn is_valid_name(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with('-')
@@ -133,7 +141,7 @@ pub fn add_registry(url: &str, key: Option<&str>) -> Result<bool, String> {
     let mut regs = load_registries()?;
     if let Some(existing) = regs.registry.iter_mut().find(|r| r.url == url) {
         // Known URL: update the key if one was supplied and it differs; otherwise a no-op.
-        let new_key = key.map(|k| k.to_string());
+        let new_key = key.map(std::string::ToString::to_string);
         if key.is_some() && existing.key != new_key {
             existing.key = new_key;
             save_registries(&regs)?;
@@ -141,12 +149,13 @@ pub fn add_registry(url: &str, key: Option<&str>) -> Result<bool, String> {
         }
         return Ok(false);
     }
-    regs.registry.push(RegistryEntry { url: url.to_string(), key: key.map(|k| k.to_string()) });
+    regs.registry.push(RegistryEntry { url: url.to_string(), key: key.map(std::string::ToString::to_string) });
     save_registries(&regs)?;
     Ok(true)
 }
 
 /// The trusted signing key (base64 ed25519 public key) configured for `url`, if any.
+#[must_use]
 pub fn registry_key(url: &str) -> Option<String> {
     load_registries().ok()?.registry.into_iter().find(|r| r.url == url).and_then(|r| r.key)
 }
@@ -164,6 +173,7 @@ pub fn remove_registry(url: &str) -> Result<bool, String> {
 }
 
 /// The configured registry URLs, in order.
+#[must_use]
 pub fn list_registries() -> Vec<String> {
     load_registries()
         .map(|r| r.registry.into_iter().map(|e| e.url).collect())
@@ -228,6 +238,7 @@ fn safe_join(root: &Path, rel: &str) -> Option<PathBuf> {
 
 /// Public path-confinement join for MCP resource materialization under `/mnt/mcp/<server>/` — same
 /// `..`/absolute-escape guard as [`safe_join`], keeping a server's resources inside its mount dir.
+#[must_use]
 pub fn mcp_safe_join(root: &Path, rel: &str) -> Option<PathBuf> {
     safe_join(root, rel)
 }
@@ -244,7 +255,7 @@ mod tests {
 
     /// Point the grease dirs at fresh temp dirs for the duration of `f`.
     pub(crate) fn with_temp_dirs<F: FnOnce()>(f: F) {
-        let _guard = super::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = super::TEST_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let n = unique();
         let base = std::env::temp_dir().join(format!("clank_grease_{}_{n}", std::process::id()));
         for sub in ["etc", "store", "bin", "script-bin", "skills"] {

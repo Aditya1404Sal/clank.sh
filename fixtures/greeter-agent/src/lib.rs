@@ -1,4 +1,4 @@
-//! GreeterAgent — a deliberately trivial second Golem agent.
+//! `GreeterAgent` — a deliberately trivial second Golem agent.
 //!
 //! It exists only to be the *target* of a grease-installed agent invocation from clank: proving that
 //! `WasmRpcInvoker`'s `invoke_and_await` actually round-trips to another agent type in the same

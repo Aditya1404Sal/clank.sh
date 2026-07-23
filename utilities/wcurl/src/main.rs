@@ -10,7 +10,7 @@ fn main() {
 
     let _ = std::io::stdout().write_all(&outcome.stdout);
     let _ = std::io::stderr().write_all(&outcome.stderr);
-    std::process::exit(outcome.exit_code as i32);
+    std::process::exit(i32::from(outcome.exit_code));
 }
 
 #[cfg(target_arch = "wasm32")]

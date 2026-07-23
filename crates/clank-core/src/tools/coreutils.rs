@@ -78,7 +78,7 @@ struct ShellCwd;
 impl ShellCwd {
     fn enter<SE: ShellExtensions>(context: &ExecutionContext<'_, SE>) -> Self {
         // Poisoning is harmless — the state is two plain fields — so recover the guard either way.
-        let mut state = CWD_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = CWD_STATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let target = context.shell.working_dir();
         let current = std::env::current_dir().ok();
 
@@ -102,7 +102,7 @@ impl ShellCwd {
 
 impl Drop for ShellCwd {
     fn drop(&mut self) {
-        let mut state = CWD_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = CWD_STATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         state.depth -= 1;
         // Last one out returns the process, so a still-running stage never has it moved underneath it.
         if state.depth == 0 {
@@ -197,7 +197,7 @@ pub(crate) fn run_uu<SE: ShellExtensions>(
 
     // Serialize the process-global fd swap (see `FD_SWAP_LOCK`). Poisoning is harmless here — the
     // guarded region restores fds even on panic paths — so recover the guard either way.
-    let _fd_guard = FD_SWAP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _fd_guard = FD_SWAP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
     // Relative operands (`cat f`, `ls`, `touch f`) resolve against the shell's `cd`, not the process's
     // directory. See `ShellCwd`.
@@ -581,27 +581,21 @@ impl SimpleCommand for Cat {
                 // Reads as empty (the emulated null device is not a real fs entry uu_cat can open).
             } else if crate::runtime::binfs::is_bin_path(op) {
                 // `/bin/<name>` → the command's help text (static registry; no Session access).
-                match crate::runtime::binfs::resolve(op) {
-                    Ok(content) => {
-                        let _ = out.write_all(content.as_bytes());
-                    }
-                    Err(_) => {
-                        let _ = writeln!(context.stderr(), "cat: {op}: No such file or directory");
-                        had_error = true;
-                    }
+                if let Ok(content) = crate::runtime::binfs::resolve(op) {
+                    let _ = out.write_all(content.as_bytes());
+                } else {
+                    let _ = writeln!(context.stderr(), "cat: {op}: No such file or directory");
+                    had_error = true;
                 }
             } else if crate::runtime::procfs::is_proc_path(op) {
                 let resolved = table
                     .as_ref()
                     .map(|t| crate::runtime::procfs::resolve(op, &t.lock().unwrap(), &environ));
-                match resolved {
-                    Some(Ok(content)) => {
-                        let _ = out.write_all(content.as_bytes());
-                    }
-                    _ => {
-                        let _ = writeln!(context.stderr(), "cat: {op}: No such file or directory");
-                        had_error = true;
-                    }
+                if let Some(Ok(content)) = resolved {
+                    let _ = out.write_all(content.as_bytes());
+                } else {
+                    let _ = writeln!(context.stderr(), "cat: {op}: No such file or directory");
+                    had_error = true;
                 }
             } else {
                 // A real path in a mixed invocation: delegate just this operand to uutils.
@@ -612,11 +606,11 @@ impl SimpleCommand for Cat {
                 }
             }
         }
-        Ok(ExecutionResult::new(if had_error { 1 } else { 0 }))
+        Ok(ExecutionResult::new(u8::from(had_error)))
     }
 }
 
-/// `env`, hand-written so the LISTING form redacts `export --secret` variables. uu_env reads the
+/// `env`, hand-written so the LISTING form redacts `export --secret` variables. `uu_env` reads the
 /// process environment (`std::env`) directly, so a secret var — which is set in `std::env` for Full
 /// env parity (real subprocesses inherit it) — would otherwise leak through `env` and, worse,
 /// `env | grep …` as a pipeline stage. This custom builtin renders the *filtered* environment

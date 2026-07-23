@@ -10,7 +10,7 @@ use http::Method;
 
 /// Where a fetched body is written.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Output {
+pub(crate) enum Output {
     /// Stream to stdout (`-O -`).
     Stdout,
     /// Write to this path (explicit `-O <file>`, or the default basename).
@@ -19,7 +19,7 @@ pub enum Output {
 
 /// A parsed `wget` invocation.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Request {
+pub(crate) struct Request {
     pub url: String,
     pub output: Output,
     /// True when `output` is the URL-derived default (no explicit `-O`) — the only case
@@ -83,7 +83,7 @@ fn expand_args(args: &[String]) -> Vec<String> {
 }
 
 /// Parse argv (without the leading `wget` word) into a [`Request`].
-pub fn parse(args: &[String]) -> Result<Request, ParseError> {
+pub(crate) fn parse(args: &[String]) -> Result<Request, ParseError> {
     let expanded = expand_args(args);
 
     let mut url: Option<String> = None;
@@ -178,7 +178,7 @@ fn split_header(raw: &str) -> (String, String) {
 
 /// The default output filename for a URL: its last non-empty path segment (stripped of any query),
 /// or `index.html` if there is none.
-pub fn default_filename(url: &str) -> String {
+pub(crate) fn default_filename(url: &str) -> String {
     let without_scheme = url.split("://").nth(1).unwrap_or(url);
     let path = without_scheme.split(['?', '#']).next().unwrap_or("");
     match path.rsplit('/').find(|seg| !seg.is_empty()) {
@@ -193,7 +193,7 @@ mod tests {
     use super::*;
 
     fn argv(parts: &[&str]) -> Vec<String> {
-        parts.iter().map(|s| s.to_string()).collect()
+        parts.iter().map(std::string::ToString::to_string).collect()
     }
 
     #[test]

@@ -54,6 +54,7 @@ const PROMPT_USER_TOOL_SCHEMA: &str = r#"{"type":"object","properties":{"questio
 /// line in the clank session — pipes/redirects/`$(...)` come free) and [`PROMPT_USER_TOOL`] (the
 /// model→human back-channel; pauses the loop for an answer). Per-command and MCP tools arrive later.
 /// Takes the registry so future increments can derive tools from it without a signature change.
+#[must_use]
 pub fn build_ask_tools(_registry: &CommandRegistry) -> Vec<AskTool> {
     vec![
         AskTool {
@@ -83,6 +84,7 @@ pub fn build_ask_tools(_registry: &CommandRegistry) -> Vec<AskTool> {
 ///
 /// Shared with `/proc/clank/system-prompt` (inspectable at runtime) so the model's instructions and
 /// the user-visible view are the same bytes.
+#[must_use]
 pub fn build_system_prompt(registry: &CommandRegistry) -> String {
     let mut out = String::from(CORE_SYSTEM_PROMPT);
     out.push_str(
@@ -123,6 +125,7 @@ pub fn build_system_prompt(registry: &CommandRegistry) -> String {
 
 /// Like [`build_system_prompt`] but also lists installed MCP tools (each exposed as its own
 /// `mcp__<server>__<tool>` tool). `mcp_tools` is [`crate::mcp::state::McpState::ask_tool_definitions`].
+#[must_use]
 pub fn build_system_prompt_with_mcp(
     registry: &CommandRegistry,
     mcp: &crate::mcp::state::McpState,
@@ -135,6 +138,7 @@ pub fn build_system_prompt_with_mcp(
 /// The full agentic system prompt: the command surface + installed MCP tools + installed grease
 /// prompts. Each installed prompt is a `prompt__<name>` tool the model can call. Shared with
 /// `/proc/clank/system-prompt` so the human-visible view matches what the model sees.
+#[must_use]
 pub fn build_system_prompt_with_capabilities(
     registry: &CommandRegistry,
     mcp: &crate::mcp::state::McpState,
@@ -344,6 +348,7 @@ pub struct LoggingAskProvider {
 }
 
 impl LoggingAskProvider {
+    #[must_use]
     pub fn new(inner: Box<dyn AskProvider>) -> Self {
         Self { inner }
     }
@@ -409,10 +414,12 @@ pub struct AskArgs {
 /// Deliberately a conservative substring scan: it also refuses a *quoted* literal like `echo '$(x)'`
 /// and arithmetic `$(( … ))`, both safe over-refusals on the model path. The human path is
 /// unaffected — this is only consulted by the model-tool gate.
+#[must_use]
 pub fn contains_command_substitution(s: &str) -> bool {
     s.contains("$(") || s.contains('`') || s.contains("<(") || s.contains(">(")
 }
 
+#[must_use]
 pub fn classify(line: &str) -> Option<AskArgs> {
     let words = leading_words(line)?;
     let (first, rest) = words.split_first()?;
@@ -469,6 +476,7 @@ pub struct ReplArgs {
 /// If `line` is `ask repl [--fresh|--inherit] [--model <id>]`, parse it. `None` otherwise (including
 /// a plain `ask …` — that's [`classify`]). The default seed is `Fresh`; the README's summary-injection
 /// default is not yet wired for `repl`.
+#[must_use]
 pub fn classify_repl(line: &str) -> Option<ReplArgs> {
     let words = leading_words(line)?;
     let mut iter = words.iter();
@@ -498,6 +506,7 @@ pub fn classify_repl(line: &str) -> Option<ReplArgs> {
 /// Build the first user message body: the transcript window (if any) as context, then the prompt.
 /// Shared by the `Session` loop (which constructs the initial [`AskTurn::User`]); kept here so the
 /// transcript-as-context shaping lives beside the rest of the `ask` seam.
+#[must_use]
 pub fn user_content(transcript: &str, prompt: &str) -> String {
     user_content_with_stdin(transcript, prompt, None)
 }
@@ -505,6 +514,7 @@ pub fn user_content(transcript: &str, prompt: &str) -> String {
 /// Like [`user_content`] but also appends piped stdin as a clearly-delimited supplementary block
 /// AFTER the prompt (README: "the transcript is the base context, stdin is appended after it").
 /// `--fresh` drops the transcript but keeps this block — piped input is explicit, not ambient.
+#[must_use]
 pub fn user_content_with_stdin(transcript: &str, prompt: &str, stdin: Option<&str>) -> String {
     let mut out = if transcript.is_empty() {
         prompt.to_string()
@@ -528,6 +538,7 @@ pub const JSON_SYSTEM_ADDENDUM: &str =
 /// Append [`JSON_SYSTEM_ADDENDUM`] to `system` when `json` is set; return `system` unchanged
 /// otherwise. Kept out of [`build_system_prompt`] so `/proc/clank/system-prompt` (the human-facing,
 /// non-JSON view) is unaffected.
+#[must_use]
 pub fn with_json_addendum(system: String, json: bool) -> String {
     if json {
         system + JSON_SYSTEM_ADDENDUM
@@ -547,7 +558,7 @@ pub fn strip_json_fence(text: &str) -> &str {
     // Drop an optional language tag on the opening fence line (```json), then the trailing fence.
     let inner = inner.strip_prefix("json").unwrap_or(inner);
     let inner = inner.trim_start_matches(['\n', '\r']);
-    inner.strip_suffix("```").map(str::trim).unwrap_or(t)
+    inner.strip_suffix("```").map_or(t, str::trim)
 }
 
 /// The `Word` tokens of `line`, dequoted (quote-aware via Brush's tokenizer; operators dropped).
@@ -568,6 +579,7 @@ fn leading_words(line: &str) -> Option<Vec<String>> {
 /// is empty, OR contains any shell operator (`|`/`;`/`&&`/redirects) — so a nested use falls through
 /// to Brush (and its honest stub). Used by grease's prompt dispatch (a prompt can't run in a pipe/`$()`
 /// — it makes an LLM call, the Wall-C wall). Public sibling of [`leading_words`].
+#[must_use]
 pub fn dequote_words(line: &str) -> Option<Vec<String>> {
     let tokens = tokenize_str(line).ok()?;
     if tokens.iter().any(|t| matches!(t, Token::Operator(_, _))) {
@@ -640,6 +652,7 @@ pub fn split_ask_tail(line: &str) -> Option<AskTailPipe> {
 /// The `ask` manifest. `Subprocess` scope (runs isolated, no shell-state access), `Confirm` policy
 /// (outbound LLM HTTP pauses for user confirmation, mirroring the README's curl/wget "Outbound HTTP →
 /// confirm" rule; `sudo ask` pre-authorizes).
+#[must_use]
 pub fn manifests() -> Vec<Manifest> {
     vec![
         Manifest::builtin("ask", "invoke the AI model with the shell transcript as context")
@@ -801,7 +814,7 @@ mod tests {
         // `| ask` with no producer.
         assert!(split_ask_tail(r#"| ask "q""#).is_none());
         // Not an ask line at all.
-        assert!(split_ask_tail(r#"cat x | grep y"#).is_none());
+        assert!(split_ask_tail(r"cat x | grep y").is_none());
     }
 
     #[test]

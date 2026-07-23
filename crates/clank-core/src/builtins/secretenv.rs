@@ -66,6 +66,7 @@ pub fn parse(line: &str) -> Option<SecretExport> {
 }
 
 /// Whether `line` is an `export --secret NAME=VALUE` invocation this module handles.
+#[must_use]
 pub fn is_secret_export(line: &str) -> bool {
     parse(line).is_some()
 }
@@ -75,6 +76,7 @@ pub fn is_secret_export(line: &str) -> bool {
 /// unchanged). This declaration line is the one place `mask_values` can't help — the secret isn't
 /// registered in the active set until the line actually runs, and the shell.log start/end events fire
 /// around that — so the value is stripped structurally here instead.
+#[must_use]
 pub fn redact_export_line(line: &str) -> Option<String> {
     let export = parse(line)?;
     Some(format!(
@@ -102,6 +104,7 @@ const SECRET_FLAGS: &[&str] = &["--key", "--token", "--password", "--api-key", "
 /// This is the log-safety guard for commands like `model add anthropic --key <KEY>`, whose shell.log
 /// start/end events would otherwise record the credential verbatim — `mask_values` can't help there,
 /// because the value isn't a registered secret when those events fire.
+#[must_use]
 pub fn redact_secret_flag_args(line: &str) -> Option<String> {
     let tokens = tokenize_str(line).ok()?;
     // (unquoted value, raw-span start, raw-span end) for each Word, in order.

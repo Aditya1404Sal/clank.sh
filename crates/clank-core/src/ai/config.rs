@@ -65,6 +65,7 @@ impl std::fmt::Debug for ProviderSection {
 }
 
 /// The `ask.toml` path under a given home directory: `<home>/.config/ask/ask.toml`.
+#[must_use]
 pub fn config_path(home: &str) -> PathBuf {
     PathBuf::from(home).join(".config").join("ask").join("ask.toml")
 }
@@ -104,6 +105,7 @@ pub fn default_model(home: &str) -> Result<Option<String>, String> {
 /// The stored API key for `provider` from `ask.toml` `[providers.<provider>].key`, if present. A
 /// parse/read error is swallowed to `None` — a missing/broken key file is not an error here; the
 /// caller falls back to the environment. Native only in practice (the agent never stores a key).
+#[must_use]
 pub fn provider_key(home: &str, provider: &str) -> Option<String> {
     load(home)
         .ok()
@@ -198,10 +200,10 @@ mod tests {
         save_provider_key(h, "anthropic", "sk-stored").unwrap();
         assert_eq!(provider_key(h, "anthropic").as_deref(), Some("sk-stored"));
         // Removing returns true and the key is gone.
-        assert_eq!(remove_provider_key(h, "anthropic").unwrap(), true);
+        assert!(remove_provider_key(h, "anthropic").unwrap());
         assert_eq!(provider_key(h, "anthropic"), None);
         // A second remove is a no-op (nothing stored).
-        assert_eq!(remove_provider_key(h, "anthropic").unwrap(), false);
+        assert!(!remove_provider_key(h, "anthropic").unwrap());
     }
 
     #[test]
@@ -217,7 +219,7 @@ mod tests {
              [providers.anthropic]\nkey-env = \"ANTHROPIC_API_KEY\"\nkey = \"sk-x\"\n",
         )
         .unwrap();
-        assert_eq!(remove_provider_key(h, "anthropic").unwrap(), true);
+        assert!(remove_provider_key(h, "anthropic").unwrap());
         let cfg = load(h).unwrap().unwrap();
         // Default model untouched; the section survives (its key-env doc remains); only the key is gone.
         assert_eq!(cfg.ask.default_model.as_deref(), Some("anthropic/claude-opus-4-8"));

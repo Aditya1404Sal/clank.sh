@@ -34,6 +34,7 @@ pub struct ReqwestAnthropicProvider {
 }
 
 impl ReqwestAnthropicProvider {
+    #[must_use]
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
             .build()
@@ -232,7 +233,7 @@ fn parse_response(v: &Value) -> AskResponse {
                         // type carries arguments as a string).
                         arguments_json: block
                             .get("input")
-                            .map(|i| i.to_string())
+                            .map(std::string::ToString::to_string)
                             .unwrap_or_else(|| "{}".to_string()),
                     });
                 }

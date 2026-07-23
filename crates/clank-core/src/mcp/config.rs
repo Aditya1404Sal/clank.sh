@@ -69,6 +69,7 @@ impl McpServerConfig {
 
     /// Resolve the auth (header + value) from the environment, if `auth_env` is set and present. The
     /// default header is `Authorization` with a `Bearer ` prefix; a custom header sends the raw value.
+    #[must_use]
     pub fn resolve_auth(&self) -> Option<crate::mcp::client::McpAuth> {
         let var = self.auth_env.as_ref()?;
         let value = std::env::var(var).ok()?;
@@ -88,21 +89,25 @@ impl McpServerConfig {
 pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// The config directory, honoring `$CLANK_MCP_ETC`.
+#[must_use]
 pub fn etc_dir() -> PathBuf {
     PathBuf::from(std::env::var("CLANK_MCP_ETC").unwrap_or_else(|_| DEFAULT_ETC.to_string()))
 }
 
 /// The generated-command directory, honoring `$CLANK_MCP_BIN`.
+#[must_use]
 pub fn bin_dir() -> PathBuf {
     PathBuf::from(std::env::var("CLANK_MCP_BIN").unwrap_or_else(|_| DEFAULT_BIN.to_string()))
 }
 
 /// The config path for a server name.
+#[must_use]
 pub fn config_path(name: &str) -> PathBuf {
     etc_dir().join(format!("{name}.toml"))
 }
 
 /// Whether `name` is a valid kebab-case server name (`[a-z0-9-]+`, not empty, no leading/trailing `-`).
+#[must_use]
 pub fn is_valid_name(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with('-')
@@ -138,6 +143,7 @@ pub fn load(name: &str) -> Result<Option<McpServerConfig>, String> {
 }
 
 /// All configured server names (the stems of `*.toml` in the config dir), sorted.
+#[must_use]
 pub fn list_names() -> Vec<String> {
     let mut names = Vec::new();
     if let Ok(entries) = std::fs::read_dir(etc_dir()) {
@@ -177,7 +183,7 @@ mod tests {
 
     /// Point the config/bin dirs at fresh temp dirs for the duration of `f`.
     fn with_temp_dirs<F: FnOnce(&str)>(f: F) {
-        let _guard = super::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = super::TEST_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let n = unique();
         let base = std::env::temp_dir().join(format!("clank_mcpcfg_{}_{n}", std::process::id()));
         let etc = base.join("etc");

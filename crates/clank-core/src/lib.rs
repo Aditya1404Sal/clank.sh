@@ -109,11 +109,13 @@ fn est_tokens(byte_len: usize) -> usize {
 }
 
 impl Transcript {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Build a transcript with an explicit token budget (mainly for tests and tuning).
+    #[must_use]
     pub fn with_budget(token_budget: usize) -> Self {
         Self {
             entries: Vec::new(),
@@ -123,6 +125,7 @@ impl Transcript {
     }
 
     /// The current sliding-window budget, in estimated tokens.
+    #[must_use]
     pub fn budget(&self) -> usize {
         self.token_budget
     }
@@ -190,7 +193,7 @@ impl Transcript {
         while self.total_tokens() > self.token_budget {
             // Index of the oldest `Command` entry, and whether a leading marker already exists.
             let has_marker = matches!(self.entries.first(), Some(Entry::Elided { .. }));
-            let oldest_cmd = if has_marker { 1 } else { 0 };
+            let oldest_cmd = usize::from(has_marker);
 
             // Stop if dropping would leave nothing, or would drop the current (last) entry.
             if oldest_cmd >= self.entries.len() || oldest_cmd == self.entries.len() - 1 {
@@ -241,6 +244,7 @@ impl Transcript {
 
     /// Render the whole window as bytes: a leading `[N earlier entries dropped]` marker if any
     /// history was elided, then each command behind a prompt marker followed by its output.
+    #[must_use]
     pub fn render(&self) -> Vec<u8> {
         let mut out = Vec::new();
         for e in &self.entries {
@@ -292,7 +296,7 @@ impl Transcript {
         let mut dropped = 0;
         for _ in 0..n {
             let has_marker = matches!(self.entries.first(), Some(Entry::Elided { .. }));
-            let oldest_cmd = if has_marker { 1 } else { 0 };
+            let oldest_cmd = usize::from(has_marker);
             // Stop if there's nothing left to drop, or dropping would remove the current entry.
             if oldest_cmd >= self.entries.len() || oldest_cmd == self.entries.len() - 1 {
                 break;
@@ -321,6 +325,7 @@ impl Transcript {
     /// exists, has no summary yet, and there is captured dropped text — else `None`. Draining is the
     /// Session layer's job: it renders this, sends it to the model, and writes the result back via
     /// [`set_marker_summary`](Self::set_marker_summary). Inspection-only; does not mutate the window.
+    #[must_use]
     pub fn pending_summary(&self) -> Option<(usize, String)> {
         match self.entries.first() {
             Some(Entry::Elided {
@@ -461,6 +466,7 @@ impl Drop for TranscriptGuard {
 ///
 /// This is retained for core unit tests. Real native, wasm REPL, and Golem-agent execution goes
 /// through [`session::Session`].
+#[must_use]
 pub fn eval(line: &[u8]) -> (Vec<u8>, Flow) {
     let text = String::from_utf8_lossy(line);
     let mut words = text.split_whitespace();
@@ -486,6 +492,7 @@ pub fn eval(line: &[u8]) -> (Vec<u8>, Flow) {
 }
 
 /// Strip a single trailing `\n` and an optional preceding `\r` (CRLF-tolerant).
+#[must_use]
 pub fn trim_eol(line: &[u8]) -> &[u8] {
     let mut end = line.len();
     if end > 0 && line[end - 1] == b'\n' {

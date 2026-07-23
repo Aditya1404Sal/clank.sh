@@ -93,6 +93,7 @@ pub struct NativeHttpAgentInvoker {
 }
 
 impl NativeHttpAgentInvoker {
+    #[must_use]
     pub fn new(cfg: ClusterConfig) -> Self {
         let endpoint = format!("{}{INVOKE_PATH}", cfg.url);
         Self { client: client(), cfg, endpoint }
@@ -186,6 +187,7 @@ pub struct NativeHttpGolemCluster {
 }
 
 impl NativeHttpGolemCluster {
+    #[must_use]
     pub fn new(cfg: ClusterConfig) -> Self {
         Self { client: client(), cfg }
     }

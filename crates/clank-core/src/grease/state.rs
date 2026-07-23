@@ -63,6 +63,7 @@ pub enum Payload {
 }
 
 impl Payload {
+    #[must_use]
     pub fn kind(&self) -> PackageKind {
         match self {
             Payload::Prompt(_) => PackageKind::Prompt,
@@ -73,6 +74,7 @@ impl Payload {
         }
     }
 
+    #[must_use]
     pub fn name(&self) -> &str {
         match self {
             Payload::Prompt(p) => &p.name,
@@ -83,6 +85,7 @@ impl Payload {
         }
     }
 
+    #[must_use]
     pub fn description(&self) -> &str {
         match self {
             Payload::Prompt(p) => &p.description,
@@ -102,9 +105,11 @@ pub struct InstalledPackage {
 }
 
 impl InstalledPackage {
+    #[must_use]
     pub fn name(&self) -> &str {
         self.payload.name()
     }
+    #[must_use]
     pub fn kind(&self) -> PackageKind {
         self.payload.kind()
     }
@@ -122,6 +127,7 @@ pub struct GreaseState {
 impl GreaseState {
     /// Reconstruct the installed set by scanning the etc dir for `<name>.toml` markers and reading
     /// each package's payload from the store per its kind. Corrupt/partial installs are skipped.
+    #[must_use]
     pub fn load() -> Self {
         let mut packages = Vec::new();
         let etc = crate::grease::config::etc_dir();
@@ -149,6 +155,7 @@ impl GreaseState {
 
     /// The mutation counter — see [`version`](Self::version)'s field docs. Any change to the package
     /// set bumps it, so a cache keyed on it is invalidated exactly when a capability view would change.
+    #[must_use]
     pub fn version(&self) -> u64 {
         self.version
     }
@@ -168,45 +175,54 @@ impl GreaseState {
         self.version = self.version.wrapping_add(1);
     }
 
+    #[must_use]
     pub fn packages(&self) -> &[InstalledPackage] {
         &self.packages
     }
 
+    #[must_use]
     pub fn get(&self, name: &str) -> Option<&InstalledPackage> {
         self.packages.iter().find(|p| p.name() == name)
     }
 
     /// The kind of an installed package, if any.
+    #[must_use]
     pub fn kind_of(&self, name: &str) -> Option<PackageKind> {
-        self.get(name).map(|p| p.kind())
+        self.get(name).map(InstalledPackage::kind)
     }
 
     /// Whether `name` is an installed prompt (drives command dispatch).
+    #[must_use]
     pub fn is_prompt(&self, name: &str) -> bool {
         self.kind_of(name) == Some(PackageKind::Prompt)
     }
 
     /// Whether `name` is an installed script (drives command dispatch).
+    #[must_use]
     pub fn is_script(&self, name: &str) -> bool {
         self.kind_of(name) == Some(PackageKind::Script)
     }
 
     /// Whether `name` is an installed skill (skills are not commands — for `info`/`remove`).
+    #[must_use]
     pub fn is_skill(&self, name: &str) -> bool {
         self.kind_of(name) == Some(PackageKind::Skill)
     }
 
     /// Whether `name` is an installed MCP-server package (for `info`/`remove`/boot reconstruction).
+    #[must_use]
     pub fn is_mcp(&self, name: &str) -> bool {
         self.kind_of(name) == Some(PackageKind::Mcp)
     }
 
     /// Whether `name` is an installed Golem-agent package (drives the `run_agent` dispatch).
+    #[must_use]
     pub fn is_agent(&self, name: &str) -> bool {
         self.kind_of(name) == Some(PackageKind::Agent)
     }
 
     /// The installed Golem-agent payload, if `name` is an agent.
+    #[must_use]
     pub fn agent(&self, name: &str) -> Option<&AgentPackage> {
         match self.get(name).map(|p| &p.payload) {
             Some(Payload::Agent(a)) => Some(a),
@@ -215,6 +231,7 @@ impl GreaseState {
     }
 
     /// The installed prompt payload, if `name` is a prompt.
+    #[must_use]
     pub fn prompt(&self, name: &str) -> Option<&PromptPackage> {
         match self.get(name).map(|p| &p.payload) {
             Some(Payload::Prompt(p)) => Some(p),
@@ -223,6 +240,7 @@ impl GreaseState {
     }
 
     /// The installed script payload, if `name` is a script.
+    #[must_use]
     pub fn script(&self, name: &str) -> Option<&ScriptPackage> {
         match self.get(name).map(|p| &p.payload) {
             Some(Payload::Script(s)) => Some(s),
@@ -231,6 +249,7 @@ impl GreaseState {
     }
 
     /// The installed skill payload, if `name` is a skill.
+    #[must_use]
     pub fn skill(&self, name: &str) -> Option<&SkillPackage> {
         match self.get(name).map(|p| &p.payload) {
             Some(Payload::Skill(s)) => Some(s),
@@ -239,6 +258,7 @@ impl GreaseState {
     }
 
     /// All installed skills (skills are not commands; they contribute a system-prompt listing only).
+    #[must_use]
     pub fn skills(&self) -> Vec<&SkillPackage> {
         self.packages
             .iter()
@@ -250,6 +270,7 @@ impl GreaseState {
     }
 
     /// The installed MCP-server payload, if `name` is an MCP package.
+    #[must_use]
     pub fn mcp(&self, name: &str) -> Option<&McpPackage> {
         match self.get(name).map(|p| &p.payload) {
             Some(Payload::Mcp(m)) => Some(m),
@@ -259,6 +280,7 @@ impl GreaseState {
 
     /// Find an installed MCP resource-template executable by its `<server>-<name>` command name,
     /// returning `(server_url, auth_env, uri_template)` for running it.
+    #[must_use]
     pub fn mcp_template(&self, cmd: &str) -> Option<(String, Option<String>, String)> {
         for m in self.mcp_packages() {
             if let Some(t) = m.templates.iter().find(|t| t.name == cmd) {
@@ -269,11 +291,13 @@ impl GreaseState {
     }
 
     /// Whether `cmd` is an installed MCP resource-template executable.
+    #[must_use]
     pub fn is_mcp_template(&self, cmd: &str) -> bool {
         self.mcp_packages().iter().any(|m| m.templates.iter().any(|t| t.name == cmd))
     }
 
     /// Look up a resource entry by its `/mnt/mcp/<server>/<rel_path>` — for `mcp resource info`/`stat`.
+    #[must_use]
     pub fn mcp_resource_entry(
         &self,
         server: &str,
@@ -283,6 +307,7 @@ impl GreaseState {
     }
 
     /// All installed MCP-server packages (for boot reconstruction into `McpState`).
+    #[must_use]
     pub fn mcp_packages(&self) -> Vec<&McpPackage> {
         self.packages
             .iter()
@@ -295,6 +320,7 @@ impl GreaseState {
 
     /// The flattened MCP resource index (all installed servers' resources) for the `/mnt/mcp`
     /// virtual-fs ([`crate::runtime::mcpfs`]).
+    #[must_use]
     pub fn mcp_resource_index(&self) -> Vec<crate::runtime::mcpfs::ResourceEntry> {
         let mut out = Vec::new();
         for m in self.mcp_packages() {
@@ -323,6 +349,7 @@ impl GreaseState {
     /// The dynamic manifest for an installed command package (prompt or script). Both are
     /// `Subprocess`/`Confirm` (a prompt makes an outbound LLM call; a script runs local shell), with
     /// the declared arguments as the input schema. **Skills return `None`** — they are not commands.
+    #[must_use]
     pub fn manifest_for(&self, name: &str) -> Option<Manifest> {
         let pkg = self.get(name)?;
         let (synopsis, params): (String, Vec<crate::manifest::ParamSpec>) = match &pkg.payload {
@@ -359,6 +386,7 @@ impl GreaseState {
 
     /// The dynamic manifests for all installed command packages (prompts + scripts) — for the
     /// per-line [`crate::runtime::dynreg`] slot. Skills contribute nothing here.
+    #[must_use]
     pub fn all_manifests(&self) -> Vec<Manifest> {
         self.packages.iter().filter_map(|p| self.manifest_for(p.name())).collect()
     }
@@ -368,6 +396,7 @@ impl GreaseState {
     /// the executor decodes it back to a `<name> --arg value …` line). **Scripts and skills are
     /// excluded** — scripts run local shell and are reachable via the plain `shell` tool; skills are
     /// context, not tools.
+    #[must_use]
     pub fn ask_tool_definitions(&self) -> Vec<crate::ai::ask::AskTool> {
         self.packages
             .iter()
@@ -402,6 +431,7 @@ impl GreaseState {
 
     /// Human-facing help for an installed command package (prompt or script). `None` for a skill (not
     /// a command) or an unknown name.
+    #[must_use]
     pub fn pkg_help(&self, name: &str) -> Option<String> {
         let pkg = self.get(name)?;
         match &pkg.payload {

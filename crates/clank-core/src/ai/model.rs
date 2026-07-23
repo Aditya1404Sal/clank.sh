@@ -80,7 +80,7 @@ impl SimpleCommand for Model {
             .shell
             .env()
             .get_str("HOME", context.shell)
-            .map(|h| h.into_owned())
+            .map(std::borrow::Cow::into_owned)
             .unwrap_or_else(|| "/home/user".to_string());
 
         let (stdout, stderr, code) = run(&home, &argv);
@@ -97,7 +97,7 @@ impl SimpleCommand for Model {
 /// Run `model <argv>` against the ask.toml under `home`. Returns `(stdout, stderr, exit_code)` so the
 /// logic is testable without an `ExecutionContext`.
 fn run(home: &str, argv: &[String]) -> (String, String, u8) {
-    let sub = argv.first().map(String::as_str).unwrap_or("list");
+    let sub = argv.first().map_or("list", String::as_str);
     match sub {
         "list" => list(home),
         "default" => set_default(home, argv.get(1).map(String::as_str)),
@@ -159,7 +159,7 @@ fn set_default(home: &str, id: Option<&str>) -> (String, String, u8) {
 
 fn info(home: &str, id: Option<&str>) -> (String, String, u8) {
     let (default, _source, warn) = resolved_default(home);
-    let target = id.map(canonicalize).unwrap_or_else(|| canonicalize(&default));
+    let target = id.map_or_else(|| canonicalize(&default), canonicalize);
     let is_default = target == canonicalize(&default);
     let provider = target.split('/').next().unwrap_or(PROVIDER);
     let in_catalog = CATALOG.iter().any(|c| *c == target);
@@ -179,7 +179,7 @@ fn info(home: &str, id: Option<&str>) -> (String, String, u8) {
 /// `ANTHROPIC_API_KEY` (golem.yaml passthrough), matching the durable provider's `from_env` contract.
 fn add(home: &str, argv: &[String]) -> (String, String, u8) {
     let _ = home; // used only on native (see below)
-    let provider = argv.get(1).map(String::as_str).unwrap_or("");
+    let provider = argv.get(1).map_or("", String::as_str);
     if !(provider == PROVIDER || provider.is_empty()) {
         return (
             String::new(),
@@ -327,7 +327,7 @@ mod tests {
     }
 
     fn args(parts: &[&str]) -> Vec<String> {
-        parts.iter().map(|s| s.to_string()).collect()
+        parts.iter().map(std::string::ToString::to_string).collect()
     }
 
     #[test]

@@ -34,6 +34,7 @@ pub struct HttpResponse {
 
 impl HttpResponse {
     /// The first header whose (case-insensitive) name matches `name`.
+    #[must_use]
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
@@ -44,8 +45,7 @@ impl HttpResponse {
     /// Whether the response body is SSE (`Content-Type: text/event-stream`).
     fn is_sse(&self) -> bool {
         self.header("content-type")
-            .map(|ct| ct.to_ascii_lowercase().contains("text/event-stream"))
-            .unwrap_or(false)
+            .is_some_and(|ct| ct.to_ascii_lowercase().contains("text/event-stream"))
     }
 }
 
@@ -73,6 +73,7 @@ pub struct LoggingMcpHttp {
 }
 
 impl LoggingMcpHttp {
+    #[must_use]
     pub fn new(inner: Box<dyn McpHttp>) -> Self {
         Self { inner }
     }
@@ -154,7 +155,7 @@ pub struct InitializeResult {
 pub struct ToolSpec {
     pub name: String,
     pub description: Option<String>,
-    /// The tool's JSON-schema input, kept lossless (drives arg mapping + the ask ToolDefinition).
+    /// The tool's JSON-schema input, kept lossless (drives arg mapping + the ask `ToolDefinition`).
     pub input_schema: Value,
 }
 

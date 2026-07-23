@@ -40,6 +40,7 @@ pub struct AuthzState {
 ///
 /// Quote-aware (via Brush's tokenizer) and pipe/operator-aware: only leading `Word` tokens are
 /// considered, so `sudo` before an operator isn't mistaken for elevation of a later stage.
+#[must_use]
 pub fn leading_command(line: &str) -> (Option<String>, bool) {
     let Ok(tokens) = tokenize_str(line) else {
         return (None, false);
@@ -71,6 +72,7 @@ pub enum Decision {
 
 /// Decide how to handle a command with the given `policy`, given whether the invocation is
 /// `elevated` (a `sudo` prefix) and the session's `allow_all` grant.
+#[must_use]
 pub fn decide(policy: AuthorizationPolicy, elevated: bool, allow_all: bool) -> Decision {
     match policy {
         AuthorizationPolicy::Allow => Decision::Allow,
@@ -99,9 +101,10 @@ pub fn decide(policy: AuthorizationPolicy, elevated: bool, allow_all: bool) -> D
 /// **Subcommand-aware:** if the resolved manifest has subcommands and the line's *second* word names
 /// one, that subcommand's policy wins (so `mcp list` is `Allow` while `mcp add` is `Confirm`). This
 /// keeps a coarse top-level policy from over-gating read-only subcommands.
+#[must_use]
 pub fn resolve(registry: &CommandRegistry, line: &str) -> (AuthorizationPolicy, bool, Option<String>) {
     let words = command_words(line);
-    let elevated = words.first().map(|w| w == "sudo").unwrap_or(false);
+    let elevated = words.first().is_some_and(|w| w == "sudo");
     let rest = if elevated { &words[1..] } else { &words[..] };
     let command = rest.first().cloned();
     let subword = rest.get(1);
@@ -109,14 +112,12 @@ pub fn resolve(registry: &CommandRegistry, line: &str) -> (AuthorizationPolicy, 
     let policy = command
         .as_deref()
         .and_then(|name| registry.get(name))
-        .map(|m| {
+        .map_or(AuthorizationPolicy::Allow, |m| {
             // Prefer a matching subcommand's policy, else the command's own.
             subword
                 .and_then(|sub| m.subcommands.iter().find(|s| &s.name == sub))
-                .map(|s| s.authorization_policy)
-                .unwrap_or(m.authorization_policy)
-        })
-        .unwrap_or(AuthorizationPolicy::Allow);
+                .map_or(m.authorization_policy, |s| s.authorization_policy)
+        });
     (policy, elevated, command)
 }
 
@@ -153,6 +154,7 @@ const SEGMENT_SEPARATORS: &[&str] = &["|", "|&", "||", "&", "&&", ";", "\n"];
 ///
 /// A line that doesn't tokenize (or contains only separators) yields the whole line as one segment, so
 /// the caller always resolves *something* rather than silently skipping the gate.
+#[must_use]
 pub fn split_segments(line: &str) -> Vec<&str> {
     let Ok(tokens) = tokenize_str(line) else {
         return vec![line];
@@ -191,6 +193,7 @@ pub fn split_segments(line: &str) -> Vec<&str> {
 
 /// A total order on [`Decision`] strictness, for aggregating a compound line onto its most-restrictive
 /// segment: `Allow` < `Confirm{sudo_grant:false}` < `Confirm{sudo_grant:true}` < `Deny`.
+#[must_use]
 pub fn decision_rank(d: Decision) -> u8 {
     match d {
         Decision::Allow => 0,
@@ -203,6 +206,7 @@ pub fn decision_rank(d: Decision) -> u8 {
 /// Render the "names every gated command with its tier" clause for a compound-line confirmation, e.g.
 /// `rm [sudo-only], curl [confirm]`. Shown when a line has more than one gated command so the human
 /// sees everything approving will run, not just the strictest.
+#[must_use]
 pub fn gated_commands_summary(gated: &[(String, AuthorizationPolicy)]) -> String {
     gated
         .iter()
@@ -221,6 +225,7 @@ pub fn gated_commands_summary(gated: &[(String, AuthorizationPolicy)]) -> String
 /// The confirmation prompt for a compound line with more than one gated command: names them all (via
 /// [`gated_commands_summary`]) so approval is informed. Choices still follow the strictest tier (via
 /// [`confirm_choices`]); `sudo_grant` picks the tail.
+#[must_use]
 pub fn confirm_question_multi(summary: &str, sudo_grant: bool) -> String {
     if sudo_grant {
         format!("this line runs {summary}; it requires sudo authorization. (y)es, (n)o")
@@ -231,6 +236,7 @@ pub fn confirm_question_multi(summary: &str, sudo_grant: bool) -> String {
 
 /// The confirmation prompt text for a gated command, matching the README's example phrasing
 /// (`"<cmd> has requested permission to <synopsis>. (y)es, (n)o, (a)ll"`).
+#[must_use]
 pub fn confirm_question(command: &str, synopsis: &str, sudo_grant: bool) -> String {
     if sudo_grant {
         format!("{command} requires sudo authorization to {synopsis}. (y)es, (n)o")
@@ -241,6 +247,7 @@ pub fn confirm_question(command: &str, synopsis: &str, sudo_grant: bool) -> Stri
 
 /// The `--choices` a confirmation prompt offers: `yes,no,all` for a `confirm` gate, `yes,no` for a
 /// `sudo-only` gate (no blanket "all" for the strongest tier).
+#[must_use]
 pub fn confirm_choices(sudo_grant: bool) -> Vec<String> {
     if sudo_grant {
         vec!["yes".to_string(), "no".to_string()]

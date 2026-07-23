@@ -37,6 +37,7 @@ pub enum PackageKind {
 
 impl PackageKind {
     /// The payload filename this kind is stored under in `<store>/<name>/`.
+    #[must_use]
     pub fn payload_file(self) -> &'static str {
         match self {
             PackageKind::Prompt => "prompt.json",
@@ -48,6 +49,7 @@ impl PackageKind {
     }
 
     /// A short human label (for `grease list`/`info`).
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             PackageKind::Prompt => "prompt",
@@ -293,11 +295,13 @@ impl PromptPackage {
     }
 
     /// Serialize the package to pretty JSON (for the store).
+    #[must_use]
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).unwrap_or_default()
     }
 
     /// The package's arguments rendered as manifest [`ParamSpec`]s.
+    #[must_use]
     pub fn param_specs(&self) -> Vec<ParamSpec> {
         args_to_param_specs(&self.arguments)
     }
@@ -329,10 +333,12 @@ impl ScriptPackage {
         serde_json::from_slice(bytes).map_err(|e| format!("invalid script package JSON: {e}"))
     }
 
+    #[must_use]
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).unwrap_or_default()
     }
 
+    #[must_use]
     pub fn param_specs(&self) -> Vec<ParamSpec> {
         args_to_param_specs(&self.arguments)
     }
@@ -389,6 +395,7 @@ impl SkillPackage {
         serde_json::from_slice(bytes).map_err(|e| format!("invalid skill package JSON: {e}"))
     }
 
+    #[must_use]
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).unwrap_or_default()
     }
@@ -421,6 +428,7 @@ impl Default for McpArtifacts {
 
 impl McpArtifacts {
     /// Build from the parsed `--tools/--prompts/--resources` flags: if none were given, all three.
+    #[must_use]
     pub fn from_flags(tools: bool, prompts: bool, resources: bool) -> Self {
         if !tools && !prompts && !resources {
             Self::default()
@@ -538,6 +546,7 @@ impl McpPackage {
         serde_json::from_slice(bytes).map_err(|e| format!("invalid mcp package JSON: {e}"))
     }
 
+    #[must_use]
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).unwrap_or_default()
     }
@@ -585,17 +594,20 @@ impl AgentPackage {
         serde_json::from_slice(bytes).map_err(|e| format!("invalid agent package JSON: {e}"))
     }
 
+    #[must_use]
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).unwrap_or_default()
     }
 
     /// Look up a method by name.
+    #[must_use]
     pub fn method(&self, name: &str) -> Option<&AgentMethod> {
         self.methods.iter().find(|m| m.name == name)
     }
 }
 
 /// The lowercase hex sha256 of `bytes` — for content integrity verification.
+#[must_use]
 pub fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);

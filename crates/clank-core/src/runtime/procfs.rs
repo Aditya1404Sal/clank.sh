@@ -32,17 +32,19 @@ pub enum ProcError {
 const PROC_ROOT: &str = "/proc/";
 
 /// Snapshot the shell's current environment as `(key, value)` pairs — the same source `env`
-/// (uu_env) reads, so `/proc/<pid>/environ` and `env` never disagree. Used to populate the
+/// (`uu_env`) reads, so `/proc/<pid>/environ` and `env` never disagree. Used to populate the
 /// `environ` argument to [`resolve`].
 ///
 /// Secret variables (marked via `export --secret`) are filtered out here so they never appear in
 /// `env` or `/proc/<pid>/environ` — the single chokepoint both surfaces read through. See
 /// [`crate::runtime::secretenv`].
+#[must_use]
 pub fn current_environ() -> Vec<(String, String)> {
     crate::runtime::secretenv::filter_environ(std::env::vars().collect())
 }
 
 /// Whether `path` is under the virtual `/proc` namespace. (`/proc` itself and `/proc/` count too.)
+#[must_use]
 pub fn is_proc_path(path: &str) -> bool {
     path == "/proc" || path.starts_with(PROC_ROOT)
 }
@@ -138,6 +140,7 @@ fn environ_block(environ: &[(String, String)]) -> String {
 /// `/proc/clank` → the shell-wide files. Returns `None` if `dir` isn't a listable `/proc` directory
 /// (top-level `/proc` pid enumeration is deferred). Note: this does not validate that `<pid>` exists
 /// — `ls /proc/<pid>` lists the file names regardless, matching how `/proc` presents a fixed schema.
+#[must_use]
 pub fn list_children(dir: &str) -> Option<Vec<String>> {
     let rest = dir.strip_prefix(PROC_ROOT)?;
     let trimmed = rest.trim_end_matches('/');
@@ -163,6 +166,7 @@ pub fn list_children(dir: &str) -> Option<Vec<String>> {
 /// fully-rendered prompt (command surface + installed MCP tools + grease prompts/skills) into the
 /// [`crate::runtime::sysprompt`] slot; we serve that. Off-session (native tests, a bare read with no live
 /// Session), fall back to the static base prompt over the registry snapshot.
+#[must_use]
 pub fn system_prompt_stub() -> String {
     match crate::runtime::sysprompt::active() {
         Some(prompt) => (*prompt).clone(),
