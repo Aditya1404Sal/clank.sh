@@ -29,16 +29,32 @@ impl Model {
     pub(crate) const SYNOPSIS: &'static str = "list and configure model providers and the default model";
 }
 
-/// The only provider clank speaks to today.
+/// The default provider when a model id carries no `provider/` prefix.
 const PROVIDER: &str = "anthropic";
 
-/// The built-in model catalog (an honest subset; the provider accepts any id, these are the vetted
-/// ones). Haiku is the built-in default (matches [`crate::ai::ask::DEFAULT_MODEL`]) — the lightest and
-/// cheapest; opt into a bigger model explicitly.
+/// Every provider clank can route `ask` to. On the Golem agent all six are reachable (via
+/// golem-ai-llm); natively, anthropic + the OpenAI-compatible family (`openai`/`grok`/`openrouter`/
+/// `ollama`) work and `bedrock` is agent-only. Keys come from each provider's env var (or, on native,
+/// `model add <provider> --key`).
+pub(crate) const PROVIDERS: &[&str] =
+    &["anthropic", "openai", "ollama", "grok", "openrouter", "bedrock"];
+
+/// Whether `provider` is one clank knows how to route to.
+pub(crate) fn is_known_provider(provider: &str) -> bool {
+    PROVIDERS.contains(&provider)
+}
+
+/// The built-in model catalog (an honest subset; each provider accepts any id, these are vetted
+/// examples). Haiku is the built-in default (matches [`crate::ai::ask::DEFAULT_MODEL`]) — the lightest
+/// and cheapest; opt into a bigger model or another provider explicitly.
 const CATALOG: &[&str] = &[
     "anthropic/claude-haiku-4-5-20251001",
     "anthropic/claude-sonnet-4-5",
     "anthropic/claude-opus-4-8",
+    "openai/gpt-4o",
+    "openai/gpt-4o-mini",
+    "grok/grok-2-latest",
+    "ollama/llama3.2",
 ];
 
 impl SimpleCommand for Model {
@@ -58,12 +74,15 @@ impl SimpleCommand for Model {
                  \x20 model list              list the built-in model catalog (the default is marked *)\n\
                  \x20 model default <id>      set the default model (writes ~/.config/ask/ask.toml)\n\
                  \x20 model info [<id>]       show details for a model (or the current default)\n\
-                 \x20 model add <provider> [--key K]  store a native key, or point at the env var\n\
-                 \x20 model remove <provider> clear a stored provider key (native); anthropic stays built in\n\n\
-                 Model ids use `provider/model`; the provider prefix may be omitted for unambiguous names.\n\
-                 The catalog is a curated subset — the provider accepts other ids, passed through as-is.\n\
-                 API keys: on native, `model add anthropic --key <k>` stores the key in ~/.config/ask/ask.toml;\n\
-                 without --key (and on the Golem agent), set ANTHROPIC_API_KEY in the environment.\n\n\
+                 \x20 model add <provider> [--key K]  store a native provider key, or point at the env var\n\
+                 \x20 model remove <provider> clear a stored provider key (native)\n\n\
+                 Model ids use `provider/model` (a bare id defaults to anthropic).\n\
+                 Providers: anthropic, openai, grok, openrouter, ollama, bedrock. All work on the Golem\n\
+                 agent (via golem-ai-llm); natively, anthropic + openai/grok/openrouter/ollama work and\n\
+                 bedrock is agent-only. The catalog is a curated subset — any id is passed through as-is.\n\
+                 API keys: on native, `model add <p> --key <k>` stores the key in ~/.config/ask/ask.toml;\n\
+                 otherwise (and on the agent) set the provider's env var — ANTHROPIC_API_KEY, OPENAI_API_KEY,\n\
+                 XAI_API_KEY, OPENROUTER_API_KEY (ollama is keyless).\n\n\
                  (clank builtin)\n",
                 Model::SYNOPSIS
             )),
@@ -182,13 +201,14 @@ fn info(home: &str, id: Option<&str>) -> (String, String, u8) {
 /// `ANTHROPIC_API_KEY` (golem.yaml passthrough), matching the durable provider's `from_env` contract.
 fn add(home: &str, argv: &[String]) -> (String, String, u8) {
     let _ = home; // used only on native (see below)
-    let provider = argv.get(1).map_or("", String::as_str);
-    if !(provider == PROVIDER || provider.is_empty()) {
+    let raw = argv.get(1).map_or("", String::as_str);
+    let provider = if raw.is_empty() { PROVIDER } else { raw };
+    if !is_known_provider(provider) {
         return (
             String::new(),
             format!(
-                "model add: only the built-in anthropic provider is supported; '{provider}' cannot \
-                 be added.\n"
+                "model add: unknown provider '{provider}' (known: {})\n",
+                PROVIDERS.join(", ")
             ),
             1,
         );
@@ -204,19 +224,23 @@ fn add(home: &str, argv: &[String]) -> (String, String, u8) {
     #[cfg(not(target_arch = "wasm32"))]
     {
         match key {
-            Some(k) if !k.is_empty() => match crate::ai::config::save_provider_key(home, PROVIDER, k) {
-                Ok(()) => (
-                    "model add: stored the anthropic key in ~/.config/ask/ask.toml\n".to_string(),
-                    String::new(),
-                    0,
-                ),
-                Err(e) => (String::new(), format!("model add: {e}\n"), 1),
-            },
+            Some(k) if !k.is_empty() => {
+                match crate::ai::config::save_provider_key(home, provider, k) {
+                    Ok(()) => (
+                        format!("model add: stored the {provider} key in ~/.config/ask/ask.toml\n"),
+                        String::new(),
+                        0,
+                    ),
+                    Err(e) => (String::new(), format!("model add: {e}\n"), 1),
+                }
+            }
             _ => (
                 String::new(),
-                "model add: anthropic is built in. Provide a key with `--key <value>` to store it \
-                 in ~/.config/ask/ask.toml, or set ANTHROPIC_API_KEY in the environment.\n"
-                    .to_string(),
+                format!(
+                    "model add: provide a key with `--key <value>` to store it in \
+                     ~/.config/ask/ask.toml, or set {provider}'s API key env var in the environment \
+                     (e.g. ANTHROPIC_API_KEY / OPENAI_API_KEY). Ollama is keyless.\n"
+                ),
                 1,
             ),
         }
@@ -226,8 +250,8 @@ fn add(home: &str, argv: &[String]) -> (String, String, u8) {
         let _ = key;
         (
             String::new(),
-            "model add: provider keys are not stored on the agent; set ANTHROPIC_API_KEY in the \
-             environment (the Golem agent receives it via golem.yaml). anthropic is built in.\n"
+            "model add: provider keys are not stored on the agent; set the provider's API key env \
+             var in the environment (the Golem agent receives it via golem.yaml).\n"
                 .to_string(),
             1,
         )
@@ -240,30 +264,35 @@ fn add(home: &str, argv: &[String]) -> (String, String, u8) {
 /// keys are never stored, so it's an honest no-op message.
 fn remove(home: &str, provider: Option<&str>) -> (String, String, u8) {
     let _ = home; // used only on native
-    let p = provider.unwrap_or("");
-    if !(p == PROVIDER || p.is_empty()) {
+    let raw = provider.unwrap_or("");
+    let p = if raw.is_empty() { PROVIDER } else { raw };
+    if !is_known_provider(p) {
         return (
             String::new(),
-            format!("model remove: no such provider '{p}' (only the built-in anthropic exists).\n"),
+            format!(
+                "model remove: unknown provider '{p}' (known: {})\n",
+                PROVIDERS.join(", ")
+            ),
             1,
         );
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-        match crate::ai::config::remove_provider_key(home, PROVIDER) {
+        match crate::ai::config::remove_provider_key(home, p) {
             Ok(true) => (
-                "model remove: cleared the stored anthropic key from ~/.config/ask/ask.toml; auth \
-                 now falls back to ANTHROPIC_API_KEY. anthropic stays built in.\n"
-                    .to_string(),
+                format!(
+                    "model remove: cleared the stored {p} key from ~/.config/ask/ask.toml; auth now \
+                     falls back to the {p} env var.\n"
+                ),
                 String::new(),
                 0,
             ),
             Ok(false) => (
                 String::new(),
-                "model remove: no stored anthropic key to clear (anthropic is built in and reads \
-                 ANTHROPIC_API_KEY).\n"
-                    .to_string(),
+                format!(
+                    "model remove: no stored {p} key to clear ({p} auth reads its API key env var).\n"
+                ),
                 1,
             ),
             Err(e) => (String::new(), format!("model remove: {e}\n"), 1),
@@ -273,8 +302,8 @@ fn remove(home: &str, provider: Option<&str>) -> (String, String, u8) {
     {
         (
             String::new(),
-            "model remove: provider keys are not stored on the agent (anthropic reads \
-             ANTHROPIC_API_KEY via golem.yaml). anthropic is built in.\n"
+            "model remove: provider keys are not stored on the agent (each provider reads its API \
+             key env var via golem.yaml).\n"
                 .to_string(),
             1,
         )
@@ -290,12 +319,14 @@ fn canonicalize(id: &str) -> String {
     }
 }
 
-/// Like [`canonicalize`] but rejects an unknown provider prefix (only `anthropic/` is valid today).
+/// Like [`canonicalize`] but rejects an unknown provider prefix. A bare id defaults to the
+/// [`PROVIDER`]; any of the known [`PROVIDERS`] is accepted.
 fn canonicalize_checked(id: &str) -> Result<String, String> {
     if let Some((provider, _)) = id.split_once('/') {
-        if provider != PROVIDER {
+        if !is_known_provider(provider) {
             return Err(format!(
-                "model default: unknown provider '{provider}' (only {PROVIDER} is available)\n"
+                "model default: unknown provider '{provider}' (known: {})\n",
+                PROVIDERS.join(", ")
             ));
         }
         Ok(id.to_string())
@@ -365,11 +396,19 @@ mod tests {
     }
 
     #[test]
-    fn default_rejects_unknown_provider() {
+    fn default_accepts_known_provider_rejects_unknown() {
         let home = temp_home();
-        let (_out, err, code) = run(&home, &args(&["default", "openai/gpt-4o"]));
+        // A known non-anthropic provider is accepted (multi-provider) and persisted.
+        let (_out, _err, code) = run(&home, &args(&["default", "openai/gpt-4o"]));
+        assert_eq!(code, 0);
+        assert_eq!(
+            crate::ai::config::default_model(&home).unwrap().as_deref(),
+            Some("openai/gpt-4o")
+        );
+        // A truly-unknown provider is still rejected.
+        let (_out, err, code) = run(&home, &args(&["default", "frobnicate/x"]));
         assert_eq!(code, 2);
-        assert!(err.contains("unknown provider 'openai'"), "got: {err}");
+        assert!(err.contains("unknown provider 'frobnicate'"), "got: {err}");
     }
 
     #[test]
@@ -410,11 +449,21 @@ mod tests {
     }
 
     #[test]
-    fn add_unknown_provider_is_rejected() {
+    fn add_known_provider_stores_key_unknown_rejected() {
         let home = temp_home();
-        let (_out, err, code) = run(&home, &args(&["add", "openai", "--key", "x"]));
+        // A known non-anthropic provider stores its key natively (per-provider ask.toml entry).
+        let (out, err, code) = run(&home, &args(&["add", "openai", "--key", "sk-openai"]));
+        assert_eq!(code, 0, "err: {err}");
+        assert!(out.contains("openai") && out.contains("ask.toml"), "got: {out}");
+        assert!(!out.contains("sk-openai") && !err.contains("sk-openai"), "key leaked");
+        assert_eq!(
+            crate::ai::config::provider_key(&home, "openai").as_deref(),
+            Some("sk-openai")
+        );
+        // A truly-unknown provider is rejected.
+        let (_out, err, code) = run(&home, &args(&["add", "frobnicate", "--key", "x"]));
         assert_eq!(code, 1);
-        assert!(err.contains("only the built-in anthropic"), "got: {err}");
+        assert!(err.contains("unknown provider 'frobnicate'"), "got: {err}");
     }
 
     #[test]

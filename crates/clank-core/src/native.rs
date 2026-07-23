@@ -172,7 +172,10 @@ async fn run_repl(
 ///   (otherwise native keeps the honest "needs a cluster" error, unchanged).
 fn inject_native_providers(session: &mut Session) {
     session.set_mcp_http(Box::new(crate::mcp::http_native::ReqwestMcpHttp::new()));
-    session.set_ask_provider(Box::new(crate::ai::anthropic_native::ReqwestAnthropicProvider::new()));
+    // The multi-provider dispatcher: routes `ask` by the model's `provider/` prefix (anthropic via
+    // the Messages API; openai/grok/openrouter/ollama via the OpenAI Chat Completions API; bedrock is
+    // an honest agent-only error). Mirrors clank-agent's durable golem-ai-llm dispatcher.
+    session.set_ask_provider(Box::new(crate::ai::llm_native::NativeLlmProvider::new()));
 
     // Golem cluster + agent invoker: only when an external cluster config is present (README §161-163).
     // Without it, native keeps the honest "needs a cluster" error — Tier C is inert unless configured.

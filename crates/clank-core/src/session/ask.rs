@@ -394,17 +394,18 @@ impl Session {
             }
         };
 
-        // Validate/strip the provider prefix. Only `anthropic/` is known; a bare id is anthropic.
-        let bare = match chosen.split_once('/') {
-            Some(("anthropic", model)) => model.to_string(),
-            Some((provider, _)) => {
+        // Validate the provider prefix against the known set and pass the id through UNCHANGED — the
+        // injected provider (native dispatcher or the durable agent dispatcher) splits `provider/model`
+        // and routes. A bare id (no prefix) stays bare; both dispatchers default it to anthropic.
+        if let Some((provider, _)) = chosen.split_once('/') {
+            if !crate::ai::model::is_known_provider(provider) {
                 return Err(format!(
-                    "ask: unknown provider '{provider}' (only anthropic is available)\n"
-                ))
+                    "ask: unknown provider '{provider}' (known: {})\n",
+                    crate::ai::model::PROVIDERS.join(", ")
+                ));
             }
-            None => chosen,
-        };
-        Ok((bare, warning))
+        }
+        Ok((chosen, warning))
     }
 
     /// The shell's `$HOME` (seeded to `/home/user` on the agent), for locating `~/.config/ask/ask.toml`.

@@ -3203,14 +3203,18 @@ fn ask_uses_model_default_and_flag_overrides() {
             .run_line(&format!("export HOME={}", home.display()))
             .await;
 
-        // Set the default, then a bare ask should use it (prefix stripped to the bare id).
+        // Set the default; a bare ask uses it. The provider now receives the FULL `provider/model`
+        // id (the injected dispatcher splits the prefix and routes) rather than a stripped bare id.
         session
             .run_line("model default anthropic/claude-sonnet-4-5")
             .await;
         session.run_line(r#"sudo ask --fresh "hi""#).await;
-        assert_eq!(seen.lock().unwrap().last().unwrap().model, "claude-sonnet-4-5");
+        assert_eq!(
+            seen.lock().unwrap().last().unwrap().model,
+            "anthropic/claude-sonnet-4-5"
+        );
 
-        // An explicit --model overrides the default.
+        // An explicit --model overrides the default. A bare id (no prefix) passes through bare.
         session
             .run_line(r#"sudo ask --fresh --model claude-haiku-4-5 "hi""#)
             .await;
@@ -3227,8 +3231,9 @@ fn ask_unknown_provider_prefix_errors() {
         let mut session = Session::new().await.unwrap();
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         session.set_ask_provider(Box::new(FakeProvider::reply("x", seen.clone())));
+        // A truly-unknown provider errors before any call (known providers like openai now route).
         let result = session
-            .eval_line(r#"sudo ask --model openai/gpt-4o --fresh "hi""#)
+            .eval_line(r#"sudo ask --model frobnicate/x --fresh "hi""#)
             .await;
         assert_eq!(result.exit_code, 2);
         assert!(String::from_utf8(result.stderr).unwrap().contains("unknown provider"));

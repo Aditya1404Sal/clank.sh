@@ -106,7 +106,7 @@ impl ClankAgentImpl {
                 Ok(mut s) => {
                     // Install the durable Anthropic provider so `ask` can reach the model. Only the
                     // agent build has the Golem-host LLM bindings; native leaves `ask` unconfigured.
-                    s.set_ask_provider(Box::new(crate::ask_provider::DurableAnthropicProvider));
+                    s.set_ask_provider(Box::new(crate::ask_provider::DurableLlmProvider));
                     // Install the durable wstd HTTP transport so `mcp` can reach servers.
                     s.set_mcp_http(Box::new(crate::mcp_http::WstdMcpHttp));
                     // Install the durable WasmRpc invoker so grease-installed Golem agents can be
