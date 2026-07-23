@@ -20,6 +20,7 @@ use brush_builtins::{BuiltinSet, ShellBuilderExt};
 use brush_core::openfiles::{OpenFile, OpenFiles};
 use brush_core::{ExecutionControlFlow, Shell, SourceInfo};
 
+use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 
 use crate::authz::{self, AuthzState, Decision};
@@ -152,9 +153,13 @@ struct PendingInvocation {
 
 /// The result of evaluating one shell line.
 pub struct LineResult {
+    /// The line's captured standard output.
     pub stdout: Vec<u8>,
+    /// The line's captured standard error.
     pub stderr: Vec<u8>,
+    /// The line's exit status (`0` on success; see the README exit-code table).
     pub exit_code: u8,
+    /// Whether the shell should continue or exit after this line.
     pub flow: Flow,
     /// Set when this line surfaced a `prompt-user` question the shell is now awaiting a response
     /// to. The caller must collect a human answer and deliver it via [`Session::answer_prompt`]
@@ -164,6 +169,7 @@ pub struct LineResult {
 
 impl LineResult {
     /// Bytes as a terminal would display them through the legacy `run_line` API.
+    #[must_use]
     pub fn terminal_output(&self) -> Vec<u8> {
         let mut output = self.stdout.clone();
         output.extend_from_slice(&self.stderr);
@@ -237,7 +243,7 @@ pub struct Session {
     authz: AuthzState,
     /// Live background jobs: the Brush job id ↔ clank PID mapping `kill <pid>` resolves through.
     /// Deterministic under Golem replay — derived purely from the replayed line history, like the
-    /// process table (the JoinHandles themselves are rebuilt by re-execution).
+    /// process table (the `JoinHandles` themselves are rebuilt by re-execution).
     bg_jobs: Vec<BgJob>,
     /// The injected LLM provider for `ask`. Installed by the agent build (a durable Anthropic
     /// provider); `None` on native and until injected, in which case `ask` degrades to a clean
@@ -294,6 +300,10 @@ pub struct Session {
 
 impl Session {
     /// Build a non-interactive shell with the full bash-compatible builtin set.
+    ///
+    /// # Errors
+    /// Returns `Err` if the Brush shell fails to build or its `$PATH`/`$HOME` seeding fails (and,
+    /// on wasm, if the current-thread tokio runtime cannot be constructed).
     pub async fn new() -> Result<Self, BoxError> {
         ensure_fs_layout();
         #[cfg(target_arch = "wasm32")]
@@ -429,6 +439,7 @@ impl Session {
     }
 
     /// The command registry — clank's inventory of command manifests.
+    #[must_use]
     pub fn registry(&self) -> &CommandRegistry {
         &self.registry
     }
@@ -486,6 +497,8 @@ impl Session {
     }
 
     /// Emit the shell.log terminal event for a finished (or paused) line.
+    // A method for call-site symmetry with `eval_line`; pairs with the per-`self` log-sink install.
+    #[allow(clippy::unused_self)]
     fn log_line_outcome(&self, line: &str, result: &LineResult) {
         if line.trim().is_empty() {
             return;
@@ -498,6 +511,9 @@ impl Session {
         rec.emit(crate::logging::LogFile::Shell);
     }
 
+    // The single per-line dispatch pipeline: pending-prompt guard, secret-env install, transcript
+    // record, then the ordered intercept ladder ending at the authz gate — one linear read.
+    #[allow(clippy::too_many_lines)]
     async fn eval_line_inner(&mut self, line: &str) -> LineResult {
         // A prompt is already outstanding: the caller must answer it (via `answer_prompt`), not run
         // a new command. The shell never blocks, so it's the caller's job to notice `pending_prompt`
@@ -514,7 +530,7 @@ impl Session {
                     .any(|t| matches!(t, crate::builtins::kill::Target::Pid(p) if *p == pp))
             );
             if kills_pending {
-                self.transcript.lock().unwrap().record_command(line);
+                self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record_command(line);
                 return self.answer_prompt(None).await;
             }
             // Re-surface the still-outstanding prompt (NOT a bare stderr, which carries
@@ -557,10 +573,10 @@ impl Session {
             Some(secret) if !secret.value.is_empty() => {
                 let redacted =
                     line.replace(&secret.value, crate::runtime::secretenv::REDACTED);
-                self.transcript.lock().unwrap().record_command(&redacted);
+                self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record_command(&redacted);
             }
             _ => {
-                self.transcript.lock().unwrap().record_command(line);
+                self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record_command(line);
             }
         }
 
@@ -598,6 +614,9 @@ impl Session {
         // guards clear the slots on drop. The manifests/index/prompt are read-only surfaces, so sharing
         // one `Arc` across lines is safe.
         let (dynreg, mcpfs, sysprompt) = {
+            // Invariant: Some by this point — the block just above sets it when the cap key changed,
+            // and leaves the existing value otherwise.
+            #[allow(clippy::expect_used)]
             let cap = self.cap_cache.as_ref().expect("cap_cache just populated");
             (cap.dynreg.clone(), cap.mcpfs.clone(), cap.sysprompt.clone())
         };
@@ -615,7 +634,7 @@ impl Session {
                 None
             } else {
                 let kind = classify(line);
-                Some(self.proc_table.lock().unwrap().spawn(kind, argv))
+                Some(self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).spawn(kind, argv))
             }
         };
 
@@ -669,7 +688,7 @@ impl Session {
                     // Inspection output — reap the row but do NOT record it back (like `context show`).
                     let result = self.run_context_summarize().await;
                     if let Some(pid) = pid {
-                        self.proc_table.lock().unwrap().complete(pid);
+                        self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(pid);
                     }
                     return result;
                 }
@@ -690,9 +709,9 @@ impl Session {
         }
 
         // `context show` output is intentionally not recorded back into the transcript.
-        if let Some(bytes) = dispatch_context(&mut self.transcript.lock().unwrap(), line) {
+        if let Some(bytes) = dispatch_context(&mut self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner), line) {
             if let Some(pid) = pid {
-                self.proc_table.lock().unwrap().complete(pid);
+                self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(pid);
             }
             return LineResult::continue_with_stdout(bytes);
         }
@@ -826,7 +845,7 @@ impl Session {
         // `resolve_auth_confirm`, which passes `false`).
         let blanket = elevated || self.authz.allow_all;
         let result = self.run_command(&effective, pid, blanket).await;
-        self.transcript.lock().unwrap().record_output(&result.terminal_output());
+        self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record_output(&result.terminal_output());
         // If recording just evicted old entries to stay under budget, upgrade the leading count marker
         // into a model-generated summary block (no-op when nothing was dropped or no provider exists).
         self.compact_dropped_span().await;
@@ -944,7 +963,7 @@ impl Session {
             }
         };
         if let Some(pid) = pid {
-            self.proc_table.lock().unwrap().complete(pid);
+            self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(pid);
         }
         result
     }
@@ -985,7 +1004,7 @@ impl Session {
         for (job, _result) in results {
             if let Some(idx) = self.bg_jobs.iter().position(|b| b.job_id == job.id) {
                 let bg = self.bg_jobs.remove(idx);
-                self.proc_table.lock().unwrap().complete(bg.pid);
+                self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(bg.pid);
             }
         }
     }
@@ -1009,7 +1028,7 @@ impl Session {
             let bg_pid = self
                 .proc_table
                 .lock()
-                .unwrap()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .spawn_bg(crate::runtime::process::ProcessKind::Builtin, argv, ppid);
             self.bg_jobs.push(BgJob {
                 job_id,
@@ -1036,15 +1055,12 @@ impl Session {
         for target in &args.targets {
             let job_id = match target {
                 Target::Job(spec) => {
-                    match self.shell.jobs_mut().resolve_job_spec(spec).map(|j| j.id) {
-                        Some(id) => id,
-                        None => {
-                            stderr.extend_from_slice(
-                                format!("kill: {spec}: no such job\n").as_bytes(),
-                            );
-                            any_missed = true;
-                            continue;
-                        }
+                    if let Some(id) = self.shell.jobs_mut().resolve_job_spec(spec).map(|j| j.id) { id } else {
+                        stderr.extend_from_slice(
+                            format!("kill: {spec}: no such job\n").as_bytes(),
+                        );
+                        any_missed = true;
+                        continue;
                     }
                 }
                 Target::Pid(pid) => {
@@ -1063,7 +1079,7 @@ impl Session {
                     // guaranteed — documented.)
                     if let Some(idx) = self.pending_invocations.iter().position(|p| p.pid == *pid) {
                         let inv = self.pending_invocations.remove(idx);
-                        self.proc_table.lock().unwrap().complete(*pid);
+                        self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(*pid);
                         let msg = if inv.cancel_token.is_some() {
                             format!("[{pid}] cancelled (queued/scheduled invocation)\n")
                         } else {
@@ -1075,15 +1091,12 @@ impl Session {
                         stdout.extend_from_slice(msg.as_bytes());
                         continue;
                     }
-                    match self.bg_jobs.iter().find(|b| b.pid == *pid) {
-                        Some(bg) => bg.job_id,
-                        None => {
-                            stderr.extend_from_slice(
-                                format!("kill: ({pid}) - No such process\n").as_bytes(),
-                            );
-                            any_missed = true;
-                            continue;
-                        }
+                    if let Some(bg) = self.bg_jobs.iter().find(|b| b.pid == *pid) { bg.job_id } else {
+                        stderr.extend_from_slice(
+                            format!("kill: ({pid}) - No such process\n").as_bytes(),
+                        );
+                        any_missed = true;
+                        continue;
                     }
                 }
             };
@@ -1099,7 +1112,7 @@ impl Session {
             let mapping_idx = self.bg_jobs.iter().position(|b| b.job_id == job_id);
             let killed_pid = mapping_idx.map(|i| self.bg_jobs.remove(i).pid);
             if let Some(killed_pid) = killed_pid {
-                self.proc_table.lock().unwrap().complete(killed_pid);
+                self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(killed_pid);
                 stdout.extend_from_slice(
                     format!("[{job_id}] {killed_pid} Killed\t{}\n", job.command_line).as_bytes(),
                 );
@@ -1331,9 +1344,9 @@ impl Session {
     /// through `run_command`, e.g. an authorization denial).
     fn finish_intercepted(&mut self, pid: Option<u32>, result: LineResult) -> LineResult {
         if let Some(pid) = pid {
-            self.proc_table.lock().unwrap().complete(pid);
+            self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(pid);
         }
-        self.transcript.lock().unwrap().record_output(&result.terminal_output());
+        self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record_output(&result.terminal_output());
         result
     }
 
@@ -1381,6 +1394,7 @@ impl Session {
     }
 
     /// Whether a `prompt-user` question is currently awaiting a response.
+    #[must_use]
     pub fn has_pending_prompt(&self) -> bool {
         self.pending.is_some()
     }
@@ -1394,6 +1408,7 @@ impl Session {
     ///
     /// The native REPL uses it to drive PS2 continuation; `eval_line_inner` uses it to answer
     /// incomplete input honestly instead of letting the fatal-parse path end the session.
+    #[must_use]
     pub fn line_is_incomplete(&self, line: &str) -> bool {
         match self.shell.parse_string(line) {
             Err(brush_parser::ParseError::Tokenizing { ref inner, .. }) if inner.is_incomplete() => {
@@ -1430,9 +1445,8 @@ impl Session {
             Ok(f) => f,
             Err(e) => return LineResult::stderr(format!("clank: {e}\n")),
         };
-        let (out_fd, err_fd) = match (stdout_capture.try_clone(), stderr_capture.try_clone()) {
-            (Ok(o), Ok(e)) => (o, e),
-            _ => return LineResult::stderr(b"clank: failed to set up output capture\n".to_vec()),
+        let (Ok(out_fd), Ok(err_fd)) = (stdout_capture.try_clone(), stderr_capture.try_clone()) else {
+            return LineResult::stderr(b"clank: failed to set up output capture\n".to_vec());
         };
 
         let mut params = self.shell.default_exec_params();
@@ -1512,8 +1526,8 @@ impl Session {
         let result = self.rt.block_on(fut);
         drop(params);
 
-        let stdout = std::mem::take(&mut *stdout_buf.lock().unwrap());
-        let stderr = std::mem::take(&mut *stderr_buf.lock().unwrap());
+        let stdout = std::mem::take(&mut *stdout_buf.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+        let stderr = std::mem::take(&mut *stderr_buf.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
         finish(result, stdout, stderr)
     }
 }
@@ -1635,7 +1649,7 @@ struct IndexEntry {
 /// the exit code. curl/wget bypass the `McpHttp` seam (their own `wstd`/`reqwest` fetch), so they're
 /// logged here at the dispatch site rather than by the `LoggingMcpHttp` decorator.
 fn log_http_tool(tool: &str, args: &[String], exit_code: u8) {
-    let url = args.iter().find(|a| !a.starts_with('-')).map(String::as_str).unwrap_or("");
+    let url = args.iter().find(|a| !a.starts_with('-')).map_or("", String::as_str);
     crate::logging::Record::new("http")
         .field("tool", tool)
         .field("url", crate::logging::redact_url(url))
@@ -1957,7 +1971,7 @@ fn parse_agent_line(
         }
         // A bare word: the method (first).
         if method.is_empty() {
-            method = w.clone();
+            method.clone_from(w);
             i += 1;
             break;
         }
@@ -1996,14 +2010,14 @@ fn write_install_marker(name: &str, marker: &crate::grease::state::InstallMarker
 fn skill_info_text(sk: &crate::grease::pkg::SkillPackage) -> String {
     let mut out = format!("{} — {} [skill]\n", sk.name, sk.description);
     if let Some(use_) = &sk.intended_use {
-        out.push_str(&format!("\nIntended use: {use_}\n"));
+        let _ = writeln!(out, "\nIntended use: {use_}");
     }
     if !sk.documents.is_empty() {
         out.push_str("\nDocuments (under /usr/share/skills/");
         out.push_str(&sk.name);
         out.push_str("/):\n");
         for d in &sk.documents {
-            out.push_str(&format!("  {}\n", d.path));
+            let _ = writeln!(out, "  {}", d.path);
         }
     }
     if !sk.scripts.is_empty() {
@@ -2011,7 +2025,7 @@ fn skill_info_text(sk: &crate::grease::pkg::SkillPackage) -> String {
         out.push_str(&sk.name);
         out.push_str("/bin/):\n");
         for s in &sk.scripts {
-            out.push_str(&format!("  {}\n", s.name));
+            let _ = writeln!(out, "  {}", s.name);
         }
     }
     out.push_str(
@@ -2025,7 +2039,7 @@ fn skill_info_text(sk: &crate::grease::pkg::SkillPackage) -> String {
 /// tool/prompt listings.
 fn mcp_info_text(m: &crate::grease::pkg::McpPackage) -> String {
     let mut out = format!("{} — {} [mcp]\n", m.name, m.description);
-    out.push_str(&format!("\nServer: {}\n", m.url));
+    let _ = writeln!(out, "\nServer: {}", m.url);
     let mut kinds = Vec::new();
     if m.artifacts.tools {
         kinds.push("tools");
@@ -2036,17 +2050,17 @@ fn mcp_info_text(m: &crate::grease::pkg::McpPackage) -> String {
     if m.artifacts.resources {
         kinds.push("resources");
     }
-    out.push_str(&format!("Artifacts: {}\n", kinds.join(", ")));
+    let _ = writeln!(out, "Artifacts: {}", kinds.join(", "));
     if !m.tools.is_empty() {
-        out.push_str(&format!("\nTools (run as `{} <tool>`):\n", m.name));
+        let _ = writeln!(out, "\nTools (run as `{} <tool>`):", m.name);
         for t in &m.tools {
-            out.push_str(&format!("  {} — {}\n", t.name, t.description));
+            let _ = writeln!(out, "  {} — {}", t.name, t.description);
         }
     }
     if !m.prompts.is_empty() {
         out.push_str("\nPrompts (installed as $PATH commands):\n");
         for p in &m.prompts {
-            out.push_str(&format!("  {} — {}\n", p.name, p.description));
+            let _ = writeln!(out, "  {} — {}", p.name, p.description);
         }
     }
     out
@@ -2094,10 +2108,10 @@ fn ask_reconstruct(args: &crate::ai::ask::AskArgs) -> String {
         line.push_str(" --json");
     }
     if let Some(m) = &args.model {
-        line.push_str(&format!(" --model {m}"));
+        let _ = write!(line, " --model {m}");
     }
     let escaped = args.prompt.replace('\'', r"'\''");
-    line.push_str(&format!(" '{escaped}'"));
+    let _ = write!(line, " '{escaped}'");
     line
 }
 
@@ -2142,13 +2156,12 @@ fn build_mcp_arguments(
             .and_then(|s| s.get("type"))
             .and_then(Value::as_str);
         let coerced = match (ty, value) {
-            (Some("boolean"), None) => Value::Bool(true),
             (Some("boolean"), Some(v)) => Value::Bool(v == "true" || v == "1" || v == "yes"),
-            (Some("integer"), Some(v)) | (Some("number"), Some(v)) => v
+            (Some("integer" | "number"), Some(v)) => v
                 .parse::<f64>()
                 .map(|n| serde_json::json!(n))
                 .map_err(|_| format!("--{key}: '{v}' is not a number"))?,
-            (Some("array"), Some(v)) | (Some("object"), Some(v)) => serde_json::from_str(v)
+            (Some("array" | "object"), Some(v)) => serde_json::from_str(v)
                 .map_err(|e| format!("--{key}: expected JSON: {e}"))?,
             (_, Some(v)) => Value::String(v.clone()),
             // A bare flag with no schema type: treat as a present boolean.
@@ -2174,6 +2187,9 @@ fn build_mcp_arguments(
 /// The README's default `$PATH` — the resolution namespace clank's package layout installs into.
 /// Kept as the documented default and the drift-guard baseline; the value actually installed is
 /// [`effective_path`], which resolves the package dirs through their env-overridable config fns.
+// Referenced only by the drift-guard test (pins `effective_path()` == this with no overrides); kept
+// as the documented baseline, so it reads as dead outside `cfg(test)`.
+#[allow(dead_code)]
 const DEFAULT_PATH: &str =
     "/usr/local/bin:/usr/bin:/usr/lib/mcp/bin:/usr/lib/agents/bin:/usr/lib/prompts/bin:/usr/share/skills/*/bin";
 
@@ -2337,7 +2353,7 @@ impl std::io::Read for BufSink {
 #[cfg(target_arch = "wasm32")]
 impl std::io::Write for BufSink {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(data);
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).extend_from_slice(data);
         Ok(data.len())
     }
     fn flush(&mut self) -> std::io::Result<()> {

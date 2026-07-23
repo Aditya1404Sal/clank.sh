@@ -29,6 +29,7 @@
 //! plumbed through Brush's `ShellExtensions` instead — out of scope while execution is synchronous.
 
 use std::cell::RefCell;
+use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 
 use crate::runtime::process::ProcessKind;
@@ -65,6 +66,7 @@ pub enum ProcState {
 
 impl ProcState {
     /// The single-letter code shown in `ps`'s STAT column and `/proc/<pid>/status`.
+    #[must_use]
     pub fn code(self) -> char {
         match self {
             ProcState::R => 'R',
@@ -76,6 +78,7 @@ impl ProcState {
     }
 
     /// The long name shown alongside the code in `/proc/<pid>/status` (`R (running)`).
+    #[must_use]
     pub fn long_name(self) -> &'static str {
         match self {
             ProcState::R => "running",
@@ -94,20 +97,26 @@ impl ProcState {
 /// omitted rather than fabricated — consistent with the honest `--revision` stub.)
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentMeta {
+    /// The Golem agent type name (e.g. `GreeterAgent`).
     pub agent_type: String,
     /// Constructor params rendered as `k=v,k=v` (ordered), matching the invocation grammar.
     pub agent_params: String,
+    /// The phantom-instance UUID when the invocation targeted a phantom agent; `None` otherwise.
     pub phantom_uuid: Option<String>,
 }
 
 /// One process-table row: a single invocation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProcRow {
+    /// The process ID — monotonic within the session and never reused.
     pub pid: u32,
+    /// The parent process ID (the shell-root PID 1, or the spawning line's row for a background job).
     pub ppid: u32,
+    /// The process kind tag, driving `ps`'s type column and `/proc` rendering.
     pub kind: ProcessKind,
     /// The command line as argv (whitespace-split; display-only).
     pub argv: Vec<String>,
+    /// The current process state (`R`/`S`/`T`/`Z`/`P`).
     pub state: ProcState,
     /// Logical start ordinal (monotonic within the session), not wall-clock — keeps the table
     /// fully deterministic under replay.
@@ -122,6 +131,7 @@ impl ProcRow {
     /// masked so a secret never leaks through `ps` COMMAND, `/proc/<pid>/cmdline`, or the `Cmd:` line
     /// of `/proc/<pid>/status` — the display chokepoint all three render through. See
     /// [`crate::runtime::secretenv`].
+    #[must_use]
     pub fn command(&self) -> String {
         crate::runtime::secretenv::mask_values(&self.argv.join(" "))
     }
@@ -129,6 +139,7 @@ impl ProcRow {
 
 /// The canonical synthetic shell-root row (PID 1). It is not stored in the table — both `ps` (via
 /// the renderers) and `/proc` (via [`ProcessTable::find`]) source it here so they can't drift.
+#[must_use]
 pub fn root_row() -> ProcRow {
     ProcRow {
         pid: SHELL_ROOT_PID,
@@ -171,6 +182,8 @@ impl Default for ProcessTable {
 }
 
 impl ProcessTable {
+    /// A new, empty process table with the PID and start-ordinal counters at their initial values.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -197,6 +210,8 @@ impl ProcessTable {
     /// Record a background job's row in state `S` (sleeping — parked async work), parented to the
     /// spawning line's row. Used by the Session when a `cmd &` line leaves a Brush job behind; the
     /// row completes (`S → Z`) when the job is reaped or killed.
+    // `pid`/`ppid` are the canonical process-table field names; keeping both reads clearer than a rename.
+    #[allow(clippy::similar_names)]
     pub fn spawn_bg(&mut self, kind: ProcessKind, argv: Vec<String>, ppid: u32) -> u32 {
         let pid = self.next_pid;
         self.next_pid += 1;
@@ -279,12 +294,14 @@ impl ProcessTable {
     }
 
     /// The rows, oldest first (for tests and rendering).
+    #[must_use]
     pub fn rows(&self) -> &[ProcRow] {
         &self.rows
     }
 
     /// Look up a process by PID, including the synthetic root (PID 1), which is not a stored row.
     /// This is the single place PID-1 handling lives, so `ps` and `/proc` can't disagree about it.
+    #[must_use]
     pub fn find(&self, pid: u32) -> Option<ProcRow> {
         if pid == SHELL_ROOT_PID {
             return Some(root_row());
@@ -293,6 +310,7 @@ impl ProcessTable {
     }
 
     /// Render the table in the given `ps` mode, including the synthetic root row.
+    #[must_use]
     pub fn render_ps(&self, mode: PsMode) -> String {
         match mode {
             PsMode::Default => self.render_default(),
@@ -301,31 +319,32 @@ impl ProcessTable {
         }
     }
 
+    // Aligned column headers: the width-formatted literals (`{:>5}` etc.) are the point of the
+    // table, so passing the header strings as format args is intentional, not inlinable.
+    #[allow(clippy::write_literal)]
     fn render_default(&self) -> String {
         let mut out = String::new();
-        out.push_str(&format!("{:>5} {:<4} {}\n", "PID", "STAT", "COMMAND"));
+        let _ = writeln!(out, "{:>5} {:<4} {}", "PID", "STAT", "COMMAND");
         // The synthetic root, then the real rows — sourced uniformly from `root_row()`.
         for r in std::iter::once(root_row()).chain(self.rows.iter().cloned()) {
-            out.push_str(&format!(
-                "{:>5} {:<4} {}\n",
-                r.pid,
-                r.state.code(),
-                r.command()
-            ));
+            let _ = writeln!(out, "{:>5} {:<4} {}", r.pid, r.state.code(), r.command());
         }
         out
     }
 
+    #[allow(clippy::write_literal)] // aligned column headers, as in render_default
     fn render_aux(&self) -> String {
         // %CPU/%MEM/VSZ/RSS/TTY are not available in WASM — shown as `-` (README).
         let mut out = String::new();
-        out.push_str(&format!(
-            "{:<6} {:>5} {:>4} {:>4} {:>6} {:>6} {:<4} {:<4} {:<5} {:<5} {}\n",
+        let _ = writeln!(
+            out,
+            "{:<6} {:>5} {:>4} {:>4} {:>6} {:>6} {:<4} {:<4} {:<5} {:<5} {}",
             "USER", "PID", "%CPU", "%MEM", "VSZ", "RSS", "TTY", "STAT", "START", "TIME", "COMMAND"
-        ));
+        );
         for r in std::iter::once(root_row()).chain(self.rows.iter().cloned()) {
-            out.push_str(&format!(
-                "{:<6} {:>5} {:>4} {:>4} {:>6} {:>6} {:<4} {:<4} {:<5} {:<5} {}\n",
+            let _ = writeln!(
+                out,
+                "{:<6} {:>5} {:>4} {:>4} {:>6} {:>6} {:<4} {:<4} {:<5} {:<5} {}",
                 "clank",
                 r.pid,
                 "-",
@@ -337,20 +356,23 @@ impl ProcessTable {
                 r.start,
                 "-",
                 r.command()
-            ));
+            );
         }
         out
     }
 
+    #[allow(clippy::write_literal)] // aligned column headers, as in render_default
     fn render_ef(&self) -> String {
         let mut out = String::new();
-        out.push_str(&format!(
-            "{:<6} {:>5} {:>5} {:>2} {:<6} {:<4} {:<5} {}\n",
+        let _ = writeln!(
+            out,
+            "{:<6} {:>5} {:>5} {:>2} {:<6} {:<4} {:<5} {}",
             "UID", "PID", "PPID", "C", "STIME", "TTY", "TIME", "CMD"
-        ));
+        );
         for r in std::iter::once(root_row()).chain(self.rows.iter().cloned()) {
-            out.push_str(&format!(
-                "{:<6} {:>5} {:>5} {:>2} {:<6} {:<4} {:<5} {}\n",
+            let _ = writeln!(
+                out,
+                "{:<6} {:>5} {:>5} {:>2} {:<6} {:<4} {:<5} {}",
                 "clank",
                 r.pid,
                 r.ppid,
@@ -359,7 +381,7 @@ impl ProcessTable {
                 "-",
                 "-",
                 r.command()
-            ));
+            );
         }
         out
     }
@@ -382,6 +404,7 @@ pub fn install(table: Arc<Mutex<ProcessTable>>) -> InstallGuard {
 }
 
 /// The currently-installed process table, if a line is executing on this thread.
+#[must_use]
 pub fn active() -> Option<Arc<Mutex<ProcessTable>>> {
     ACTIVE.with(|slot| slot.borrow().clone())
 }
@@ -515,7 +538,7 @@ mod tests {
         assert!(out.contains("clank"));
         // The completed command shows as Z.
         let cmd_line = out.lines().find(|l| l.contains("echo hi")).unwrap();
-        assert!(cmd_line.contains("Z"));
+        assert!(cmd_line.contains('Z'));
     }
 
     #[test]

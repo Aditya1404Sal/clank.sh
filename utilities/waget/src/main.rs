@@ -9,7 +9,7 @@ fn main() {
 
     let _ = std::io::stdout().write_all(&outcome.stdout);
     let _ = std::io::stderr().write_all(&outcome.stderr);
-    std::process::exit(outcome.exit_code as i32);
+    std::process::exit(i32::from(outcome.exit_code));
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -19,6 +19,8 @@ fn block_on(fut: impl std::future::Future<Output = waget::Outcome>) -> waget::Ou
 
 #[cfg(not(target_arch = "wasm32"))]
 fn block_on(fut: impl std::future::Future<Output = waget::Outcome>) -> waget::Outcome {
+    // Runtime construction failure is unrecoverable in the standalone CLI: fail fast.
+    #[allow(clippy::expect_used)]
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

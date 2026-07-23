@@ -14,6 +14,8 @@
 //! intercepted — any Brush-known or mixed line defers wholesale to Brush (a documented scope cut;
 //! single-name lookups, the common case and what tool packaging uses, are fully correct).
 
+use std::fmt::Write as _;
+
 use brush_parser::{tokenize_str, unquote_str, Token};
 
 use crate::registry::CommandRegistry;
@@ -25,6 +27,7 @@ pub const INTERCEPTED: &[&str] =
     &["prompt-user", "curl", "wget", "context", "ask", "kill", "mcp", "grease", "golem"];
 
 /// Whether `name` is a clank-intercepted command (one Brush can't resolve).
+#[must_use]
 pub fn is_intercepted(name: &str) -> bool {
     INTERCEPTED.contains(&name)
 }
@@ -89,6 +92,7 @@ fn parse(line: &str) -> Option<TypeInvocation> {
 ///
 /// Output shape matches Brush's `type` wording exactly (`"<name> is a shell builtin"`; `-t` →
 /// `"builtin"`) so the two resolvers are indistinguishable to a caller. Returns `(stdout, exit_code)`.
+#[must_use]
 pub fn dispatch(line: &str, registry: &CommandRegistry) -> Option<(String, u8)> {
     let inv = parse(line)?;
     // No names (`type` alone / `type -t`) → let Brush handle its own usage/error.
@@ -110,7 +114,7 @@ pub fn dispatch(line: &str, registry: &CommandRegistry) -> Option<(String, u8)> 
         if inv.type_only {
             out.push_str("builtin\n");
         } else {
-            out.push_str(&format!("{name} is a shell builtin\n"));
+            let _ = writeln!(out, "{name} is a shell builtin");
         }
     }
     Some((out, 0))
@@ -129,6 +133,7 @@ pub fn dispatch(line: &str, registry: &CommandRegistry) -> Option<(String, u8)> 
 /// confirmation, `sudo greeter --help` failing as "unknown flag --help before the method"). That path
 /// is not hypothetical: `ask`'s per-command authorization re-runs an approved command WITH the sudo
 /// grant applied, so the model asking for `<cmd> --help` was the one that hit it.
+#[must_use]
 pub fn help_for(line: &str, registry: &CommandRegistry) -> Option<String> {
     let words = words(line)?;
     let words = match words.split_first() {

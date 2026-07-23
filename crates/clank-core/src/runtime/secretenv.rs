@@ -54,17 +54,18 @@ pub fn install(secrets: SecretSet) -> InstallGuard {
     if secrets.is_empty() {
         return InstallGuard { previous: None };
     }
-    let mut slot = ACTIVE.write().unwrap_or_else(|e| e.into_inner());
+    let mut slot = ACTIVE.write().unwrap_or_else(std::sync::PoisonError::into_inner);
     let previous = slot.replace(secrets);
     InstallGuard { previous: Some(previous) }
 }
 
 /// The active secret set, if a line is executing.
 pub fn active() -> Option<SecretSet> {
-    ACTIVE.read().unwrap_or_else(|e| e.into_inner()).clone()
+    ACTIVE.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
 }
 
 /// Whether `name` is a secret-marked variable in the active set.
+#[must_use]
 pub fn is_secret_name(name: &str) -> bool {
     active().is_some_and(|s| s.iter().any(|(k, _)| k == name))
 }
@@ -72,6 +73,7 @@ pub fn is_secret_name(name: &str) -> bool {
 /// Drop every secret-marked key from an `(name, value)` environment list. Used by `env` and
 /// `/proc/<pid>/environ` so a secret var never appears in the environment display. When no secret set
 /// is installed (native off-session reads, tests), the environment passes through unchanged.
+#[must_use]
 pub fn filter_environ(environ: Vec<(String, String)>) -> Vec<(String, String)> {
     match active() {
         Some(secrets) => environ
@@ -86,6 +88,7 @@ pub fn filter_environ(environ: Vec<(String, String)>) -> Vec<(String, String)> {
 /// Used by the transcript recorder, `ps` COMMAND rendering, and any log text — a secret can leak by
 /// value where its name is absent (e.g. `echo "$KEY"`, a URL that embeds it). Empty secret values are
 /// skipped (masking `""` would corrupt the whole string). No-op when no secret set is installed.
+#[must_use]
 pub fn mask_values(text: &str) -> String {
     match active() {
         Some(secrets) => {
@@ -112,13 +115,16 @@ pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// empty [`install`] returns (it wrote nothing, so it restores nothing); `Some(prev)` for a real
 /// install that must put `prev` back.
 pub struct InstallGuard {
+    // Both Option levels are load-bearing: the outer None marks the no-op guard an empty install
+    // returns (restore nothing), while Some(prev) carries the slot's prior Option value to put back.
+    #[allow(clippy::option_option)]
     previous: Option<Option<SecretSet>>,
 }
 
 impl Drop for InstallGuard {
     fn drop(&mut self) {
         if let Some(previous) = self.previous.take() {
-            *ACTIVE.write().unwrap_or_else(|e| e.into_inner()) = previous;
+            *ACTIVE.write().unwrap_or_else(std::sync::PoisonError::into_inner) = previous;
         }
     }
 }
@@ -129,7 +135,7 @@ mod tests {
     use std::sync::MutexGuard;
 
     fn secret_test_lock() -> MutexGuard<'static, ()> {
-        TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn secrets(pairs: &[(&str, &str)]) -> SecretSet {

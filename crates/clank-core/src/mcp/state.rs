@@ -5,6 +5,8 @@
 //! mechanism as curl durability). Local session ids (`s1`, `s2`, …) and the JSON-RPC id counter are
 //! plain monotonic counters, deterministic like PIDs.
 
+use std::fmt::Write as _;
+
 use serde_json::Value;
 
 use crate::manifest::{AuthorizationPolicy, ExecutionScope, Manifest, ParamSpec, ParamType};
@@ -14,8 +16,11 @@ use crate::mcp::config::McpServerConfig;
 /// One installed MCP tool (mirrors [`ToolSpec`] with an owned schema).
 #[derive(Clone, Debug)]
 pub struct McpTool {
+    /// The tool's name.
     pub name: String,
+    /// The tool's human-readable description, if any.
     pub description: Option<String>,
+    /// The tool's JSON-schema input (kept lossless for the actual call).
     pub input_schema: Value,
 }
 
@@ -28,7 +33,9 @@ impl From<ToolSpec> for McpTool {
 /// One configured MCP server plus its install status.
 #[derive(Clone, Debug)]
 pub struct McpServer {
+    /// The server's name.
     pub name: String,
+    /// The server's parsed configuration.
     pub config: McpServerConfig,
     /// The tools fetched at install; empty until a successful `tools/list`.
     pub tools: Vec<McpTool>,
@@ -41,11 +48,17 @@ pub struct McpServer {
 /// One open MCP session: a local id, the server it belongs to, and the server-issued session id.
 #[derive(Clone, Debug)]
 pub struct McpSession {
+    /// The local session id (`s1`, `s2`, …).
     pub local_id: String,
+    /// The name of the server this session belongs to.
     pub server: String,
+    /// The server-issued session id (from `Mcp-Session-Id`), if any.
     pub server_session_id: Option<String>,
+    /// The protocol version negotiated at `initialize`.
     pub protocol_version: String,
+    /// The server's name + version, as a display string.
     pub server_info: String,
+    /// The server's advertised capabilities object.
     pub capabilities: Value,
 }
 
@@ -63,6 +76,7 @@ pub struct McpState {
 impl McpState {
     /// The mutation counter — bumped by server install/remove (see [`version`](Self::version)'s field
     /// docs). A cache keyed on it is invalidated exactly when the manifests/system-prompt would change.
+    #[must_use]
     pub fn version(&self) -> u64 {
         self.version
     }
@@ -100,20 +114,26 @@ impl McpState {
         self.version = self.version.wrapping_add(1);
     }
 
+    /// All configured servers (installed or failed), in insertion order.
+    #[must_use]
     pub fn servers(&self) -> &[McpServer] {
         &self.servers
     }
 
+    /// The server record for `name`, if it exists (installed or failed).
+    #[must_use]
     pub fn get(&self, name: &str) -> Option<&McpServer> {
         self.servers.iter().find(|s| s.name == name)
     }
 
     /// Whether `name` is an installed server (drives command dispatch).
+    #[must_use]
     pub fn is_server(&self, name: &str) -> bool {
         self.servers.iter().any(|s| s.name == name && s.installed)
     }
 
     /// A tool spec by server + tool name.
+    #[must_use]
     pub fn tool(&self, server: &str, tool: &str) -> Option<&McpTool> {
         self.get(server)?.tools.iter().find(|t| t.name == tool)
     }
@@ -135,15 +155,20 @@ impl McpState {
         local_id
     }
 
+    /// All currently-open MCP sessions.
+    #[must_use]
     pub fn sessions(&self) -> &[McpSession] {
         &self.sessions
     }
 
+    /// The open session with the given local id, if any.
+    #[must_use]
     pub fn session(&self, local_id: &str) -> Option<&McpSession> {
         self.sessions.iter().find(|s| s.local_id == local_id)
     }
 
     /// The first open session for a server, if any (implicit-session reuse).
+    #[must_use]
     pub fn session_for(&self, server: &str) -> Option<&McpSession> {
         self.sessions.iter().find(|s| s.server == server)
     }
@@ -160,6 +185,7 @@ impl McpState {
     /// The dynamic manifest for an installed server: `Subprocess` scope, `Confirm` policy (MCP tool
     /// calls are outbound HTTP), one subcommand per tool (schema → [`ParamSpec`] for help/completion;
     /// the raw schema stays on [`McpTool`]).
+    #[must_use]
     pub fn manifest_for(&self, name: &str) -> Option<Manifest> {
         let server = self.get(name)?;
         if !server.installed {
@@ -186,6 +212,7 @@ impl McpState {
 
     /// The dynamic manifests for all installed servers (for the per-line [`crate::runtime::dynreg`] slot that
     /// `man` consults).
+    #[must_use]
     pub fn all_manifests(&self) -> Vec<Manifest> {
         self.servers
             .iter()
@@ -196,6 +223,7 @@ impl McpState {
     /// Every installed MCP tool as an [`crate::ai::ask::AskTool`], for the agentic `ask` tool surface.
     /// The tool name is namespaced `mcp__<server>__<tool>` (the executor decodes it back to a
     /// `<server> <tool>` call); the parameters schema is the raw inputSchema string.
+    #[must_use]
     pub fn ask_tool_definitions(&self) -> Vec<crate::ai::ask::AskTool> {
         let mut tools = Vec::new();
         for server in &self.servers {
@@ -219,6 +247,7 @@ impl McpState {
     }
 
     /// Human-facing help for a server: its tools and their synopses.
+    #[must_use]
     pub fn server_help(&self, name: &str) -> Option<String> {
         let server = self.get(name)?;
         let mut out = format!("{name} — MCP server at {}\n\nTools:\n", server.config.url);
@@ -227,12 +256,13 @@ impl McpState {
         }
         for t in &server.tools {
             let desc = t.description.as_deref().unwrap_or("");
-            out.push_str(&format!("  {name} {} — {desc}\n", t.name));
+            let _ = writeln!(out, "  {name} {} — {desc}", t.name);
         }
-        out.push_str(&format!(
+        let _ = writeln!(
+            out,
             "\nUsage: {name} <tool> [--param value ...] [--args '<json>'] [--json] [--session-id <id>]\n\
-             MCP tool calls are outbound HTTP and require confirmation (or `sudo {name} …`).\n"
-        ));
+             MCP tool calls are outbound HTTP and require confirmation (or `sudo {name} …`)."
+        );
         Some(out)
     }
 }
@@ -252,7 +282,7 @@ fn schema_to_params(schema: &Value) -> Vec<ParamSpec> {
         .iter()
         .map(|(name, spec)| {
             let ty = match spec.get("type").and_then(Value::as_str) {
-                Some("integer") | Some("number") => ParamType::Int,
+                Some("integer" | "number") => ParamType::Int,
                 Some("boolean") => ParamType::Flag,
                 Some("string") => match spec.get("enum").and_then(Value::as_array) {
                     Some(vals) => ParamType::Enum(

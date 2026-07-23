@@ -29,6 +29,8 @@ impl<T: SimpleCommand> SimpleCommand for WithHelp<T> {
         T::get_content(name, content_type, options)
     }
 
+    // similar_names: `args`/`argv` are the conventional arg-iterator / arg-vector pair.
+    #[allow(clippy::similar_names)]
     fn execute<SE, I, S>(context: ExecutionContext<'_, SE>, args: I) -> Result<ExecutionResult, Error>
     where
         SE: ShellExtensions,
@@ -37,7 +39,7 @@ impl<T: SimpleCommand> SimpleCommand for WithHelp<T> {
     {
         let argv: Vec<String> = args.map(|s| s.as_ref().to_string()).collect();
         if matches!(argv.get(1).map(String::as_str), Some("--help" | "-h")) {
-            let name = argv.first().map(String::as_str).unwrap_or("");
+            let name = argv.first().map_or("", String::as_str);
             let help = T::get_content(name, ContentType::DetailedHelp, &ContentOptions::default())?;
             let mut out = context.stdout();
             let _ = out.write_all(help.as_bytes());
@@ -65,7 +67,7 @@ where
 mod tests {
     use super::*;
 
-    /// A minimal SimpleCommand that would error on `--help` if it ever saw it.
+    /// A minimal `SimpleCommand` that would error on `--help` if it ever saw it.
     struct Probe;
 
     impl SimpleCommand for Probe {
@@ -80,6 +82,8 @@ mod tests {
             }
         }
 
+        // similar_names: `args`/`argv` are the conventional arg-iterator / arg-vector pair.
+        #[allow(clippy::similar_names)]
         fn execute<SE, I, S>(
             context: ExecutionContext<'_, SE>,
             args: I,

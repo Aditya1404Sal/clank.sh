@@ -41,14 +41,14 @@ const MAX_LOG_BYTES: usize = 256 * 1024;
 
 /// A replay-safe log sink: buffers each log file's recent lines in memory (bounded, rolling) and rewrites
 /// the whole file on every append via idempotent `std::fs::write`.
-pub struct DurableLogSink {
+pub(crate) struct DurableLogSink {
     /// Per-file accumulated contents (filename → bounded recent text). `RefCell` because `LogSink::append`
     /// takes `&self`; the agent is single-threaded (wasip2), so there is no cross-thread contention.
     buffers: RefCell<HashMap<&'static str, String>>,
 }
 
 impl DurableLogSink {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self { buffers: RefCell::new(HashMap::new()) }
     }
 }

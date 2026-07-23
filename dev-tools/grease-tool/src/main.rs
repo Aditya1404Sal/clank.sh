@@ -208,24 +208,21 @@ fn handle_conn(mut stream: TcpStream, dir: &Path) -> std::io::Result<()> {
         std::fs::read(dir.join(rel)).ok()
     };
 
-    match body {
-        Some(bytes) => {
-            let header = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
-                bytes.len()
-            );
-            stream.write_all(header.as_bytes())?;
-            stream.write_all(&bytes)?;
-        }
-        None => {
-            let msg = b"not found\n";
-            let header = format!(
-                "HTTP/1.1 404 Not Found\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                msg.len()
-            );
-            stream.write_all(header.as_bytes())?;
-            stream.write_all(msg)?;
-        }
+    if let Some(bytes) = body {
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
+            bytes.len()
+        );
+        stream.write_all(header.as_bytes())?;
+        stream.write_all(&bytes)?;
+    } else {
+        let msg = b"not found\n";
+        let header = format!(
+            "HTTP/1.1 404 Not Found\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            msg.len()
+        );
+        stream.write_all(header.as_bytes())?;
+        stream.write_all(msg)?;
     }
     stream.flush()
 }
@@ -442,15 +439,14 @@ fn main() -> Result<()> {
     println!("  grease registry add http://localhost:{port} --key {pubkey}\n");
 
     loop {
-        let choice = match Select::new(
+        let Ok(choice) = Select::new(
             "add to the registry:",
             vec!["prompt", "script", "skill", "agent", "mcp", "list", "quit"],
         )
         .prompt()
-        {
-            Ok(c) => c,
+        else {
             // Esc / Ctrl-C at the menu = quit cleanly.
-            Err(_) => break,
+            break;
         };
         let result = match choice {
             "prompt" => author_prompt(&mut reg),
@@ -677,7 +673,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Minimal HTTP/1.1 GET over a raw TcpStream: returns (status-line, body-bytes).
+    /// Minimal HTTP/1.1 GET over a raw `TcpStream`: returns (status-line, body-bytes).
     fn http_get(port: u16, path: &str) -> (String, Vec<u8>) {
         use std::io::{Read, Write};
         let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();

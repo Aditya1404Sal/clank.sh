@@ -21,6 +21,7 @@ pub struct ReqwestMcpHttp {
 impl ReqwestMcpHttp {
     /// Build the transport with a default rustls-backed client. Falls back to `Client::new()` if the
     /// builder somehow fails (it does not, in practice — there is nothing to configure).
+    #[must_use]
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
             .build()

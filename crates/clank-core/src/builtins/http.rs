@@ -18,7 +18,7 @@ use crate::manifest::{AuthorizationPolicy, ExecutionScope, Manifest};
 
 /// The two HTTP commands clank intercepts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HttpCommand {
+pub(crate) enum HttpCommand {
     Curl,
     Wget,
 }
@@ -30,7 +30,7 @@ pub enum HttpCommand {
 /// wcurl `[-s, URL, jq, .x]` for `curl -s URL | jq .x` — "unknown option: jq"). Operator-bearing
 /// lines either match [`split_http_head`] (a curl/wget-headed pipeline, handled at the Session
 /// layer) or fall through to Brush, where the honest `CurlStub` answers.
-pub fn classify(line: &str) -> Option<(HttpCommand, Vec<String>)> {
+pub(crate) fn classify(line: &str) -> Option<(HttpCommand, Vec<String>)> {
     let words = operator_free_words(line)?;
     let (first, rest) = words.split_first()?;
     let cmd = match first.as_str() {
@@ -60,7 +60,7 @@ fn operator_free_words(line: &str) -> Option<Vec<String>> {
 /// at the Session layer (Wall C: async HTTP can't run inside Brush), and `rest` runs through Brush
 /// with the response bytes as its stdin — so `curl -s URL | jq .x | head -1` composes on both
 /// targets.
-pub struct HttpHeadPipe {
+pub(crate) struct HttpHeadPipe {
     pub cmd: HttpCommand,
     /// The head's argv tail (after `curl`/`wget`, dequoted).
     pub args: Vec<String>,
@@ -76,7 +76,7 @@ pub struct HttpHeadPipe {
 /// `&&`/`;` before it declines — those shapes stay with Brush's honest stub); the head (with a
 /// leading `sudo` stripped — the authz gate already consumed the elevation) classifies as an
 /// operator-free curl/wget invocation; and the downstream is non-empty.
-pub fn split_http_head(line: &str) -> Option<HttpHeadPipe> {
+pub(crate) fn split_http_head(line: &str) -> Option<HttpHeadPipe> {
     let tokens = tokenize_str(line).ok()?;
     // The first operator in the line must be the pipe we split at.
     let mut pipe_end: Option<usize> = None;
@@ -110,7 +110,7 @@ pub fn split_http_head(line: &str) -> Option<HttpHeadPipe> {
 
 /// The `curl` and `wget` manifests. `Subprocess` scope (they run isolated, no shell-state access),
 /// `Confirm` policy (outbound HTTP pauses for user confirmation, per the README).
-pub fn manifests() -> Vec<Manifest> {
+pub(crate) fn manifests() -> Vec<Manifest> {
     vec![
         Manifest::builtin("curl", "transfer data from a URL over HTTP")
             .with_scope(ExecutionScope::Subprocess)
@@ -142,7 +142,7 @@ mod tests {
 
     #[test]
     fn classifies_curl_and_splits_args() {
-        let (cmd, args) = classify(r#"curl -s https://example.com"#).unwrap();
+        let (cmd, args) = classify(r"curl -s https://example.com").unwrap();
         assert_eq!(cmd, HttpCommand::Curl);
         assert_eq!(args, vec!["-s", "https://example.com"]);
     }
@@ -181,7 +181,7 @@ mod tests {
 
     #[test]
     fn head_split_survives_quoted_pipes_in_args() {
-        let p = split_http_head(r#"curl -H 'X-A: a|b' https://x | grep ok"#).unwrap();
+        let p = split_http_head(r"curl -H 'X-A: a|b' https://x | grep ok").unwrap();
         assert_eq!(p.args, vec!["-H", "X-A: a|b", "https://x"]);
         assert_eq!(p.downstream, "grep ok");
     }

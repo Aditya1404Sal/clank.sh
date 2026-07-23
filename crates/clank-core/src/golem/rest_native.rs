@@ -93,6 +93,8 @@ pub struct NativeHttpAgentInvoker {
 }
 
 impl NativeHttpAgentInvoker {
+    /// Build an invoker for `cfg`, deriving the REST invoke endpoint from `cfg.url`.
+    #[must_use]
     pub fn new(cfg: ClusterConfig) -> Self {
         let endpoint = format!("{}{INVOKE_PATH}", cfg.url);
         Self { client: client(), cfg, endpoint }
@@ -186,6 +188,8 @@ pub struct NativeHttpGolemCluster {
 }
 
 impl NativeHttpGolemCluster {
+    /// Build a native REST-backed Golem cluster from `cfg`.
+    #[must_use]
     pub fn new(cfg: ClusterConfig) -> Self {
         Self { client: client(), cfg }
     }

@@ -11,6 +11,8 @@
 //!
 //! `uucore` is patched for `wasm32-wasip2` via `[patch.crates-io]` in the workspace root.
 
+#![allow(clippy::similar_names)] // argv/args/arg-style locals are inherent to arg parsing here
+
 use std::io::Write;
 
 use brush_core::builtins::{ContentOptions, ContentType, Registration, SimpleCommand};
@@ -78,7 +80,7 @@ struct ShellCwd;
 impl ShellCwd {
     fn enter<SE: ShellExtensions>(context: &ExecutionContext<'_, SE>) -> Self {
         // Poisoning is harmless — the state is two plain fields — so recover the guard either way.
-        let mut state = CWD_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = CWD_STATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let target = context.shell.working_dir();
         let current = std::env::current_dir().ok();
 
@@ -102,7 +104,7 @@ impl ShellCwd {
 
 impl Drop for ShellCwd {
     fn drop(&mut self) {
-        let mut state = CWD_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = CWD_STATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         state.depth -= 1;
         // Last one out returns the process, so a still-running stage never has it moved underneath it.
         if state.depth == 0 {
@@ -148,15 +150,15 @@ impl Drop for ShellCwd {
 ///   `head` cannot early-exit and hand the producer an EPIPE, because the drain has to finish before
 ///   the lock is taken. Bounded input, the shell's normal case, is unaffected.
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::items_after_statements)] // the SEQ counter lives beside its only use
 fn stage_piped_stdin<SE: ShellExtensions>(
     context: &ExecutionContext<'_, SE>,
 ) -> Option<std::fs::File> {
     use brush_core::openfiles::{OpenFile, OpenFiles};
     use std::io::Seek;
 
-    let mut source = match context.try_fd(OpenFiles::STDIN_FD) {
-        Some(f @ OpenFile::PipeReader(_)) => f,
-        _ => return None,
+    let Some(mut source @ OpenFile::PipeReader(_)) = context.try_fd(OpenFiles::STDIN_FD) else {
+        return None;
     };
 
     // Unique per process AND per call: two pipeline stages stage their stdin concurrently.
@@ -183,6 +185,7 @@ fn stage_piped_stdin<SE: ShellExtensions>(
 /// Run a uutils `uumain` closure with the process's stdin/stdout/stderr pointed at the `OpenFile`s
 /// brush assigned for this command, so its input and output land wherever brush wants them.
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(unsafe_code, clippy::similar_names)] // libc dup/dup2/signal/close FFI over raw fds (see per-call SAFETY); saved_in/out/err intentional
 pub(crate) fn run_uu<SE: ShellExtensions>(
     context: &ExecutionContext<'_, SE>,
     uumain: impl FnOnce() -> i32,
@@ -197,7 +200,7 @@ pub(crate) fn run_uu<SE: ShellExtensions>(
 
     // Serialize the process-global fd swap (see `FD_SWAP_LOCK`). Poisoning is harmless here — the
     // guarded region restores fds even on panic paths — so recover the guard either way.
-    let _fd_guard = FD_SWAP_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _fd_guard = FD_SWAP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
     // Relative operands (`cat f`, `ls`, `touch f`) resolve against the shell's `cd`, not the process's
     // directory. See `ShellCwd`.
@@ -280,6 +283,7 @@ pub(crate) fn run_uu<SE: ShellExtensions>(
 /// the call, fds 0-2 intentionally STAY bound to the staging/capture files as stable anchors for
 /// the next call. Requires a writable /tmp (created on demand); without one we run uncaptured.
 #[cfg(target_arch = "wasm32")]
+#[allow(unsafe_code, clippy::items_after_statements, clippy::similar_names)] // __wasilibc_fd_renumber FFI (see SAFETY in bind_to_fd); the fd-renumber shim + bind_to_fd helper sit with their first use; out_bytes/err_bytes share the _bytes suffix
 pub(crate) fn run_uu<SE: ShellExtensions>(
     context: &ExecutionContext<'_, SE>,
     uumain: impl FnOnce() -> i32,
@@ -441,6 +445,7 @@ pub(crate) fn tool_stdin<SE: ShellExtensions>(
 
 /// Shared `get_content` body: derive real help content from a synopsis rather than a stub. Used by
 /// every coreutils builtin (macro-generated and the hand-written `/proc`-shimming `cat`/`ls`).
+#[allow(clippy::needless_pass_by_value)] // ContentType is a fieldless brush enum matched here; by-ref would ripple to every caller
 fn uu_get_content(name: &str, synopsis: &str, content_type: ContentType) -> Result<String, Error> {
     match content_type {
         ContentType::ShortDescription => Ok(format!("{name} - {synopsis}\n")),
@@ -475,6 +480,7 @@ macro_rules! uu_builtin {
                 uu_get_content(name, $ty::SYNOPSIS, content_type)
             }
 
+            #[allow(clippy::cast_sign_loss)] // code is clamped to 0..=255 before the u8 cast
             fn execute<SE, I, S>(
                 context: ExecutionContext<'_, SE>,
                 args: I,
@@ -550,6 +556,7 @@ impl SimpleCommand for Cat {
         uu_get_content(name, Cat::SYNOPSIS, content_type)
     }
 
+    #[allow(clippy::cast_sign_loss)] // code is clamped to 0..=255 before the u8 cast
     fn execute<SE, I, S>(context: ExecutionContext<'_, SE>, args: I) -> Result<ExecutionResult, Error>
     where
         SE: ShellExtensions,
@@ -581,27 +588,21 @@ impl SimpleCommand for Cat {
                 // Reads as empty (the emulated null device is not a real fs entry uu_cat can open).
             } else if crate::runtime::binfs::is_bin_path(op) {
                 // `/bin/<name>` → the command's help text (static registry; no Session access).
-                match crate::runtime::binfs::resolve(op) {
-                    Ok(content) => {
-                        let _ = out.write_all(content.as_bytes());
-                    }
-                    Err(_) => {
-                        let _ = writeln!(context.stderr(), "cat: {op}: No such file or directory");
-                        had_error = true;
-                    }
+                if let Ok(content) = crate::runtime::binfs::resolve(op) {
+                    let _ = out.write_all(content.as_bytes());
+                } else {
+                    let _ = writeln!(context.stderr(), "cat: {op}: No such file or directory");
+                    had_error = true;
                 }
             } else if crate::runtime::procfs::is_proc_path(op) {
                 let resolved = table
                     .as_ref()
-                    .map(|t| crate::runtime::procfs::resolve(op, &t.lock().unwrap(), &environ));
-                match resolved {
-                    Some(Ok(content)) => {
-                        let _ = out.write_all(content.as_bytes());
-                    }
-                    _ => {
-                        let _ = writeln!(context.stderr(), "cat: {op}: No such file or directory");
-                        had_error = true;
-                    }
+                    .map(|t| crate::runtime::procfs::resolve(op, &t.lock().unwrap_or_else(std::sync::PoisonError::into_inner), &environ));
+                if let Some(Ok(content)) = resolved {
+                    let _ = out.write_all(content.as_bytes());
+                } else {
+                    let _ = writeln!(context.stderr(), "cat: {op}: No such file or directory");
+                    had_error = true;
                 }
             } else {
                 // A real path in a mixed invocation: delegate just this operand to uutils.
@@ -612,11 +613,11 @@ impl SimpleCommand for Cat {
                 }
             }
         }
-        Ok(ExecutionResult::new(if had_error { 1 } else { 0 }))
+        Ok(ExecutionResult::new(u8::from(had_error)))
     }
 }
 
-/// `env`, hand-written so the LISTING form redacts `export --secret` variables. uu_env reads the
+/// `env`, hand-written so the LISTING form redacts `export --secret` variables. `uu_env` reads the
 /// process environment (`std::env`) directly, so a secret var — which is set in `std::env` for Full
 /// env parity (real subprocesses inherit it) — would otherwise leak through `env` and, worse,
 /// `env | grep …` as a pipeline stage. This custom builtin renders the *filtered* environment
@@ -639,6 +640,7 @@ impl SimpleCommand for Env {
         uu_get_content(name, Env::SYNOPSIS, content_type)
     }
 
+    #[allow(clippy::cast_sign_loss)] // code is clamped to 0..=255 before the u8 cast
     fn execute<SE, I, S>(context: ExecutionContext<'_, SE>, args: I) -> Result<ExecutionResult, Error>
     where
         SE: ShellExtensions,
@@ -733,6 +735,7 @@ impl SimpleCommand for Ls {
         uu_get_content(name, Ls::SYNOPSIS, content_type)
     }
 
+    #[allow(clippy::cast_sign_loss, clippy::similar_names)] // code clamped to 0..=255 before the u8 cast; bin_operand/mcp_operand/proc_operand share the _operand suffix
     fn execute<SE, I, S>(context: ExecutionContext<'_, SE>, args: I) -> Result<ExecutionResult, Error>
     where
         SE: ShellExtensions,

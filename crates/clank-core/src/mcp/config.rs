@@ -44,9 +44,12 @@ pub struct McpServerConfig {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct StoredTool {
+    /// The tool's name.
     pub name: String,
+    /// The tool's human-readable description (empty if the server gave none).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
+    /// The tool's JSON `inputSchema`, stored as a JSON string.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub input_schema: String,
 }
@@ -69,6 +72,7 @@ impl McpServerConfig {
 
     /// Resolve the auth (header + value) from the environment, if `auth_env` is set and present. The
     /// default header is `Authorization` with a `Bearer ` prefix; a custom header sends the raw value.
+    #[must_use]
     pub fn resolve_auth(&self) -> Option<crate::mcp::client::McpAuth> {
         let var = self.auth_env.as_ref()?;
         let value = std::env::var(var).ok()?;
@@ -88,21 +92,25 @@ impl McpServerConfig {
 pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// The config directory, honoring `$CLANK_MCP_ETC`.
+#[must_use]
 pub fn etc_dir() -> PathBuf {
     PathBuf::from(std::env::var("CLANK_MCP_ETC").unwrap_or_else(|_| DEFAULT_ETC.to_string()))
 }
 
 /// The generated-command directory, honoring `$CLANK_MCP_BIN`.
+#[must_use]
 pub fn bin_dir() -> PathBuf {
     PathBuf::from(std::env::var("CLANK_MCP_BIN").unwrap_or_else(|_| DEFAULT_BIN.to_string()))
 }
 
 /// The config path for a server name.
+#[must_use]
 pub fn config_path(name: &str) -> PathBuf {
     etc_dir().join(format!("{name}.toml"))
 }
 
 /// Whether `name` is a valid kebab-case server name (`[a-z0-9-]+`, not empty, no leading/trailing `-`).
+#[must_use]
 pub fn is_valid_name(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with('-')
@@ -111,22 +119,33 @@ pub fn is_valid_name(name: &str) -> bool {
 }
 
 /// Write a server config (creating `/etc/mcp/` as needed).
+///
+/// # Errors
+/// Returns `Err` if the config directory can't be created, the config fails to serialize, or writing
+/// the file fails.
 pub fn save(name: &str, config: &McpServerConfig) -> Result<(), String> {
     let dir = etc_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {dir:?}: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let text = toml::to_string_pretty(config).map_err(|e| format!("serialize error: {e}"))?;
     std::fs::write(config_path(name), text).map_err(|e| format!("write error: {e}"))
 }
 
 /// Remove a server's config file (and, if present, its generated `/usr/lib/mcp/bin` stub).
+///
+/// # Errors
+/// Returns `Err` if the config file can't be removed (e.g. it does not exist); removing the bin stub
+/// is best-effort and never fails the call.
 pub fn remove(name: &str) -> Result<(), String> {
     let path = config_path(name);
-    std::fs::remove_file(&path).map_err(|e| format!("cannot remove {path:?}: {e}"))?;
+    std::fs::remove_file(&path).map_err(|e| format!("cannot remove {}: {e}", path.display()))?;
     let _ = std::fs::remove_file(bin_dir().join(name));
     Ok(())
 }
 
 /// Load one server config by name. `Ok(None)` if the file doesn't exist.
+///
+/// # Errors
+/// Returns `Err` if the file exists but can't be read, or if its contents fail to parse as TOML.
 pub fn load(name: &str) -> Result<Option<McpServerConfig>, String> {
     match std::fs::read_to_string(config_path(name)) {
         Ok(text) => toml::from_str(&text)
@@ -138,6 +157,7 @@ pub fn load(name: &str) -> Result<Option<McpServerConfig>, String> {
 }
 
 /// All configured server names (the stems of `*.toml` in the config dir), sorted.
+#[must_use]
 pub fn list_names() -> Vec<String> {
     let mut names = Vec::new();
     if let Ok(entries) = std::fs::read_dir(etc_dir()) {
@@ -156,9 +176,12 @@ pub fn list_names() -> Vec<String> {
 
 /// Write the generated `/usr/lib/mcp/bin/<name>` stub file (help text + a managed-by header). This is
 /// a real file so `which`/`ls`/`cat`/`type` see it with no new virtual-fs code.
+///
+/// # Errors
+/// Returns `Err` if the bin directory can't be created or writing the stub file fails.
 pub fn write_bin_stub(name: &str, help: &str) -> Result<(), String> {
     let dir = bin_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {dir:?}: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let content = format!(
         "# clank MCP command (server: {name}, managed by `mcp`; runs at the session layer)\n{help}"
     );
@@ -177,7 +200,7 @@ mod tests {
 
     /// Point the config/bin dirs at fresh temp dirs for the duration of `f`.
     fn with_temp_dirs<F: FnOnce(&str)>(f: F) {
-        let _guard = super::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = super::TEST_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let n = unique();
         let base = std::env::temp_dir().join(format!("clank_mcpcfg_{}_{n}", std::process::id()));
         let etc = base.join("etc");

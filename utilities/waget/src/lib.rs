@@ -10,14 +10,19 @@
 
 mod parse;
 
+use std::fmt::Write as _;
+
 pub use parse::ParseError;
 use parse::{Output, Request};
 
 /// The result of a `waget` invocation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Outcome {
+    /// Bytes written to standard output (the body under `-O -`).
     pub stdout: Vec<u8>,
+    /// Bytes written to standard error (progress/saved/status/`-S` messages).
     pub stderr: Vec<u8>,
+    /// The process exit code (0 success, 2 usage error, 4 transport/server error).
     pub exit_code: u8,
 }
 
@@ -132,7 +137,7 @@ fn finish(req: &Request, resp: whttp::Response) -> Outcome {
 fn server_response(resp: &whttp::Response) -> String {
     let mut s = format!("  HTTP/1.1 {}\n", resp.status);
     for (k, v) in &resp.headers {
-        s.push_str(&format!("  {k}: {v}\n"));
+        let _ = writeln!(s, "  {k}: {v}");
     }
     s
 }
@@ -156,6 +161,9 @@ fn content_disposition_filename(resp: &whttp::Response) -> Option<String> {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
+    // Test code: unwrap/expect on known-good fixtures is correct style. clippy's allow-unwrap-in-tests
+    // does not fire here (compound/edge cfg-test detection), so scope it explicitly.
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -179,7 +187,7 @@ mod tests {
     }
 
     fn argv(parts: &[&str]) -> Vec<String> {
-        parts.iter().map(|s| s.to_string()).collect()
+        parts.iter().map(std::string::ToString::to_string).collect()
     }
 
     #[tokio::test]

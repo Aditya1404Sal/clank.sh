@@ -52,8 +52,11 @@ pub enum AuthorizationPolicy {
 /// JSON Schema — sufficient for the README's "typed params" and cheap to construct.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ParamType {
+    /// A free-form string value.
     String,
+    /// An integer value.
     Int,
+    /// A filesystem path.
     Path,
     /// A boolean switch (present/absent), e.g. `-r`.
     Flag,
@@ -64,9 +67,13 @@ pub enum ParamType {
 /// One typed parameter in a command's input schema.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ParamSpec {
+    /// The parameter's name, as it appears on the command line.
     pub name: String,
+    /// The parameter's type.
     pub ty: ParamType,
+    /// Whether the parameter must be supplied.
     pub required: bool,
+    /// The value used when the parameter is omitted, if any.
     pub default: Option<String>,
 }
 
@@ -74,6 +81,7 @@ pub struct ParamSpec {
 /// marks output-schema optional and we don't yet model structured output.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OutputSchema {
+    /// A prose description of the command's structured output.
     pub description: String,
 }
 
@@ -85,6 +93,7 @@ pub struct Manifest {
     pub name: String,
     /// One-line description.
     pub synopsis: String,
+    /// What session state the command may touch.
     pub execution_scope: ExecutionScope,
     /// Nested manifests, one per subcommand (empty for all current builtins).
     pub subcommands: Vec<Manifest>,
@@ -92,6 +101,7 @@ pub struct Manifest {
     pub input_schema: Vec<ParamSpec>,
     /// Optional typed description of structured output.
     pub output_schema: Option<OutputSchema>,
+    /// The authorization policy required to invoke the command.
     pub authorization_policy: AuthorizationPolicy,
     /// Parameter names that must never appear in `ps`, logs, history, transcript, completion
     /// caches, or provider manifests. Empty for all current builtins.
@@ -122,24 +132,28 @@ impl Manifest {
     }
 
     /// Override the execution scope (builder-style).
+    #[must_use]
     pub fn with_scope(mut self, scope: ExecutionScope) -> Self {
         self.execution_scope = scope;
         self
     }
 
     /// Override the authorization policy (builder-style).
+    #[must_use]
     pub fn with_policy(mut self, policy: AuthorizationPolicy) -> Self {
         self.authorization_policy = policy;
         self
     }
 
     /// Attach the input parameter schema (builder-style).
+    #[must_use]
     pub fn with_params(mut self, params: Vec<ParamSpec>) -> Self {
         self.input_schema = params;
         self
     }
 
     /// Replace the help text (defaults to the synopsis) with full help content (builder-style).
+    #[must_use]
     pub fn with_help(mut self, help_text: impl Into<String>) -> Self {
         self.help_text = help_text.into();
         self
@@ -148,6 +162,7 @@ impl Manifest {
     /// Declare the parameter names whose values must be redacted from every rendered surface
     /// (`ps`, logs, history, transcript, completion caches, provider manifests) — builder-style.
     /// See [`redaction_rules`](Self::redaction_rules).
+    #[must_use]
     pub fn with_redaction(mut self, rules: Vec<String>) -> Self {
         self.redaction_rules = rules;
         self
@@ -159,6 +174,7 @@ impl Manifest {
 /// unit-testable; the [`Session`](crate::session::Session) calls it to decide, from the manifest
 /// rather than a hardcoded flag name, whether a `prompt-user` response (or any future redaction-ruled
 /// command's marked value) must be kept out of the transcript/logs. Empty rules ⇒ never redacts.
+#[must_use]
 pub fn flags_trigger_redaction(rules: &[String], words: &[String]) -> bool {
     !rules.is_empty() && words.iter().any(|w| rules.iter().any(|r| r == w))
 }

@@ -1,7 +1,7 @@
 //! `Session` methods for Golem agent invocation (`<agent> [flags] <method>`) and the `golem`
 //! cluster command. Invocation parsing (`parse_agent_line`) + types live in `super` (mod.rs).
 
-use super::*;
+use super::{Session, prompt_leading_word, LineResult, parse_agent_line, ParsedAgentLine, PendingInvocation};
 
 /// The most fire-and-forget (`--trigger`/`--schedule`) invocations tracked at once. Beyond this the
 /// oldest is presumed complete and reaped — see [`Session::spawn_agent_invocation_row`].
@@ -21,10 +21,12 @@ impl Session {
     /// Run an installed Golem agent: parse the ctor/wrapper-flags/method/args, validate the method (or
     /// dispatch a reserved subcommand), and invoke it via the injected wRPC invoker in the selected mode
     /// (await / trigger / schedule). Missing invoker → honest "needs a cluster"; unknown method → exit 2.
+    // One end-to-end dispatch: parse, validate reserved subcommands + method, build the invocation,
+    // audit-log, then branch on invoke mode — cohesive enough to keep in a single function.
+    #[allow(clippy::too_many_lines)]
     pub(super) async fn run_agent(&mut self, line: &str) -> LineResult {
-        let words = match crate::ai::ask::dequote_words(line) {
-            Some(w) => w,
-            None => return LineResult::from_outcome(Vec::new(), b"agent: parse error\n".to_vec(), 2),
+        let Some(words) = crate::ai::ask::dequote_words(line) else {
+            return LineResult::from_outcome(Vec::new(), b"agent: parse error\n".to_vec(), 2);
         };
         // Strip a leading sudo (gate already resolved).
         let rest = if words.first().map(String::as_str) == Some("sudo") { &words[1..] } else { &words[..] };
@@ -276,7 +278,7 @@ impl Session {
             agent_params,
             phantom_uuid: inv.phantom.clone(),
         };
-        let mut table = self.proc_table.lock().unwrap();
+        let mut table = self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let pid = table.spawn_bg(
             crate::runtime::process::ProcessKind::AgentInvocation,
             argv,
@@ -294,7 +296,7 @@ impl Session {
         // reports "already dispatched", which is the honest answer for a fire-and-forget call.
         while self.pending_invocations.len() > MAX_PENDING_INVOCATIONS {
             let old = self.pending_invocations.remove(0);
-            self.proc_table.lock().unwrap().complete(old.pid);
+            self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(old.pid);
         }
         pid
     }

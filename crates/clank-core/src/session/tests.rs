@@ -1,3 +1,8 @@
+// This whole file is the session test suite (included via `#[cfg(all(test, not(wasm)))] mod tests`
+// in mod.rs). unwrap/expect on known-good fixtures is correct test style; clippy's
+// allow-unwrap-in-tests does not recognize the compound cfg gate, so scope it explicitly here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use super::*;
 
 /// Drive a closure on a fresh current-thread runtime (mirrors how `Session` is used natively).
@@ -32,7 +37,7 @@ fn cd_is_honored_by_builtins_not_just_pwd() {
     // entering ShellCwd with a different working_dir mid-window yanks it. Serialize against the
     // known heavy contenders (the curl-pipeline tests, whose grep stages hold cwd windows while a
     // mock server round-trips).
-    let _cwd = CWD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _cwd = CWD_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     on_rt(async {
         let dir = std::env::temp_dir().join(format!("clank_cd_{}", std::process::id()));
         let sub = dir.join("sub");
@@ -374,6 +379,8 @@ impl crate::mcp::client::McpHttp for FakeMcpHttp {
     }
 }
 
+// Taken by value so the many `mcp_json(serde_json::json!({...}))` call sites stay ergonomic.
+#[allow(clippy::needless_pass_by_value)]
 fn mcp_json(value: serde_json::Value) -> crate::mcp::client::HttpResponse {
     crate::mcp::client::HttpResponse {
         status: 200,
@@ -412,6 +419,8 @@ impl crate::mcp::client::McpHttp for FakeGreaseHttp {
 }
 
 /// A 200 JSON response (for `FakeGreaseHttp` routes).
+// Taken by value so the many `grease_json(serde_json::json!({...}))` call sites stay ergonomic.
+#[allow(clippy::needless_pass_by_value)]
 fn grease_json(value: serde_json::Value) -> crate::mcp::client::HttpResponse {
     crate::mcp::client::HttpResponse {
         status: 200,
@@ -445,8 +454,10 @@ impl Drop for GreaseDirsGuard {
         std::env::remove_var("CLANK_GREASE_AGENT_BIN");
     }
 }
+// `static COUNTER` sits with the per-call sequence number it backs, after the lock acquisition.
+#[allow(clippy::items_after_statements)]
 fn set_grease_dirs() -> GreaseDirsGuard {
-    let lock = crate::grease::config::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let lock = crate::grease::config::TEST_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let base = std::env::temp_dir().join(format!("clank_grease_sess_{}_{n}", std::process::id()));
@@ -476,8 +487,10 @@ impl Drop for McpDirsGuard {
 
 /// A fresh temp `$CLANK_MCP_ETC/$CLANK_MCP_BIN` pair, exported for the duration of the returned
 /// guard (which serializes MCP tests via the shared lock and clears the vars on drop).
+// `static COUNTER` sits with the per-call sequence number it backs, after the lock acquisition.
+#[allow(clippy::items_after_statements)]
 fn set_mcp_dirs() -> McpDirsGuard {
-    let lock = crate::mcp::config::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let lock = crate::mcp::config::TEST_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let base = std::env::temp_dir().join(format!("clank_mcp_sess_{}_{n}", std::process::id()));
@@ -567,6 +580,8 @@ impl crate::mcp::client::McpHttp for FakeMcpArtifactHttp {
 /// (initialize + tools/list + prompts/list + prompts/get + resources/list/read), registers the
 /// tools into `McpState` (so `<server> <tool>` works), materializes prompts as $PATH commands and
 /// static resources under /mnt/mcp, and caches the surface so a fresh Session rebuilds it offline.
+// `init` (the JSON-RPC initialize response) reads close to `inst` (the install result) — clear in context.
+#[allow(clippy::similar_names)]
 #[test]
 fn grease_install_an_mcp_server_registers_tools_prompts_resources() {
     on_rt(async {
@@ -648,6 +663,8 @@ fn grease_install_an_mcp_server_registers_tools_prompts_resources() {
 /// file) and one DYNAMIC resource (install read fails → served live). `ls /mnt/mcp/<server>/` lists
 /// both; a top-level `cat` of the dynamic resource fetches it live via resources/read; the same cat
 /// inside `$()` hits the honest Wall-C stub.
+// `init` (the JSON-RPC initialize response) reads close to `inst` (the install result) — clear in context.
+#[allow(clippy::similar_names)]
 #[test]
 fn mcp_resources_virtual_fs_static_and_dynamic() {
     on_rt(async {
@@ -719,6 +736,8 @@ fn mcp_resources_virtual_fs_static_and_dynamic() {
 /// (`resources/templates/list`) → a `<server>-<name>` executable; running it substitutes the arg
 /// into the URI template and reads the constructed resource. `mcp resource info` shows annotations;
 /// `ls /mnt/mcp/<server>` lists the template stub.
+// `init` (the JSON-RPC initialize response) reads close to `inst` (the install result) — clear in context.
+#[allow(clippy::similar_names)]
 #[test]
 fn mcp_templates_and_resource_info() {
     on_rt(async {
@@ -996,7 +1015,7 @@ fn agent_invocation_without_a_cluster_errors_honestly() {
     });
 }
 
-/// Install a `golem:shopping-cart` agent (helper) — a durable ShoppingCart with one method.
+/// Install a `golem:shopping-cart` agent (helper) — a durable `ShoppingCart` with one method.
 async fn install_shopping_cart(session: &mut Session) {
     let pkg = serde_json::json!({
         "kind": "agent", "name": "shopping-cart", "description": "cart",
@@ -1230,7 +1249,7 @@ fn grease_install_then_run_a_prompt() {
 }
 
 /// A prompt authored as a `.md` file with YAML frontmatter installs identically to a JSON prompt:
-/// grease fetches `/packages/<name>.md`, converts the frontmatter → the canonical PromptPackage,
+/// grease fetches `/packages/<name>.md`, converts the frontmatter → the canonical `PromptPackage`,
 /// and the installed command fills `{{var}}` and dispatches to the model.
 #[test]
 fn grease_install_then_run_a_markdown_prompt() {
@@ -1564,7 +1583,7 @@ fn grease_install_rejects_unsigned_package_from_signed_registry() {
     });
 }
 
-/// An UNsigned registry (no `--key`) still installs, marked unsigned (record-only signing).
+/// An `UNsigned` registry (no `--key`) still installs, marked unsigned (record-only signing).
 #[test]
 fn grease_install_from_unsigned_registry_is_record_only() {
     on_rt(async {
@@ -1960,7 +1979,7 @@ fn mcp_add_installs_and_surfaces_the_server() {
 /// Native cross-restart MCP DISPATCH: after a restart (a fresh Session reconstructs the server from
 /// the config cache), a live tool call works with the transport re-injected — WITHOUT `mcp reload`.
 /// Dispatch is a stateless `tools/call` from the reconstructed config URL + `mcp_http`; it needs no
-/// open session (session_id falls back to None). This pins that the pre-cache "needs reload" caveat
+/// open session (`session_id` falls back to None). This pins that the pre-cache "needs reload" caveat
 /// no longer applies.
 #[test]
 fn mcp_dispatch_survives_restart_without_reload() {
@@ -2233,8 +2252,8 @@ fn mcp_session_close_405_removes_locally() {
     });
 }
 
-/// C4: an installed MCP tool becomes an ask ToolDefinition. Under `sudo ask`, the model calling
-/// `mcp__demo__echo` runs the tool (blanket confirm-tier) and the FakeMcpHttp sees the tools/call.
+/// C4: an installed MCP tool becomes an ask `ToolDefinition`. Under `sudo ask`, the model calling
+/// `mcp__demo__echo` runs the tool (blanket confirm-tier) and the `FakeMcpHttp` sees the tools/call.
 #[test]
 fn ask_can_call_an_mcp_tool() {
     on_rt(async {
@@ -2492,7 +2511,7 @@ fn ops_log_records_destructive_ops() {
     });
 }
 
-/// An `ask` LLM turn is recorded in http.log (via the LoggingAskProvider wrapper).
+/// An `ask` LLM turn is recorded in http.log (via the `LoggingAskProvider` wrapper).
 #[test]
 fn http_log_records_the_llm_turn() {
     on_rt(async {
@@ -2873,7 +2892,7 @@ fn repl_meta_commands() {
         assert!(!content.contains("hi"), "new-session should have cleared history: {content}");
 
         // :exit signals exit; a non-meta line returns None.
-        assert_eq!(session.repl_meta(":exit").unwrap().1, true);
+        assert!(session.repl_meta(":exit").unwrap().1);
         assert!(session.repl_meta("just a prompt").is_none());
     });
 }
@@ -3263,7 +3282,7 @@ fn ask_shell_internal_command_is_refused() {
 
 /// The scope gate is PER-SEGMENT: a compound tool call must not smuggle a parent-shell / shell-internal
 /// builtin past the guard behind a harmless leading command. `run_shell_tool` runs on the SHARED
-/// Session, so before this fix `echo ok && cd /etc` (cd = ParentShell) checked only `echo`, ran, and
+/// Session, so before this fix `echo ok && cd /etc` (cd = `ParentShell`) checked only `echo`, ran, and
 /// mutated the real shell cwd.
 #[test]
 fn ask_compound_tool_call_cannot_smuggle_a_shell_internal_command() {
@@ -3782,7 +3801,7 @@ fn curl_approved_runs_the_request() {
 }
 
 /// Serializes the cwd-sensitive `cd` test against the curl-pipeline tests: their grep stages hold
-/// process-cwd windows (ShellCwd) while a mock server round-trips, and the process cwd is one
+/// process-cwd windows (`ShellCwd`) while a mock server round-trips, and the process cwd is one
 /// global across Sessions. Test-parallelism artifact only; production runs one line at a time.
 static CWD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -3790,7 +3809,7 @@ static CWD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// the response as stdin. `sudo` pre-authorizes, so the pipeline runs directly.
 #[test]
 fn curl_headed_pipeline_feeds_the_downstream() {
-    let _cwd = CWD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _cwd = CWD_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     on_rt(async {
         let url = http_mock("alpha\nbeta\ngamma\n");
         let mut session = Session::new().await.unwrap();
@@ -3803,7 +3822,7 @@ fn curl_headed_pipeline_feeds_the_downstream() {
 /// The downstream may itself be a multi-stage Brush pipeline.
 #[test]
 fn curl_headed_pipeline_multistage_downstream() {
-    let _cwd = CWD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _cwd = CWD_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     on_rt(async {
         let url = http_mock("c\nb\na\n");
         let mut session = Session::new().await.unwrap();
@@ -3820,7 +3839,7 @@ fn curl_headed_pipeline_multistage_downstream() {
 /// have re-broken it.
 #[test]
 fn curl_headed_pipeline_approved_after_confirm() {
-    let _cwd = CWD_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _cwd = CWD_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     on_rt(async {
         let url = http_mock("x1\nx2\n");
         let mut session = Session::new().await.unwrap();
@@ -3930,10 +3949,10 @@ fn http_commands_have_confirm_manifests() {
 fn path_is_the_readme_default() {
     let _grease = crate::grease::config::TEST_ENV_LOCK
         .lock()
-        .unwrap_or_else(|e| e.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _mcp = crate::mcp::config::TEST_ENV_LOCK
         .lock()
-        .unwrap_or_else(|e| e.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     on_rt(async {
         let mut session = Session::new().await.unwrap();
         let (out, _) = session.run_line("echo $PATH").await;
@@ -3948,10 +3967,10 @@ fn effective_path_defaults_to_the_readme_path() {
     // House lock order: grease, then mcp (see path_is_the_readme_default).
     let _grease = crate::grease::config::TEST_ENV_LOCK
         .lock()
-        .unwrap_or_else(|e| e.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _mcp = crate::mcp::config::TEST_ENV_LOCK
         .lock()
-        .unwrap_or_else(|e| e.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(effective_path(), DEFAULT_PATH);
 }
 
@@ -3962,7 +3981,7 @@ fn effective_path_defaults_to_the_readme_path() {
 fn effective_path_honors_the_mcp_bin_override() {
     let _lock = crate::mcp::config::TEST_ENV_LOCK
         .lock()
-        .unwrap_or_else(|e| e.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("mcp-bin");
     std::env::set_var("CLANK_MCP_BIN", &bin);
@@ -4187,7 +4206,7 @@ fn pids_are_monotonic_across_lines() {
 fn secret_export_value_still_expands() {
     let _secret_lock = crate::runtime::secretenv::TEST_LOCK
         .lock()
-        .unwrap_or_else(|e| e.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     on_rt(async {
         let mut session = Session::new().await.unwrap();
         session
@@ -4239,7 +4258,7 @@ fn incomplete_input_survives_the_session() {
 fn secret_export_with_operators_is_refused() {
     let _secret_lock = crate::runtime::secretenv::TEST_LOCK
         .lock()
-        .unwrap_or_else(|e| e.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     on_rt(async {
         let mut session = Session::new().await.unwrap();
         let result = session
@@ -4261,7 +4280,7 @@ fn secret_export_with_operators_is_refused() {
 fn secret_export_quoted_metachar_value_still_plain() {
     let _secret_lock = crate::runtime::secretenv::TEST_LOCK
         .lock()
-        .unwrap_or_else(|e| e.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     on_rt(async {
         let mut session = Session::new().await.unwrap();
         let result = session
@@ -4285,7 +4304,7 @@ fn secret_export_quoted_metachar_value_still_plain() {
 fn secret_export_hidden_from_env() {
     let _secret_lock = crate::runtime::secretenv::TEST_LOCK
         .lock()
-        .unwrap_or_else(|e| e.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     on_rt(async {
         std::env::set_var("CLANK_ENV_CONTROL", "controlval");
         let mut session = Session::new().await.unwrap();
@@ -4323,7 +4342,7 @@ fn secret_export_hidden_from_env() {
 fn secret_hidden_from_env_in_a_pipeline() {
     let _secret_lock = crate::runtime::secretenv::TEST_LOCK
         .lock()
-        .unwrap_or_else(|e| e.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     on_rt(async {
         let mut session = Session::new().await.unwrap();
         session
@@ -4341,12 +4360,12 @@ fn secret_hidden_from_env_in_a_pipeline() {
 }
 
 /// `env -0` (NUL-separated listing) still filters the secret — the custom listing path handles the
-/// `-0` flag rather than delegating to uu_env.
+/// `-0` flag rather than delegating to `uu_env`.
 #[test]
 fn secret_hidden_from_env_null_separated() {
     let _secret_lock = crate::runtime::secretenv::TEST_LOCK
         .lock()
-        .unwrap_or_else(|e| e.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     on_rt(async {
         let mut session = Session::new().await.unwrap();
         session
@@ -4362,13 +4381,13 @@ fn secret_hidden_from_env_null_separated() {
 }
 
 /// `env -i` (ignore-environment) listing still hides a secret — starting from an empty env means the
-/// secret was never there, and the filter path is what serves the listing (not uu_env). A control
+/// secret was never there, and the filter path is what serves the listing (not `uu_env`). A control
 /// `NAME=value` operand added on the line still shows.
 #[test]
 fn secret_hidden_from_env_ignore_and_inline_add() {
     let _secret_lock = crate::runtime::secretenv::TEST_LOCK
         .lock()
-        .unwrap_or_else(|e| e.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     on_rt(async {
         std::env::set_var("CLANK_ENV_IADD", "willbedropped");
         let mut session = Session::new().await.unwrap();
@@ -4412,7 +4431,7 @@ fn env_unset_drops_a_var() {
 fn secret_export_line_redacted_in_transcript() {
     let _secret_lock = crate::runtime::secretenv::TEST_LOCK
         .lock()
-        .unwrap_or_else(|e| e.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     on_rt(async {
         let mut session = Session::new().await.unwrap();
         session
@@ -4439,7 +4458,7 @@ fn secret_export_line_redacted_in_transcript() {
 fn secret_export_value_absent_from_shell_log() {
     let _secret_lock = crate::runtime::secretenv::TEST_LOCK
         .lock()
-        .unwrap_or_else(|e| e.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     on_rt(async {
         let cap = LogCapture::new("secretlog");
         let mut session = Session::new().await.unwrap();
@@ -4464,7 +4483,7 @@ fn secret_export_value_absent_from_shell_log() {
 fn secret_value_masked_in_later_output() {
     let _secret_lock = crate::runtime::secretenv::TEST_LOCK
         .lock()
-        .unwrap_or_else(|e| e.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     on_rt(async {
         let mut session = Session::new().await.unwrap();
         session
@@ -4490,7 +4509,7 @@ fn secret_value_masked_in_later_output() {
 fn secret_value_masked_in_ps() {
     let _secret_lock = crate::runtime::secretenv::TEST_LOCK
         .lock()
-        .unwrap_or_else(|e| e.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     on_rt(async {
         let mut session = Session::new().await.unwrap();
         session

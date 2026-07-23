@@ -72,7 +72,7 @@ fn resolve(path: &str, follow: bool) -> Result<StatInfo, String> {
         }
         let environ = crate::runtime::procfs::current_environ();
         let content = crate::runtime::proctable::active()
-            .map(|t| crate::runtime::procfs::resolve(path, &t.lock().unwrap(), &environ))
+            .map(|t| crate::runtime::procfs::resolve(path, &t.lock().unwrap_or_else(std::sync::PoisonError::into_inner), &environ))
             .and_then(Result::ok)
             .ok_or_else(not_found)?;
         return Ok(StatInfo::virtual_file(path, content.len() as u64));
@@ -200,16 +200,14 @@ fn render_format(info: &StatInfo, format: &str) -> String {
                 Some('X') => out.push_str(&epoch_secs(info.accessed)),
                 Some('w') => out.push_str(&human_time(info.created)),
                 Some('W') => out.push_str(&epoch_secs(info.created)),
-                Some('%') => out.push('%'),
+                Some('%') | None => out.push('%'),
                 Some(_) => out.push('?'),
-                None => out.push('%'),
             },
             '\\' => match chars.next() {
                 Some('n') => out.push('\n'),
                 Some('t') => out.push('\t'),
-                Some('\\') => out.push('\\'),
+                Some('\\') | None => out.push('\\'),
                 Some(other) => out.push(other),
-                None => out.push('\\'),
             },
             other => out.push(other),
         }
@@ -236,6 +234,7 @@ impl SimpleCommand for Stat {
         }
     }
 
+    #[allow(clippy::similar_names)] // argv/arg are conventional
     fn execute<SE, I, S>(context: ExecutionContext<'_, SE>, args: I) -> Result<ExecutionResult, Error>
     where
         SE: ShellExtensions,
@@ -287,7 +286,7 @@ impl SimpleCommand for Stat {
                 }
             }
         }
-        Ok(ExecutionResult::new(if failed { 1 } else { 0 }))
+        Ok(ExecutionResult::new(u8::from(failed)))
     }
 }
 

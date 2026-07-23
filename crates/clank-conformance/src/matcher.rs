@@ -1,7 +1,7 @@
 //! Expectation matching + failure rendering.
 //!
 //! `check` returns every mismatch for a step (not just the first), so one failed trial
-//! shows the whole picture; `render_failure` formats them with the scenario file:line and
+//! shows the whole picture; `render_failure` formats them with the scenario <file:line> and
 //! the verbatim streams the backend actually produced.
 
 use crate::backend::Outcome;
@@ -29,6 +29,7 @@ fn check_stream(label: &str, expect: &StreamExpect, got: &str, mismatches: &mut 
 }
 
 /// All mismatches between a step's expectation and the backend's outcome; empty = pass.
+#[must_use]
 pub fn check(expect: &Expect, outcome: &Outcome) -> Vec<String> {
     let mut mismatches = Vec::new();
 
@@ -74,6 +75,7 @@ pub fn check(expect: &Expect, outcome: &Outcome) -> Vec<String> {
 }
 
 /// Render a failed step as the trial's failure message.
+#[must_use]
 pub fn render_failure(scenario_path: &std::path::Path, step_index: usize, step: &Step, outcome: &Outcome, mismatches: &[String]) -> String {
     let action = match &step.action {
         Action::Eval(p) => format!("run {p}"),

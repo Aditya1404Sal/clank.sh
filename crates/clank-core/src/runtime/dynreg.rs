@@ -25,11 +25,16 @@ pub fn install(manifests: Arc<Mutex<Vec<Manifest>>>) -> InstallGuard {
 }
 
 /// The dynamic manifest for `name`, if a line is executing and the name is a dynamic (MCP) command.
+///
+/// # Panics
+///
+/// Panics if the installed-manifests mutex is poisoned (a prior holder panicked while holding it).
+#[must_use]
 pub fn lookup(name: &str) -> Option<Manifest> {
     ACTIVE.with(|slot| {
         slot.borrow()
             .as_ref()
-            .and_then(|arc| arc.lock().unwrap().iter().find(|m| m.name == name).cloned())
+            .and_then(|arc| arc.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().find(|m| m.name == name).cloned())
     })
 }
 

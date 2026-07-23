@@ -6,7 +6,7 @@
 //! 1. The clank [`CommandRegistry`](crate::registry::CommandRegistry) manifest — the same content
 //!    `cat /bin/<name>` serves — for every clank-registered or intercepted command.
 //! 2. Brush's own builtin help (`Registration::content_func`, what the `help` builtin prints) for any
-//!    Brush-native builtin that carries no clank manifest (e.g. `echo`). Most BashMode builtins
+//!    Brush-native builtin that carries no clank manifest (e.g. `echo`). Most `BashMode` builtins
 //!    (`cd`, `export`, `alias`, `type`, …) now carry clank manifests and render via source 1.
 //!
 //! Unknown names get the classic `No manual entry for <name>` and exit 1. A leading numeric
@@ -92,25 +92,21 @@ impl SimpleCommand for Man {
                 // A dynamically-installed command (an MCP server) — resolved via the per-line slot.
                 let _ = write!(out, "{}", render_manifest_page(&m));
             } else if let Some(reg) = context.shell.builtins().get(name.as_str()) {
-                match (reg.content_func)(name, ContentType::DetailedHelp, &ContentOptions::default())
-                {
-                    Ok(content) => {
-                        let _ = write!(out, "{content}");
-                        if !content.ends_with('\n') {
-                            let _ = writeln!(out);
-                        }
+                if let Ok(content) = (reg.content_func)(name, ContentType::DetailedHelp, &ContentOptions::default()) {
+                    let _ = write!(out, "{content}");
+                    if !content.ends_with('\n') {
+                        let _ = writeln!(out);
                     }
-                    Err(_) => {
-                        let _ = writeln!(context.stderr(), "No manual entry for {name}");
-                        missing = true;
-                    }
+                } else {
+                    let _ = writeln!(context.stderr(), "No manual entry for {name}");
+                    missing = true;
                 }
             } else {
                 let _ = writeln!(context.stderr(), "No manual entry for {name}");
                 missing = true;
             }
         }
-        Ok(ExecutionResult::new(if missing { 1 } else { 0 }))
+        Ok(ExecutionResult::new(u8::from(missing)))
     }
 }
 

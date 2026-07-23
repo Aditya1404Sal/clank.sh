@@ -11,14 +11,19 @@
 
 mod parse;
 
+use std::fmt::Write as _;
+
 pub use parse::ParseError;
 use parse::Request;
 
 /// The result of a `wcurl` invocation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Outcome {
+    /// Bytes written to standard output (the response body and any `-w` output).
     pub stdout: Vec<u8>,
+    /// Bytes written to standard error (status/transport notes and any `-v` trace).
     pub stderr: Vec<u8>,
+    /// The process exit code (0 ok; 2 usage error; 4 transport/HTTP error; 22 `-f` fail).
     pub exit_code: u8,
 }
 
@@ -80,6 +85,8 @@ pub async fn run(args: &[String]) -> Outcome {
 /// Format a fetch into an [`Outcome`], honoring the output-shaping flags. Without `-f`, a client/
 /// server error status (>= 400) still writes the body but yields exit 4 (clank's "remote call
 /// failed"); `-f` suppresses the body and yields curl's exit 22.
+// resp is a private helper's owned response; taking it by value keeps the single call site simple.
+#[allow(clippy::needless_pass_by_value)]
 fn finish(req: &Request, resp: whttp::Response) -> Outcome {
     let status = resp.status;
     let mut stdout: Vec<u8> = Vec::new();
@@ -136,7 +143,7 @@ fn finish(req: &Request, resp: whttp::Response) -> Outcome {
 fn header_block(resp: &whttp::Response) -> String {
     let mut s = format!("HTTP/1.1 {}\r\n", resp.status);
     for (k, v) in &resp.headers {
-        s.push_str(&format!("{k}: {v}\r\n"));
+        let _ = write!(s, "{k}: {v}\r\n");
     }
     s.push_str("\r\n");
     s
@@ -146,11 +153,11 @@ fn header_block(resp: &whttp::Response) -> String {
 fn verbose_trace(req: &Request, resp: &whttp::Response) -> String {
     let mut s = format!("> {} {}\n", req.method, req.url);
     for (k, v) in &req.headers {
-        s.push_str(&format!("> {k}: {v}\n"));
+        let _ = writeln!(s, "> {k}: {v}");
     }
-    s.push_str(&format!("< HTTP/1.1 {}\n", resp.status));
+    let _ = writeln!(s, "< HTTP/1.1 {}", resp.status);
     for (k, v) in &resp.headers {
-        s.push_str(&format!("< {k}: {v}\n"));
+        let _ = writeln!(s, "< {k}: {v}");
     }
     s
 }
@@ -202,6 +209,9 @@ fn write_out_var(var: &str, resp: &whttp::Response) -> String {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
+    // Test code: unwrap/expect on known-good fixtures is correct style. clippy's allow-unwrap-in-tests
+    // does not fire here (compound/edge cfg-test detection), so scope it explicitly.
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -228,7 +238,7 @@ mod tests {
     }
 
     fn argv(parts: &[&str]) -> Vec<String> {
-        parts.iter().map(|s| s.to_string()).collect()
+        parts.iter().map(std::string::ToString::to_string).collect()
     }
 
     #[tokio::test]

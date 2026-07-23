@@ -14,6 +14,8 @@
 //! (`if`/`while`/`for`), `getline`, field assignment. awk's number/string duck-typing follows the
 //! usual rule: compare numerically when both sides look numeric, else as strings.
 
+#![allow(clippy::similar_names)] // argv/args/arg-style locals are inherent to arg parsing here
+
 use std::collections::HashMap;
 use std::io::{Read, Write};
 
@@ -77,6 +79,7 @@ fn regex_can_follow(prev: Option<&Tok>) -> bool {
     )
 }
 
+#[allow(clippy::too_many_lines, clippy::similar_names)] // one lexer dispatch loop; `tok`/`toks` are intentional
 fn lex(src: &str) -> AwkResult<Vec<Tok>> {
     let mut toks = Vec::new();
     let mut chars = src.chars().peekable();
@@ -672,6 +675,7 @@ enum Value {
 }
 
 /// awk's default number rendering: integers print bare, others get a short decimal form.
+#[allow(clippy::float_cmp, clippy::cast_possible_truncation)] // exact integrality test; `n as i64` is guarded by the abs()<1e16 check
 fn fmt_num(n: f64) -> String {
     if n == n.trunc() && n.abs() < 1e16 {
         format!("{}", n as i64)
@@ -762,6 +766,8 @@ impl Env {
         let split: Vec<String> = if self.fs == " " {
             line.split_whitespace().map(String::from).collect()
         } else if self.fs.chars().count() == 1 {
+            // Guarded: `chars().count() == 1` above guarantees exactly one char.
+            #[allow(clippy::unwrap_used)]
             let c = self.fs.chars().next().unwrap();
             line.split(c).map(String::from).collect()
         } else {
@@ -790,6 +796,7 @@ impl Env {
         Ok(re)
     }
 
+    #[allow(clippy::cast_precision_loss)] // NR/NF are small line/field counts; f64 is awk's only number type
     fn get_var(&self, name: &str) -> Value {
         match name {
             "NR" => Value::Num(self.nr as f64),
@@ -804,6 +811,7 @@ impl Env {
         }
     }
 
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // NR is a non-negative counter
     fn set_var(&mut self, name: &str, value: Value) {
         match name {
             "FS" => self.fs = value.string(),
@@ -816,6 +824,7 @@ impl Env {
     }
 }
 
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)] // field index is guarded >= 0; char counts are small
 fn eval(expr: &Expr, env: &mut Env) -> AwkResult<Value> {
     Ok(match expr {
         Expr::Num(n) => Value::Num(*n),
@@ -964,6 +973,7 @@ fn exec_stmts(stmts: &[Stmt], env: &mut Env, out: &mut dyn Write) -> AwkResult<(
 }
 
 /// A subset printf: `%[-0][width][.prec](d|i|f|g|e|s|x|o|c|%)` plus `\n`/`\t` escapes.
+#[allow(clippy::cast_possible_truncation, clippy::similar_names)] // %d/%x/%o intentionally truncate the f64 to an integer; pad_len/pad_char share the pad_ prefix
 fn format_printf(format: &str, values: &[Value]) -> AwkResult<String> {
     let mut out = String::new();
     let mut chars = format.chars().peekable();
@@ -973,9 +983,8 @@ fn format_printf(format: &str, values: &[Value]) -> AwkResult<String> {
             '\\' => match chars.next() {
                 Some('n') => out.push('\n'),
                 Some('t') => out.push('\t'),
-                Some('\\') => out.push('\\'),
+                Some('\\') | None => out.push('\\'),
                 Some(other) => out.push(other),
-                None => out.push('\\'),
             },
             '%' => {
                 if chars.peek() == Some(&'%') {
@@ -994,16 +1003,16 @@ fn format_printf(format: &str, values: &[Value]) -> AwkResult<String> {
                     chars.next();
                 }
                 let mut width = String::new();
-                while chars.peek().is_some_and(char::is_ascii_digit) {
-                    width.push(chars.next().unwrap());
+                while let Some(c) = chars.next_if(char::is_ascii_digit) {
+                    width.push(c);
                 }
                 let width: Option<usize> = width.parse().ok();
                 let mut prec: Option<usize> = None;
                 if chars.peek() == Some(&'.') {
                     chars.next();
                     let mut p = String::new();
-                    while chars.peek().is_some_and(char::is_ascii_digit) {
-                        p.push(chars.next().unwrap());
+                    while let Some(c) = chars.next_if(char::is_ascii_digit) {
+                        p.push(c);
                     }
                     prec = Some(p.parse().unwrap_or(0));
                 }
@@ -1054,6 +1063,7 @@ fn format_printf(format: &str, values: &[Value]) -> AwkResult<String> {
 // ---------------------------------------------------------------------------
 
 /// The `run_tool`-shaped entry point (registered via `text_builtin!` in texttools).
+#[allow(clippy::similar_names)] // argv/args/arg, rules/rule, files/file are conventional
 pub(crate) fn run_awk(
     argv: &[String],
     stdin: &mut dyn Read,

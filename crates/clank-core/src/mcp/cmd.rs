@@ -81,7 +81,7 @@ pub(crate) fn classify(line: &str) -> Option<Result<McpCommand, String>> {
 }
 
 fn parse(args: &[String]) -> Result<McpCommand, String> {
-    let sub = args.first().map(String::as_str).unwrap_or("list");
+    let sub = args.first().map_or("list", String::as_str);
     match sub {
         "list" => Ok(McpCommand::List),
         "add" => parse_add(&args[1..]),

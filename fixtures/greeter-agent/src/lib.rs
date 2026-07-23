@@ -1,4 +1,4 @@
-//! GreeterAgent — a deliberately trivial second Golem agent.
+//! `GreeterAgent` — a deliberately trivial second Golem agent.
 //!
 //! It exists to prove two clank seams end-to-end, from both directions:
 //!
@@ -17,6 +17,12 @@
 //! honest errors) except the replay-safe log sink, which every Golem embed needs — the default
 //! sink's raw appends duplicate `/var/log` lines under oplog replay.
 
+// The `agent_definition`/`agent_implementation` macros expand to dispatch and client items that
+// carry no doc comments. The hand-written trait, methods, struct, and field below are all
+// documented; this crate-level allow covers only the macro-generated surface. (This is a test-only
+// fixture — see `fixtures/`.)
+#![allow(missing_docs)]
+
 use clank_embed::{EmbeddedShell, EvalResult};
 use golem_rust::{agent_definition, agent_implementation};
 
@@ -25,6 +31,7 @@ use golem_rust::{agent_definition, agent_implementation};
 /// the method arg — an unambiguous proof the wRPC call reached this agent with both.
 #[agent_definition]
 pub trait GreeterAgent {
+    /// Construct a greeter bound to `name` — the durable agent identity echoed back in every greeting.
     fn new(name: String) -> Self;
 
     /// Greet `who`, naming the greeter instance — a deterministic, self-identifying reply.
@@ -41,7 +48,9 @@ pub trait GreeterAgent {
     async fn abort_prompt(&mut self) -> EvalResult;
 }
 
+/// The concrete `GreeterAgent`: a single `name` field carrying the identity set at construction.
 pub struct GreeterAgentImpl {
+    /// The greeter's identity, set once at construction and echoed in each greeting.
     name: String,
     /// The embedded shell over this agent's own filesystem. Log-sink-only tier: replay-correct
     /// with zero providers — `ls`/`cat`/pipelines work; `ask`/`mcp` report honest errors.

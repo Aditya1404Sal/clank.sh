@@ -57,8 +57,9 @@ mod tests {
         let k = ProcessKind::Builtin;
         assert_eq!(k, ProcessKind::Builtin);
         assert_ne!(k, ProcessKind::Script);
-        // Copy semantics.
-        let _c = k;
+        // Copy semantics: the original stays usable after being copied.
+        let copied = k;
+        assert_eq!(copied, ProcessKind::Builtin);
         assert_eq!(k, ProcessKind::Builtin);
     }
 }

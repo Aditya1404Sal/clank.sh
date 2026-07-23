@@ -33,6 +33,7 @@ pub const DEFAULT_AGENT_BIN: &str = "/usr/lib/agents/bin";
 /// The registry list — configured registry URLs `grease install`/`search` fetch from, in order.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Registries {
+    /// The configured registries, in fetch order.
     #[serde(default)]
     pub registry: Vec<RegistryEntry>,
 }
@@ -40,6 +41,7 @@ pub struct Registries {
 /// One configured registry.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegistryEntry {
+    /// The registry's base URL.
     pub url: String,
     /// The registry's trusted ed25519 public key (base64), if configured via `grease registry add
     /// --key`. When present, `grease install` verifies each package's detached signature against it;
@@ -55,21 +57,25 @@ pub struct RegistryEntry {
 pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// The config directory, honoring `$CLANK_GREASE_ETC`.
+#[must_use]
 pub fn etc_dir() -> PathBuf {
     PathBuf::from(std::env::var("CLANK_GREASE_ETC").unwrap_or_else(|_| DEFAULT_ETC.to_string()))
 }
 
 /// The payload store directory, honoring `$CLANK_GREASE_STORE`.
+#[must_use]
 pub fn store_dir() -> PathBuf {
     PathBuf::from(std::env::var("CLANK_GREASE_STORE").unwrap_or_else(|_| DEFAULT_STORE.to_string()))
 }
 
 /// The prompt bin directory, honoring `$CLANK_GREASE_BIN`.
+#[must_use]
 pub fn bin_dir() -> PathBuf {
     PathBuf::from(std::env::var("CLANK_GREASE_BIN").unwrap_or_else(|_| DEFAULT_BIN.to_string()))
 }
 
 /// The script bin directory (`/usr/bin`), honoring `$CLANK_GREASE_SCRIPT_BIN`.
+#[must_use]
 pub fn script_bin_dir() -> PathBuf {
     PathBuf::from(
         std::env::var("CLANK_GREASE_SCRIPT_BIN").unwrap_or_else(|_| DEFAULT_SCRIPT_BIN.to_string()),
@@ -77,11 +83,13 @@ pub fn script_bin_dir() -> PathBuf {
 }
 
 /// The skills directory (`/usr/share/skills`), honoring `$CLANK_GREASE_SKILLS`.
+#[must_use]
 pub fn skills_dir() -> PathBuf {
     PathBuf::from(std::env::var("CLANK_GREASE_SKILLS").unwrap_or_else(|_| DEFAULT_SKILLS.to_string()))
 }
 
 /// The MCP resource mount root (`/mnt/mcp`), honoring `$CLANK_GREASE_MCP_MOUNT`.
+#[must_use]
 pub fn mcp_mount_dir() -> PathBuf {
     PathBuf::from(
         std::env::var("CLANK_GREASE_MCP_MOUNT").unwrap_or_else(|_| DEFAULT_MCP_MOUNT.to_string()),
@@ -89,6 +97,7 @@ pub fn mcp_mount_dir() -> PathBuf {
 }
 
 /// The Golem-agent bin directory (`/usr/lib/agents/bin`), honoring `$CLANK_GREASE_AGENT_BIN`.
+#[must_use]
 pub fn agent_bin_dir() -> PathBuf {
     PathBuf::from(
         std::env::var("CLANK_GREASE_AGENT_BIN").unwrap_or_else(|_| DEFAULT_AGENT_BIN.to_string()),
@@ -102,6 +111,7 @@ fn registries_path() -> PathBuf {
 
 /// Whether `name` is a valid kebab-case package name (`[a-z0-9-]+`, not empty, no leading/trailing `-`).
 /// Same rule as [`crate::mcp::config::is_valid_name`].
+#[must_use]
 pub fn is_valid_name(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with('-')
@@ -110,6 +120,9 @@ pub fn is_valid_name(name: &str) -> bool {
 }
 
 /// Load the registry list. `Ok(default)` (empty) if the file doesn't exist.
+///
+/// # Errors
+/// Returns `Err` if `registries.toml` exists but can't be read, or fails to parse as TOML.
 pub fn load_registries() -> Result<Registries, String> {
     match std::fs::read_to_string(registries_path()) {
         Ok(text) => toml::from_str(&text).map_err(|e| format!("registries.toml parse error: {e}")),
@@ -121,7 +134,7 @@ pub fn load_registries() -> Result<Registries, String> {
 /// Persist the registry list (creating `/etc/grease/` as needed).
 fn save_registries(regs: &Registries) -> Result<(), String> {
     let dir = etc_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {dir:?}: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let text = toml::to_string_pretty(regs).map_err(|e| format!("serialize error: {e}"))?;
     std::fs::write(registries_path(), text).map_err(|e| format!("write error: {e}"))
 }
@@ -129,11 +142,14 @@ fn save_registries(regs: &Registries) -> Result<(), String> {
 /// Add a registry URL with an optional trusted signing key (base64 ed25519 public key). Idempotent on
 /// the URL, but re-adding a known URL WITH a `key` updates its key (so `grease registry add <url>
 /// --key <k>` can attach a key to an existing entry). Returns whether the list changed.
+///
+/// # Errors
+/// Returns `Err` if the existing list can't be loaded, or the updated list can't be persisted.
 pub fn add_registry(url: &str, key: Option<&str>) -> Result<bool, String> {
     let mut regs = load_registries()?;
     if let Some(existing) = regs.registry.iter_mut().find(|r| r.url == url) {
         // Known URL: update the key if one was supplied and it differs; otherwise a no-op.
-        let new_key = key.map(|k| k.to_string());
+        let new_key = key.map(std::string::ToString::to_string);
         if key.is_some() && existing.key != new_key {
             existing.key = new_key;
             save_registries(&regs)?;
@@ -141,17 +157,21 @@ pub fn add_registry(url: &str, key: Option<&str>) -> Result<bool, String> {
         }
         return Ok(false);
     }
-    regs.registry.push(RegistryEntry { url: url.to_string(), key: key.map(|k| k.to_string()) });
+    regs.registry.push(RegistryEntry { url: url.to_string(), key: key.map(std::string::ToString::to_string) });
     save_registries(&regs)?;
     Ok(true)
 }
 
 /// The trusted signing key (base64 ed25519 public key) configured for `url`, if any.
+#[must_use]
 pub fn registry_key(url: &str) -> Option<String> {
     load_registries().ok()?.registry.into_iter().find(|r| r.url == url).and_then(|r| r.key)
 }
 
 /// Remove a registry URL. Returns whether it was present.
+///
+/// # Errors
+/// Returns `Err` if the existing list can't be loaded, or the updated list can't be persisted.
 pub fn remove_registry(url: &str) -> Result<bool, String> {
     let mut regs = load_registries()?;
     let before = regs.registry.len();
@@ -164,6 +184,7 @@ pub fn remove_registry(url: &str) -> Result<bool, String> {
 }
 
 /// The configured registry URLs, in order.
+#[must_use]
 pub fn list_registries() -> Vec<String> {
     load_registries()
         .map(|r| r.registry.into_iter().map(|e| e.url).collect())
@@ -174,8 +195,11 @@ pub fn list_registries() -> Vec<String> {
 /// `which`/`ls`/`cat`/`type` see it with no virtual-fs code — but it is NEVER executed (wasip2 has no
 /// process spawn); the command runs via Session interception. `label` names the kind in the header
 /// (`prompt`/`script`). Mirrors [`crate::mcp::config::write_bin_stub`].
+///
+/// # Errors
+/// Returns `Err` if `dir` can't be created or the stub file can't be written.
 pub fn write_bin_stub(dir: &Path, name: &str, help: &str, label: &str) -> Result<(), String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {dir:?}: {e}"))?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let content = format!(
         "# clank {label} (package: {name}, managed by `grease`; runs at the session layer)\n{help}"
     );
@@ -187,9 +211,13 @@ pub fn write_bin_stub(dir: &Path, name: &str, help: &str, label: &str) -> Result
 /// `$PATH`). Best-effort; the durable payload is already persisted in the store. Any document `path`
 /// that escapes the skill dir (`..` / absolute) is skipped (defense-in-depth against a hostile
 /// registry).
+///
+/// # Errors
+/// Returns `Err` if the skill's root directory can't be created; document/script writes past that
+/// point are best-effort and don't fail the call.
 pub fn materialize_skill(sk: &crate::grease::pkg::SkillPackage) -> Result<(), String> {
     let root = skills_dir().join(&sk.name);
-    std::fs::create_dir_all(&root).map_err(|e| format!("cannot create {root:?}: {e}"))?;
+    std::fs::create_dir_all(&root).map_err(|e| format!("cannot create {}: {e}", root.display()))?;
     for doc in &sk.documents {
         let Some(dest) = safe_join(&root, &doc.path) else {
             continue; // path escapes the skill dir — skip
@@ -228,6 +256,7 @@ fn safe_join(root: &Path, rel: &str) -> Option<PathBuf> {
 
 /// Public path-confinement join for MCP resource materialization under `/mnt/mcp/<server>/` — same
 /// `..`/absolute-escape guard as [`safe_join`], keeping a server's resources inside its mount dir.
+#[must_use]
 pub fn mcp_safe_join(root: &Path, rel: &str) -> Option<PathBuf> {
     safe_join(root, rel)
 }
@@ -244,7 +273,7 @@ mod tests {
 
     /// Point the grease dirs at fresh temp dirs for the duration of `f`.
     pub(crate) fn with_temp_dirs<F: FnOnce()>(f: F) {
-        let _guard = super::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = super::TEST_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let n = unique();
         let base = std::env::temp_dir().join(format!("clank_grease_{}_{n}", std::process::id()));
         for sub in ["etc", "store", "bin", "script-bin", "skills"] {

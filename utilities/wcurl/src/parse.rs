@@ -10,7 +10,9 @@ use http::Method;
 
 /// A parsed `curl` invocation. (No `Eq`: the timeout fields are `f64`.)
 #[derive(Clone, Debug, PartialEq)]
-pub struct Request {
+// Each bool is a distinct curl flag; folding them into an enum would obscure the 1:1 flag mapping.
+#[allow(clippy::struct_excessive_bools)]
+pub(crate) struct Request {
     pub url: String,
     pub method: Method,
     pub headers: Vec<(String, String)>,
@@ -43,11 +45,17 @@ pub struct Request {
 /// A `curl` argument parsing error.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ParseError {
+    /// No URL was given on the command line.
     MissingUrl,
+    /// A flag that requires a value was given none; holds the flag.
     MissingValue(String),
+    /// An unrecognized flag; holds the offending token.
     UnknownFlag(String),
+    /// The `-X` value was not a valid HTTP method; holds the given value.
     BadMethod(String),
+    /// A timeout value did not parse as a number; holds the given value.
     BadNumber(String),
+    /// A `-d @file` payload could not be resolved; holds the explanatory message.
     BadData(String),
 }
 
@@ -105,7 +113,7 @@ fn expand_args(args: &[String]) -> Vec<String> {
 }
 
 /// Parse argv (without the leading `curl` word) into a [`Request`].
-pub fn parse(args: &[String]) -> Result<Request, ParseError> {
+pub(crate) fn parse(args: &[String]) -> Result<Request, ParseError> {
     let expanded = expand_args(args);
 
     let mut url: Option<String> = None;
@@ -257,7 +265,7 @@ fn base64(input: &[u8]) -> String {
         let b0 = chunk[0];
         let b1 = *chunk.get(1).unwrap_or(&0);
         let b2 = *chunk.get(2).unwrap_or(&0);
-        let n = (b0 as u32) << 16 | (b1 as u32) << 8 | b2 as u32;
+        let n = u32::from(b0) << 16 | u32::from(b1) << 8 | u32::from(b2);
         out.push(T[(n >> 18 & 63) as usize] as char);
         out.push(T[(n >> 12 & 63) as usize] as char);
         out.push(if chunk.len() > 1 { T[(n >> 6 & 63) as usize] as char } else { '=' });
@@ -271,7 +279,7 @@ mod tests {
     use super::*;
 
     fn argv(parts: &[&str]) -> Vec<String> {
-        parts.iter().map(|s| s.to_string()).collect()
+        parts.iter().map(std::string::ToString::to_string).collect()
     }
 
     #[test]

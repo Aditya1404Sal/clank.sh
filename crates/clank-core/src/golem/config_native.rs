@@ -45,6 +45,7 @@ const ENV_ENV: &str = "GOLEM_ENV";
 /// least `GOLEM_URL` is set; the app/env default to `default`/`local` (the usual local-server names)
 /// when unset, and the token is optional. A trailing slash on the URL is trimmed so path joins are
 /// unambiguous.
+#[must_use]
 pub fn load() -> Option<ClusterConfig> {
     let url = std::env::var(ENV_URL).ok().filter(|u| !u.is_empty())?;
     let url = url.trim_end_matches('/').to_string();

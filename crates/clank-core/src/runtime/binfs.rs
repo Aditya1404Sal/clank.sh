@@ -27,6 +27,7 @@ use crate::registry::CommandRegistry;
 /// Error resolving a `/bin` path — maps to a `cat`/`grep` "No such file or directory".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BinError {
+    /// The requested `/bin` path resolves to no registered command; carries the offending path.
     NotFound(String),
 }
 
@@ -42,12 +43,18 @@ pub(crate) fn registry() -> &'static CommandRegistry {
 }
 
 /// Whether `path` is under the virtual `/bin` namespace. (`/bin` itself and `/bin/` count too.)
+#[must_use]
 pub fn is_bin_path(path: &str) -> bool {
     path == "/bin" || path.starts_with(BIN_ROOT)
 }
 
 /// Resolve a virtual `/bin/<name>` path to its content: the command's manifest `help_text` with a
 /// trailing newline (so `cat /bin/curl` prints a clean help block). Unknown name → `NotFound`.
+///
+/// # Errors
+///
+/// Returns [`BinError::NotFound`] when `path` isn't under `/bin/`, carries no command component,
+/// nests below a leaf (`/bin/<name>/...`), or names a command the registry doesn't know.
 pub fn resolve(path: &str) -> Result<String, BinError> {
     let not_found = || BinError::NotFound(path.to_string());
     let rest = path.strip_prefix(BIN_ROOT).ok_or_else(not_found)?;

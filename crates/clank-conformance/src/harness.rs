@@ -63,9 +63,7 @@ fn build_trials(kind: BackendKind, golem_enabled: bool) -> Vec<Trial> {
     let mut trials = Vec::with_capacity(paths.len());
     for path in paths {
         let stem = path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
+            .file_stem().map_or_else(|| path.display().to_string(), |s| s.to_string_lossy().into_owned());
 
         // The stem becomes the golem agent id and is interpolated into the injected
         // `mkdir -p` step — enforce the safe charset at the source.
@@ -100,8 +98,8 @@ fn build_trials(kind: BackendKind, golem_enabled: bool) -> Vec<Trial> {
         // running a scenario that cannot validly run on this tier.
         let not_runnable: Option<String> = if kind == BackendKind::Golem && !golem_enabled {
             Some("golem tier disabled — run scripts/conformance-golem.sh (or set CLANK_CONFORMANCE_GOLEM=1 against a running server)".into())
-        } else if scenario.only.is_some_and(|only| only != kind) {
-            Some(format!("scenario is @only {} — not runnable on the {} tier", scenario.only.unwrap().label(), kind.label()))
+        } else if let Some(only) = scenario.only.filter(|&only| only != kind) {
+            Some(format!("scenario is @only {} — not runnable on the {} tier", only.label(), kind.label()))
         } else if !scenario.requires.is_empty() {
             // Tier-gated scenarios (`@requires network|llm|grease|mcp`) stay visible-but-
             // ignored until those tiers are wired into the harness.
@@ -122,6 +120,8 @@ fn build_trials(kind: BackendKind, golem_enabled: bool) -> Vec<Trial> {
     trials
 }
 
+// scenario is owned by the trial closure and consumed here — the terminal consumer; by-ref would just push the move elsewhere
+#[allow(clippy::needless_pass_by_value)]
 fn run_scenario(kind: BackendKind, scenario: Scenario) -> Result<(), Failed> {
     let infra = |line: usize, e: anyhow::Error| {
         Failed::from(format!(

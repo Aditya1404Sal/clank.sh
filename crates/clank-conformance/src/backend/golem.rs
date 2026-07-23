@@ -14,10 +14,12 @@
 
 use super::{Outcome, PendingView, ShellBackend};
 use anyhow::{bail, Context};
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
+/// A [`ShellBackend`] that drives a deployed clank agent through the `golem` CLI.
 pub struct GolemBackend {
     rt: tokio::runtime::Runtime,
     agent_id: String,
@@ -27,6 +29,11 @@ pub struct GolemBackend {
 }
 
 impl GolemBackend {
+    /// Construct a backend that drives a fresh clank agent per scenario via the `golem` CLI.
+    ///
+    /// # Errors
+    /// Returns `Err` if `scenario` is not a non-empty `[a-z0-9-]` string, if the repo root
+    /// cannot be located, or if the tokio runtime fails to build.
     pub fn new(scenario: &str) -> anyhow::Result<Self> {
         // The stem goes verbatim into the agent id — lossy sanitization could collapse
         // two distinct scenarios onto ONE durable agent (silent state sharing), so
@@ -49,8 +56,7 @@ impl GolemBackend {
         let timeout = std::env::var("CLANK_CONFORMANCE_STEP_TIMEOUT_SECS")
             .ok()
             .and_then(|s| s.parse().ok())
-            .map(Duration::from_secs)
-            .unwrap_or(Duration::from_secs(60));
+            .map_or(Duration::from_mins(1), Duration::from_secs);
 
         Ok(Self {
             rt: tokio::runtime::Builder::new_current_thread()
@@ -67,7 +73,7 @@ impl GolemBackend {
     fn invoke(&self, method: &str, payload: Option<&str>) -> anyhow::Result<Outcome> {
         let mut argv: Vec<String> = ["agent", "invoke", "-q", "--format", "json"]
             .iter()
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .collect();
         argv.push(self.agent_id.clone());
         argv.push(method.to_string());
@@ -126,7 +132,7 @@ impl ShellBackend for GolemBackend {
         }
     }
 
-    fn tmp(&self) -> &str {
+    fn tmp(&self) -> &'static str {
         // A fresh agent per scenario means a fresh VFS — a fixed path is collision-free.
         // (A fresh agent has NO /tmp; the harness's injected `mkdir -p` step creates it.)
         "/tmp/w"
@@ -143,6 +149,7 @@ impl ShellBackend for GolemBackend {
 ///
 /// `$` is NOT escaped — `\$` is an invalid WAVE escape that silently degrades the whole
 /// argument to a raw string (the e2e's documented trap). Control characters use `\u{…}`.
+#[must_use]
 pub fn wit_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -154,7 +161,7 @@ pub fn wit_string(s: &str) -> String {
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
             c if (c as u32) < 0x20 => {
-                out.push_str(&format!("\\u{{{:x}}}", c as u32));
+                let _ = write!(out, "\\u{{{:x}}}", c as u32);
             }
             c => out.push(c),
         }
@@ -168,6 +175,10 @@ pub fn wit_string(s: &str) -> String {
 /// The golem 1.5.x CLI prints invocation markers and stream lines first, then the result
 /// document; the e2e's proven recipe is "last line containing `result_json`". A whole-
 /// output parse is the fallback for a pretty-printed document.
+///
+/// # Errors
+/// Returns `Err` if no `result_json` document is present, if it carries no value, if the
+/// value lacks a numeric `exit_code`, or if that code is outside the `u8` range.
 pub fn decode_invoke(cli_stdout: &str) -> anyhow::Result<Outcome> {
     let mut doc: Option<serde_json::Value> = None;
     for line in cli_stdout.lines() {

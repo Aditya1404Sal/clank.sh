@@ -24,6 +24,7 @@ use brush_parser::{tokenize_str, unquote_str, Token};
 /// [`crate::dispatch_context`]'s "leading word" detection, but uses Brush's own tokenizer instead
 /// of `split_whitespace()` since `prompt-user`'s question argument is routinely a quoted string
 /// containing spaces (every README example quotes it).
+#[must_use]
 pub fn is_prompt_user(line: &str) -> bool {
     leading_word(line).as_deref() == Some("prompt-user")
 }
@@ -41,8 +42,11 @@ fn leading_word(line: &str) -> Option<String> {
 /// A parsed `prompt-user` invocation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PromptUserArgs {
+    /// The prompt text presented to the human.
     pub question: String,
+    /// The allowed answers (`--choices`/`--confirm`), or `None` for a free-form response.
     pub choices: Option<Vec<String>>,
+    /// Whether the response is sensitive (`--secret`) and must be redacted from renders.
     pub secret: bool,
 }
 
@@ -71,6 +75,12 @@ impl std::fmt::Display for ParseError {
 /// arguments. Accepts `--choices <a,b,...>`, `--confirm` (shorthand for `--choices yes,no`), and
 /// `--secret`. Exactly one non-flag word is the question; a second non-flag word is an error to
 /// avoid silently swallowing a mistyped flag as a second question.
+///
+/// # Errors
+///
+/// Returns [`ParseError::MissingQuestion`] if no question word was given,
+/// [`ParseError::MissingValue`] if `--choices` had no value after it, and
+/// [`ParseError::UnknownFlag`] for an unrecognized flag or a second non-flag word.
 pub fn parse(line: &str) -> Result<PromptUserArgs, ParseError> {
     let tokens = tokenize_str(line).unwrap_or_default();
     let words: Vec<String> = tokens
@@ -120,8 +130,11 @@ pub fn parse(line: &str) -> Result<PromptUserArgs, ParseError> {
 /// persists across Golem invocations via the oplog) and returned to the caller in the eval result.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingPrompt {
+    /// The prompt text (with any piped stdin markdown already prepended).
     pub question: String,
+    /// The allowed answers, or `None` for a free-form response.
     pub choices: Option<Vec<String>>,
+    /// Whether the response is sensitive and must be redacted from renders.
     pub secret: bool,
 }
 
@@ -129,6 +142,7 @@ impl PromptUserArgs {
     /// Convert parsed args into a [`PendingPrompt`]. `stdin_md`, if present, is prepended to the
     /// question verbatim (README: piped stdin is rendered as markdown before the question; real
     /// markdown rendering is deferred — clank has no rich terminal yet).
+    #[must_use]
     pub fn into_pending(self, stdin_md: Option<&str>) -> PendingPrompt {
         let question = match stdin_md {
             Some(md) => format!("{md}\n{}", self.question),
@@ -156,16 +170,25 @@ pub enum AnswerInput {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Resolution {
     /// A valid response: stdout bytes (the response + newline) and exit `0`.
-    Answered { stdout: Vec<u8>, secret: bool },
+    Answered {
+        /// The response bytes to emit (the canonical answer plus a trailing newline).
+        stdout: Vec<u8>,
+        /// Whether the response is sensitive and must be redacted from renders.
+        secret: bool,
+    },
     /// Aborted: no stdout, exit `130`.
     Aborted,
     /// The response wasn't one of the prompt's `--choices`: an error message for stderr, and the
     /// prompt stays pending (the caller re-asks). Exit `1`.
-    InvalidChoice { message: String },
+    InvalidChoice {
+        /// The stderr diagnostic explaining the answer wasn't one of the offered choices.
+        message: String,
+    },
 }
 
 /// Resolve a [`PendingPrompt`] against a delivered answer. A response is validated against the
 /// prompt's `choices`; a non-matching response leaves the prompt pending (the caller can re-ask).
+#[must_use]
 pub fn resolve(pending: &PendingPrompt, answer: AnswerInput) -> Resolution {
     match answer {
         AnswerInput::Abort => Resolution::Aborted,
@@ -277,7 +300,7 @@ mod tests {
         for (input, want) in [("y", "yes\n"), ("n", "no\n"), ("a", "all\n"), ("YES", "yes\n")] {
             match resolve(&pending, AnswerInput::Response(input.to_string())) {
                 Resolution::Answered { stdout, .. } => {
-                    assert_eq!(stdout, want.as_bytes(), "input {input:?}")
+                    assert_eq!(stdout, want.as_bytes(), "input {input:?}");
                 }
                 other => panic!("expected Answered for {input:?}, got {other:?}"),
             }

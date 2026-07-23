@@ -47,6 +47,8 @@ impl SimpleCommand for Context {
         }
     }
 
+    // similar_names: `args`/`argv` are the conventional arg-iterator / arg-vector pair.
+    #[allow(clippy::similar_names)]
     fn execute<SE, I, S>(context: ExecutionContext<'_, SE>, args: I) -> Result<ExecutionResult, Error>
     where
         SE: ShellExtensions,
@@ -62,7 +64,7 @@ impl SimpleCommand for Context {
             return Ok(ExecutionResult::new(1));
         };
         let out = crate::apply_context(
-            &mut transcript.lock().unwrap(),
+            &mut transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
             argv.iter().map(String::as_str),
         );
         let _ = context.stdout().write_all(&out);

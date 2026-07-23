@@ -20,11 +20,14 @@
 //! space-joins with a trailing newline — every other clank surface is newline-oriented and
 //! LLM-legibility is a first-class constraint. Documented deviation.
 
+use std::fmt::Write as _;
+
 use crate::runtime::proctable::{ProcRow, ProcessTable};
 
 /// Error resolving a `/proc` path — maps to a `cat`/`grep` "No such file or directory".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProcError {
+    /// The requested `/proc` path resolves to no served virtual file; carries the offending path.
     NotFound(String),
 }
 
@@ -32,17 +35,19 @@ pub enum ProcError {
 const PROC_ROOT: &str = "/proc/";
 
 /// Snapshot the shell's current environment as `(key, value)` pairs — the same source `env`
-/// (uu_env) reads, so `/proc/<pid>/environ` and `env` never disagree. Used to populate the
+/// (`uu_env`) reads, so `/proc/<pid>/environ` and `env` never disagree. Used to populate the
 /// `environ` argument to [`resolve`].
 ///
 /// Secret variables (marked via `export --secret`) are filtered out here so they never appear in
 /// `env` or `/proc/<pid>/environ` — the single chokepoint both surfaces read through. See
 /// [`crate::runtime::secretenv`].
+#[must_use]
 pub fn current_environ() -> Vec<(String, String)> {
     crate::runtime::secretenv::filter_environ(std::env::vars().collect())
 }
 
 /// Whether `path` is under the virtual `/proc` namespace. (`/proc` itself and `/proc/` count too.)
+#[must_use]
 pub fn is_proc_path(path: &str) -> bool {
     path == "/proc" || path.starts_with(PROC_ROOT)
 }
@@ -51,6 +56,12 @@ pub fn is_proc_path(path: &str) -> bool {
 ///
 /// `table` supplies the process rows (including the synthetic root via [`ProcessTable::find`]);
 /// `environ` is the shell's current environment as `(key, value)` pairs (rendered sorted).
+///
+/// # Errors
+///
+/// Returns [`ProcError::NotFound`] when `path` isn't a served `/proc` file: the `/proc/` prefix or a
+/// path component is missing, the path nests too deep, `<pid>` fails to parse or matches no table
+/// row, or the requested file name isn't one this namespace serves.
 pub fn resolve(
     path: &str,
     table: &ProcessTable,
@@ -114,10 +125,10 @@ fn status(row: &ProcRow) -> String {
     // phantom UUID when present. (agent-revision and the await idempotency-key have no host field
     // here, matching the honest `--revision` stub, so they are not emitted rather than fabricated.)
     if let Some(meta) = &row.agent_meta {
-        out.push_str(&format!("AgentType:\t{}\n", meta.agent_type));
-        out.push_str(&format!("AgentParams:\t{}\n", meta.agent_params));
+        let _ = writeln!(out, "AgentType:\t{}", meta.agent_type);
+        let _ = writeln!(out, "AgentParams:\t{}", meta.agent_params);
         if let Some(uuid) = &meta.phantom_uuid {
-            out.push_str(&format!("PhantomUuid:\t{uuid}\n"));
+            let _ = writeln!(out, "PhantomUuid:\t{uuid}");
         }
     }
     out
@@ -129,7 +140,7 @@ fn environ_block(environ: &[(String, String)]) -> String {
     pairs.sort_by(|a, b| a.0.cmp(&b.0));
     let mut out = String::new();
     for (k, v) in pairs {
-        out.push_str(&format!("{k}={v}\n"));
+        let _ = writeln!(out, "{k}={v}");
     }
     out
 }
@@ -138,6 +149,7 @@ fn environ_block(environ: &[(String, String)]) -> String {
 /// `/proc/clank` → the shell-wide files. Returns `None` if `dir` isn't a listable `/proc` directory
 /// (top-level `/proc` pid enumeration is deferred). Note: this does not validate that `<pid>` exists
 /// — `ls /proc/<pid>` lists the file names regardless, matching how `/proc` presents a fixed schema.
+#[must_use]
 pub fn list_children(dir: &str) -> Option<Vec<String>> {
     let rest = dir.strip_prefix(PROC_ROOT)?;
     let trimmed = rest.trim_end_matches('/');
@@ -163,6 +175,7 @@ pub fn list_children(dir: &str) -> Option<Vec<String>> {
 /// fully-rendered prompt (command surface + installed MCP tools + grease prompts/skills) into the
 /// [`crate::runtime::sysprompt`] slot; we serve that. Off-session (native tests, a bare read with no live
 /// Session), fall back to the static base prompt over the registry snapshot.
+#[must_use]
 pub fn system_prompt_stub() -> String {
     match crate::runtime::sysprompt::active() {
         Some(prompt) => (*prompt).clone(),

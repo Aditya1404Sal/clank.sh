@@ -30,6 +30,7 @@ pub fn install(prompt: Arc<String>) -> InstallGuard {
 }
 
 /// The active system prompt, if a line is executing on this thread.
+#[must_use]
 pub fn active() -> Option<Arc<String>> {
     ACTIVE.with(|slot| slot.borrow().clone())
 }

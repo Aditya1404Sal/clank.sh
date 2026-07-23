@@ -27,13 +27,17 @@ const MAX_TOOL_PAGES: usize = 16;
 /// One HTTP response: status, headers (lowercased names), and the full body.
 #[derive(Clone, Debug)]
 pub struct HttpResponse {
+    /// The HTTP status code.
     pub status: u16,
+    /// Response headers as `(name, value)` pairs, names lowercased.
     pub headers: Vec<(String, String)>,
+    /// The full response body bytes.
     pub body: Vec<u8>,
 }
 
 impl HttpResponse {
     /// The first header whose (case-insensitive) name matches `name`.
+    #[must_use]
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
@@ -44,8 +48,7 @@ impl HttpResponse {
     /// Whether the response body is SSE (`Content-Type: text/event-stream`).
     fn is_sse(&self) -> bool {
         self.header("content-type")
-            .map(|ct| ct.to_ascii_lowercase().contains("text/event-stream"))
-            .unwrap_or(false)
+            .is_some_and(|ct| ct.to_ascii_lowercase().contains("text/event-stream"))
     }
 }
 
@@ -73,6 +76,8 @@ pub struct LoggingMcpHttp {
 }
 
 impl LoggingMcpHttp {
+    /// Wrap `inner`, logging every request to `http.log` (secrets redacted) before delegating to it.
+    #[must_use]
     pub fn new(inner: Box<dyn McpHttp>) -> Self {
         Self { inner }
     }
@@ -140,8 +145,11 @@ struct JsonRpcError {
 /// The result of a successful `initialize`.
 #[derive(Clone, Debug)]
 pub struct InitializeResult {
+    /// The protocol version the server negotiated.
     pub protocol_version: String,
+    /// The server's advertised name (`serverInfo.name`).
     pub server_name: String,
+    /// The server's advertised version (`serverInfo.version`).
     pub server_version: String,
     /// The session id from the `Mcp-Session-Id` response header, if the server issued one.
     pub session_id: Option<String>,
@@ -152,9 +160,11 @@ pub struct InitializeResult {
 /// One tool advertised by a server (`tools/list`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolSpec {
+    /// The tool's name (as called via `tools/call`).
     pub name: String,
+    /// The tool's human-readable description, if the server provides one.
     pub description: Option<String>,
-    /// The tool's JSON-schema input, kept lossless (drives arg mapping + the ask ToolDefinition).
+    /// The tool's JSON-schema input, kept lossless (drives arg mapping + the ask `ToolDefinition`).
     pub input_schema: Value,
 }
 
@@ -162,7 +172,9 @@ pub struct ToolSpec {
 /// (name + required flag), used to build a standalone prompt package at grease install time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PromptSpec {
+    /// The prompt's name.
     pub name: String,
+    /// The prompt's human-readable description, if any.
     pub description: Option<String>,
     /// `(arg-name, description, required)` for each declared argument.
     pub arguments: Vec<(String, String, bool)>,
@@ -171,9 +183,13 @@ pub struct PromptSpec {
 /// One resource advertised by a server (`resources/list`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResourceSpec {
+    /// The resource's URI.
     pub uri: String,
+    /// The resource's human-readable name, if any.
     pub name: Option<String>,
+    /// The resource's description, if any.
     pub description: Option<String>,
+    /// The resource's MIME type, if the server advertises one.
     pub mime_type: Option<String>,
     /// Byte size, if the server advertises it.
     pub size: Option<u64>,
@@ -191,8 +207,11 @@ pub struct ResourceSpec {
 pub struct ResourceTemplateSpec {
     /// The RFC-6570 URI template, e.g. `github://repo/{path}`.
     pub uri_template: String,
+    /// The template's human-readable name, if any.
     pub name: Option<String>,
+    /// The template's description, if any.
     pub description: Option<String>,
+    /// The MIME type of resources the template yields, if advertised.
     pub mime_type: Option<String>,
 }
 
@@ -210,7 +229,9 @@ pub struct CallToolResult {
 /// An MCP client error, carrying the clank exit code the caller should surface.
 #[derive(Clone, Debug)]
 pub struct McpError {
+    /// The human-readable error message.
     pub message: String,
+    /// The clank exit code the caller should surface.
     pub exit_code: u8,
 }
 
@@ -233,6 +254,10 @@ type McpResult<T> = Result<T, McpError>;
 /// Extract the JSON-RPC *response* (an object with a `result` or `error`, not a notification) from a
 /// complete `text/event-stream` body. Events are separated by blank lines; `data:` lines within an
 /// event are concatenated and parsed as JSON. Returns the first parseable response object.
+///
+/// # Errors
+/// Returns `Err` if no event's concatenated `data:` payload parses as a JSON-RPC response object
+/// (one carrying a `result` or `error`).
 pub fn extract_sse_json_rpc(body: &str) -> Result<Value, String> {
     for event in body.split("\n\n") {
         let mut data = String::new();
@@ -267,6 +292,7 @@ fn parse_response_body(resp: &HttpResponse) -> McpResult<JsonRpcResponse> {
 }
 
 /// Map a JSON-RPC error object to an [`McpError`] with the right exit code.
+#[allow(clippy::needless_pass_by_value)] // small owned error value, consumed at the one call site
 fn rpc_error_to_mcp(err: JsonRpcError) -> McpError {
     match err.code {
         // Method-not-found / invalid-params are usage-shaped (exit 2).
@@ -280,7 +306,9 @@ fn rpc_error_to_mcp(err: JsonRpcError) -> McpError {
 /// Auth to attach to MCP requests: a header name and the *value* already resolved from the env var.
 #[derive(Clone, Debug, Default)]
 pub struct McpAuth {
+    /// The header name to send the token in.
     pub header: String,
+    /// The already-resolved header value (read from the env var at config time).
     pub value: String,
 }
 
@@ -294,6 +322,7 @@ pub struct McpClient<'a> {
 }
 
 impl<'a> McpClient<'a> {
+    /// Create a client bound to `url`, driving requests through `http` with optional `auth`.
     pub fn new(http: &'a dyn McpHttp, url: impl Into<String>, auth: Option<McpAuth>) -> Self {
         Self { http, url: url.into(), auth, next_id: 1 }
     }
@@ -371,6 +400,10 @@ impl<'a> McpClient<'a> {
     }
 
     /// `initialize` + `notifications/initialized`. Captures the session id from the response header.
+    ///
+    /// # Errors
+    /// Returns `Err` on transport failure, an HTTP status ≥ 400, an unparseable body, a JSON-RPC
+    /// error object, or a response with no `result`.
     pub async fn initialize(&mut self) -> McpResult<InitializeResult> {
         let params = serde_json::json!({
             "protocolVersion": PROTOCOL_VERSION,
@@ -425,6 +458,10 @@ impl<'a> McpClient<'a> {
     }
 
     /// `tools/list`, following pagination up to [`MAX_TOOL_PAGES`].
+    ///
+    /// # Errors
+    /// Returns `Err` on transport failure, an HTTP error status, or a JSON-RPC error (e.g.
+    /// method-not-found from a server without the tools capability).
     pub async fn list_tools(&mut self, session_id: Option<&str>) -> McpResult<Vec<ToolSpec>> {
         let mut tools = Vec::new();
         let mut cursor: Option<String> = None;
@@ -450,6 +487,12 @@ impl<'a> McpClient<'a> {
     }
 
     /// `tools/call` with the given arguments object.
+    ///
+    /// # Errors
+    /// Returns `Err` on transport/protocol failure, or (exit 1) when the tool itself reports
+    /// `isError: true`.
+    // `arguments` is forwarded into `json!` (which only borrows it); by-value keeps the public call site ergonomic.
+    #[allow(clippy::needless_pass_by_value)]
     pub async fn call_tool(
         &mut self,
         name: &str,
@@ -473,6 +516,10 @@ impl<'a> McpClient<'a> {
     /// `prompts/list` — the server's advertised prompts (name + description + declared arguments).
     /// Paginated like `tools/list`. A server without the prompts capability typically returns a
     /// method-not-found error, which the caller can treat as "no prompts".
+    ///
+    /// # Errors
+    /// Returns `Err` on transport/protocol failure or a JSON-RPC error (e.g. method-not-found from a
+    /// server lacking the prompts capability).
     pub async fn list_prompts(&mut self, session_id: Option<&str>) -> McpResult<Vec<PromptSpec>> {
         let mut prompts = Vec::new();
         let mut cursor: Option<String> = None;
@@ -517,6 +564,11 @@ impl<'a> McpClient<'a> {
 
     /// `prompts/get` — fetch a prompt's messages (with the given arguments), joining the text content
     /// into a single string (the body a standalone prompt package would carry / run through `ask`).
+    ///
+    /// # Errors
+    /// Returns `Err` on transport/protocol failure or a JSON-RPC error from the server.
+    // `arguments` is forwarded into `json!` (which only borrows it); by-value keeps the public call site ergonomic.
+    #[allow(clippy::needless_pass_by_value)]
     pub async fn get_prompt(
         &mut self,
         name: &str,
@@ -549,6 +601,10 @@ impl<'a> McpClient<'a> {
 
     /// `resources/list` — the server's advertised resources (uri + name + description + mimeType).
     /// Paginated like `tools/list`. A server without the resources capability returns method-not-found.
+    ///
+    /// # Errors
+    /// Returns `Err` on transport/protocol failure or a JSON-RPC error (e.g. method-not-found from a
+    /// server lacking the resources capability).
     pub async fn list_resources(&mut self, session_id: Option<&str>) -> McpResult<Vec<ResourceSpec>> {
         let mut resources = Vec::new();
         let mut cursor: Option<String> = None;
@@ -593,6 +649,9 @@ impl<'a> McpClient<'a> {
 
     /// `resources/templates/list` — the server's parameterized-URI resource templates. Paginated like
     /// `resources/list`. A server without templates returns an empty list or method-not-found.
+    ///
+    /// # Errors
+    /// Returns `Err` on transport/protocol failure or a JSON-RPC error from the server.
     pub async fn list_resource_templates(
         &mut self,
         session_id: Option<&str>,
@@ -625,6 +684,10 @@ impl<'a> McpClient<'a> {
 
     /// `resources/subscribe` — subscribe to change notifications for a resource URI. Best-effort (a
     /// server may not support it); `mcp watch` uses this before its poll loop.
+    ///
+    /// # Errors
+    /// Returns `Err` on transport/protocol failure or if the server does not support
+    /// `resources/subscribe`.
     pub async fn subscribe_resource(&mut self, uri: &str, session_id: Option<&str>) -> McpResult<()> {
         let params = serde_json::json!({ "uri": uri });
         self.call("resources/subscribe", Some(params), session_id).await?;
@@ -634,6 +697,9 @@ impl<'a> McpClient<'a> {
     /// `resources/read` — read a resource's contents by URI. Joins the text of each returned content
     /// item (the common single-text case yields that text verbatim). Binary (`blob`) contents are
     /// returned base64-decoded when possible, else the raw base64 string.
+    ///
+    /// # Errors
+    /// Returns `Err` on transport/protocol failure or a JSON-RPC error from the server.
     pub async fn read_resource(&mut self, uri: &str, session_id: Option<&str>) -> McpResult<String> {
         let params = serde_json::json!({ "uri": uri });
         let result = self.call("resources/read", Some(params), session_id).await?;
@@ -659,6 +725,10 @@ impl<'a> McpClient<'a> {
 
     /// Close a session (HTTP DELETE with the session id). A 405 means the server refuses explicit
     /// close — reported as such (exit 1); the caller removes the local session anyway.
+    ///
+    /// # Errors
+    /// Returns `Err` on transport failure, `405` (the server refuses explicit close, exit 1), or any
+    /// other non-2xx status.
     pub async fn close_session(&self, session_id: &str) -> McpResult<()> {
         let resp = self
             .http
@@ -702,6 +772,8 @@ mod tests {
     /// A scripted [`McpHttp`] fake: replays a queue of responses and records the requests it saw.
     struct FakeHttp {
         responses: RefCell<VecDeque<HttpResponse>>,
+        // records (method, url, headers, body) per request — a local test-bookkeeping tuple.
+        #[allow(clippy::type_complexity)]
         seen: RefCell<Vec<(String, String, Vec<(String, String)>, Option<Vec<u8>>)>>,
     }
 
@@ -736,6 +808,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::needless_pass_by_value)] // value is serialized into the response body
     fn json_response(status: u16, value: Value) -> HttpResponse {
         HttpResponse {
             status,
@@ -750,6 +823,9 @@ mod tests {
     }
 
     // A tiny block_on without pulling a dep: poll to completion (the fake futures are ready quickly).
+    // SAFETY: the no-op waker never dereferences its null data pointer; `f` is a stack local that is
+    // never moved again after being pinned in place below.
+    #[allow(unsafe_code)]
     fn futures_executor_block_on<F: std::future::Future>(mut f: F) -> F::Output {
         use std::pin::Pin;
         use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
@@ -766,7 +842,7 @@ mod tests {
         loop {
             match f.as_mut().poll(&mut cx) {
                 Poll::Ready(v) => return v,
-                Poll::Pending => continue,
+                Poll::Pending => {}
             }
         }
     }

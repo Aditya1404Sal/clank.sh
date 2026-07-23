@@ -40,6 +40,7 @@ pub const DEFAULT_LOG_DIR: &str = "/var/log";
 pub const LOG_DIR_ENV: &str = "CLANK_LOG_DIR";
 
 /// The log directory: `$CLANK_LOG_DIR` if set, else `/var/log`.
+#[must_use]
 pub fn log_dir() -> PathBuf {
     PathBuf::from(std::env::var(LOG_DIR_ENV).unwrap_or_else(|_| DEFAULT_LOG_DIR.to_string()))
 }
@@ -49,7 +50,7 @@ pub fn log_dir() -> PathBuf {
 #[cfg(test)]
 pub fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// A destination for log lines. Implemented by [`DefaultLogSink`] (native/tests: append directly) and by
@@ -112,14 +113,19 @@ pub fn write_line(file: LogFile, line: &str) {
 /// The four log files. Each maps to a fixed filename under [`log_dir`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LogFile {
+    /// `shell.log` — per-command start/end/exit-code events and authorization pauses.
     Shell,
+    /// `http.log` — outbound HTTP (MCP, grease registry, curl/wget, `ask`), secrets redacted.
     Http,
+    /// `mcp.log` — MCP JSON-RPC tool invocations and their responses.
     Mcp,
+    /// `ops.log` — destructive operations (the `sudo-only` tier).
     Ops,
 }
 
 impl LogFile {
     /// The fixed filename under [`log_dir`].
+    #[must_use]
     pub fn filename(self) -> &'static str {
         match self {
             LogFile::Shell => "shell.log",
@@ -157,11 +163,14 @@ pub struct Record {
 }
 
 impl Record {
+    /// A new, empty record tagged with the given event `kind` and no fields yet.
+    #[must_use]
     pub fn new(kind: &'static str) -> Self {
         Self { kind, fields: Vec::new() }
     }
 
     /// Add a field. Empty values are skipped (keeps lines tight).
+    #[must_use]
     pub fn field(mut self, key: &str, value: impl AsRef<str>) -> Self {
         let value = value.as_ref();
         if !value.is_empty() {
@@ -244,6 +253,7 @@ const SECRET_QUERY_PARAMS: &[&str] =
 /// `https://h/mcp?token=sk-abc&x=1` → `https://h/mcp?token=<redacted>&x=1`. Anything before the `?` is
 /// untouched. A parameter whose name (case-insensitive) is in [`SECRET_QUERY_PARAMS`] has its value
 /// replaced. Non-secret params and a URL with no query string pass through unchanged.
+#[must_use]
 pub fn redact_url(url: &str) -> String {
     let Some((base, query)) = url.split_once('?') else {
         return url.to_string();
@@ -264,6 +274,7 @@ pub fn redact_url(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Write as _;
 
     /// A temp-dir guard that points `CLANK_LOG_DIR` at a fresh directory for the test AND installs the
     /// default log sink, restoring both on drop. Serializes via the shared [`test_env_lock`].
@@ -334,10 +345,10 @@ mod tests {
             .field("line", "echo \"hi\"\nrm -rf /\tC:\\path")
             .render();
         assert!(!line.contains('\n'), "no raw newline may survive: {line:?}");
-        assert!(line.contains(r#"\n"#), "the newline is escaped: {line}");
+        assert!(line.contains(r"\n"), "the newline is escaped: {line}");
         assert!(line.contains(r#"\""#), "the quote is escaped: {line}");
-        assert!(line.contains(r#"\\"#), "the backslash is escaped: {line}");
-        assert!(line.contains(r#"\t"#), "the tab is escaped: {line}");
+        assert!(line.contains(r"\\"), "the backslash is escaped: {line}");
+        assert!(line.contains(r"\t"), "the tab is escaped: {line}");
         // Exactly one line.
         assert_eq!(line.lines().count(), 1);
     }
@@ -352,7 +363,7 @@ mod tests {
         // Over the cap → drops whole leading lines, keeps a line-aligned tail under the cap.
         let mut s = String::new();
         for i in 0..100 {
-            s.push_str(&format!("line{i}\n"));
+            let _ = writeln!(s, "line{i}");
         }
         bound_tail(&mut s, 30);
         assert!(s.len() <= 30, "tail must be under the cap, got {}", s.len());

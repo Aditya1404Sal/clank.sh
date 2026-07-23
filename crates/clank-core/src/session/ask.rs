@@ -2,7 +2,9 @@
 //! `context summarize`/auto-compaction summarization, and model resolution. A few core helpers
 //! (`shell_home`, `resolve_authz`, `mcp_help_for`) ride along here and are re-exported to `super`.
 
-use super::*;
+use std::fmt::Write as _;
+
+use super::{Session, LineResult, AskLoopState, authz, Decision, ask_reconstruct, Transcript, ReplState, DEFAULT_HOME, ASK_MAX_ITERATIONS, ToolStep, AskPause, AskPauseKind, PendingPrompt, PendingKind, Resolution, truncate_tool_output};
 
 /// Read-only Brush builtins the model may call as tools even though clank keeps no manifest for them.
 /// They don't mutate parent-shell state, so the model-tool scope gate allows them explicitly rather
@@ -67,7 +69,7 @@ impl Session {
         let base_transcript = if args.fresh {
             String::new()
         } else {
-            String::from_utf8_lossy(&self.transcript.lock().unwrap().render()).into_owned()
+            String::from_utf8_lossy(&self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).render()).into_owned()
         };
 
         // Resolve the model: `--model` > ask.toml default > built-in DEFAULT_MODEL. Strip the
@@ -162,9 +164,9 @@ impl Session {
         self.next_ask_stdin = Some(captured);
         let result = self.run_ask(args, blanket).await;
         if let Some(pid) = pid {
-            self.proc_table.lock().unwrap().complete(pid);
+            self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(pid);
         }
-        self.transcript.lock().unwrap().record_output(&result.terminal_output());
+        self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record_output(&result.terminal_output());
         result
     }
 
@@ -183,6 +185,13 @@ impl Session {
     /// `--fresh`, a copy of the parent for `--inherit`), and stash it on `self.repl`. Returns the
     /// resolved model id for the prompt banner, or an `Err` message (unknown provider / no provider).
     /// Native-only — the durable agent returns an honest message from `eval_line` instead.
+    ///
+    /// # Errors
+    /// Returns `Err` when no provider is configured, or when the resolved model carries an unknown
+    /// `provider/` prefix (surfaced by [`Self::resolve_ask_model`]).
+    ///
+    /// # Panics
+    /// Panics if the transcript mutex is poisoned (a thread panicked while holding it).
     pub fn repl_start(&mut self, args: &crate::ai::ask::ReplArgs) -> Result<String, String> {
         if self.ask_provider.is_none() {
             return Err("ask repl: no model provider configured\n".to_string());
@@ -190,13 +199,17 @@ impl Session {
         let (model, _warning) = self.resolve_ask_model(args.model.as_deref())?;
         let transcript = match args.seed {
             crate::ai::ask::ReplSeed::Fresh => Transcript::new(),
-            crate::ai::ask::ReplSeed::Inherit => self.transcript.lock().unwrap().clone(),
+            crate::ai::ask::ReplSeed::Inherit => self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone(),
         };
-        self.repl = Some(ReplState { transcript, model });
-        Ok(self.repl.as_ref().unwrap().model.clone())
+        self.repl = Some(ReplState {
+            transcript,
+            model: model.clone(),
+        });
+        Ok(model)
     }
 
     /// The active REPL's model id, for the `[model]>` prompt. `None` if no REPL is active.
+    #[must_use]
     pub fn repl_model(&self) -> Option<String> {
         self.repl.as_ref().map(|r| r.model.clone())
     }
@@ -206,9 +219,7 @@ impl Session {
     /// isn't a meta-command (the caller then treats it as a prompt via [`Self::repl_turn`]).
     pub fn repl_meta(&mut self, line: &str) -> Option<(String, bool)> {
         let line = line.trim();
-        let Some(repl) = self.repl.as_mut() else {
-            return None;
-        };
+        let repl = self.repl.as_mut()?;
         let mut words = line.split_whitespace();
         match words.next()? {
             ":exit" | ":quit" => Some((String::new(), true)),
@@ -281,7 +292,7 @@ impl Session {
     /// (`$(...)`/pipe) hits the honest error in `apply_context`.
     pub(super) async fn run_context_summarize(&mut self) -> LineResult {
         // Render before awaiting so the transcript lock is never held across the model call.
-        let rendered = String::from_utf8_lossy(&self.transcript.lock().unwrap().render()).into_owned();
+        let rendered = String::from_utf8_lossy(&self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).render()).into_owned();
         if rendered.trim().is_empty() {
             return LineResult::from_outcome(b"(transcript is empty)\n".to_vec(), Vec::new(), 0);
         }
@@ -343,25 +354,22 @@ impl Session {
     /// left as-is — the decided fallback, so recording never blocks or fails.
     pub(super) async fn compact_dropped_span(&mut self) {
         // Snapshot the pending dropped span without holding the lock across the await.
-        let pending = self.transcript.lock().unwrap().pending_summary();
+        let pending = self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).pending_summary();
         let Some((_count, dropped_text)) = pending else {
             return;
         };
         if dropped_text.trim().is_empty() {
             return;
         }
-        let model = match self.resolve_ask_model(None) {
-            Ok((model, _warning)) => model,
-            Err(_) => {
-                // No model to summarize with (no provider / no key / bad model id). Discard the
-                // pending text so a durable agent doesn't hold it forever; keep the count marker.
-                // See audit P1-3.
-                self.transcript.lock().unwrap().discard_dropped_span();
-                return;
-            }
+        let Ok((model, _warning)) = self.resolve_ask_model(None) else {
+            // No model to summarize with (no provider / no key / bad model id). Discard the
+            // pending text so a durable agent doesn't hold it forever; keep the count marker.
+            // See audit P1-3.
+            self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).discard_dropped_span();
+            return;
         };
         if let Ok(Some(summary)) = self.summarize_text(&dropped_text, &model).await {
-            self.transcript.lock().unwrap().set_marker_summary(summary);
+            self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).set_marker_summary(summary);
         }
     }
 
@@ -403,9 +411,7 @@ impl Session {
     fn shell_home(&self) -> String {
         self.shell
             .env()
-            .get_str("HOME", &self.shell)
-            .map(|h| h.into_owned())
-            .unwrap_or_else(|| DEFAULT_HOME.to_string())
+            .get_str("HOME", &self.shell).map_or_else(|| DEFAULT_HOME.to_string(), std::borrow::Cow::into_owned)
     }
 
     /// Resolve a line's authorization policy, consulting the static registry AND the dynamic MCP
@@ -477,10 +483,13 @@ impl Session {
                 }
             }
             let rank = authz::decision_rank(decision);
-            if strictest.as_ref().map(|(r, ..)| rank > *r).unwrap_or(true) {
+            if strictest.as_ref().is_none_or(|(r, ..)| rank > *r) {
                 strictest = Some((rank, policy, elevated, command));
             }
         }
+        // Invariant: `split_segments` never returns empty, so the loop above set `strictest` at
+        // least once.
+        #[allow(clippy::expect_used)]
         let (_, policy, elevated, command) = strictest.expect("split_segments never returns empty");
         (policy, elevated, command, gated)
     }
@@ -488,9 +497,8 @@ impl Session {
     /// Generated help for an MCP tool line ending in `--help` (or a bare `<server>`): the server's
     /// tool list. `None` if the line isn't an installed-server line or doesn't request help.
     pub(super) fn mcp_help_for(&self, line: &str) -> Option<String> {
-        let inv = match crate::mcp::cmd::parse_tool_invocation(line)? {
-            Ok(inv) => inv,
-            Err(_) => return None,
+        let Ok(inv) = crate::mcp::cmd::parse_tool_invocation(line)? else {
+            return None;
         };
         if !self.mcp.is_server(&inv.server) {
             return None;
@@ -511,6 +519,9 @@ impl Session {
     /// The provider is `take()`n and restored before every return. On a pause, the whole `state` is
     /// stashed in `PendingKind::AgentLoop` and a `pending_prompt` is returned; `answer_prompt` calls
     /// back into this helper to continue.
+    // The agentic turn loop is one cohesive state machine (turn budget, tool batch, pause/restore);
+    // splitting it would scatter the provider take/restore invariant across helpers.
+    #[allow(clippy::too_many_lines)]
     async fn drive_ask_loop(
         &mut self,
         mut state: AskLoopState,
@@ -548,7 +559,7 @@ impl Session {
                 );
                 self.ask_provider = Some(provider);
                 if let Some(pid) = pid {
-                    self.proc_table.lock().unwrap().complete(pid);
+                    self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(pid);
                 }
                 // Under `--json` a truncated loop can't have produced a validated JSON answer, so
                 // honor the exit-6 contract rather than a bare exit 0.
@@ -568,7 +579,7 @@ impl Session {
             if let Some(err) = resp.error {
                 self.ask_provider = Some(provider);
                 if let Some(pid) = pid {
-                    self.proc_table.lock().unwrap().complete(pid);
+                    self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(pid);
                 }
                 let mut stderr = state.trace;
                 stderr.extend_from_slice(err.as_bytes());
@@ -626,7 +637,7 @@ impl Session {
             // tool execution above). A nested prompt tool call has already returned it to `self`.
             let Some(p) = self.ask_provider.take() else {
                 if let Some(pid) = pid {
-                    self.proc_table.lock().unwrap().complete(pid);
+                    self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(pid);
                 }
                 return LineResult::from_outcome(
                     Vec::new(),
@@ -639,7 +650,7 @@ impl Session {
 
         self.ask_provider = Some(provider);
         if let Some(pid) = pid {
-            self.proc_table.lock().unwrap().complete(pid);
+            self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(pid);
         }
 
         // `--json`: enforce the output contract. Valid JSON (after stripping a stray code fence) ⇒
@@ -647,24 +658,20 @@ impl Session {
         // stderr so it isn't lost (README: "raw model response emitted to stderr").
         if state.json {
             let candidate = crate::ai::ask::strip_json_fence(&final_text);
-            match serde_json::from_str::<serde_json::Value>(candidate) {
-                Ok(_) => {
-                    return LineResult::from_outcome(
-                        candidate.as_bytes().to_vec(),
-                        state.trace,
-                        0,
-                    );
-                }
-                Err(_) => {
-                    let mut stderr = state.trace;
-                    stderr.extend_from_slice(b"ask: --json: model did not return valid JSON\n");
-                    stderr.extend_from_slice(final_text.as_bytes());
-                    if !final_text.ends_with('\n') {
-                        stderr.push(b'\n');
-                    }
-                    return LineResult::from_outcome(Vec::new(), stderr, 6);
-                }
+            if serde_json::from_str::<serde_json::Value>(candidate).is_ok() {
+                return LineResult::from_outcome(
+                    candidate.as_bytes().to_vec(),
+                    state.trace,
+                    0,
+                );
             }
+            let mut stderr = state.trace;
+            stderr.extend_from_slice(b"ask: --json: model did not return valid JSON\n");
+            stderr.extend_from_slice(final_text.as_bytes());
+            if !final_text.ends_with('\n') {
+                stderr.push(b'\n');
+            }
+            return LineResult::from_outcome(Vec::new(), stderr, 6);
         }
 
         LineResult::from_outcome(final_text.into_bytes(), state.trace, 0)
@@ -731,7 +738,7 @@ impl Session {
         // exit 130 with the trace so far. The paused row is reaped here.
         if matches!(resolution, Resolution::Aborted) {
             if let Some(pid) = pid {
-                self.proc_table.lock().unwrap().complete(pid);
+                self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(pid);
             }
             state.trace.extend_from_slice(b"[ask] aborted by user\n");
             return LineResult::from_outcome(Vec::new(), state.trace, 130);
@@ -826,6 +833,9 @@ impl Session {
     /// [`authz`]: `Allow` executes, `Confirm` pauses. Approved lines run through `run_command` (full
     /// session surface — `curl`/`wget` work) with no proc row; a nonzero exit is a *successful* tool
     /// result carrying the code (the model must see failures).
+    // One linear guard gauntlet (parse → recursion → substitution → scope → authz); the mid-body
+    // `use ExecutionScope` sits with the segment loop it serves.
+    #[allow(clippy::too_many_lines, clippy::items_after_statements)]
     async fn execute_ask_tool(
         &mut self,
         call: &crate::ai::ask::AskToolCall,
@@ -903,7 +913,7 @@ impl Session {
                         other => other.to_string(),
                     };
                     let escaped = val.replace('\'', r"'\''");
-                    line.push_str(&format!(" --{k} '{escaped}'"));
+                    let _ = write!(line, " --{k} '{escaped}'");
                 }
             }
             line

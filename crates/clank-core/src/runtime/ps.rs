@@ -64,6 +64,8 @@ impl SimpleCommand for Ps {
         }
     }
 
+    // `args` (the raw iterator) and `argv` (the collected Vec) intentionally mirror each other.
+    #[allow(clippy::similar_names)]
     fn execute<SE, I, S>(context: ExecutionContext<'_, SE>, args: I) -> Result<ExecutionResult, Error>
     where
         SE: ShellExtensions,
@@ -77,7 +79,7 @@ impl SimpleCommand for Ps {
         // outside a run_line — shouldn't happen in practice), render an empty table with just the
         // synthetic root.
         let rendered = match proctable::active() {
-            Some(table) => table.lock().unwrap().render_ps(mode),
+            Some(table) => table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).render_ps(mode),
             None => proctable::ProcessTable::new().render_ps(mode),
         };
 

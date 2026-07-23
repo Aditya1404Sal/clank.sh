@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 /// The parsed `ask.toml`. All sections default so a partial file round-trips.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AskConfig {
+    /// The `[ask]` section: the default model.
     #[serde(default)]
     pub ask: AskSection,
     /// Per-provider config: the `key-env` doc field and, on native, an optional stored `key` value.
@@ -65,12 +66,17 @@ impl std::fmt::Debug for ProviderSection {
 }
 
 /// The `ask.toml` path under a given home directory: `<home>/.config/ask/ask.toml`.
+#[must_use]
 pub fn config_path(home: &str) -> PathBuf {
     PathBuf::from(home).join(".config").join("ask").join("ask.toml")
 }
 
 /// Load `ask.toml` from `home`. `Ok(None)` if the file doesn't exist (use the built-in default);
 /// `Err(msg)` on an unreadable or unparseable file (the caller should warn and fall back).
+///
+/// # Errors
+///
+/// Returns `Err` when the file exists but cannot be read, or its contents fail to parse as TOML.
 pub fn load(home: &str) -> Result<Option<AskConfig>, String> {
     let path = config_path(home);
     match std::fs::read_to_string(&path) {
@@ -84,12 +90,18 @@ pub fn load(home: &str) -> Result<Option<AskConfig>, String> {
 
 /// Set the default model in `ask.toml` under `home`, preserving the existing `[providers]` entries.
 /// Creates `~/.config/ask/` as needed. Never writes a key value.
+///
+/// # Errors
+///
+/// Returns `Err` when the existing file cannot be loaded, the config directory cannot be created, the
+/// config cannot be serialized, or the file cannot be written.
 pub fn save_default_model(home: &str, model: &str) -> Result<(), String> {
     let mut config = load(home)?.unwrap_or_default();
     config.ask.default_model = Some(model.to_string());
     let path = config_path(home);
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("ask.toml: cannot create {dir:?}: {e}"))?;
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("ask.toml: cannot create {}: {e}", dir.display()))?;
     }
     let text = toml::to_string_pretty(&config).map_err(|e| format!("ask.toml serialize error: {e}"))?;
     std::fs::write(&path, text).map_err(|e| format!("ask.toml write error: {e}"))
@@ -97,6 +109,10 @@ pub fn save_default_model(home: &str, model: &str) -> Result<(), String> {
 
 /// The default model resolved from `ask.toml`, if any. A parse error returns `Err` so the caller can
 /// warn once and fall back to the built-in default.
+///
+/// # Errors
+///
+/// Returns `Err` when `ask.toml` exists but cannot be read or parsed (propagated from [`load`]).
 pub fn default_model(home: &str) -> Result<Option<String>, String> {
     Ok(load(home)?.and_then(|c| c.ask.default_model))
 }
@@ -104,6 +120,7 @@ pub fn default_model(home: &str) -> Result<Option<String>, String> {
 /// The stored API key for `provider` from `ask.toml` `[providers.<provider>].key`, if present. A
 /// parse/read error is swallowed to `None` — a missing/broken key file is not an error here; the
 /// caller falls back to the environment. Native only in practice (the agent never stores a key).
+#[must_use]
 pub fn provider_key(home: &str, provider: &str) -> Option<String> {
     load(home)
         .ok()
@@ -114,6 +131,11 @@ pub fn provider_key(home: &str, provider: &str) -> Option<String> {
 /// Store `key` for `provider` in `ask.toml` `[providers.<provider>].key`, preserving the default
 /// model and any other provider entries. Creates `~/.config/ask/` as needed. Native only — the agent
 /// reads its key from the environment and never calls this.
+///
+/// # Errors
+///
+/// Returns `Err` when the existing file cannot be loaded, the config directory cannot be created, the
+/// config cannot be serialized, or the file cannot be written.
 pub fn save_provider_key(home: &str, provider: &str, key: &str) -> Result<(), String> {
     let mut config = load(home)?.unwrap_or_default();
     config
@@ -123,7 +145,8 @@ pub fn save_provider_key(home: &str, provider: &str, key: &str) -> Result<(), St
         .key = Some(key.to_string());
     let path = config_path(home);
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("ask.toml: cannot create {dir:?}: {e}"))?;
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("ask.toml: cannot create {}: {e}", dir.display()))?;
     }
     let text = toml::to_string_pretty(&config).map_err(|e| format!("ask.toml serialize error: {e}"))?;
     std::fs::write(&path, text).map_err(|e| format!("ask.toml write error: {e}"))
@@ -133,6 +156,11 @@ pub fn save_provider_key(home: &str, provider: &str, key: &str) -> Result<(), St
 /// provider entries. Returns `Ok(true)` if a key was present and removed, `Ok(false)` if there was
 /// nothing to clear. A section left with neither `key` nor `key_env` is dropped to keep the file
 /// tidy. Native only — the agent never stores keys, so it never calls this.
+///
+/// # Errors
+///
+/// Returns `Err` when the existing file cannot be loaded, the config directory cannot be created, the
+/// config cannot be serialized, or the file cannot be rewritten.
 pub fn remove_provider_key(home: &str, provider: &str) -> Result<bool, String> {
     let Some(mut config) = load(home)? else {
         return Ok(false); // no ask.toml → nothing stored
@@ -152,7 +180,8 @@ pub fn remove_provider_key(home: &str, provider: &str) -> Result<bool, String> {
     }
     let path = config_path(home);
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("ask.toml: cannot create {dir:?}: {e}"))?;
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("ask.toml: cannot create {}: {e}", dir.display()))?;
     }
     let text = toml::to_string_pretty(&config).map_err(|e| format!("ask.toml serialize error: {e}"))?;
     std::fs::write(&path, text).map_err(|e| format!("ask.toml write error: {e}"))?;
@@ -198,10 +227,10 @@ mod tests {
         save_provider_key(h, "anthropic", "sk-stored").unwrap();
         assert_eq!(provider_key(h, "anthropic").as_deref(), Some("sk-stored"));
         // Removing returns true and the key is gone.
-        assert_eq!(remove_provider_key(h, "anthropic").unwrap(), true);
+        assert!(remove_provider_key(h, "anthropic").unwrap());
         assert_eq!(provider_key(h, "anthropic"), None);
         // A second remove is a no-op (nothing stored).
-        assert_eq!(remove_provider_key(h, "anthropic").unwrap(), false);
+        assert!(!remove_provider_key(h, "anthropic").unwrap());
     }
 
     #[test]
@@ -217,7 +246,7 @@ mod tests {
              [providers.anthropic]\nkey-env = \"ANTHROPIC_API_KEY\"\nkey = \"sk-x\"\n",
         )
         .unwrap();
-        assert_eq!(remove_provider_key(h, "anthropic").unwrap(), true);
+        assert!(remove_provider_key(h, "anthropic").unwrap());
         let cfg = load(h).unwrap().unwrap();
         // Default model untouched; the section survives (its key-env doc remains); only the key is gone.
         assert_eq!(cfg.ask.default_model.as_deref(), Some("anthropic/claude-opus-4-8"));

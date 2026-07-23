@@ -51,6 +51,7 @@ pub struct ResourceEntry {
 impl ResourceEntry {
     /// A plain resource entry (static or dynamic) with no annotations — the common constructor;
     /// callers set annotation fields afterward when present.
+    #[must_use]
     pub fn plain(server: &str, rel_path: &str, uri: &str, is_static: bool) -> Self {
         Self {
             server: server.to_string(),
@@ -73,7 +74,12 @@ pub enum McpPathKind {
     /// A directory (the root, a server dir, or an intermediate dir) — its listed children.
     Directory(Vec<String>),
     /// A dynamic resource file: its `(server, uri)` — the caller fetches it live.
-    Dynamic { server: String, uri: String },
+    Dynamic {
+        /// The MCP server name (the `/mnt/mcp/<server>/` segment).
+        server: String,
+        /// The MCP resource URI to fetch via `resources/read`.
+        uri: String,
+    },
     /// A static resource file: it's a real file on disk (the caller delegates to uutils).
     Static,
     /// A resource-template stub — an executable, not a readable file (README:774).
@@ -83,12 +89,14 @@ pub enum McpPathKind {
 }
 
 /// Whether `path` is under the virtual `/mnt/mcp` namespace.
+#[must_use]
 pub fn is_mcp_path(path: &str) -> bool {
     path == MCP_ROOT || path.starts_with(&format!("{MCP_ROOT}/"))
 }
 
 /// Classify a `/mnt/mcp` path against `index` (the installed resources). Directories list their
 /// children; a resource file is static or dynamic; anything else is `NotFound`.
+#[must_use]
 pub fn classify(path: &str, index: &[ResourceEntry]) -> McpPathKind {
     let rel = path.trim_start_matches(MCP_ROOT).trim_start_matches('/').trim_end_matches('/');
 
@@ -160,6 +168,7 @@ pub fn install(index: Arc<Vec<ResourceEntry>>) -> InstallGuard {
 }
 
 /// The active index, if a line is executing on this thread.
+#[must_use]
 pub fn active() -> Option<Arc<Vec<ResourceEntry>>> {
     ACTIVE.with(|slot| slot.borrow().clone())
 }
