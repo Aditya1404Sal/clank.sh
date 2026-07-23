@@ -1,3 +1,8 @@
+// This whole file is the session test suite (included via `#[cfg(all(test, not(wasm)))] mod tests`
+// in mod.rs). unwrap/expect on known-good fixtures is correct test style; clippy's
+// allow-unwrap-in-tests does not recognize the compound cfg gate, so scope it explicitly here.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use super::*;
 
 /// Drive a closure on a fresh current-thread runtime (mirrors how `Session` is used natively).

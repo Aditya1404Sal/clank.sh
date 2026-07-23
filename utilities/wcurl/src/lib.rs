@@ -209,6 +209,9 @@ fn write_out_var(var: &str, resp: &whttp::Response) -> String {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
+    // Test code: unwrap/expect on known-good fixtures is correct style. clippy's allow-unwrap-in-tests
+    // does not fire here (compound/edge cfg-test detection), so scope it explicitly.
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;

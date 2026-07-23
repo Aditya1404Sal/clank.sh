@@ -394,6 +394,9 @@ fn collect_headers(map: &http::HeaderMap) -> Vec<(String, String)> {
 
 #[cfg(test)]
 mod tests {
+    // Test code: unwrap/expect on known-good fixtures is correct style. clippy's allow-unwrap-in-tests
+    // does not fire here (compound/edge cfg-test detection), so scope it explicitly.
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]
@@ -499,6 +502,8 @@ mod tests {
 /// without the internet.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod transport_tests {
+    // Test code; see the note on `mod tests` above.
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use std::fmt::Write as _;
     use std::io::{Read, Write};
