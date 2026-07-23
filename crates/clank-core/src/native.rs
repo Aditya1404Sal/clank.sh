@@ -1,12 +1,23 @@
 //! Native target: the shell as an ordinary executable over blocking `std::io`. All command
 //! execution and output capture live in the shared [`crate::session::Session`]; this driver is
 //! just the prompt/read/write loop.
+//!
+//! Two loops, chosen by whether stdin is a TTY:
+//! - **[`run_interactive`]** — a rich [`reedline`] line editor for humans: history + Ctrl-R search,
+//!   arrow-key editing, fish-style ghost autosuggestions, live command highlighting, and a styled
+//!   "starship-lite" prompt (`clank  <cwd>  <branch> ❯`). Output is neatly presented (a trailing
+//!   newline is guaranteed so the next prompt never glues onto command output; stderr is dimmed).
+//! - **[`run_plain`]** — the original blocking `read_line` loop, used verbatim when stdin is piped
+//!   (`echo cmd | clank`, the e2e scripts, the tests). No terminal, no ANSI, no behavior change.
 
 use crate::session::Session;
 use crate::{trim_eol, Flow, PROMPT};
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 
 /// Run the interactive read/eval/print loop until `exit` or end-of-input.
+///
+/// Dispatches to the rich [`reedline`] editor for an interactive terminal, or the plain blocking
+/// loop when stdin is not a TTY (pipes, the test/e2e drivers).
 ///
 /// # Errors
 ///
@@ -15,6 +26,16 @@ use std::io::{self, Write};
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut session = Session::new().await?;
     inject_native_providers(&mut session);
+    if io::stdin().is_terminal() {
+        run_interactive(&mut session).await
+    } else {
+        run_plain(&mut session).await
+    }
+}
+
+/// The plain blocking loop: prompt, `read_line`, eval, write. Used when stdin is not a terminal, so
+/// piped input and the test/e2e drivers behave exactly as before (no ANSI, no line editor).
+async fn run_plain(session: &mut Session) -> Result<(), Box<dyn std::error::Error>> {
     let mut line = String::new();
 
     loop {
@@ -33,7 +54,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         // driver owns the terminal, so it can block on human input between turns — the durable agent
         // cannot, and returns an honest message from `eval_line`). See `Session::repl_*`.
         if let Some(args) = crate::ai::ask::classify_repl(&line_str) {
-            run_repl(&mut session, &args).await?;
+            run_repl(session, &args).await?;
             continue;
         }
 
@@ -99,6 +120,349 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// The interactive loop: a [`reedline`] line editor with history, ghost autosuggestions, live
+/// command highlighting, and the styled starship-lite prompt. Only reached when stdin is a TTY.
+///
+/// The editor is idle (terminal in cooked mode) between `read_line` calls, so `ask repl` and
+/// `prompt-user` answer collection reuse the plain blocking reads unchanged.
+async fn run_interactive(session: &mut Session) -> Result<(), Box<dyn std::error::Error>> {
+    use reedline::Signal;
+
+    // Backstop against a pathological continuation feed (matches the plain loop).
+    const MAX_CONTINUATION_LINES: usize = 512;
+
+    let mut editor = build_editor();
+    let mut last_ok = true;
+
+    loop {
+        let prompt = StarshipPrompt::new(last_ok);
+        let buffer = match editor.read_line(&prompt) {
+            Ok(Signal::Success(buffer)) => buffer,
+            // Ctrl-C cancels the current line (like every shell) rather than killing the session.
+            Ok(Signal::CtrlC) => continue,
+            // Ctrl-D on an empty line leaves the shell.
+            Ok(Signal::CtrlD) => break,
+            // The line editor couldn't drive this terminal (e.g. no cursor-position reporting).
+            // Drop it — its `Drop` restores cooked mode — and finish on the plain loop rather than
+            // dying, so the shell still works on a barebones terminal.
+            Err(e) => {
+                eprintln!("clank: line editor unavailable ({e}); falling back to basic input.");
+                drop(editor);
+                return run_plain(session).await;
+            }
+        };
+        let mut line_str = buffer.trim_end_matches(['\n', '\r']).to_string();
+
+        // `ask repl` — reuse the plain read-driven REPL (the terminal is cooked here; reedline only
+        // holds raw mode during its own `read_line`).
+        if let Some(args) = crate::ai::ask::classify_repl(&line_str) {
+            run_repl(session, &args).await?;
+            last_ok = true;
+            continue;
+        }
+
+        // PS2 continuation for incomplete input (heredocs, open quotes/substitutions): read more
+        // physical lines via reedline with a dim `· ` continuation prompt. Ctrl-C/Ctrl-D discards
+        // the construct, not the shell.
+        let mut continuations = 0usize;
+        let mut aborted = false;
+        while session.line_is_incomplete(&line_str) && continuations < MAX_CONTINUATION_LINES {
+            match editor.read_line(&ContinuationPrompt) {
+                Ok(Signal::Success(more)) => {
+                    line_str.push('\n');
+                    line_str.push_str(more.trim_end_matches(['\n', '\r']));
+                    continuations += 1;
+                }
+                Ok(Signal::CtrlC | Signal::CtrlD) => {
+                    write_stdout(b"\n")?;
+                    aborted = true;
+                    break;
+                }
+                Err(_) => {
+                    aborted = true;
+                    break;
+                }
+            }
+        }
+        if aborted {
+            continue;
+        }
+
+        let result = session.eval_line(&line_str).await;
+        render_output(&result.stdout, &result.stderr)?;
+        last_ok = result.exit_code == 0;
+        let flow = result.flow;
+
+        // `prompt-user`: surface the valid answers, then collect the human's response with plain
+        // blocking reads (reedline is idle, terminal cooked) until the prompt resolves.
+        if let Some(prompt) = &result.pending_prompt {
+            if let Some(choices) = &prompt.choices {
+                if !choices.is_empty() {
+                    write_stdout(format!("[{}]\n", choices.join("/")).as_bytes())?;
+                }
+            }
+        }
+        if result.pending_prompt.is_some() {
+            let mut line = String::new();
+            while session.has_pending_prompt() {
+                line.clear();
+                let answer = if io::stdin().read_line(&mut line)? == 0 {
+                    session.answer_prompt(None).await // EOF → abort
+                } else {
+                    let answer_str = String::from_utf8_lossy(trim_eol(line.as_bytes())).into_owned();
+                    session.answer_prompt(Some(answer_str)).await
+                };
+                render_output(&answer.stdout, &answer.stderr)?;
+                last_ok = answer.exit_code == 0;
+            }
+        }
+
+        if let Flow::Exit = flow {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+/// Build the [`reedline`] editor: file-backed history (best-effort), a dim ghost-hint from history,
+/// and the [`CommandHighlighter`] (the command word turns green when recognized).
+fn build_editor() -> reedline::Reedline {
+    use nu_ansi_term::{Color, Style};
+    use reedline::{DefaultHinter, FileBackedHistory, Reedline};
+
+    let mut editor = Reedline::create()
+        .with_hinter(Box::new(
+            DefaultHinter::default().with_style(Style::new().fg(Color::DarkGray)),
+        ))
+        .with_highlighter(Box::new(CommandHighlighter::new()));
+
+    // Persist history across sessions when we can open the file; otherwise reedline keeps an
+    // in-memory history (the default), so a read-only HOME degrades cleanly to no persistence.
+    if let Some(hist) = history_path().and_then(|p| FileBackedHistory::with_file(2000, p).ok()) {
+        editor = editor.with_history(Box::new(hist));
+    }
+    editor
+}
+
+/// Highlights the **command word** (first token) green when it's a recognized command, leaving
+/// everything else at the default colour. Deliberately NOT reedline's `ExampleHighlighter`, which
+/// substring-matches (so `false` lights up the `ls` inside it) and reddens anything not in its list
+/// (so brush builtins like `echo` read as errors). The recognized set is clank's registry plus the
+/// brush builtins/keywords that carry no clank manifest.
+struct CommandHighlighter {
+    known: std::collections::HashSet<String>,
+}
+
+impl CommandHighlighter {
+    fn new() -> Self {
+        let mut known: std::collections::HashSet<String> = crate::registry::build()
+            .names()
+            .map(std::string::ToString::to_string)
+            .collect();
+        // Brush builtins / shell keywords with no clank manifest — recognized, not "unknown".
+        for word in [
+            "echo", "true", "false", "test", "pwd", "let", "eval", "trap", "getopts", "shift",
+            "return", "local", "declare", "readonly", "set", "shopt", "if", "then", "else", "elif",
+            "fi", "for", "while", "until", "do", "done", "case", "esac", "in", "function", "select",
+            "time", ":", ".",
+        ] {
+            known.insert(word.to_string());
+        }
+        Self { known }
+    }
+}
+
+impl reedline::Highlighter for CommandHighlighter {
+    fn highlight(&self, line: &str, _cursor: usize) -> reedline::StyledText {
+        use nu_ansi_term::{Color, Style};
+        let mut styled = reedline::StyledText::new();
+        let lead_len = line.len() - line.trim_start().len();
+        let (lead, rest) = line.split_at(lead_len);
+        let cmd_len = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let (cmd, tail) = rest.split_at(cmd_len);
+        if !lead.is_empty() {
+            styled.push((Style::new(), lead.to_string()));
+        }
+        let cmd_style = if self.known.contains(cmd) {
+            Style::new().fg(Color::Green)
+        } else {
+            Style::new()
+        };
+        styled.push((cmd_style, cmd.to_string()));
+        styled.push((Style::new(), tail.to_string()));
+        styled
+    }
+}
+
+/// `$XDG_DATA_HOME/clank/history.txt` (or `~/.local/share/clank/…`), creating the directory. `None`
+/// if neither var is set or the directory can't be created.
+fn history_path() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share")))?;
+    let dir = base.join("clank");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join("history.txt"))
+}
+
+/// Write `stdout` verbatim, then `stderr` (dimmed if it carries no ANSI of its own), and guarantee
+/// the line ends in a newline — so the next prompt never glues onto output that lacked a trailing
+/// `\n`. A dim `⏎` marks where that missing newline was inserted.
+fn render_output(stdout: &[u8], stderr: &[u8]) -> io::Result<()> {
+    use nu_ansi_term::{Color, Style};
+
+    write_stdout(stdout)?;
+    if !stderr.is_empty() {
+        if stderr.contains(&0x1b) {
+            // Already styled by the tool — pass through so we don't clobber its colors.
+            write_stdout(stderr)?;
+        } else {
+            let dimmed = Style::new()
+                .dimmed()
+                .paint(String::from_utf8_lossy(stderr))
+                .to_string();
+            write_stdout(dimmed.as_bytes())?;
+        }
+    }
+
+    let printed = !stdout.is_empty() || !stderr.is_empty();
+    let ends_with_newline = if stderr.is_empty() {
+        stdout.ends_with(b"\n")
+    } else {
+        stderr.ends_with(b"\n")
+    };
+    if printed && !ends_with_newline {
+        write_stdout(Color::DarkGray.paint("⏎").to_string().as_bytes())?;
+        write_stdout(b"\n")?;
+    }
+    Ok(())
+}
+
+/// The starship-lite prompt: `clank` (cyan) · cwd (blue, `~`-abbreviated) · git branch (dim) · a
+/// `❯` indicator that is green after a successful command and red after a failure.
+struct StarshipPrompt {
+    /// Pre-rendered, ANSI-styled left segment (`clank  <cwd>  <branch>`).
+    left: String,
+    /// Whether the previous command exited 0 (drives the indicator colour).
+    ok: bool,
+}
+
+impl StarshipPrompt {
+    fn new(ok: bool) -> Self {
+        use nu_ansi_term::Color;
+        let mut left = Color::Cyan.bold().paint("clank").to_string();
+        left.push(' ');
+        left.push_str(&Color::Blue.paint(cwd_display()).to_string());
+        if let Some(branch) = git_branch() {
+            left.push(' ');
+            left.push_str(&Color::DarkGray.paint(format!("⎇ {branch}")).to_string());
+        }
+        Self { left, ok }
+    }
+}
+
+impl reedline::Prompt for StarshipPrompt {
+    fn render_prompt_left(&self) -> std::borrow::Cow<'_, str> {
+        std::borrow::Cow::Borrowed(&self.left)
+    }
+    fn render_prompt_right(&self) -> std::borrow::Cow<'_, str> {
+        std::borrow::Cow::Borrowed("")
+    }
+    fn render_prompt_indicator(&self, _mode: reedline::PromptEditMode) -> std::borrow::Cow<'_, str> {
+        let color = if self.ok {
+            nu_ansi_term::Color::Green
+        } else {
+            nu_ansi_term::Color::Red
+        };
+        std::borrow::Cow::Owned(format!(" {} ", color.paint("❯")))
+    }
+    fn render_prompt_multiline_indicator(&self) -> std::borrow::Cow<'_, str> {
+        std::borrow::Cow::Owned(nu_ansi_term::Color::DarkGray.paint("· ").to_string())
+    }
+    fn render_prompt_history_search_indicator(
+        &self,
+        history_search: reedline::PromptHistorySearch,
+    ) -> std::borrow::Cow<'_, str> {
+        let failing = matches!(
+            history_search.status,
+            reedline::PromptHistorySearchStatus::Failing
+        );
+        let prefix = if failing { "failing " } else { "" };
+        std::borrow::Cow::Owned(format!("({prefix}reverse-search: {}) ", history_search.term))
+    }
+}
+
+/// The dim `· ` prompt shown for PS2 continuation lines (heredocs, open quotes).
+struct ContinuationPrompt;
+
+impl reedline::Prompt for ContinuationPrompt {
+    fn render_prompt_left(&self) -> std::borrow::Cow<'_, str> {
+        std::borrow::Cow::Borrowed("")
+    }
+    fn render_prompt_right(&self) -> std::borrow::Cow<'_, str> {
+        std::borrow::Cow::Borrowed("")
+    }
+    fn render_prompt_indicator(&self, _mode: reedline::PromptEditMode) -> std::borrow::Cow<'_, str> {
+        std::borrow::Cow::Owned(nu_ansi_term::Color::DarkGray.paint("· ").to_string())
+    }
+    fn render_prompt_multiline_indicator(&self) -> std::borrow::Cow<'_, str> {
+        std::borrow::Cow::Borrowed("· ")
+    }
+    fn render_prompt_history_search_indicator(
+        &self,
+        _history_search: reedline::PromptHistorySearch,
+    ) -> std::borrow::Cow<'_, str> {
+        std::borrow::Cow::Borrowed("")
+    }
+}
+
+/// The current working directory, abbreviating `$HOME` to `~`.
+fn cwd_display() -> String {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    if let Some(home) = std::env::var_os("HOME") {
+        if let Ok(rel) = cwd.strip_prefix(std::path::PathBuf::from(home)) {
+            return if rel.as_os_str().is_empty() {
+                "~".to_string()
+            } else {
+                format!("~/{}", rel.display())
+            };
+        }
+    }
+    cwd.display().to_string()
+}
+
+/// The current git branch (or short detached-HEAD sha), walking up from the cwd for a `.git` dir or
+/// worktree pointer file. `None` when not inside a repository — the prompt then omits the segment.
+fn git_branch() -> Option<String> {
+    let mut dir = std::env::current_dir().ok()?;
+    loop {
+        let dot_git = dir.join(".git");
+        if dot_git.is_dir() {
+            return head_branch(&dot_git);
+        }
+        if dot_git.is_file() {
+            // Worktree: `.git` is a file `gitdir: <path>`.
+            let content = std::fs::read_to_string(&dot_git).ok()?;
+            let gitdir = content.strip_prefix("gitdir:")?.trim();
+            return head_branch(std::path::Path::new(gitdir));
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
+/// Read `<gitdir>/HEAD`: a `ref: refs/heads/<branch>` symref yields the branch; a raw sha (detached
+/// HEAD) yields its 7-char short form.
+fn head_branch(gitdir: &std::path::Path) -> Option<String> {
+    let head = std::fs::read_to_string(gitdir.join("HEAD")).ok()?;
+    let head = head.trim();
+    head.strip_prefix("ref: refs/heads/")
+        .map(std::string::ToString::to_string)
+        .or_else(|| Some(head.chars().take(7).collect()))
 }
 
 /// Run an interactive `ask repl` session: an AI conversation with its OWN isolated transcript.
