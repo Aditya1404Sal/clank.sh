@@ -143,9 +143,9 @@ The only HTTP client that works inside a Golem/wasip2 component is `wstd::http` 
 in the oplog and replayed on recovery). Native uses `reqwest`. The seam is a small trait with two
 `cfg`-gated implementations:
 
-- **`crates/wcurl/src/lib.rs`** — `fetch` is `#[cfg(target_arch = "wasm32")]` wstd (`lib.rs:91`) vs
-  `#[cfg(not(...))]` reqwest (`lib.rs:126`). Deps split in `crates/wcurl/Cargo.toml` lines 22–30.
-- **`crates/waget/`** — same split (`crates/waget/Cargo.toml` lines 22–29).
+- **`utilities/wcurl/src/lib.rs`** — `fetch` is `#[cfg(target_arch = "wasm32")]` wstd (`lib.rs:91`) vs
+  `#[cfg(not(...))]` reqwest (`lib.rs:126`). Deps split in `utilities/wcurl/Cargo.toml` lines 22–30.
+- **`utilities/waget/`** — same split (`utilities/waget/Cargo.toml` lines 22–29).
 - **`crates/clank-agent/src/mcp_http.rs`** — `WstdMcpHttp` implements the dual-target
   `clank_core::mcp::client::McpHttp` seam using `wstd::http` (this agent crate is wasm-only, so it can
   link the Golem-host-only `wstd` client that `clank-core` cannot). It additionally collects response

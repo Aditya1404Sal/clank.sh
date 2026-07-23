@@ -892,4 +892,4 @@ sleep 30 & jobs; wait
 *Cross-references point at section headings in `README.md`. Flags and subcommands in this document
 are sourced from `crates/clank-core/src/session/mod.rs` (the `run_command` dispatch ladder) and the
 per-command `cmd.rs`/`classify` modules (`mcp/`, `grease/`, `golem/`, `ai/`, `tools/`, `builtins/`),
-plus `crates/wcurl` and `crates/waget` for HTTP.*
+plus `utilities/wcurl` and `utilities/waget` for HTTP.*
