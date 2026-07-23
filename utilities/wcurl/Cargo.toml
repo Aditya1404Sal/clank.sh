@@ -1,21 +1,24 @@
 [package]
-name = "waget"
+name = "wcurl"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# Both a library (embedded by clank-shell and any other wasm component) and a standalone CLI binary.
+[lints]
+workspace = true
+
+# Both a library (embedded by clank-core and any other wasm component) and a standalone CLI binary.
 [lib]
 path = "src/lib.rs"
 
 [[bin]]
-name = "waget"
+name = "wcurl"
 path = "src/main.rs"
 
 [dependencies]
 # `http::Method` in the parsed request; `whttp` is the shared cfg-gated transport (wstd/reqwest)
-# plus redirect following + timeouts, so waget only parses flags and formats output.
+# plus redirect following + timeouts, so wcurl only parses flags and formats output.
 http = "1"
 whttp = { path = "../whttp" }
 

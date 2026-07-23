@@ -6,6 +6,9 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[lints]
+workspace = true
+
 [lib]
 # The Golem agent component. cdylib only — this crate is a leaf component, not a library.
 crate-type = ["cdylib"]

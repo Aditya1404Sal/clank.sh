@@ -1,18 +1,20 @@
 [package]
-name = "clank-shell"
+name = "clank-core"
 version = "0.0.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
 
-[lib]
-# cdylib → the wasm component; rlib → linked by the native `clank` binary.
-crate-type = ["cdylib", "rlib"]
+[lints]
+workspace = true
 
-[[bin]]
-name = "clank"
-path = "src/main.rs"
+[lib]
+# Pure rlib (R1): the native `clank` binary lives in clank-cli, and the wasm component is
+# clank-agent — nothing consumed a cdylib artifact from this crate (verified against golem.yaml,
+# scripts, and CI), so the standalone `wasi:cli/run` REPL component artifact is retired with it.
+# The `repl-driver` feature and `mod wasm` remain for a dependent that wants to export the driver.
+crate-type = ["rlib"]
 
 # All-target deps: Brush (the shell interpreter) now runs on both native and wasm. `nix` is
 # gated under cfg(unix) inside brush-core, so the wasm32-wasip2 build still pulls zero nix.
@@ -23,8 +25,8 @@ brush-builtins = "0.2"
 brush-parser = "0.4"
 # The curl/wget HTTP commands (wasm/native HTTP seam lives in these crates). clank intercepts
 # curl/wget in Session::run_command and awaits their async `run` under the live reactor.
-wcurl = { path = "../wcurl" }
-waget = { path = "../waget" }
+wcurl = { path = "../../utilities/wcurl" }
+waget = { path = "../../utilities/waget" }
 tokio = { version = "1", features = ["rt"] }
 diffy = { version = "0.5", features = ["std"] }
 grep = "0.4"

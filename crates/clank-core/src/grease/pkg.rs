@@ -196,7 +196,7 @@ impl PromptPackage {
     /// tokens intact). A body with no frontmatter fence is a non-parameterized prompt whose `name` the
     /// caller must supply (there's no header to read it from) — so this requires the fence.
     ///
-    /// Deliberately a tiny hand-rolled subset parser (no YAML crate — clank-shell keeps its dependency
+    /// Deliberately a tiny hand-rolled subset parser (no YAML crate — clank-core keeps its dependency
     /// set pure-Rust/wasm-clean), covering exactly the scalar keys and the `arguments` list shape
     /// [`PromptPackage`]/[`PackageArg`] need. Unknown frontmatter keys are ignored (forgiving, like the
     /// `#[serde(default)]` JSON path).

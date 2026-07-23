@@ -3,7 +3,7 @@
 # Here-doc bodies are staged through the same channel as pipe input, so they ride the same
 # fix: the wasm agent fd-renumbers the staged stream onto uu stdin, and natively `run_uu`
 # stages the body into a private temp fd and `dup2`s it over fd 0 (`stage_piped_stdin`,
-# crates/clank-shell/src/tools/coreutils.rs). grep/sed/awk consumers are target-agnostic
+# crates/clank-core/src/tools/coreutils.rs). grep/sed/awk consumers are target-agnostic
 # either way — see heredocs.clank.
 
 run cat <<EOF

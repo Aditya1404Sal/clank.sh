@@ -23,7 +23,7 @@ providers = ["dep:wstd", "dep:async-trait"]
 # The shell core. default-features=false drops `repl-driver`, so this links as a plain rlib WITHOUT
 # the `wasi:cli/run` export that would clash with an embedding agent's golem:agent world (the same
 # pattern clank-agent has always used).
-clank-shell = { path = "../clank-shell", default-features = false }
+clank-core = { path = "../clank-core", default-features = false }
 # Default features only: `macro` is the load-bearing one (it makes `derive(Schema)` on the wire
 # types resolve through golem-rust's re-export). Deliberately NOT `export_golem_agentic` — that
 # feature compiles the SDK's own `Component` export into the build; the EMBEDDING agent crate is
@@ -38,5 +38,5 @@ async-trait = { version = "0.1", optional = true }
 
 [dev-dependencies]
 # Native test harness: a current-thread runtime to drive the async Session, mirroring how the
-# shell runs natively (clank-shell's own `on_rt` pattern).
+# shell runs natively (clank-core's own `on_rt` pattern).
 tokio = { version = "1", features = ["rt"] }

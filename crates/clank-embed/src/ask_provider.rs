@@ -10,18 +10,18 @@
 //! instead of a wrapper crate.
 //!
 //! The request/response wire mapping (neutral `AskTurn`/`AskTool`/… ↔ Anthropic JSON) is shared with
-//! the native reqwest provider via [`clank_shell::ai::anthropic_wire`], so the two can't drift. This
+//! the native reqwest provider via [`clank_core::ai::anthropic_wire`], so the two can't drift. This
 //! module is just the `wstd` transport + key resolution around it.
 //!
 //! **API key**: read from `ANTHROPIC_API_KEY` in the agent environment (supplied through golem.yaml at
 //! deploy time). Absent/empty ⇒ an honest "not configured" [`AskResponse`], so `ask` degrades cleanly
 //! rather than sending an unauthenticated request.
 
-use clank_shell::ai::anthropic_wire::{
+use clank_core::ai::anthropic_wire::{
     build_request, parse_error, parse_response_body, serialize_request, ANTHROPIC_VERSION,
     MESSAGES_URL,
 };
-use clank_shell::ai::ask::{AskProvider, AskResponse, AskTool, AskTurn};
+use clank_core::ai::ask::{AskProvider, AskResponse, AskTool, AskTurn};
 
 /// Cap on a single response body (bounds a runaway/held-open server). An `ask` reply is at most a few
 /// hundred KB of JSON; 8 MiB is generous headroom.

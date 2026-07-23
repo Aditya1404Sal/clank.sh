@@ -1,6 +1,6 @@
 //! The durable Golem-agent invoker backing installed agent commands on the Golem agent.
 //!
-//! `clank-shell` defines the [`AgentInvoker`](clank_shell::golem::agent::AgentInvoker) seam; this module
+//! `clank-core` defines the [`AgentInvoker`](clank_core::golem::agent::AgentInvoker) seam; this module
 //! (in `clank-embed`, for any Golem agent embedding the shell) implements it with `golem-rust`'s
 //! generic `WasmRpc` host resource, which
 //! invokes an arbitrary agent type by name in the configured Golem cluster. Mirrors the
@@ -16,7 +16,7 @@
 //! The invocation is **await mode**: `invoke-and-await` blocks (under the Golem reactor) until the
 //! remote agent returns, and the result tree is rendered to text.
 
-use clank_shell::golem::agent::{AgentInvocation, AgentInvoker, InvokeHandle, InvokeMode};
+use clank_core::golem::agent::{AgentInvocation, AgentInvoker, InvokeHandle, InvokeMode};
 use golem_rust::bindings::golem::agent::host::WasmRpc;
 use golem_rust::schema::wit::wire::{SchemaValueTree, Uuid};
 use golem_rust::{SchemaValue, decode_schema_value, encode_schema_value};

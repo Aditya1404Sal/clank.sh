@@ -518,30 +518,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "clank-cli"
+version = "0.0.0"
+dependencies = [
+ "clank-core",
+ "tokio",
+]
+
+[[package]]
 name = "clank-conformance"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "clank-shell",
+ "clank-core",
  "libtest-mimic",
  "serde_json",
  "tokio",
 ]
 
 [[package]]
-name = "clank-embed"
-version = "0.0.0"
-dependencies = [
- "async-trait",
- "clank-shell",
- "golem-rust",
- "serde",
- "tokio",
- "wstd",
-]
-
-[[package]]
-name = "clank-shell"
+name = "clank-core"
 version = "0.0.0"
 dependencies = [
  "async-trait",
@@ -592,6 +588,18 @@ dependencies = [
  "wasip3",
  "wcurl",
  "wit-bindgen 0.57.1",
+]
+
+[[package]]
+name = "clank-embed"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "clank-core",
+ "golem-rust",
+ "serde",
+ "tokio",
+ "wstd",
 ]
 
 [[package]]
@@ -1589,7 +1597,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64",
- "clank-shell",
+ "clank-core",
  "ed25519-dalek",
  "inquire",
  "serde",

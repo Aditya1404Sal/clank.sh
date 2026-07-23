@@ -10,7 +10,7 @@
 //!
 //! This crate provides everything behind that surface so an agent adopts it with ~12 lines of glue:
 //! the [`EvalResult`]/[`PendingPromptView`] wire types, and [`EmbeddedShell`] — a lazily-initialized
-//! shell [`Session`](clank_shell::session::Session) scoped to *your agent's own instance* (its own
+//! shell [`Session`](clank_core::session::Session) scoped to *your agent's own instance* (its own
 //! durable filesystem, transcript, and process table; one agent instance = one Golem worker = one
 //! isolated VFS, so the shell explores exactly your agent's sandbox and nothing else's).
 //!
@@ -67,5 +67,5 @@ pub use shell::EmbeddedShell;
 pub use wire::{EvalResult, PendingPromptView};
 
 // Re-exported so an embedder can name `Session` in a `with_setup` closure (or implement the
-// provider seam traits) without adding its own clank-shell dependency line.
-pub use clank_shell;
+// provider seam traits) without adding its own clank-core dependency line.
+pub use clank_core;

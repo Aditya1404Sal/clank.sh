@@ -24,7 +24,7 @@ make it more than a shell wrapper:
   other Golem agents as first-class commands; `mcp` speaks the Model Context Protocol.
 
 **The controlling design decision — read this and half the code stops being surprising.** There is
-*one* shell core, [`Session`](../crates/clank-shell/src/session/mod.rs), and it is **target-agnostic**.
+*one* shell core, [`Session`](../crates/clank-core/src/session/mod.rs), and it is **target-agnostic**.
 Everything that differs between native and the durable agent is either a `#[cfg]` branch or an
 **injected provider** — a boxed trait object the two entry points install differently. Native injects
 `reqwest`-backed providers; the agent injects durable `golem-rust`-backed ones. When a provider is
@@ -43,7 +43,7 @@ multi-user: `sudo` means "the human authorized this," not Unix uid 0.
 
 | Crate | What it is | Target |
 |---|---|---|
-| **`clank-shell`** | The whole shell core (~28k LOC): `Session`, the AI/MCP/grease/golem subsystems, coreutils, authz, logging. `cdylib`+`rlib`+bin. | both |
+| **`clank-core`** | The whole shell core (~28k LOC): `Session`, the AI/MCP/grease/golem subsystems, coreutils, authz, logging. `cdylib`+`rlib`+bin. | both |
 | **`clank-agent`** | clank's own Golem agent type — ~60 lines that wire the shell surface to the full provider set. | wasm |
 | **`clank-embed`** | The shell surface *as a reusable library*: `EmbeddedShell` + the wasm HTTP providers. Any Golem agent can embed it. | wasm |
 | **`greeter-agent`** | A trivial second agent that proves the shell surface is a contract, not a clank-only feature. | wasm |
@@ -53,7 +53,7 @@ multi-user: `sudo` means "the human authorized this," not Unix uid 0.
 | **`grease-tool`** | A dev tool that authors + serves a signed grease registry. | native |
 | **`golem-stuff/golem`** | A vendored clone of the Golem SDK, path-depended (not part of clank's own workspace). | — |
 
-Inside `clank-shell/src`, the code is grouped by concern: `session/` (the core, split across several
+Inside `clank-core/src`, the code is grouped by concern: `session/` (the core, split across several
 files), `ai/` (ask + LLM), `mcp/`, `grease/`, `golem/` (cluster + agent RPC), `tools/` (coreutils
 wrappers), `builtins/` (clank's own builtins like `kill`, `secretenv`), `runtime/` (proc table,
 secret slot, procfs), plus top-level `authz.rs`, `manifest.rs`, `registry.rs`, `logging.rs`,
@@ -91,9 +91,9 @@ see the `Arc<Mutex>`, think "a Brush builtin needs to see this," not "concurrenc
 
 One continuous walk, in the order things actually happen. This is the native path; the agent path is
 identical from step 2 on (§6 covers how it gets here). The entry is
-[`Session::eval_line`](../crates/clank-shell/src/session/mod.rs) → `eval_line_inner`.
+[`Session::eval_line`](../crates/clank-core/src/session/mod.rs) → `eval_line_inner`.
 
-**Stage 0 — the driver reads a line.** Native: `main.rs` → [`native::run`](../crates/clank-shell/src/native.rs)
+**Stage 0 — the driver reads a line.** Native: `main.rs` → [`native::run`](../crates/clank-core/src/native.rs)
 is a classic read/eval/print loop over blocking `std::io`. It handles `ask repl` and PS2 continuation
 (typing a multi-line heredoc) itself, because it owns the terminal, then calls `eval_line`.
 
@@ -160,7 +160,7 @@ flowchart TB
     S --> B["Brush engine + clank interception"]
 ```
 
-**How each world injects providers.** Native: [`native::inject_native_providers`](../crates/clank-shell/src/native.rs)
+**How each world injects providers.** Native: [`native::inject_native_providers`](../crates/clank-core/src/native.rs)
 installs `reqwest`/`rustls` shims for the LLM, MCP HTTP, and (if a cluster is configured) Golem. The
 agent: `ClankAgent::new` builds an `EmbeddedShell::with_default_golem_providers()`, whose `Session`
 gets durable `wstd`/`golem-rust` implementations. Same four `Option<Box<dyn …>>` fields on `Session`;
@@ -213,8 +213,8 @@ exists to prove `EmbeddedShell` is a reusable contract, not clank-private.
 
 Brief tours of the interception targets from Stage 6. Follow the anchors when you need depth.
 
-**`ask` — the agentic LLM loop** ([`session/ask.rs`](../crates/clank-shell/src/session/ask.rs),
-[`ai/ask.rs`](../crates/clank-shell/src/ai/ask.rs)). `ask "question"` assembles the transcript as
+**`ask` — the agentic LLM loop** ([`session/ask.rs`](../crates/clank-core/src/session/ask.rs),
+[`ai/ask.rs`](../crates/clank-core/src/ai/ask.rs)). `ask "question"` assembles the transcript as
 context and drives model turns through the injected `AskProvider`. The model can call two tools:
 `shell` (run a command) and `prompt_user` (ask the human). Each `shell` tool call is **re-gated**
 through the same authz machinery *and* a scope gate (only subprocess-safe commands may be tool-called;
@@ -223,8 +223,8 @@ un-gated tool call would mutate the real shell. When the model calls `prompt_use
 on a `Pending` and returns; the human answers via `answer_prompt`, which resumes the loop mid-flight.
 This durable mid-loop pause is only possible because of the non-blocking prompt model.
 
-**`grease` — the package manager** ([`session/grease.rs`](../crates/clank-shell/src/session/grease.rs),
-[`grease/pkg.rs`](../crates/clank-shell/src/grease/pkg.rs)). `grease install <name>` fetches a package
+**`grease` — the package manager** ([`session/grease.rs`](../crates/clank-core/src/session/grease.rs),
+[`grease/pkg.rs`](../crates/clank-core/src/grease/pkg.rs)). `grease install <name>` fetches a package
 from a registry and installs it as one of five kinds: a **prompt** (becomes an `ask` command), a
 **script** (shell source run as a synthetic process), a **skill** (context + `$PATH` scripts), an
 **mcp** server, or an **agent** (a Golem agent invoked over RPC). Integrity is layered and
@@ -233,7 +233,7 @@ packages must carry a valid ed25519 signature; and an RFC-6962 transparency-log 
 verified when present. `pkg.rs` hand-rolls the sha256/ed25519/Merkle verification on `sha2` +
 `ed25519-dalek`, with real tamper tests.
 
-**coreutils — the fd-swap** ([`tools/coreutils.rs`](../crates/clank-shell/src/tools/coreutils.rs)).
+**coreutils — the fd-swap** ([`tools/coreutils.rs`](../crates/clank-core/src/tools/coreutils.rs)).
 `ls`, `cat`, `grep`, `sed`, etc. are the real [uutils](https://github.com/uutils/coreutils) crates,
 not reimplementations. Because uutils writes to the process's standard fds, clank temporarily
 **rebinds fds 0/1/2** around each call — via `libc::dup2` on native, and `__wasilibc_fd_renumber` on
@@ -243,8 +243,8 @@ wasm — so the tool's output lands in Brush's capture files instead of the real
 > swapped to the redirect/capture targets, the tool runs, and the originals are restored on every
 > path including panics. Each block carries a `// SAFETY:` note.
 
-**authz + manifests** ([`authz.rs`](../crates/clank-shell/src/authz.rs),
-[`manifest.rs`](../crates/clank-shell/src/manifest.rs)). A `Manifest` gives each command an
+**authz + manifests** ([`authz.rs`](../crates/clank-core/src/authz.rs),
+[`manifest.rs`](../crates/clank-core/src/manifest.rs)). A `Manifest` gives each command an
 `authorization_policy` (`allow`/`confirm`/`sudo-only`, enforced at Stage 5) and an `execution_scope`
 (whether it's safe to run as an `ask` tool). `sudo` is human intent, not credentials: a leading
 `sudo` marks the invocation elevated and is stripped before the command runs.

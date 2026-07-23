@@ -6,7 +6,7 @@ clank.sh is an AI-native shell targeting `wasm32-wasip2` and native Rust. See `R
 
 ## Build & Test
 
-The shell (`crates/clank-shell`) runs on two targets from one codebase, split by
+The shell (`crates/clank-core`) runs on two targets from one codebase, split by
 `#[cfg(target_arch = "wasm32")]`. Command evaluation (`eval`) is a pure, shared core; only
 the I/O differs. See `dev-docs/designs/proposed/target-abstraction-native-and-wasm.md` and
 `dev-docs/designs/proposed/shell-entrypoint-and-io-realized.md`.
@@ -36,7 +36,7 @@ Prerequisites: `rustup target add wasm32-wasip2`; **Wasmtime ≥ 46** (final `wa
 
 ```sh
 cargo build --release --target wasm32-wasip2 --lib
-# → target/wasm32-wasip2/release/clank_shell.wasm
+# → target/wasm32-wasip2/release/clank_core.wasm
 ```
 
 Use `--lib`: the crate also has a `clank` bin whose `main` is empty on wasm. Run on
@@ -44,9 +44,9 @@ wasmtime (`-Sp3` = WASI 0.3 imports, `-W component-model-async=y` = component-mo
 
 ```sh
 wasmtime run -Sp3 -W component-model-async=y \
-  target/wasm32-wasip2/release/clank_shell.wasm
+  target/wasm32-wasip2/release/clank_core.wasm
 printf 'echo hello\nhelp\nexit\n' | wasmtime run -Sp3 -W component-model-async=y \
-  target/wasm32-wasip2/release/clank_shell.wasm
+  target/wasm32-wasip2/release/clank_core.wasm
 ```
 
 ## Code Conventions

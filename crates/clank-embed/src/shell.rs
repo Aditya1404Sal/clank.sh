@@ -1,7 +1,7 @@
 //! [`EmbeddedShell`] — a lazily-built shell [`Session`] plus the [`LineResult`]→[`EvalResult`]
 //! mapping, i.e. everything between an agent's three shell-surface methods and the shell core.
 
-use clank_shell::session::{LineResult, Session};
+use clank_core::session::{LineResult, Session};
 
 use crate::wire::{EvalResult, PendingPromptView};
 
@@ -145,7 +145,7 @@ fn eval_result(result: LineResult) -> EvalResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clank_shell::Flow;
+    use clank_core::Flow;
 
     /// Drive a future on a fresh current-thread runtime (mirrors how `Session` runs natively).
     fn on_rt<F: std::future::Future>(f: F) -> F::Output {
@@ -163,7 +163,7 @@ mod tests {
             stderr: b"err\n".to_vec(),
             exit_code: 3,
             flow: Flow::Continue,
-            pending_prompt: Some(clank_shell::builtins::promptuser::PendingPrompt {
+            pending_prompt: Some(clank_core::builtins::promptuser::PendingPrompt {
                 question: "Which?".to_string(),
                 choices: Some(vec!["a".to_string(), "b".to_string()]),
                 secret: false,

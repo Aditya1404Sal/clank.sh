@@ -1,19 +1,35 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/clank-shell",
+    "crates/clank-core",
+    "crates/clank-cli",
     "crates/clank-embed",
     "crates/clank-agent",
     "crates/clank-conformance",
-    "crates/greeter-agent",
-    "crates/whttp",
-    "crates/wcurl",
-    "crates/waget",
+    "utilities/whttp",
+    "utilities/wcurl",
+    "utilities/waget",
     "crates/grease-tool",
+    "fixtures/greeter-agent",
 ]
 # main-rc-1: exclude the vendored golem clone so its crates (golem-schema, etc.) resolve their
 # `{ workspace = true }` deps against THEIR OWN workspace (golem-stuff/golem/), not clank's root.
 exclude = ["golem-stuff"]
+# default-members excludes the two wasm-only component crates, so a bare native `cargo build`
+# is green: greeter-agent is an e2e fixture (the second implementer of the embed surface), and
+# clank-agent's cdylib links only for wasm32-wasip2 (its golem/wasi host imports are undefined
+# natively — the link has never succeeded on native). `--workspace`, explicit `-p`, and the
+# golem deploy path still build both for wasm.
+default-members = [
+    "crates/clank-core",
+    "crates/clank-cli",
+    "crates/clank-embed",
+    "crates/clank-conformance",
+    "utilities/whttp",
+    "utilities/wcurl",
+    "utilities/waget",
+    "crates/grease-tool",
+]
 
 [workspace.package]
 edition = "2021"
@@ -24,6 +40,20 @@ repository = "https://github.com/clank-sh/clank.sh"
 wasip3 = "0.7"
 wit-bindgen = { version = "0.57", default-features = false, features = ["async"] }
 futures = "0.3"
+
+# Workspace-wide lints (audit C1, full set). Every member opts in via `[lints] workspace = true`.
+# Warn-level only: these surface debt on every build without breaking it; burn down over time.
+[workspace.lints.rust]
+unsafe_code = "warn"     # not "forbid": clank has ~7 real SAFETY-documented unsafe blocks
+unreachable_pub = "warn" # surfaces the pub-vs-pub(crate) gap (audit C3); tighten after R1 settles
+missing_docs = "warn"    # clank-core is a real library (rlib consumed by agent/conformance)
+
+[workspace.lints.clippy]
+# Groups sit at lower priority so the individual lints below always win (cargo's required form).
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn" # the highest-value lint for THIS codebase — ~470 non-test unwrap/expect sites
+expect_used = "warn"
 
 # uucore's upstream 0.9.0 fails to build on wasm32-wasip2 (uses the unstable `wasip2` std
 # feature). Our fork adds a stable encoded-bytes shim. This redirects every transitive uucore

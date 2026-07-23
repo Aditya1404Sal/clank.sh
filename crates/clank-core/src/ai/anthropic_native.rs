@@ -1,7 +1,7 @@
 //! The native (reqwest) Anthropic `ask` provider — the off-Golem mirror of `clank-agent`'s durable
 //! `DurableAnthropicProvider`.
 //!
-//! `clank-shell` owns the target-agnostic [`AskProvider`](crate::ai::ask::AskProvider) seam and the
+//! `clank-core` owns the target-agnostic [`AskProvider`](crate::ai::ask::AskProvider) seam and the
 //! neutral `AskTurn`/`AskTool`/`AskToolCall`/`AskToolResult`/`AskResponse` types. The request/response
 //! wire mapping onto Anthropic's `POST /v1/messages` lives in [`anthropic_wire`](super::anthropic_wire)
 //! (shared with the durable agent provider); this module is the thin `reqwest` transport around it, so

@@ -2,7 +2,7 @@
 #
 # Each target reaches this differently: the wasm agent fd-renumbers the Wall-C staged stream
 # onto uu stdin, while natively `run_uu` stages the pipe into a private temp fd and `dup2`s it
-# over fd 0 (`stage_piped_stdin`, crates/clank-shell/src/tools/coreutils.rs). Natively fd 0 is
+# over fd 0 (`stage_piped_stdin`, crates/clank-core/src/tools/coreutils.rs). Natively fd 0 is
 # swapped ONLY for a real pipe/redirect — never for the REPL's terminal — and the upstream bytes
 # are drained before `FD_SWAP_LOCK` is taken, so concurrent stages can't deadlock.
 

@@ -6,6 +6,9 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[lints]
+workspace = true
+
 [lib]
 # A minimal second Golem agent, deployed alongside clank:agent purely to prove grease-installed
 # agent invocation (wRPC through WasmRpcInvoker) round-trips end-to-end. cdylib = leaf component.
@@ -22,4 +25,4 @@ golem-rust = { path = "/Users/adityasalunkhe/Desktop/clank.sh/golem-stuff/golem/
 # The embedded shell surface (eval/answer_prompt/abort_prompt + EvalResult), making this the second
 # implementer of the contract `golem agent shell` drives. Deliberately WITHOUT the `providers`
 # feature: the log-sink-only tier proves the minimal correct embed (no wstd, no env vars).
-clank-embed = { path = "../clank-embed" }
+clank-embed = { path = "../../crates/clank-embed" }

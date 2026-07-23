@@ -1,6 +1,6 @@
 //! Golem interaction: remote agent invocation ([`agent`]) and the `golem` cluster command ([`cluster`]).
 //!
-//! Both are dependency-injection seams — `clank-shell` defines the traits here. The durable Golem-host
+//! Both are dependency-injection seams — `clank-core` defines the traits here. The durable Golem-host
 //! bindings are implemented in the `clank-agent` crate (wasm) and injected into the `Session`; the
 //! native+cluster REST implementations live in [`rest_native`], gated on an external cluster config
 //! ([`config_native`]).

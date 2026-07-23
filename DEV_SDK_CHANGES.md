@@ -200,9 +200,9 @@ dashboards — with an empty read rather than a parse error.
 
 | File | Change |
 |---|---|
-| `crates/clank-shell/src/ai/anthropic_wire.rs` | **NEW**, 311 lines — the target-agnostic Anthropic `POST /v1/messages` wire format |
-| `crates/clank-shell/src/ai/anthropic_native.rs` | 455 → 206 lines — now a thin `reqwest` transport over the shared wire |
-| `crates/clank-shell/src/ai/mod.rs` | `pub mod anthropic_wire;` — **deliberately un-`cfg`-gated** |
+| `crates/clank-core/src/ai/anthropic_wire.rs` | **NEW**, 311 lines — the target-agnostic Anthropic `POST /v1/messages` wire format |
+| `crates/clank-core/src/ai/anthropic_native.rs` | 455 → 206 lines — now a thin `reqwest` transport over the shared wire |
+| `crates/clank-core/src/ai/mod.rs` | `pub mod anthropic_wire;` — **deliberately un-`cfg`-gated** |
 | `crates/clank-agent/Cargo.toml:27-32` | `golem-ai-llm` / `golem-ai-llm-anthropic` commented out |
 
 **WHY:** `^0.5.1` resolves to `golem-ai-llm 0.5.2`, which hard-pins `golem-rust = "=2.1.0"`. That is an
@@ -244,8 +244,8 @@ buffered (`:94`). It bounds the *reported* size, not the allocation — a sanity
 
 ## 5. Bucket 4 — incidental: a real bugfix that rode this branch
 
-**WHAT:** `4bd6fa2` — `crates/clank-shell/src/session/mod.rs:479-494` (+ a regression test at
-`crates/clank-shell/src/session/tests.rs:3336-3363`).
+**WHAT:** `4bd6fa2` — `crates/clank-core/src/session/mod.rs:479-494` (+ a regression test at
+`crates/clank-core/src/session/tests.rs:3336-3363`).
 
 **This has nothing to do with the SDK** and is a **merge-back candidate for `main`.**
 
@@ -291,7 +291,7 @@ it is invisible unless you read `Cargo.lock`. Anyone auditing clank's supply cha
 alone will miss it.
 
 Note this is *not* the `wit-bindgen 0.57` in clank's `[workspace.dependencies]` — that one is only used
-by `clank-shell`'s `repl-driver` feature, which the agent build drops. They coexist without conflict
+by `clank-core`'s `repl-driver` feature, which the agent build drops. They coexist without conflict
 (a wall the spike expected to hit and didn't).
 
 **ACTIVE:** Yes, while this branch is checked out. **This section supersedes WASM_CHANGES.md's
@@ -379,7 +379,7 @@ the clone; the crate is shaped for publication when the SDK releases.
 - **`agent_invoker.rs` is DONE** (§3) — the branch has **no stubs left**. What remains is not clank's to
   fix: the spike still path-deps an unreleased `golem-rust 0.0.0`, so it cannot merge until the dev SDK
   ships and `golem-ai-llm` stops pinning `=2.1.0` (§4). That is a release-timing wall, not a code wall.
-- **`crates/clank-shell/src/session/mod.rs`'s fix (`4bd6fa2`)** should be **cherry-picked to `main`** —
+- **`crates/clank-core/src/session/mod.rs`'s fix (`4bd6fa2`)** should be **cherry-picked to `main`** —
   it is SDK-independent (§5).
 - **`scripts/golem-e2e.sh` still calls a bare `golem`** (it is byte-identical to `main`'s). On this
   branch that resolves to whatever is on `PATH` — a release **1.5.1** CLI cannot parse this branch's
