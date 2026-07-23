@@ -10,12 +10,11 @@ publish = false
 workspace = true
 
 [lib]
-# cdylib → the wasm component; rlib → linked by the native `clank` binary.
-crate-type = ["cdylib", "rlib"]
-
-[[bin]]
-name = "clank"
-path = "src/main.rs"
+# Pure rlib (R1): the native `clank` binary lives in clank-cli, and the wasm component is
+# clank-agent — nothing consumed a cdylib artifact from this crate (verified against golem.yaml,
+# scripts, and CI), so the standalone `wasi:cli/run` REPL component artifact is retired with it.
+# The `repl-driver` feature and `mod wasm` remain for a dependent that wants to export the driver.
+crate-type = ["rlib"]
 
 # All-target deps: Brush (the shell interpreter) now runs on both native and wasm. `nix` is
 # gated under cfg(unix) inside brush-core, so the wasm32-wasip2 build still pulls zero nix.

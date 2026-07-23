@@ -513,6 +513,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "clank-cli"
+version = "0.0.0"
+dependencies = [
+ "clank-core",
+ "tokio",
+]
+
+[[package]]
 name = "clank-conformance"
 version = "0.0.0"
 dependencies = [
