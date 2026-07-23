@@ -328,6 +328,12 @@ fn render_output(stdout: &[u8], stderr: &[u8]) -> io::Result<()> {
 
     write_stdout(stdout)?;
     if !stderr.is_empty() {
+        // Keep stderr on its own line: when stdout didn't end in a newline, separate the two so a
+        // model answer (ask's stdout) never glues onto its dimmed `[tool]` trace (ask's stderr) —
+        // matching the golem shell's and clank-repl.sh's renderers.
+        if !stdout.is_empty() && !stdout.ends_with(b"\n") {
+            write_stdout(b"\n")?;
+        }
         if stderr.contains(&0x1b) {
             // Already styled by the tool — pass through so we don't clobber its colors.
             write_stdout(stderr)?;
