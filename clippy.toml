@@ -1,0 +1,7 @@
+# Workspace clippy configuration (companion to [workspace.lints] in Cargo.toml).
+
+# Tests assert invariants — `unwrap`/`expect` on known-good fixtures IS the correct test style.
+# The unwrap_used/expect_used lints stay hard-on for production code (audit C1: the highest-value
+# lints for this codebase); these knobs scope them out of #[cfg(test)] code only.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
