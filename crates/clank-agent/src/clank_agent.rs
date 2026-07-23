@@ -1,4 +1,4 @@
-use clank_shell::session::{LineResult, Session};
+use clank_core::session::{LineResult, Session};
 use golem_rust::{Schema, agent_definition, agent_implementation};
 use serde::{Deserialize, Serialize};
 

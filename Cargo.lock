@@ -504,7 +504,7 @@ name = "clank-agent"
 version = "0.0.0"
 dependencies = [
  "async-trait",
- "clank-shell",
+ "clank-core",
  "golem-ai-llm",
  "golem-ai-llm-anthropic",
  "golem-rust",
@@ -517,14 +517,14 @@ name = "clank-conformance"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "clank-shell",
+ "clank-core",
  "libtest-mimic",
  "serde_json",
  "tokio",
 ]
 
 [[package]]
-name = "clank-shell"
+name = "clank-core"
 version = "0.0.0"
 dependencies = [
  "async-trait",
@@ -1592,7 +1592,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64",
- "clank-shell",
+ "clank-core",
  "ed25519-dalek",
  "inquire",
  "serde",

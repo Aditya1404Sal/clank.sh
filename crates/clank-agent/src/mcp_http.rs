@@ -1,6 +1,6 @@
 //! The durable `wstd` HTTP transport backing MCP on the Golem agent.
 //!
-//! `clank-shell` defines the [`McpHttp`](clank_shell::mcp::client::McpHttp) seam but is dual-target and
+//! `clank-core` defines the [`McpHttp`](clank_core::mcp::client::McpHttp) seam but is dual-target and
 //! can't link the Golem-host-only `wstd` client. This module (wasm-only agent crate) implements it with
 //! `wstd::http`, mirroring `wcurl`'s wasm `fetch` and additionally collecting response headers (MCP
 //! needs the `Mcp-Session-Id`). The Golem runtime records the HTTP call in the oplog and replays it on
@@ -10,7 +10,7 @@
 //! issues one request/response per call (no subscriptions), so the server closes the stream after
 //! answering. A body cap bounds a misbehaving server.
 
-use clank_shell::mcp::client::{HttpResponse, McpHttp};
+use clank_core::mcp::client::{HttpResponse, McpHttp};
 
 /// Cap on a single response body (bounds a runaway/held-open server).
 const MAX_BODY: usize = 4 * 1024 * 1024;

@@ -1,6 +1,6 @@
 //! The replay-safe `/var/log` sink for the Golem agent.
 //!
-//! `clank-shell` defines the [`LogSink`](clank_shell::logging::LogSink) seam and a default sink that
+//! `clank-core` defines the [`LogSink`](clank_core::logging::LogSink) seam and a default sink that
 //! **appends** directly to the log file. Appends are correct on native but NOT on the Golem agent: the
 //! worker filesystem is ephemeral local disk rebuilt from the Initial File System, and Golem replays the
 //! durable oplog by *re-running the guest code* — a raw `std::fs` append is a local side effect Golem
@@ -30,7 +30,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use clank_shell::logging::{bound_tail, log_dir, LogFile, LogSink};
+use clank_core::logging::{bound_tail, log_dir, LogFile, LogSink};
 
 /// Per-log in-memory buffer cap. The whole-file-rewrite approach costs one full write per line, so an
 /// unbounded buffer would grow without limit and make each write O(total-log-size). Keeping only a

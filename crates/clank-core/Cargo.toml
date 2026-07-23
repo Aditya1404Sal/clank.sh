@@ -1,5 +1,5 @@
 [package]
-name = "clank-shell"
+name = "clank-core"
 version = "0.0.0"
 edition.workspace = true
 license.workspace = true

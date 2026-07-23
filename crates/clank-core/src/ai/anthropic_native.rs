@@ -1,7 +1,7 @@
 //! The native (reqwest) Anthropic `ask` provider — the off-Golem mirror of `clank-agent`'s durable
 //! `DurableAnthropicProvider`.
 //!
-//! `clank-shell` owns the target-agnostic [`AskProvider`](crate::ai::ask::AskProvider) seam and the
+//! `clank-core` owns the target-agnostic [`AskProvider`](crate::ai::ask::AskProvider) seam and the
 //! neutral `AskTurn`/`AskTool`/`AskToolCall`/`AskToolResult`/`AskResponse` types; the durable impl
 //! maps those onto `golem-ai-llm` (Golem-host-only). This module maps the SAME neutral types directly
 //! onto Anthropic's `POST /v1/messages` JSON wire format via `reqwest` + `serde_json`, so `ask` works

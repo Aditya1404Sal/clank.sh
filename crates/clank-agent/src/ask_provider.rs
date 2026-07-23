@@ -1,6 +1,6 @@
 //! The durable Anthropic provider backing `ask` on the Golem agent.
 //!
-//! `clank-shell` defines the [`AskProvider`](clank_shell::ai::ask::AskProvider) seam but is dual-target
+//! `clank-core` defines the [`AskProvider`](clank_core::ai::ask::AskProvider) seam but is dual-target
 //! and can't depend on the Golem-host-only LLM crates. This module (in the wasm-only agent crate)
 //! implements that seam with `golem-ai-llm`'s `DurableAnthropic`: the LLM response is recorded in the
 //! Golem oplog and replayed on recovery (no re-bill). The API key is read from `ANTHROPIC_API_KEY` via
@@ -10,9 +10,9 @@
 //! conversation (system + history + tool definitions) and returns the model's response. The `Session`
 //! owns the multi-turn agentic loop — it maps the neutral `AskTurn`/`AskTool`/`AskToolCall`/
 //! `AskToolResult` types onto `golem-ai-llm`'s `Event`/`ToolDefinition`/`ToolCall`/`ToolResult` at this
-//! seam, keeping the golem crates out of `clank-shell`.
+//! seam, keeping the golem crates out of `clank-core`.
 
-use clank_shell::ai::ask::{
+use clank_core::ai::ask::{
     AskProvider, AskResponse, AskTool, AskToolCall, AskTurn,
 };
 use golem_ai_llm::model::{

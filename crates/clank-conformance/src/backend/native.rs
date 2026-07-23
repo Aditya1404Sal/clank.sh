@@ -10,7 +10,7 @@
 
 use super::{Outcome, PendingView, ShellBackend};
 use anyhow::Context;
-use clank_shell::session::Session;
+use clank_core::session::Session;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -63,7 +63,7 @@ impl NativeBackend {
         Ok(Self { session, rt, tmp, tmp_str, env_snapshot, _guard: guard })
     }
 
-    fn to_outcome(result: clank_shell::session::LineResult) -> Outcome {
+    fn to_outcome(result: clank_core::session::LineResult) -> Outcome {
         Outcome {
             stdout: String::from_utf8_lossy(&result.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&result.stderr).into_owned(),

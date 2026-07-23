@@ -1,4 +1,4 @@
-//! The Golem-agent invocation seam: `clank-shell` defines the [`AgentInvoker`] trait; the durable
+//! The Golem-agent invocation seam: `clank-core` defines the [`AgentInvoker`] trait; the durable
 //! Golem binding (`golem-rust`'s generic `WasmRpc`) is implemented in the `clank-agent` crate and
 //! injected via `Session::set_agent_invoker`. Mirrors the `AskProvider`→`DurableAnthropicProvider` and
 //! `McpHttp`→`WstdMcpHttp` seams.

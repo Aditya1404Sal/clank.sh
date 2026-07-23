@@ -1,12 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/clank-shell", "crates/clank-agent", "crates/clank-conformance", "crates/whttp", "crates/wcurl", "crates/waget", "crates/grease-tool", "fixtures/greeter-agent"]
+members = ["crates/clank-core", "crates/clank-agent", "crates/clank-conformance", "crates/whttp", "crates/wcurl", "crates/waget", "crates/grease-tool", "fixtures/greeter-agent"]
 # default-members excludes the two wasm-only component crates, so a bare native `cargo build`
 # is green: greeter-agent is an e2e fixture (the second implementer of the embed surface), and
 # clank-agent's cdylib links only for wasm32-wasip2 (its golem/wasi host imports are undefined
 # natively — the link has never succeeded on native). `--workspace`, explicit `-p`, and the
 # golem deploy path still build both for wasm.
-default-members = ["crates/clank-shell", "crates/clank-conformance", "crates/whttp", "crates/wcurl", "crates/waget", "crates/grease-tool"]
+default-members = ["crates/clank-core", "crates/clank-conformance", "crates/whttp", "crates/wcurl", "crates/waget", "crates/grease-tool"]
 
 [workspace.package]
 edition = "2021"
@@ -23,7 +23,7 @@ futures = "0.3"
 [workspace.lints.rust]
 unsafe_code = "warn"     # not "forbid": clank has ~7 real SAFETY-documented unsafe blocks
 unreachable_pub = "warn" # surfaces the pub-vs-pub(crate) gap (audit C3); tighten after R1 settles
-missing_docs = "warn"    # clank-shell is a real library (rlib consumed by agent/conformance)
+missing_docs = "warn"    # clank-core is a real library (rlib consumed by agent/conformance)
 
 [workspace.lints.clippy]
 # Groups sit at lower priority so the individual lints below always win (cargo's required form).

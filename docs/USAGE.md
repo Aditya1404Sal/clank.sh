@@ -9,7 +9,7 @@ same command surface a human does.
 
 This document is a practical, code-grounded reference to **every** command and subsystem. Flags and
 subcommands here are drawn directly from the dispatch ladder in
-`crates/clank-shell/src/session/mod.rs` and the per-command classifier modules — nothing is invented.
+`crates/clank-core/src/session/mod.rs` and the per-command classifier modules — nothing is invented.
 
 > **Environment note.** clank runs as a single WebAssembly component. There is no `fork`, no `exec`,
 > no real OS processes, and no Unix signal kernel. PIDs are synthetic handles on internal async work
@@ -50,7 +50,7 @@ golem -Y deploy
 > reports "not configured" (exit 4) while every other command works. **Never** hard-code the key.
 >
 > A stale `target/` is the usual cause of a `golem deploy` "failed to parse WebAssembly module" — run
-> `cargo clean -p clank-agent -p clank-shell --target wasm32-wasip2` and rebuild.
+> `cargo clean -p clank-agent -p clank-core --target wasm32-wasip2` and rebuild.
 
 ### Driving the agent
 
@@ -117,8 +117,8 @@ one. Quit with `exit`, `:q`, or Ctrl-D.
 > `--with-grease` for a signed local package registry, `--keep` to leave the agent up to poke at).
 >
 > **Iterating on the Rust?** `golem build` may report the component `[UP-TO-DATE]` after you edit
-> `clank-shell` (it tracks the `clank-agent` component dir, not its path-dependency), deploying a
-> stale wasm. Force a fresh build with `cargo clean -p clank-shell -p clank-agent --target wasm32-wasip2`.
+> `clank-core` (it tracks the `clank-agent` component dir, not its path-dependency), deploying a
+> stale wasm. Force a fresh build with `cargo clean -p clank-core -p clank-agent --target wasm32-wasip2`.
 
 ---
 
@@ -890,6 +890,6 @@ sleep 30 & jobs; wait
 ---
 
 *Cross-references point at section headings in `README.md`. Flags and subcommands in this document
-are sourced from `crates/clank-shell/src/session/mod.rs` (the `run_command` dispatch ladder) and the
+are sourced from `crates/clank-core/src/session/mod.rs` (the `run_command` dispatch ladder) and the
 per-command `cmd.rs`/`classify` modules (`mcp/`, `grease/`, `golem/`, `ai/`, `tools/`, `builtins/`),
 plus `crates/wcurl` and `crates/waget` for HTTP.*

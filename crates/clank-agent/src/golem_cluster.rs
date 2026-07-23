@@ -1,6 +1,6 @@
 //! The durable Golem cluster interface backing the `golem` command on the Golem agent.
 //!
-//! `clank-shell` defines the [`GolemCluster`](clank_shell::golem::cluster::GolemCluster) seam; this module
+//! `clank-core` defines the [`GolemCluster`](clank_core::golem::cluster::GolemCluster) seam; this module
 //! (wasm-only agent crate) implements it with golem-rust's `golem:api` host bindings. Mirrors the
 //! `AgentInvoker`→`WasmRpcInvoker` seam.
 //!
@@ -14,9 +14,9 @@
 //! that need an `agent-id` constructed from a type + constructor tuple (`get-agent-metadata`,
 //! `get-oplog`, `revert-agent`) require the caller's reflected constructor schema to build the id; v1
 //! reports an honest "needs constructor schema" for those rather than guessing the encoding.
-//! `interrupt`/`resume` are honest-stubbed in `clank-shell` (no host func at all).
+//! `interrupt`/`resume` are honest-stubbed in `clank-core` (no host func at all).
 
-use clank_shell::golem::cluster::GolemCluster;
+use clank_core::golem::cluster::GolemCluster;
 
 /// A [`GolemCluster`] backed by the durable `golem:api` host bindings.
 pub struct GolemApiCluster;

@@ -10,7 +10,7 @@
 //! `rt.block_on`, the "Wall C" shape). So `ask` is intercepted in `Session::eval_line`/`run_command`.
 //!
 //! The LLM transport is a Golem host dependency (`golem-ai-llm-anthropic`, which links only in the
-//! wasm/agent build), but `clank-shell` is dual-target (native + wasm) and must not pull it in. So
+//! wasm/agent build), but `clank-core` is dual-target (native + wasm) and must not pull it in. So
 //! this module owns only the *seam*: the [`AskProvider`] trait, the request/outcome types, leading-word
 //! detection, and the manifest. The concrete durable provider lives in `clank-agent` and is injected
 //! into the `Session`; on native, no provider is installed and `ask` degrades to an informative error.
@@ -187,7 +187,7 @@ fn append_mcp_tools(out: &mut String, mcp: &crate::mcp::state::McpState) {
 
 /// One tool the model may call, rendered from the manifest registry. The clank-neutral mirror of
 /// `golem-ai-llm`'s `ToolDefinition` — the `clank-agent` provider converts it at the seam so
-/// `clank-shell` need not link the golem crates.
+/// `clank-core` need not link the golem crates.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AskTool {
     /// The tool name the model calls (e.g. `shell`).

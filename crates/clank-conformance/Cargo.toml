@@ -22,7 +22,7 @@ workspace = true
 [dependencies]
 # Session core only — `repl-driver` (the default feature) is the wasm `wasi:cli/run` export,
 # dropped here the same way clank-agent drops it.
-clank-shell = { path = "../clank-shell", default-features = false }
+clank-core = { path = "../clank-core", default-features = false }
 # libtest-mimic sits in [dependencies] (not dev-) because src/harness.rs builds the Trials;
 # fine for a publish = false tool crate.
 libtest-mimic = "0.8"

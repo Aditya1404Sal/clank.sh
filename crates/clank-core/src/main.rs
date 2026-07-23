@@ -16,7 +16,7 @@ fn main() {
         }
     };
 
-    if let Err(e) = runtime.block_on(clank_shell::native::run()) {
+    if let Err(e) = runtime.block_on(clank_core::native::run()) {
         eprintln!("clank: {e}");
         std::process::exit(1);
     }
