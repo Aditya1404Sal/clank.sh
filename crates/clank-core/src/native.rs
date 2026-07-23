@@ -135,37 +135,34 @@ async fn run_interactive(session: &mut Session) -> Result<(), Box<dyn std::error
 
     let mut editor = build_editor();
     let mut last_ok = true;
-    let mut read_failures = 0u8;
 
     loop {
         let prompt = StarshipPrompt::new(last_ok);
         let buffer = match editor.read_line(&prompt) {
-            Ok(Signal::Success(buffer)) => {
-                read_failures = 0;
-                buffer
-            }
+            Ok(Signal::Success(buffer)) => buffer,
             // Ctrl-C cancels the current line (like every shell) rather than killing the session.
-            Ok(Signal::CtrlC) => {
-                read_failures = 0;
-                continue;
-            }
+            Ok(Signal::CtrlC) => continue,
             // Ctrl-D on an empty line leaves the shell.
             Ok(Signal::CtrlD) => break,
-            // A read error here is almost always a transient cursor-position-query timeout: right
-            // after a long command (e.g. `ask`) the terminal answers reedline's `\x1b[6n` too late,
-            // and that late reply would otherwise leak into the next line as `^[[..R`. Discard any
-            // stray terminal input and retry rather than downgrading the whole session — only fall
-            // back to the plain loop if it keeps failing (a terminal that truly can't report the
-            // cursor). The next `read_line`'s own query consumes any late reply still buffered.
-            Err(e) => {
-                read_failures += 1;
+            // reedline's cursor-position query can time out right after a long command (notably
+            // `ask`): the terminal answers `\x1b[6n` too late, and its late reply — which carries no
+            // newline, so cooked mode holds it until the next Enter — would otherwise leak into the
+            // next line as `^[[..R`. Drain that stray reply (in raw mode, so the newline-less bytes
+            // are readable) and read THIS line with a plain prompt; the editor resumes on the next
+            // line once the terminal settles. One line degrades, never the whole session, no leak.
+            Err(_) => {
+                // Let the late cursor-position reply land (it missed reedline's own timeout by a
+                // hair), then drain it before we read — so it can't slip in between the drain and
+                // the plain read. Only the rare fallback line pays this ~100ms.
+                std::thread::sleep(std::time::Duration::from_millis(100));
                 drain_terminal_input();
-                if read_failures >= 4 {
-                    eprintln!("clank: line editor unavailable ({e}); falling back to basic input.");
-                    drop(editor);
-                    return run_plain(session).await;
+                write_stdout(&StarshipPrompt::new(last_ok).plain_bytes())?;
+                let mut line = String::new();
+                if io::stdin().read_line(&mut line)? == 0 {
+                    write_stdout(b"\n")?;
+                    break;
                 }
-                continue;
+                line.trim_end_matches(['\n', '\r']).to_string()
             }
         };
         let mut line_str = buffer.trim_end_matches(['\n', '\r']).to_string();
@@ -377,6 +374,17 @@ impl StarshipPrompt {
         }
         Self { left, ok }
     }
+
+    /// The prompt rendered as bytes for the plain (`write_stdout`) fallback read, matching the
+    /// interactive look: `<left> ❯ ` with a green (ok) / red (failed) indicator.
+    fn plain_bytes(&self) -> Vec<u8> {
+        let color = if self.ok {
+            nu_ansi_term::Color::Green
+        } else {
+            nu_ansi_term::Color::Red
+        };
+        format!("{} {} ", self.left, color.paint("❯")).into_bytes()
+    }
 }
 
 impl reedline::Prompt for StarshipPrompt {
@@ -565,17 +573,30 @@ fn inject_native_providers(session: &mut Session) {
     }
 }
 
-/// Discard any bytes the terminal has buffered on stdin — a stray cursor-position reply that
-/// arrived after a query timed out, or keystrokes typed while a long command ran — so they can't
-/// pollute the next line-editor read. Best-effort: any terminal error just skips the drain.
+/// Discard any bytes the terminal has buffered on stdin — a stray cursor-position reply that arrived
+/// after a query timed out, or keystrokes typed while a long command ran — so they can't pollute the
+/// next read (or leak as `^[[..R`). Enters raw mode so bytes that carry no newline (a cursor-position
+/// reply) are readable, drains fd 0 non-blockingly, then restores both. Best-effort — any terminal or
+/// fcntl error just skips the drain. crossterm's own `event::read` is deliberately NOT used: it
+/// filters cursor-position reports out of the normal event stream, so it would leave that reply in
+/// the buffer — the very thing we need to clear.
+#[allow(unsafe_code)] // libc fcntl/read FFI over fd 0; see the SAFETY note inside.
 fn drain_terminal_input() {
-    use crossterm::{event, terminal};
+    use crossterm::terminal;
+    use std::os::unix::io::AsRawFd;
     if terminal::enable_raw_mode().is_err() {
         return;
     }
-    while matches!(event::poll(std::time::Duration::ZERO), Ok(true)) {
-        if event::read().is_err() {
-            break;
+    let fd = io::stdin().as_raw_fd();
+    // SAFETY: `fcntl`/`read` are FFI over the standard fd 0. `F_GETFL`/`F_SETFL`/`read` return -1 on
+    // error (guarded), never exhibit UB; the buffer is a live stack array with its true length.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags >= 0 {
+            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+            let mut buf = [0u8; 256];
+            while libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) > 0 {}
+            libc::fcntl(fd, libc::F_SETFL, flags);
         }
     }
     let _ = terminal::disable_raw_mode();
