@@ -177,6 +177,7 @@ render() {
   out="$(jq -r '.stdout // ""' <<<"$j")"
   err="$(jq -r '.stderr // ""' <<<"$j")"
   code="$(jq -r '.exit_code // 0' <<<"$j")"
+  LAST_CODE="$code"   # colours the next prompt's ❯ (green on 0, red otherwise)
   [[ -n "$out" ]] && { printf '%s' "$out"; [[ "$out" == *$'\n' ]] || echo; }
   [[ -n "$err" ]] && printf '%s%s%s' "$c_dim" "$err" "$c_rst" >&2 && { [[ "$err" == *$'\n' ]] || echo >&2; }
   [[ "$code" != "0" ]] && note "exit $code"
@@ -233,11 +234,25 @@ if [[ $INTERACTIVE -eq 1 ]]; then
   step "clank REPL — agent ${c_cyn}${AGENT_ID}${c_rst}"
   note "durable session (state persists across lines & restarts for this --name). :help · exit/Ctrl-D to quit."
 fi
-PROMPT="clank:${AGENT_NAME}$ "
+# Starship-lite prompt for the agent REPL: cyan "clank", dim agent identity, and a ❯ that turns
+# green after a success / red after a failure. ANSI is wrapped in readline's non-printing markers
+# (\001…\002) so `read -e` measures the prompt width correctly — unwrapped colour corrupts cursor
+# tracking (the same class of glitch we're fixing). The agent's cwd is deliberately NOT shown: it
+# would cost an extra `eval pwd` round-trip per prompt; the durable agent's identity is the useful
+# segment here.
+LAST_CODE=0
+rl_s=$'\001'; rl_e=$'\002'
+build_prompt() {
+  local ac; [[ "${LAST_CODE:-0}" == "0" ]] && ac="$c_grn" || ac="$c_red"
+  printf '%s' \
+    "${rl_s}${c_cyn}${rl_e}clank${rl_s}${c_rst}${rl_e} " \
+    "${rl_s}${c_dim}${rl_e}${AGENT_NAME}${rl_s}${c_rst}${rl_e} " \
+    "${rl_s}${ac}${rl_e}❯${rl_s}${c_rst}${rl_e} "
+}
 
 while true; do
   if [[ $INTERACTIVE -eq 1 ]]; then
-    IFS= read -e -r -p "$PROMPT" line || { echo; break; }
+    IFS= read -e -r -p "$(build_prompt)" line || { echo; break; }
   else
     IFS= read -r line || break
   fi
