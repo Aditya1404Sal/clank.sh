@@ -578,6 +578,9 @@ name = "bitflags"
 version = "2.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
+dependencies = [
+ "serde_core",
+]
 
 [[package]]
 name = "block-buffer"
@@ -646,8 +649,8 @@ dependencies = [
  "nix",
  "procfs",
  "rlimit",
- "strum",
- "thiserror",
+ "strum 0.28.0",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "uucore 0.8.0",
@@ -680,10 +683,10 @@ dependencies = [
  "normalize-path",
  "rand 0.10.2",
  "rpds",
- "strum",
- "strum_macros",
+ "strum 0.28.0",
+ "strum_macros 0.28.0",
  "terminfo",
- "thiserror",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "uuid",
@@ -701,7 +704,7 @@ dependencies = [
  "getrandom 0.4.3",
  "indenter",
  "peg",
- "thiserror",
+ "thiserror 2.0.18",
  "tracing",
  "utf8-chars",
  "uuid",
@@ -764,7 +767,7 @@ dependencies = [
  "hashbrown 0.16.1",
  "once_cell",
  "parking_lot",
- "thiserror",
+ "thiserror 2.0.18",
  "web-time",
 ]
 
@@ -920,6 +923,8 @@ dependencies = [
  "jaq-json",
  "jaq-std",
  "libc",
+ "nu-ansi-term",
+ "reedline",
  "regex",
  "reqwest",
  "serde",
@@ -1035,7 +1040,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1b60b5124979fccd9addd89d8b97a1d6eebb4950694520c75ddd722535ea443f"
 dependencies = [
  "nix",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1166,6 +1171,23 @@ dependencies = [
  "libc",
  "mio 0.8.11",
  "parking_lot",
+ "signal-hook",
+ "signal-hook-mio",
+ "winapi",
+]
+
+[[package]]
+name = "crossterm"
+version = "0.28.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "829d955a0bb380ef178a640b91779e3987da38c9aea133b20614cfed8cdea9c6"
+dependencies = [
+ "bitflags 2.13.0",
+ "crossterm_winapi",
+ "mio 1.2.1",
+ "parking_lot",
+ "rustix 0.38.44",
+ "serde",
  "signal-hook",
  "signal-hook-mio",
  "winapi",
@@ -1365,7 +1387,7 @@ version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10d60334b3b2e7c9d91ef8150abfb6fa4c1c39ebbcf4a81c2e346aad939fee3e"
 dependencies = [
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1577,6 +1599,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 
 [[package]]
+name = "fd-lock"
+version = "4.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ce92ff622d6dadf7349484f42c93271a0d49b7cc4d466a936405bacbe10aa78"
+dependencies = [
+ "cfg-if",
+ "rustix 1.1.4",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
 name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1661,7 +1694,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "54f0d287c53ffd184d04d8677f590f4ac5379785529e5e08b1c8083acdd5c198"
 dependencies = [
  "memchr",
- "thiserror",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1896,7 +1929,7 @@ dependencies = [
  "log",
  "mime",
  "nom 7.1.3",
- "thiserror",
+ "thiserror 2.0.18",
  "wasi-logger",
  "wasip2",
 ]
@@ -2799,7 +2832,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fddf93031af70e75410a2511ec04d49e758ed2f26dad3404a934e0fb45cc12a"
 dependencies = [
  "bitflags 2.13.0",
- "crossterm",
+ "crossterm 0.25.0",
  "dyn-clone",
  "fuzzy-matcher",
  "fxhash",
@@ -2849,6 +2882,15 @@ name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
+
+[[package]]
+name = "itertools"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba291022dbbd398a455acf126c1e341954079855bc60dfdda641363bd6922569"
+dependencies = [
+ "either",
+]
 
 [[package]]
 name = "itertools"
@@ -3049,6 +3091,12 @@ dependencies = [
  "clap",
  "escape8259",
 ]
+
+[[package]]
+name = "linux-raw-sys"
+version = "0.4.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d26c52dbd32dccf2d10cac7725f8eae5296885fb5703b261f7d0a0739ec807ab"
 
 [[package]]
 name = "linux-raw-sys"
@@ -3553,7 +3601,7 @@ dependencies = [
  "chrono",
  "flate2",
  "procfs-core",
- "rustix",
+ "rustix 1.1.4",
 ]
 
 [[package]]
@@ -3581,7 +3629,7 @@ dependencies = [
  "rustc-hash",
  "rustls",
  "socket2",
- "thiserror",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "web-time",
@@ -3603,7 +3651,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "slab",
- "thiserror",
+ "thiserror 2.0.18",
  "tinyvec",
  "tracing",
  "web-time",
@@ -3709,6 +3757,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
 dependencies = [
  "bitflags 2.13.0",
+]
+
+[[package]]
+name = "reedline"
+version = "0.38.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9bfa8cb0ad84c396c936d8abb814703d7042a433d2da75a0c7060cbdc89109f3"
+dependencies = [
+ "chrono",
+ "crossterm 0.28.1",
+ "fd-lock",
+ "itertools 0.12.1",
+ "nu-ansi-term",
+ "serde",
+ "strip-ansi-escapes",
+ "strum 0.26.3",
+ "strum_macros 0.26.4",
+ "thiserror 1.0.69",
+ "unicode-segmentation",
+ "unicode-width 0.1.14",
 ]
 
 [[package]]
@@ -3850,6 +3918,19 @@ dependencies = [
 
 [[package]]
 name = "rustix"
+version = "0.38.44"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdb5bc1ae2baa591800df16c9ca78619bf65c0488b41b96ccec5d11220d8c154"
+dependencies = [
+ "bitflags 2.13.0",
+ "errno",
+ "libc",
+ "linux-raw-sys 0.4.15",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rustix"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
@@ -3857,7 +3938,7 @@ dependencies = [
  "bitflags 2.13.0",
  "errno",
  "libc",
- "linux-raw-sys",
+ "linux-raw-sys 0.12.1",
  "windows-sys 0.61.2",
 ]
 
@@ -4051,6 +4132,7 @@ checksum = "b75a19a7a740b25bc7944bdee6172368f988763b744e3d4dfe753f6b4ece40cc"
 dependencies = [
  "libc",
  "mio 0.8.11",
+ "mio 1.2.1",
  "signal-hook",
 ]
 
@@ -4139,6 +4221,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
+name = "strip-ansi-escapes"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a8f8038e7e7969abb3f1b7c2a811225e9296da208539e0f79c5251d6cac0025"
+dependencies = [
+ "vte",
+]
+
+[[package]]
 name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4146,9 +4237,28 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "strum"
+version = "0.26.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8fec0f0aef304996cf250b31b5a10dee7980c85da9d759361292b8bca5a18f06"
+
+[[package]]
+name = "strum"
 version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9628de9b8791db39ceda2b119bbe13134770b56c138ec1d3af810d045c04f9bd"
+
+[[package]]
+name = "strum_macros"
+version = "0.26.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c6bee85a5a24955dc440386795aa378cd9cf82acd5f764469152d2270e581be"
+dependencies = [
+ "heck 0.5.0",
+ "proc-macro2",
+ "quote",
+ "rustversion",
+ "syn",
+]
 
 [[package]]
 name = "strum_macros"
@@ -4208,7 +4318,7 @@ dependencies = [
  "fastrand 2.4.1",
  "getrandom 0.4.3",
  "once_cell",
- "rustix",
+ "rustix 1.1.4",
  "windows-sys 0.61.2",
 ]
 
@@ -4227,7 +4337,7 @@ version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
- "rustix",
+ "rustix 1.1.4",
  "windows-sys 0.61.2",
 ]
 
@@ -4245,11 +4355,31 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
+dependencies = [
+ "thiserror-impl 1.0.69",
+]
+
+[[package]]
+name = "thiserror"
 version = "2.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4288b5bcbc7920c07a1149a35cf9590a2aa808e0bc1eafaade0b80947865fbc4"
 dependencies = [
- "thiserror-impl",
+ "thiserror-impl 2.0.18",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -4673,8 +4803,8 @@ dependencies = [
  "clap",
  "fluent",
  "memchr",
- "rustix",
- "thiserror",
+ "rustix 1.1.4",
+ "thiserror 2.0.18",
  "uucore 0.9.0",
  "winapi-util",
  "windows-sys 0.61.2",
@@ -4691,8 +4821,8 @@ dependencies = [
  "indicatif",
  "libc",
  "nix",
- "rustix",
- "thiserror",
+ "rustix 1.1.4",
+ "thiserror 2.0.18",
  "uucore 0.9.0",
  "walkdir",
  "windows-sys 0.61.2",
@@ -4719,7 +4849,7 @@ dependencies = [
  "fluent",
  "nix",
  "rust-ini",
- "thiserror",
+ "thiserror 2.0.18",
  "uucore 0.9.0",
 ]
 
@@ -4731,7 +4861,7 @@ dependencies = [
  "clap",
  "fluent",
  "memchr",
- "thiserror",
+ "thiserror 2.0.18",
  "uucore 0.9.0",
 ]
 
@@ -4748,7 +4878,7 @@ dependencies = [
  "lscolors",
  "rustc-hash",
  "terminal_size",
- "thiserror",
+ "thiserror 2.0.18",
  "uucore 0.9.0",
  "uutils_term_grid",
 ]
@@ -4760,7 +4890,7 @@ source = "git+https://github.com/Aditya1404Sal/coreutils?rev=35ecf24#35ecf24d7ca
 dependencies = [
  "clap",
  "fluent",
- "rustix",
+ "rustix 1.1.4",
  "uucore 0.9.0",
 ]
 
@@ -4776,8 +4906,8 @@ dependencies = [
  "libc",
  "nix",
  "rustc-hash",
- "rustix",
- "thiserror",
+ "rustix 1.1.4",
+ "thiserror 2.0.18",
  "uucore 0.9.0",
  "windows-sys 0.61.2",
 ]
@@ -4801,7 +4931,7 @@ dependencies = [
  "fluent",
  "indicatif",
  "libc",
- "thiserror",
+ "thiserror 2.0.18",
  "uucore 0.9.0",
  "windows-sys 0.61.2",
 ]
@@ -4833,10 +4963,10 @@ dependencies = [
  "memchr",
  "rand 0.10.2",
  "rayon",
- "rustix",
+ "rustix 1.1.4",
  "self_cell",
  "tempfile",
- "thiserror",
+ "thiserror 2.0.18",
  "uucore 0.9.0",
 ]
 
@@ -4850,7 +4980,7 @@ dependencies = [
  "libc",
  "memchr",
  "notify",
- "rustix",
+ "rustix 1.1.4",
  "same-file",
  "uucore 0.9.0",
  "windows-sys 0.61.2",
@@ -4863,7 +4993,7 @@ source = "git+https://github.com/Aditya1404Sal/coreutils?rev=35ecf24#35ecf24d7ca
 dependencies = [
  "clap",
  "fluent",
- "rustix",
+ "rustix 1.1.4",
  "uucore 0.9.0",
 ]
 
@@ -4878,8 +5008,8 @@ dependencies = [
  "jiff",
  "libc",
  "parse_datetime",
- "rustix",
- "thiserror",
+ "rustix 1.1.4",
+ "thiserror 2.0.18",
  "uucore 0.9.0",
  "windows-sys 0.61.2",
 ]
@@ -4915,8 +5045,8 @@ dependencies = [
  "clap",
  "fluent",
  "libc",
- "rustix",
- "thiserror",
+ "rustix 1.1.4",
+ "thiserror 2.0.18",
  "unicode-width 0.2.2",
  "uucore 0.9.0",
 ]
@@ -4938,8 +5068,8 @@ dependencies = [
  "num-traits",
  "os_display",
  "rustc-hash",
- "rustix",
- "thiserror",
+ "rustix 1.1.4",
+ "thiserror 2.0.18",
  "unic-langid",
  "unit-prefix",
  "uucore_procs 0.8.0",
@@ -4973,8 +5103,8 @@ dependencies = [
  "os_display",
  "procfs",
  "rustc-hash",
- "rustix",
- "thiserror",
+ "rustix 1.1.4",
+ "thiserror 2.0.18",
  "unic-langid",
  "unit-prefix",
  "uucore_procs 0.9.0",
@@ -5047,6 +5177,15 @@ name = "vsimd"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5c3082ca00d5a5ef149bb8b555a72ae84c9c59f7250f013ac822ac2e49b19c64"
+
+[[package]]
+name = "vte"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "231fdcd7ef3037e8330d8e17e61011a2c244126acc0a982f4040ac3f9f0bc077"
+dependencies = [
+ "memchr",
+]
 
 [[package]]
 name = "waget"
@@ -6050,7 +6189,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
 dependencies = [
  "libc",
- "rustix",
+ "rustix 1.1.4",
 ]
 
 [[package]]

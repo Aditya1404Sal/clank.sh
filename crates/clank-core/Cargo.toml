@@ -109,6 +109,13 @@ libc = "0.2"
 # workspace resolves one reqwest; on wasm those seams use the injected wstd impls instead (this dep
 # never reaches the wasm build — it's under the not(wasm32) target block).
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# The interactive REPL's line editor (native TTY only): history, fish-style ghost autosuggestions,
+# live syntax highlighting, and a styled multi-segment prompt. reedline pulls its own crossterm;
+# nu-ansi-term (already transitively in the tree) styles the prompt. Never reaches the wasm agent —
+# it's under the not(wasm32) target block, and `mod native` is itself cfg(not(wasm32)). Piped/
+# non-interactive stdin bypasses it entirely (see `native::run`'s is_terminal branch).
+reedline = "0.38"
+nu-ansi-term = "0.50"
 
 [dev-dependencies]
 # Signing side of ed25519 (SigningKey), for tests that produce a signed fixture payload to exercise
