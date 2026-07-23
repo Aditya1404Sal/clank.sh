@@ -9,7 +9,7 @@ members = [
     "utilities/whttp",
     "utilities/wcurl",
     "utilities/waget",
-    "crates/grease-tool",
+    "dev-tools/grease-tool",
     "fixtures/greeter-agent",
 ]
 # main-rc-1: exclude the vendored golem clone so its crates (golem-schema, etc.) resolve their
@@ -28,7 +28,7 @@ default-members = [
     "utilities/whttp",
     "utilities/wcurl",
     "utilities/waget",
-    "crates/grease-tool",
+    "dev-tools/grease-tool",
 ]
 
 [workspace.package]
