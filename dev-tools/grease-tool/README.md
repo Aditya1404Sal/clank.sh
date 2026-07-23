@@ -83,9 +83,15 @@ Installs as an `ask`-backed command. Author it two ways:
   frontmatter block declaring `name` / `description` / `model` / `arguments:`,
   and the prompt body (with `{{arg}}` placeholders) after the closing fence.
 
+When authoring from a `.md` file the tool **reads the frontmatter itself** —
+the package name and description come from the `name:`/`description:` keys, so
+you are not asked to retype them. (If the frontmatter omits `description:`,
+it asks for one; everything else is derived.)
+
 Sample: [`samples/prompt/summarize.md`](samples/prompt/summarize.md). Choose
-`prompt` → `from a .md file` → give it that path, then a registry name and
-description.
+`prompt` → `from a .md file` → give it that path. Paths are resolved from the
+directory you launched the tool in, so from the workspace root use
+`dev-tools/grease-tool/samples/prompt/summarize.md`.
 
 ### script — a shell script installed as a command
 

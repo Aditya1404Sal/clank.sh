@@ -285,14 +285,27 @@ fn author_prompt(reg: &mut Registry) -> Result<()> {
     } else {
         let path = text(".md file path")?;
         let bytes = std::fs::read(&path).with_context(|| format!("read {path}"))?;
-        if !(bytes.starts_with(b"---\n") || bytes.starts_with(b"---\r\n")) {
-            bail!("{path} does not start with a `---` YAML frontmatter fence");
-        }
-        let name = text("package name (the registry filename)")?;
-        let description = text("description (for the index listing)")?;
+        // Parse the frontmatter with the SAME parser the agent uses at install time, so the
+        // registry name/description come straight from the `---` block — no re-typing what the
+        // file already declares. This also validates the fence, the required `name`, and the
+        // `arguments:` shape now, instead of deferring those errors to install time.
+        let parsed = PromptPackage::from_markdown(&bytes).map_err(|e| anyhow!("{path}: {e}"))?;
+        // `description:` is optional in frontmatter — ask for one only if the file left it out.
+        let description = if parsed.description.trim().is_empty() {
+            text("description (frontmatter has none — for the index listing)")?
+        } else {
+            parsed.description.clone()
+        };
+        let n = parsed.arguments.len();
+        println!(
+            "  parsed '{}' — {n} argument{}{}",
+            parsed.name,
+            if n == 1 { "" } else { "s" },
+            parsed.model.as_deref().map(|m| format!(", model {m}")).unwrap_or_default(),
+        );
         // The payload is the RAW .md bytes — integrity is verified over exactly these.
-        reg.write_package("prompt", &name, &description, &bytes, "md")?;
-        announce(reg, &name);
+        reg.write_package("prompt", &parsed.name, &description, &bytes, "md")?;
+        announce(reg, &parsed.name);
     }
     Ok(())
 }
