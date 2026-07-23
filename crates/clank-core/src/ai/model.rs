@@ -10,6 +10,8 @@
 //! a hardcoded honest subset — the README's `model list` over a single provider (anthropic) — stated
 //! as such in the help.
 
+#![allow(clippy::similar_names)] // argv/args/arg-style locals are inherent to arg parsing here
+
 use std::fmt::Write as _;
 use std::io::Write;
 
@@ -131,7 +133,7 @@ fn list(home: &str) -> (String, String, u8) {
     let mut out = String::new();
     for id in CATALOG {
         let marker = if canonicalize(id) == default_id { "* " } else { "  " };
-        let _ = write!(out, "{marker}{id}\n");
+        let _ = writeln!(out, "{marker}{id}");
     }
     let _ = write!(out, "\ndefault: {default} (from {source})\n");
     (out, warn.unwrap_or_default(), 0)
@@ -165,10 +167,10 @@ fn info(home: &str, id: Option<&str>) -> (String, String, u8) {
     let provider = target.split('/').next().unwrap_or(PROVIDER);
     let in_catalog = CATALOG.iter().any(|c| *c == target);
     let mut out = String::new();
-    let _ = write!(out, "id:        {target}\n");
-    let _ = write!(out, "provider:  {provider}\n");
-    let _ = write!(out, "in catalog: {}\n", if in_catalog { "yes" } else { "no (passed through)" });
-    let _ = write!(out, "default:   {}\n", if is_default { "yes" } else { "no" });
+    let _ = writeln!(out, "id:        {target}");
+    let _ = writeln!(out, "provider:  {provider}");
+    let _ = writeln!(out, "in catalog: {}", if in_catalog { "yes" } else { "no (passed through)" });
+    let _ = writeln!(out, "default:   {}", if is_default { "yes" } else { "no" });
     (out, warn.unwrap_or_default(), 0)
 }
 

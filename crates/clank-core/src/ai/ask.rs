@@ -112,7 +112,7 @@ pub fn build_system_prompt(registry: &CommandRegistry) -> String {
         .collect();
     rows.sort_by(|a, b| a.0.cmp(b.0));
     for (name, synopsis, marker) in rows {
-        let _ = write!(out, "  {name} — {synopsis}{marker}\n");
+        let _ = writeln!(out, "  {name} — {synopsis}{marker}");
     }
 
     out.push_str(
@@ -155,7 +155,7 @@ pub fn build_system_prompt_with_capabilities(
              through the model and requires confirmation unless the user ran `sudo ask`):\n",
         );
         for t in &prompts {
-            let _ = write!(out, "  {} — {}\n", t.name, t.description);
+            let _ = writeln!(out, "  {} — {}", t.name, t.description);
         }
     }
     let skills = grease.skills();
@@ -171,7 +171,7 @@ pub fn build_system_prompt_with_capabilities(
                 .as_deref()
                 .map(|u| format!(" (use when: {u})"))
                 .unwrap_or_default();
-            let _ = write!(out, "  {} — {}{intended}\n", s.name, s.description);
+            let _ = writeln!(out, "  {} — {}{intended}", s.name, s.description);
         }
     }
     out
@@ -186,7 +186,7 @@ fn append_mcp_tools(out: &mut String, mcp: &crate::mcp::state::McpState) {
              require confirmation unless the user ran `sudo ask`):\n",
         );
         for t in &mcp_tools {
-            let _ = write!(out, "  {} — {}\n", t.name, t.description);
+            let _ = writeln!(out, "  {} — {}", t.name, t.description);
         }
     }
 }

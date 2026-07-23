@@ -28,7 +28,6 @@
 //! can assert on a temp dir.
 
 use std::cell::RefCell;
-use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -275,6 +274,7 @@ pub fn redact_url(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fmt::Write as _;
 
     /// A temp-dir guard that points `CLANK_LOG_DIR` at a fresh directory for the test AND installs the
     /// default log sink, restoring both on drop. Serializes via the shared [`test_env_lock`].
@@ -363,7 +363,7 @@ mod tests {
         // Over the cap → drops whole leading lines, keeps a line-aligned tail under the cap.
         let mut s = String::new();
         for i in 0..100 {
-            let _ = write!(s, "line{i}\n");
+            let _ = writeln!(s, "line{i}");
         }
         bound_tail(&mut s, 30);
         assert!(s.len() <= 30, "tail must be under the cap, got {}", s.len());

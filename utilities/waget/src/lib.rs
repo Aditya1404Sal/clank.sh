@@ -137,7 +137,7 @@ fn finish(req: &Request, resp: whttp::Response) -> Outcome {
 fn server_response(resp: &whttp::Response) -> String {
     let mut s = format!("  HTTP/1.1 {}\n", resp.status);
     for (k, v) in &resp.headers {
-        let _ = write!(s, "  {k}: {v}\n");
+        let _ = writeln!(s, "  {k}: {v}");
     }
     s
 }

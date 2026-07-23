@@ -4,6 +4,8 @@
 //! they run inside clank on both native and wasm. They focus on file-argument workflows for now;
 //! stdin/pipeline fidelity needs the future process model instead of process-global fd swapping.
 
+#![allow(clippy::similar_names)] // argv/args/arg-style locals are inherent to arg parsing here
+
 use brush_core::builtins::{ContentOptions, ContentType, Registration, SimpleCommand};
 use brush_core::commands::ExecutionContext;
 use brush_core::extensions::ShellExtensions;

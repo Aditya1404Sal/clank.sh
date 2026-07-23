@@ -14,6 +14,8 @@
 //! (`if`/`while`/`for`), `getline`, field assignment. awk's number/string duck-typing follows the
 //! usual rule: compare numerically when both sides look numeric, else as strings.
 
+#![allow(clippy::similar_names)] // argv/args/arg-style locals are inherent to arg parsing here
+
 use std::collections::HashMap;
 use std::io::{Read, Write};
 

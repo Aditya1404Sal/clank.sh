@@ -11,6 +11,8 @@
 //!
 //! `-exec` is deliberately absent in v1 — `find ... | xargs cmd` is the supported composition.
 
+#![allow(clippy::similar_names)] // argv/args/arg-style locals are inherent to arg parsing here
+
 use std::io::Write;
 
 use brush_core::builtins::{ContentOptions, ContentType, Registration, SimpleCommand};

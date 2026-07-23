@@ -482,7 +482,7 @@ impl GreaseState {
                 } else {
                     format!(" ({})", m.params.iter().map(|p| format!("--{p}")).collect::<Vec<_>>().join(" "))
                 };
-                let _ = write!(out, "  {} — {}{params}\n", m.name, m.description);
+                let _ = writeln!(out, "  {} — {}{params}", m.name, m.description);
             }
         }
         let _ = write!(
@@ -507,7 +507,7 @@ impl GreaseState {
             for a in &p.arguments {
                 let req = if a.required { " (required)" } else { "" };
                 let def = a.default.as_deref().map(|d| format!(" [default: {d}]")).unwrap_or_default();
-                let _ = write!(out, "  --{} — {}{req}{def}\n", a.name, a.description);
+                let _ = writeln!(out, "  --{} — {}{req}{def}", a.name, a.description);
             }
         }
         let _ = write!(
@@ -531,7 +531,7 @@ impl GreaseState {
             for a in &s.arguments {
                 let req = if a.required { " (required)" } else { "" };
                 let def = a.default.as_deref().map(|d| format!(" [default: {d}]")).unwrap_or_default();
-                let _ = write!(out, "  --{} — {}{req}{def}\n", a.name, a.description);
+                let _ = writeln!(out, "  --{} — {}{req}{def}", a.name, a.description);
             }
         }
         let _ = write!(

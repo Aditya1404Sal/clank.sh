@@ -319,6 +319,9 @@ impl ProcessTable {
         }
     }
 
+    // Aligned column headers: the width-formatted literals (`{:>5}` etc.) are the point of the
+    // table, so passing the header strings as format args is intentional, not inlinable.
+    #[allow(clippy::write_literal)]
     fn render_default(&self) -> String {
         let mut out = String::new();
         let _ = writeln!(out, "{:>5} {:<4} {}", "PID", "STAT", "COMMAND");
@@ -329,6 +332,7 @@ impl ProcessTable {
         out
     }
 
+    #[allow(clippy::write_literal)] // aligned column headers, as in render_default
     fn render_aux(&self) -> String {
         // %CPU/%MEM/VSZ/RSS/TTY are not available in WASM — shown as `-` (README).
         let mut out = String::new();
@@ -357,6 +361,7 @@ impl ProcessTable {
         out
     }
 
+    #[allow(clippy::write_literal)] // aligned column headers, as in render_default
     fn render_ef(&self) -> String {
         let mut out = String::new();
         let _ = writeln!(

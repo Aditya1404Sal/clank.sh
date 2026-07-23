@@ -153,11 +153,11 @@ fn header_block(resp: &whttp::Response) -> String {
 fn verbose_trace(req: &Request, resp: &whttp::Response) -> String {
     let mut s = format!("> {} {}\n", req.method, req.url);
     for (k, v) in &req.headers {
-        let _ = write!(s, "> {k}: {v}\n");
+        let _ = writeln!(s, "> {k}: {v}");
     }
-    let _ = write!(s, "< HTTP/1.1 {}\n", resp.status);
+    let _ = writeln!(s, "< HTTP/1.1 {}", resp.status);
     for (k, v) in &resp.headers {
-        let _ = write!(s, "< {k}: {v}\n");
+        let _ = writeln!(s, "< {k}: {v}");
     }
     s
 }

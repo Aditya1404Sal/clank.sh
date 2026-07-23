@@ -292,6 +292,7 @@ fn parse_response_body(resp: &HttpResponse) -> McpResult<JsonRpcResponse> {
 }
 
 /// Map a JSON-RPC error object to an [`McpError`] with the right exit code.
+#[allow(clippy::needless_pass_by_value)] // small owned error value, consumed at the one call site
 fn rpc_error_to_mcp(err: JsonRpcError) -> McpError {
     match err.code {
         // Method-not-found / invalid-params are usage-shaped (exit 2).
@@ -807,6 +808,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::needless_pass_by_value)] // value is serialized into the response body
     fn json_response(status: u16, value: Value) -> HttpResponse {
         HttpResponse {
             status,

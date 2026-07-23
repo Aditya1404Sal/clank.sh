@@ -6,6 +6,12 @@
 //! the constructor param is `name`, and the method is `greet(who) -> String` — all `String`, which is
 //! exactly what clank's positional-string arg encoding supports.
 
+// The `agent_definition`/`agent_implementation` macros expand to dispatch and client items that
+// carry no doc comments. The hand-written trait, methods, struct, and field below are all
+// documented; this crate-level allow covers only the macro-generated surface. (This is a test-only
+// fixture — see `fixtures/`.)
+#![allow(missing_docs)]
+
 use golem_rust::{agent_definition, agent_implementation};
 
 /// A durable greeter. The constructor `name` is the agent identity (distinct names = distinct

@@ -11,6 +11,8 @@
 //!
 //! `uucore` is patched for `wasm32-wasip2` via `[patch.crates-io]` in the workspace root.
 
+#![allow(clippy::similar_names)] // argv/args/arg-style locals are inherent to arg parsing here
+
 use std::io::Write;
 
 use brush_core::builtins::{ContentOptions, ContentType, Registration, SimpleCommand};
