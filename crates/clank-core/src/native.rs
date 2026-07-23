@@ -42,7 +42,7 @@ async fn run_plain(session: &mut Session) -> Result<(), Box<dyn std::error::Erro
         write_stdout(PROMPT)?;
 
         line.clear();
-        if io::stdin().read_line(&mut line)? == 0 {
+        if read_line_raw(&mut line)? == 0 {
             // EOF: leave the cursor on a fresh line after the dangling prompt.
             write_stdout(b"\n")?;
             break;
@@ -70,7 +70,7 @@ async fn run_plain(session: &mut Session) -> Result<(), Box<dyn std::error::Erro
         while session.line_is_incomplete(&line_str) && continuations < MAX_CONTINUATION_LINES {
             write_stdout(b"> ")?;
             line.clear();
-            if io::stdin().read_line(&mut line)? == 0 {
+            if read_line_raw(&mut line)? == 0 {
                 write_stdout(b"\nclank: incomplete input discarded\n")?;
                 aborted = true;
                 break;
@@ -104,7 +104,7 @@ async fn run_plain(session: &mut Session) -> Result<(), Box<dyn std::error::Erro
         if result.pending_prompt.is_some() {
             while session.has_pending_prompt() {
                 line.clear();
-                let answer = if io::stdin().read_line(&mut line)? == 0 {
+                let answer = if read_line_raw(&mut line)? == 0 {
                     session.answer_prompt(None).await // EOF → abort
                 } else {
                     let answer_str = String::from_utf8_lossy(trim_eol(line.as_bytes())).into_owned();
@@ -158,7 +158,7 @@ async fn run_interactive(session: &mut Session) -> Result<(), Box<dyn std::error
                 drain_terminal_input();
                 write_stdout(&StarshipPrompt::new(last_ok).plain_bytes())?;
                 let mut line = String::new();
-                if io::stdin().read_line(&mut line)? == 0 {
+                if read_line_raw(&mut line)? == 0 {
                     write_stdout(b"\n")?;
                     break;
                 }
@@ -220,7 +220,7 @@ async fn run_interactive(session: &mut Session) -> Result<(), Box<dyn std::error
             let mut line = String::new();
             while session.has_pending_prompt() {
                 line.clear();
-                let answer = if io::stdin().read_line(&mut line)? == 0 {
+                let answer = if read_line_raw(&mut line)? == 0 {
                     session.answer_prompt(None).await // EOF → abort
                 } else {
                     let answer_str = String::from_utf8_lossy(trim_eol(line.as_bytes())).into_owned();
@@ -519,7 +519,7 @@ async fn run_repl(
         write_stdout(format!("[{prompt_model}]> ").as_bytes())?;
 
         line.clear();
-        if io::stdin().read_line(&mut line)? == 0 {
+        if read_line_raw(&mut line)? == 0 {
             write_stdout(b"\n")?; // Ctrl-D: leave the REPL cleanly.
             break;
         }
@@ -609,6 +609,41 @@ fn drain_terminal_input() {
         }
     }
     let _ = terminal::disable_raw_mode();
+}
+
+/// Read one line (through `\n`) from fd 0 with NO read-ahead, appending it (lossily decoded) to
+/// `buf`; returns the number of bytes read (0 at EOF). Unlike `io::stdin().read_line`, this reads
+/// fd 0 directly and never pre-pulls later input into the process-global `Stdin` `BufReader` — the
+/// buffer a uutils consumer (`wc`/`cat`/`sort`/…) would otherwise drain mid-command via its own
+/// `io::stdin().lock()`, stealing the REPL's already-queued next line and stranding the shell at
+/// EOF (`ls | wc -l` then losing the following command; see `tools::coreutils::stage_piped_stdin`'s
+/// note "moving the REPL off the shared buffered stdin"). One byte per `read` is fine: REPL lines
+/// are short, and the shell reads exactly one line per prompt.
+#[allow(unsafe_code)]
+fn read_line_raw(buf: &mut String) -> io::Result<usize> {
+    let mut bytes = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        // SAFETY: `read` over the standard fd 0 into a 1-byte stack buffer; returns -1 on error and
+        // 0 at EOF (both handled), never exhibits UB.
+        let r = unsafe { libc::read(0, byte.as_mut_ptr().cast(), 1) };
+        if r < 0 {
+            let e = io::Error::last_os_error();
+            if e.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(e);
+        }
+        if r == 0 {
+            break; // EOF
+        }
+        bytes.push(byte[0]);
+        if byte[0] == b'\n' {
+            break;
+        }
+    }
+    buf.push_str(&String::from_utf8_lossy(&bytes));
+    Ok(bytes.len())
 }
 
 /// Write all `bytes` to stdout and flush. Takes a fresh stdout handle each call so no lock is
