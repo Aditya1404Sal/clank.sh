@@ -116,6 +116,10 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # non-interactive stdin bypasses it entirely (see `native::run`'s is_terminal branch).
 reedline = "0.38"
 nu-ansi-term = "0.50"
+# Draining stray terminal input (a late cursor-position reply, or type-ahead typed during a long
+# command) between line-editor reads, so it can't pollute reedline's next cursor query. Pinned to the
+# same 0.28 reedline already pulls, so no second crossterm copy. Native-only, like reedline.
+crossterm = "0.28"
 
 [dev-dependencies]
 # Signing side of ed25519 (SigningKey), for tests that produce a signed fixture payload to exercise
