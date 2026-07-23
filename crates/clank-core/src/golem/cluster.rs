@@ -47,7 +47,7 @@ pub(crate) fn classify(line: &str) -> Option<Result<GolemCommand, String>> {
         .iter()
         .filter_map(|t| match t {
             Token::Word(s, _) => Some(unquote_str(s)),
-            _ => None,
+            Token::Operator(_, _) => None,
         })
         .collect();
     let first = words.first()?;

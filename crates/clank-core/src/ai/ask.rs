@@ -15,6 +15,8 @@
 //! detection, and the manifest. The concrete durable provider lives in `clank-agent` and is injected
 //! into the `Session`; on native, no provider is installed and `ask` degrades to an informative error.
 
+use std::fmt::Write as _;
+
 use brush_parser::{tokenize_str, unquote_str, Token};
 
 use crate::manifest::{AuthorizationPolicy, ExecutionScope, Manifest};
@@ -110,7 +112,7 @@ pub fn build_system_prompt(registry: &CommandRegistry) -> String {
         .collect();
     rows.sort_by(|a, b| a.0.cmp(b.0));
     for (name, synopsis, marker) in rows {
-        out.push_str(&format!("  {name} — {synopsis}{marker}\n"));
+        let _ = write!(out, "  {name} — {synopsis}{marker}\n");
     }
 
     out.push_str(
@@ -153,7 +155,7 @@ pub fn build_system_prompt_with_capabilities(
              through the model and requires confirmation unless the user ran `sudo ask`):\n",
         );
         for t in &prompts {
-            out.push_str(&format!("  {} — {}\n", t.name, t.description));
+            let _ = write!(out, "  {} — {}\n", t.name, t.description);
         }
     }
     let skills = grease.skills();
@@ -169,7 +171,7 @@ pub fn build_system_prompt_with_capabilities(
                 .as_deref()
                 .map(|u| format!(" (use when: {u})"))
                 .unwrap_or_default();
-            out.push_str(&format!("  {} — {}{intended}\n", s.name, s.description));
+            let _ = write!(out, "  {} — {}{intended}\n", s.name, s.description);
         }
     }
     out
@@ -184,7 +186,7 @@ fn append_mcp_tools(out: &mut String, mcp: &crate::mcp::state::McpState) {
              require confirmation unless the user ran `sudo ask`):\n",
         );
         for t in &mcp_tools {
-            out.push_str(&format!("  {} — {}\n", t.name, t.description));
+            let _ = write!(out, "  {} — {}\n", t.name, t.description);
         }
     }
 }
@@ -236,7 +238,9 @@ pub enum AskTurn {
     User(String),
     /// The model's prior response: its text plus any tool calls it requested.
     Assistant {
+        /// The model's prose text for this turn (may be empty when it only made tool calls).
         text: String,
+        /// The tool calls the model requested this turn.
         tool_calls: Vec<AskToolCall>,
     },
     /// The results the `Session` computed for the previous turn's tool calls.
@@ -282,8 +286,11 @@ impl AskResponse {
 /// maps directly onto `LineResult::from_outcome`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AskOutcome {
+    /// The reply bytes written to stdout.
     pub stdout: Vec<u8>,
+    /// The diagnostic/error bytes written to stderr.
     pub stderr: Vec<u8>,
+    /// The command exit code (0 on a successful reply, 4 on a remote-call failure).
     pub exit_code: u8,
 }
 
@@ -348,6 +355,7 @@ pub struct LoggingAskProvider {
 }
 
 impl LoggingAskProvider {
+    /// Wrap an injected provider so each turn is logged to `http.log` before delegating to `inner`.
     #[must_use]
     pub fn new(inner: Box<dyn AskProvider>) -> Self {
         Self { inner }
@@ -419,6 +427,8 @@ pub fn contains_command_substitution(s: &str) -> bool {
     s.contains("$(") || s.contains('`') || s.contains("<(") || s.contains(">(")
 }
 
+/// If `line`'s leading command word is `ask`, parse its flags and prompt into [`AskArgs`]; `None` for
+/// any other line.
 #[must_use]
 pub fn classify(line: &str) -> Option<AskArgs> {
     let words = leading_words(line)?;
@@ -522,7 +532,7 @@ pub fn user_content_with_stdin(transcript: &str, prompt: &str, stdin: Option<&st
         format!("# Shell transcript (context)\n{transcript}\n# Question\n{prompt}")
     };
     if let Some(input) = stdin {
-        out.push_str(&format!("\n# Piped input (stdin)\n{input}"));
+        let _ = write!(out, "\n# Piped input (stdin)\n{input}");
     }
     out
 }

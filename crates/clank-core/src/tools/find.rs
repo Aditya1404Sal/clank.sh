@@ -60,6 +60,7 @@ struct FindOpts {
     mindepth: usize,
 }
 
+#[allow(clippy::similar_names)] // args/arg are conventional
 fn parse_find_args(args: &[String]) -> Result<FindOpts, String> {
     let mut opts = FindOpts::default();
     let mut iter = args.iter();

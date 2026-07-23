@@ -25,6 +25,10 @@ pub fn install(manifests: Arc<Mutex<Vec<Manifest>>>) -> InstallGuard {
 }
 
 /// The dynamic manifest for `name`, if a line is executing and the name is a dynamic (MCP) command.
+///
+/// # Panics
+///
+/// Panics if the installed-manifests mutex is poisoned (a prior holder panicked while holding it).
 #[must_use]
 pub fn lookup(name: &str) -> Option<Manifest> {
     ACTIVE.with(|slot| {

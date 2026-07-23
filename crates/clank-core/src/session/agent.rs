@@ -21,10 +21,12 @@ impl Session {
     /// Run an installed Golem agent: parse the ctor/wrapper-flags/method/args, validate the method (or
     /// dispatch a reserved subcommand), and invoke it via the injected wRPC invoker in the selected mode
     /// (await / trigger / schedule). Missing invoker → honest "needs a cluster"; unknown method → exit 2.
+    // One end-to-end dispatch: parse, validate reserved subcommands + method, build the invocation,
+    // audit-log, then branch on invoke mode — cohesive enough to keep in a single function.
+    #[allow(clippy::too_many_lines)]
     pub(super) async fn run_agent(&mut self, line: &str) -> LineResult {
-        let words = match crate::ai::ask::dequote_words(line) {
-            Some(w) => w,
-            None => return LineResult::from_outcome(Vec::new(), b"agent: parse error\n".to_vec(), 2),
+        let Some(words) = crate::ai::ask::dequote_words(line) else {
+            return LineResult::from_outcome(Vec::new(), b"agent: parse error\n".to_vec(), 2);
         };
         // Strip a leading sudo (gate already resolved).
         let rest = if words.first().map(String::as_str) == Some("sudo") { &words[1..] } else { &words[..] };

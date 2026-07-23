@@ -1,6 +1,8 @@
 //! `Session` methods for the grease package manager: install/remove/list/info/search/update
 //! and registry management. Shared install helpers + integrity types live in `super` (mod.rs).
 
+use std::fmt::Write as _;
+
 use super::{Session, LineResult, skill_info_text, mcp_info_text, IndexEntry, fetch_index_entry, verify_log_inclusion, InstallIntegrity, is_markdown_frontmatter, materialize_mcp_resources, write_install_marker};
 
 impl Session {
@@ -28,12 +30,13 @@ impl Session {
         }
         let mut out = String::new();
         for p in packages {
-            out.push_str(&format!(
-                "{}  [{}]  {}\n",
+            let _ = writeln!(
+                out,
+                "{}  [{}]  {}",
                 p.name(),
                 p.kind().label(),
                 p.payload.description()
-            ));
+            );
         }
         LineResult::continue_with_stdout(out.into_bytes())
     }
@@ -62,6 +65,9 @@ impl Session {
     /// it. The `artifacts` flags select which of an MCP server's artifact types to install (ignored for
     /// other kinds). A prompt becomes a Confirm command that runs `ask`; a script runs local shell; an
     /// MCP server's tools become `<server> <tool>` commands.
+    // The install pipeline (fetch → sha256 → signature → transparency-log → kind-dispatch) is one
+    // linear verification sequence; each early-return is a distinct reject reason, best read in place.
+    #[allow(clippy::too_many_lines)]
     async fn grease_install(
         &mut self,
         name: &str,
@@ -287,6 +293,9 @@ impl Session {
     /// persist it, register the server into `McpState` (so its tools become `<server> <tool>`
     /// commands), materialize any prompts as standalone prompt packages, materialize static resources,
     /// and write the marker. Reuses the existing `mcp_install` machinery for tool registration.
+    // Live-surface enrichment (initialize + tools/prompts/resources/templates) then persist+register
+    // is one cohesive sequence; `integrity` is threaded whole for the marker + summary it builds.
+    #[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
     async fn grease_finish_install_mcp(
         &mut self,
         name: &str,
@@ -477,6 +486,8 @@ impl Session {
     /// declared `kind`. `sha256` is the (already-computed) digest of `body`; `verified` marks whether
     /// it matched the registry's advertised hash; `signature_verified`/`signer` record the ed25519
     /// signing status resolved in `grease_install`.
+    // `integrity` is consumed whole to build both the on-disk marker and the summary line.
+    #[allow(clippy::needless_pass_by_value)]
     fn grease_finish_install(
         &mut self,
         name: &str,
@@ -572,6 +583,8 @@ impl Session {
 
     /// Parse a fetched payload for `kind` into a [`crate::grease::state::Payload`], verifying the
     /// package's own name matches the requested `name`. Returns an error string on parse/name mismatch.
+    // A method for call-site symmetry with the other grease install helpers on `Session`.
+    #[allow(clippy::unused_self)]
     fn parse_and_check_payload(
         &self,
         name: &str,
@@ -618,6 +631,8 @@ impl Session {
     }
 
     /// Persist a typed payload to `<store>/<name>/<kind>.json`.
+    // A method for call-site symmetry with the other grease install helpers on `Session`.
+    #[allow(clippy::unused_self)]
     fn persist_package(
         &self,
         name: &str,
@@ -814,6 +829,8 @@ impl Session {
     /// `grease registry add <url> [--key <base64-ed25519-pubkey>]`: record a registry URL and, if
     /// given, its trusted signing key. The key is validated (must decode to a 32-byte ed25519 key)
     /// before it's stored, so a typo is caught at `add` time, not at install time.
+    // A method for call-site symmetry with the other `grease_*` dispatch handlers on `Session`.
+    #[allow(clippy::unused_self)]
     fn grease_registry_add(&self, url: &str, key: Option<&str>) -> LineResult {
         if !(url.starts_with("https://") || url.starts_with("http://")) {
             return LineResult::from_outcome(
@@ -848,6 +865,8 @@ impl Session {
     }
 
     /// `grease registry list`: the configured registry URLs.
+    // A method for call-site symmetry with the other `grease_*` dispatch handlers on `Session`.
+    #[allow(clippy::unused_self)]
     fn grease_registry_list(&self) -> LineResult {
         let urls = crate::grease::config::list_registries();
         if urls.is_empty() {
@@ -857,6 +876,8 @@ impl Session {
     }
 
     /// `grease registry remove <url>`: drop a registry URL.
+    // A method for call-site symmetry with the other `grease_*` dispatch handlers on `Session`.
+    #[allow(clippy::unused_self)]
     fn grease_registry_remove(&self, url: &str) -> LineResult {
         match crate::grease::config::remove_registry(url) {
             Ok(true) => LineResult::continue_with_stdout(format!("removed registry {url}\n").into_bytes()),

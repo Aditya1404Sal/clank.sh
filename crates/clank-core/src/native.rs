@@ -7,6 +7,11 @@ use crate::{trim_eol, Flow, PROMPT};
 use std::io::{self, Write};
 
 /// Run the interactive read/eval/print loop until `exit` or end-of-input.
+///
+/// # Errors
+///
+/// Returns an error if the [`Session`] fails to initialize, or if reading a line from stdin or
+/// writing to stdout fails.
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut session = Session::new().await?;
     inject_native_providers(&mut session);
@@ -37,6 +42,7 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         // typed the way every shell user expects. Ctrl-D mid-construct discards the construct, not
         // the shell. The cap is a backstop against a pathological feed; overflowing it falls
         // through to eval, where the Session's incomplete-input check answers exit 2 honestly.
+        #[allow(clippy::items_after_statements)] // the cap lives beside its explanatory comment
         const MAX_CONTINUATION_LINES: usize = 512;
         let mut continuations = 0usize;
         let mut aborted = false;

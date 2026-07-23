@@ -13,13 +13,16 @@ use golem_rust::{agent_definition, agent_implementation};
 /// the method arg — an unambiguous proof the wRPC call reached this agent with both.
 #[agent_definition]
 pub trait GreeterAgent {
+    /// Construct a greeter bound to `name` — the durable agent identity echoed back in every greeting.
     fn new(name: String) -> Self;
 
     /// Greet `who`, naming the greeter instance — a deterministic, self-identifying reply.
     async fn greet(&mut self, who: String) -> String;
 }
 
+/// The concrete `GreeterAgent`: a single `name` field carrying the identity set at construction.
 pub struct GreeterAgentImpl {
+    /// The greeter's identity, set once at construction and echoed in each greeting.
     name: String,
 }
 

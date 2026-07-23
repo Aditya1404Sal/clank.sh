@@ -12,24 +12,31 @@ use std::path::{Path, PathBuf};
 /// One parsed scenario file: an ordered list of steps sharing a single shell session.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Scenario {
+    /// The scenario's stem (also the golem agent id and sandbox suffix).
     pub name: String,
+    /// Path to the source `.clank` file, for failure reports.
     pub path: PathBuf,
     /// `@only native` / `@only golem` — restrict the scenario to one backend.
     pub only: Option<BackendKind>,
     /// `@requires <tier>` tags (network/llm/grease/mcp). Parsed now; scenarios carrying
     /// any tag are reported `ignored` until the gated tiers are wired up.
     pub requires: Vec<String>,
+    /// The ordered steps, executed in sequence against one shell session.
     pub steps: Vec<Step>,
 }
 
+/// A single scenario step: one action plus its expectations.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Step {
     /// 1-based line number of the step's action line, for failure reports.
     pub line: usize,
+    /// The action to perform (run/answer/abort).
     pub action: Action,
+    /// What the step asserts about the resulting outcome.
     pub expect: Expect,
 }
 
+/// A single step's action.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     /// `run <line>` (+ `+ <line>` continuations) → one `eval` invocation.
@@ -44,8 +51,11 @@ pub enum Action {
 /// exit 0, no pending prompt — every deviation must be stated in the file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Expect {
+    /// The expectation over the standard-output stream.
     pub stdout: StreamExpect,
+    /// The expectation over the standard-error stream.
     pub stderr: StreamExpect,
+    /// The expected exit status.
     pub exit: ExitExpect,
     /// `prompt~ <substr>` — the outcome must carry a pending prompt whose question
     /// contains the substring. `None` asserts NO pending prompt (the default), which is
@@ -76,14 +86,20 @@ impl Default for Expect {
 /// - none of the above — the stream must be exactly empty.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct StreamExpect {
+    /// Exact lines the stream must equal (joined with `\n` plus a trailing `\n`).
     pub exact: Option<Vec<String>>,
+    /// Substrings that must each appear somewhere in the stream.
     pub contains: Vec<String>,
+    /// When set, the stream is unasserted (`out*`).
     pub any: bool,
 }
 
+/// The expected exit status of a step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExitExpect {
+    /// The exit code must equal this value.
     Code(u8),
+    /// Any exit code is accepted (`exit any`).
     Any,
 }
 
@@ -91,8 +107,11 @@ pub enum ExitExpect {
 /// trials (never silent skips), so the message must stand alone.
 #[derive(Debug)]
 pub struct ParseError {
+    /// Path to the file that failed to parse.
     pub path: PathBuf,
+    /// 1-based line number of the offending line.
     pub line: usize,
+    /// Human-readable description of the parse failure.
     pub msg: String,
 }
 
@@ -162,6 +181,14 @@ fn split_keyword(line: &str) -> (&str, Option<&str>) {
     }
 }
 
+/// Parse `.clank` scenario `text` into a [`Scenario`].
+///
+/// # Errors
+/// Returns [`ParseError`] on any grammar violation — a misplaced header directive, a
+/// keyword missing its payload, a duplicate `exit`/`prompt~`/`choices`/`@only`, a
+/// contradictory `out*`/`out` combination, an unknown directive, or a file with no steps.
+// line-oriented grammar walk; splitting the match arms out would scatter the grammar
+#[allow(clippy::too_many_lines)]
 pub fn parse(name: &str, path: &Path, text: &str) -> Result<Scenario, ParseError> {
     let err = |line: usize, msg: String| ParseError {
         path: path.to_path_buf(),

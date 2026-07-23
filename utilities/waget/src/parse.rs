@@ -19,6 +19,8 @@ pub(crate) enum Output {
 
 /// A parsed `wget` invocation.
 #[derive(Clone, Debug, PartialEq)]
+// independent wget flag toggles, not a state enum
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct Request {
     pub url: String,
     pub output: Output,
@@ -47,10 +49,15 @@ pub(crate) struct Request {
 /// A `wget` argument parsing error.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ParseError {
+    /// No URL argument was given.
     MissingUrl,
+    /// A flag that requires a value was given none (holds the flag name).
     MissingValue(String),
+    /// An unrecognized option was encountered (holds the offending flag).
     UnknownFlag(String),
+    /// A numeric flag value (`-T`/`-t`/`--max-redirect`) failed to parse (holds the bad text).
     BadNumber(String),
+    /// A `--post-file` body could not be read (holds the error message).
     BadData(String),
 }
 

@@ -30,6 +30,8 @@ fn encode_args(args: &[(String, String)]) -> DataValue {
 
 /// Parse a `--phantom <uuid>` string into the WIT `uuid` (two u64 halves, `golem:core/types`).
 /// Best-effort: on a malformed UUID we return `None` (the canonical, non-phantom instance).
+// signature mirrors the caller's `phantom: Option<String>` field, borrowed as `&inv.phantom`
+#[allow(clippy::ref_option)]
 fn parse_phantom(phantom: &Option<String>) -> Option<golem_rust::golem_wasm::golem_core_1_5_x::types::Uuid> {
     use golem_rust::golem_wasm::golem_core_1_5_x::types::Uuid;
     let s = phantom.as_ref()?;
@@ -116,6 +118,8 @@ impl AgentInvoker for WasmRpcInvoker {
 
 /// Parse an ISO-8601 / RFC-3339 timestamp (e.g. `2026-06-01T09:00:00Z`) to Unix epoch seconds. A small
 /// dependency-free parser (clank-agent has no chrono): handles `YYYY-MM-DDThh:mm:ss[Z]`, UTC only.
+// the only cast (`secs as u64`) is guarded by the `secs < 0` check immediately above it
+#[allow(clippy::cast_sign_loss)]
 fn parse_epoch_secs(s: &str) -> Result<u64, String> {
     let err = || format!("invalid --schedule time '{s}' (expected YYYY-MM-DDThh:mm:ssZ)");
     let s = s.trim().trim_end_matches('Z');
@@ -134,7 +138,7 @@ fn parse_epoch_secs(s: &str) -> Result<u64, String> {
     let yoe = y - era * 400;
     let doy = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146097 + doe - 719468;
+    let days = era * 146_097 + doe - 719_468;
     let secs = days * 86400 + hh * 3600 + mm * 60 + ss;
     if secs < 0 {
         return Err("scheduled time is before the epoch".to_string());

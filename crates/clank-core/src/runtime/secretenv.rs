@@ -115,6 +115,9 @@ pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// empty [`install`] returns (it wrote nothing, so it restores nothing); `Some(prev)` for a real
 /// install that must put `prev` back.
 pub struct InstallGuard {
+    // Both Option levels are load-bearing: the outer None marks the no-op guard an empty install
+    // returns (restore nothing), while Some(prev) carries the slot's prior Option value to put back.
+    #[allow(clippy::option_option)]
     previous: Option<Option<SecretSet>>,
 }
 

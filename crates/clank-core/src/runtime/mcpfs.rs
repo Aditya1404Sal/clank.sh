@@ -74,7 +74,12 @@ pub enum McpPathKind {
     /// A directory (the root, a server dir, or an intermediate dir) — its listed children.
     Directory(Vec<String>),
     /// A dynamic resource file: its `(server, uri)` — the caller fetches it live.
-    Dynamic { server: String, uri: String },
+    Dynamic {
+        /// The MCP server name (the `/mnt/mcp/<server>/` segment).
+        server: String,
+        /// The MCP resource URI to fetch via `resources/read`.
+        uri: String,
+    },
     /// A static resource file: it's a real file on disk (the caller delegates to uutils).
     Static,
     /// A resource-template stub — an executable, not a readable file (README:774).

@@ -120,6 +120,8 @@ fn build_trials(kind: BackendKind, golem_enabled: bool) -> Vec<Trial> {
     trials
 }
 
+// scenario is owned by the trial closure and consumed here — the terminal consumer; by-ref would just push the move elsewhere
+#[allow(clippy::needless_pass_by_value)]
 fn run_scenario(kind: BackendKind, scenario: Scenario) -> Result<(), Failed> {
     let infra = |line: usize, e: anyhow::Error| {
         Failed::from(format!(

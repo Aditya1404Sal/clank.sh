@@ -2,7 +2,9 @@
 //! `context summarize`/auto-compaction summarization, and model resolution. A few core helpers
 //! (`shell_home`, `resolve_authz`, `mcp_help_for`) ride along here and are re-exported to `super`.
 
-use super::{Session, LineResult, AskLoopState, authz, Decision, ask_reconstruct, Transcript, ReplState, ShellBuilderExt, DEFAULT_HOME, ASK_MAX_ITERATIONS, ToolStep, AskPause, AskPauseKind, PendingPrompt, PendingKind, Resolution, truncate_tool_output};
+use std::fmt::Write as _;
+
+use super::{Session, LineResult, AskLoopState, authz, Decision, ask_reconstruct, Transcript, ReplState, DEFAULT_HOME, ASK_MAX_ITERATIONS, ToolStep, AskPause, AskPauseKind, PendingPrompt, PendingKind, Resolution, truncate_tool_output};
 
 /// Read-only Brush builtins the model may call as tools even though clank keeps no manifest for them.
 /// They don't mutate parent-shell state, so the model-tool scope gate allows them explicitly rather
@@ -183,6 +185,13 @@ impl Session {
     /// `--fresh`, a copy of the parent for `--inherit`), and stash it on `self.repl`. Returns the
     /// resolved model id for the prompt banner, or an `Err` message (unknown provider / no provider).
     /// Native-only — the durable agent returns an honest message from `eval_line` instead.
+    ///
+    /// # Errors
+    /// Returns `Err` when no provider is configured, or when the resolved model carries an unknown
+    /// `provider/` prefix (surfaced by [`Self::resolve_ask_model`]).
+    ///
+    /// # Panics
+    /// Panics if the transcript mutex is poisoned (a thread panicked while holding it).
     pub fn repl_start(&mut self, args: &crate::ai::ask::ReplArgs) -> Result<String, String> {
         if self.ask_provider.is_none() {
             return Err("ask repl: no model provider configured\n".to_string());
@@ -207,9 +216,7 @@ impl Session {
     /// isn't a meta-command (the caller then treats it as a prompt via [`Self::repl_turn`]).
     pub fn repl_meta(&mut self, line: &str) -> Option<(String, bool)> {
         let line = line.trim();
-        let Some(repl) = self.repl.as_mut() else {
-            return None;
-        };
+        let repl = self.repl.as_mut()?;
         let mut words = line.split_whitespace();
         match words.next()? {
             ":exit" | ":quit" => Some((String::new(), true)),
@@ -351,7 +358,7 @@ impl Session {
         if dropped_text.trim().is_empty() {
             return;
         }
-        let model = if let Ok((model, _warning)) = self.resolve_ask_model(None) { model } else {
+        let Ok((model, _warning)) = self.resolve_ask_model(None) else {
             // No model to summarize with (no provider / no key / bad model id). Discard the
             // pending text so a durable agent doesn't hold it forever; keep the count marker.
             // See audit P1-3.
@@ -484,9 +491,8 @@ impl Session {
     /// Generated help for an MCP tool line ending in `--help` (or a bare `<server>`): the server's
     /// tool list. `None` if the line isn't an installed-server line or doesn't request help.
     pub(super) fn mcp_help_for(&self, line: &str) -> Option<String> {
-        let inv = match crate::mcp::cmd::parse_tool_invocation(line)? {
-            Ok(inv) => inv,
-            Err(_) => return None,
+        let Ok(inv) = crate::mcp::cmd::parse_tool_invocation(line)? else {
+            return None;
         };
         if !self.mcp.is_server(&inv.server) {
             return None;
@@ -507,6 +513,9 @@ impl Session {
     /// The provider is `take()`n and restored before every return. On a pause, the whole `state` is
     /// stashed in `PendingKind::AgentLoop` and a `pending_prompt` is returned; `answer_prompt` calls
     /// back into this helper to continue.
+    // The agentic turn loop is one cohesive state machine (turn budget, tool batch, pause/restore);
+    // splitting it would scatter the provider take/restore invariant across helpers.
+    #[allow(clippy::too_many_lines)]
     async fn drive_ask_loop(
         &mut self,
         mut state: AskLoopState,
@@ -649,15 +658,14 @@ impl Session {
                     state.trace,
                     0,
                 );
-            } else {
-                let mut stderr = state.trace;
-                stderr.extend_from_slice(b"ask: --json: model did not return valid JSON\n");
-                stderr.extend_from_slice(final_text.as_bytes());
-                if !final_text.ends_with('\n') {
-                    stderr.push(b'\n');
-                }
-                return LineResult::from_outcome(Vec::new(), stderr, 6);
             }
+            let mut stderr = state.trace;
+            stderr.extend_from_slice(b"ask: --json: model did not return valid JSON\n");
+            stderr.extend_from_slice(final_text.as_bytes());
+            if !final_text.ends_with('\n') {
+                stderr.push(b'\n');
+            }
+            return LineResult::from_outcome(Vec::new(), stderr, 6);
         }
 
         LineResult::from_outcome(final_text.into_bytes(), state.trace, 0)
@@ -819,6 +827,9 @@ impl Session {
     /// [`authz`]: `Allow` executes, `Confirm` pauses. Approved lines run through `run_command` (full
     /// session surface — `curl`/`wget` work) with no proc row; a nonzero exit is a *successful* tool
     /// result carrying the code (the model must see failures).
+    // One linear guard gauntlet (parse → recursion → substitution → scope → authz); the mid-body
+    // `use ExecutionScope` sits with the segment loop it serves.
+    #[allow(clippy::too_many_lines, clippy::items_after_statements)]
     async fn execute_ask_tool(
         &mut self,
         call: &crate::ai::ask::AskToolCall,
@@ -896,7 +907,7 @@ impl Session {
                         other => other.to_string(),
                     };
                     let escaped = val.replace('\'', r"'\''");
-                    line.push_str(&format!(" --{k} '{escaped}'"));
+                    let _ = write!(line, " --{k} '{escaped}'");
                 }
             }
             line

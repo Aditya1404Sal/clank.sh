@@ -64,7 +64,10 @@ pub enum Decision {
     /// Surface a confirmation prompt; run the command only on approval. `sudo_grant` is true when
     /// this is a `sudo-only` gate (so "all" from a prior `confirm` does not auto-satisfy it, and the
     /// prompt copy frames it as a sudo request).
-    Confirm { sudo_grant: bool },
+    Confirm {
+        /// True for a `sudo-only` gate (which a prior "all" cannot satisfy); false for `confirm`.
+        sudo_grant: bool,
+    },
     /// Refuse outright (no prompt). Currently unused — every gate offers a confirmation — but kept
     /// for a future policy that denies without asking.
     Deny,

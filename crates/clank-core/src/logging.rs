@@ -28,6 +28,7 @@
 //! can assert on a temp dir.
 
 use std::cell::RefCell;
+use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -113,9 +114,13 @@ pub fn write_line(file: LogFile, line: &str) {
 /// The four log files. Each maps to a fixed filename under [`log_dir`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LogFile {
+    /// `shell.log` — per-command start/end/exit-code events and authorization pauses.
     Shell,
+    /// `http.log` — outbound HTTP (MCP, grease registry, curl/wget, `ask`), secrets redacted.
     Http,
+    /// `mcp.log` — MCP JSON-RPC tool invocations and their responses.
     Mcp,
+    /// `ops.log` — destructive operations (the `sudo-only` tier).
     Ops,
 }
 
@@ -159,12 +164,14 @@ pub struct Record {
 }
 
 impl Record {
+    /// A new, empty record tagged with the given event `kind` and no fields yet.
     #[must_use]
     pub fn new(kind: &'static str) -> Self {
         Self { kind, fields: Vec::new() }
     }
 
     /// Add a field. Empty values are skipped (keeps lines tight).
+    #[must_use]
     pub fn field(mut self, key: &str, value: impl AsRef<str>) -> Self {
         let value = value.as_ref();
         if !value.is_empty() {
@@ -356,7 +363,7 @@ mod tests {
         // Over the cap → drops whole leading lines, keeps a line-aligned tail under the cap.
         let mut s = String::new();
         for i in 0..100 {
-            s.push_str(&format!("line{i}\n"));
+            let _ = write!(s, "line{i}\n");
         }
         bound_tail(&mut s, 30);
         assert!(s.len() <= 30, "tail must be under the cap, got {}", s.len());

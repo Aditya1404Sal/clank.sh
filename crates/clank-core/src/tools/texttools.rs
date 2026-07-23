@@ -40,6 +40,7 @@ macro_rules! text_builtin {
                 }
             }
 
+            #[allow(clippy::cast_sign_loss)] // code is clamped to 0..=255 before the u8 cast
             fn execute<SE, I, S>(
                 context: ExecutionContext<'_, SE>,
                 args: I,
@@ -113,6 +114,7 @@ pub(crate) fn manifests() -> Vec<crate::manifest::Manifest> {
     ]
 }
 
+#[allow(clippy::similar_names)] // files/file, values/value, inputs/input are conventional
 fn run_jq(
     argv: &[String],
     stdin: &mut dyn std::io::Read,
@@ -220,6 +222,7 @@ fn run_jq(
 /// Parsed `grep` invocation. Flags may appear anywhere (GNU permutes); short flags cluster
 /// (`-in`); `--` ends flag parsing; `-e PATTERN` may repeat.
 #[derive(Default)]
+#[allow(clippy::struct_excessive_bools)] // one bool field per grep CLI flag
 struct GrepOpts {
     patterns: Vec<String>,
     files: Vec<String>,
@@ -237,6 +240,7 @@ struct GrepOpts {
     filename: Option<bool>,
 }
 
+#[allow(clippy::similar_names)] // args/arg are conventional
 fn parse_grep_args(args: &[String]) -> ToolResult<GrepOpts> {
     let mut o = GrepOpts::default();
     let mut positional: Vec<String> = Vec::new();
@@ -364,6 +368,7 @@ fn collect_files_recursive(root: &str, acc: &mut Vec<String>, errs: &mut Vec<Str
     }
 }
 
+#[allow(clippy::too_many_lines, clippy::similar_names)] // single search-dispatch fn; matched/matcher, files/file, roots/root conventional
 fn run_grep(
     argv: &[String],
     stdin: &mut dyn std::io::Read,
@@ -495,6 +500,7 @@ fn run_grep(
     } else { i32::from(!matched) })
 }
 
+#[allow(clippy::similar_names)] // scripts/script, files/file are conventional
 fn run_sed(
     argv: &[String],
     stdin: &mut dyn std::io::Read,

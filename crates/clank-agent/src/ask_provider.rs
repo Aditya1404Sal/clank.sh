@@ -86,7 +86,7 @@ impl AskProvider for DurableAnthropicProvider {
                     .iter()
                     .filter_map(|part| match part {
                         ContentPart::Text(t) => Some(t.as_str()),
-                        _ => None,
+                        ContentPart::Image(_) => None,
                     })
                     .collect::<Vec<_>>()
                     .join("\n");

@@ -44,9 +44,12 @@ pub struct McpServerConfig {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct StoredTool {
+    /// The tool's name.
     pub name: String,
+    /// The tool's human-readable description (empty if the server gave none).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
+    /// The tool's JSON `inputSchema`, stored as a JSON string.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub input_schema: String,
 }
@@ -116,22 +119,33 @@ pub fn is_valid_name(name: &str) -> bool {
 }
 
 /// Write a server config (creating `/etc/mcp/` as needed).
+///
+/// # Errors
+/// Returns `Err` if the config directory can't be created, the config fails to serialize, or writing
+/// the file fails.
 pub fn save(name: &str, config: &McpServerConfig) -> Result<(), String> {
     let dir = etc_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {dir:?}: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let text = toml::to_string_pretty(config).map_err(|e| format!("serialize error: {e}"))?;
     std::fs::write(config_path(name), text).map_err(|e| format!("write error: {e}"))
 }
 
 /// Remove a server's config file (and, if present, its generated `/usr/lib/mcp/bin` stub).
+///
+/// # Errors
+/// Returns `Err` if the config file can't be removed (e.g. it does not exist); removing the bin stub
+/// is best-effort and never fails the call.
 pub fn remove(name: &str) -> Result<(), String> {
     let path = config_path(name);
-    std::fs::remove_file(&path).map_err(|e| format!("cannot remove {path:?}: {e}"))?;
+    std::fs::remove_file(&path).map_err(|e| format!("cannot remove {}: {e}", path.display()))?;
     let _ = std::fs::remove_file(bin_dir().join(name));
     Ok(())
 }
 
 /// Load one server config by name. `Ok(None)` if the file doesn't exist.
+///
+/// # Errors
+/// Returns `Err` if the file exists but can't be read, or if its contents fail to parse as TOML.
 pub fn load(name: &str) -> Result<Option<McpServerConfig>, String> {
     match std::fs::read_to_string(config_path(name)) {
         Ok(text) => toml::from_str(&text)
@@ -162,9 +176,12 @@ pub fn list_names() -> Vec<String> {
 
 /// Write the generated `/usr/lib/mcp/bin/<name>` stub file (help text + a managed-by header). This is
 /// a real file so `which`/`ls`/`cat`/`type` see it with no new virtual-fs code.
+///
+/// # Errors
+/// Returns `Err` if the bin directory can't be created or writing the stub file fails.
 pub fn write_bin_stub(name: &str, help: &str) -> Result<(), String> {
     let dir = bin_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {dir:?}: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let content = format!(
         "# clank MCP command (server: {name}, managed by `mcp`; runs at the session layer)\n{help}"
     );

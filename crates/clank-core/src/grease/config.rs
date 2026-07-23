@@ -33,6 +33,7 @@ pub const DEFAULT_AGENT_BIN: &str = "/usr/lib/agents/bin";
 /// The registry list — configured registry URLs `grease install`/`search` fetch from, in order.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Registries {
+    /// The configured registries, in fetch order.
     #[serde(default)]
     pub registry: Vec<RegistryEntry>,
 }
@@ -40,6 +41,7 @@ pub struct Registries {
 /// One configured registry.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegistryEntry {
+    /// The registry's base URL.
     pub url: String,
     /// The registry's trusted ed25519 public key (base64), if configured via `grease registry add
     /// --key`. When present, `grease install` verifies each package's detached signature against it;
@@ -118,6 +120,9 @@ pub fn is_valid_name(name: &str) -> bool {
 }
 
 /// Load the registry list. `Ok(default)` (empty) if the file doesn't exist.
+///
+/// # Errors
+/// Returns `Err` if `registries.toml` exists but can't be read, or fails to parse as TOML.
 pub fn load_registries() -> Result<Registries, String> {
     match std::fs::read_to_string(registries_path()) {
         Ok(text) => toml::from_str(&text).map_err(|e| format!("registries.toml parse error: {e}")),
@@ -129,7 +134,7 @@ pub fn load_registries() -> Result<Registries, String> {
 /// Persist the registry list (creating `/etc/grease/` as needed).
 fn save_registries(regs: &Registries) -> Result<(), String> {
     let dir = etc_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {dir:?}: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let text = toml::to_string_pretty(regs).map_err(|e| format!("serialize error: {e}"))?;
     std::fs::write(registries_path(), text).map_err(|e| format!("write error: {e}"))
 }
@@ -137,6 +142,9 @@ fn save_registries(regs: &Registries) -> Result<(), String> {
 /// Add a registry URL with an optional trusted signing key (base64 ed25519 public key). Idempotent on
 /// the URL, but re-adding a known URL WITH a `key` updates its key (so `grease registry add <url>
 /// --key <k>` can attach a key to an existing entry). Returns whether the list changed.
+///
+/// # Errors
+/// Returns `Err` if the existing list can't be loaded, or the updated list can't be persisted.
 pub fn add_registry(url: &str, key: Option<&str>) -> Result<bool, String> {
     let mut regs = load_registries()?;
     if let Some(existing) = regs.registry.iter_mut().find(|r| r.url == url) {
@@ -161,6 +169,9 @@ pub fn registry_key(url: &str) -> Option<String> {
 }
 
 /// Remove a registry URL. Returns whether it was present.
+///
+/// # Errors
+/// Returns `Err` if the existing list can't be loaded, or the updated list can't be persisted.
 pub fn remove_registry(url: &str) -> Result<bool, String> {
     let mut regs = load_registries()?;
     let before = regs.registry.len();
@@ -184,8 +195,11 @@ pub fn list_registries() -> Vec<String> {
 /// `which`/`ls`/`cat`/`type` see it with no virtual-fs code — but it is NEVER executed (wasip2 has no
 /// process spawn); the command runs via Session interception. `label` names the kind in the header
 /// (`prompt`/`script`). Mirrors [`crate::mcp::config::write_bin_stub`].
+///
+/// # Errors
+/// Returns `Err` if `dir` can't be created or the stub file can't be written.
 pub fn write_bin_stub(dir: &Path, name: &str, help: &str, label: &str) -> Result<(), String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {dir:?}: {e}"))?;
+    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let content = format!(
         "# clank {label} (package: {name}, managed by `grease`; runs at the session layer)\n{help}"
     );
@@ -197,9 +211,13 @@ pub fn write_bin_stub(dir: &Path, name: &str, help: &str, label: &str) -> Result
 /// `$PATH`). Best-effort; the durable payload is already persisted in the store. Any document `path`
 /// that escapes the skill dir (`..` / absolute) is skipped (defense-in-depth against a hostile
 /// registry).
+///
+/// # Errors
+/// Returns `Err` if the skill's root directory can't be created; document/script writes past that
+/// point are best-effort and don't fail the call.
 pub fn materialize_skill(sk: &crate::grease::pkg::SkillPackage) -> Result<(), String> {
     let root = skills_dir().join(&sk.name);
-    std::fs::create_dir_all(&root).map_err(|e| format!("cannot create {root:?}: {e}"))?;
+    std::fs::create_dir_all(&root).map_err(|e| format!("cannot create {}: {e}", root.display()))?;
     for doc in &sk.documents {
         let Some(dest) = safe_join(&root, &doc.path) else {
             continue; // path escapes the skill dir — skip

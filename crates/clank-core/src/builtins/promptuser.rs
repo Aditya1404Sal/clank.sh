@@ -42,8 +42,11 @@ fn leading_word(line: &str) -> Option<String> {
 /// A parsed `prompt-user` invocation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PromptUserArgs {
+    /// The prompt text presented to the human.
     pub question: String,
+    /// The allowed answers (`--choices`/`--confirm`), or `None` for a free-form response.
     pub choices: Option<Vec<String>>,
+    /// Whether the response is sensitive (`--secret`) and must be redacted from renders.
     pub secret: bool,
 }
 
@@ -72,6 +75,12 @@ impl std::fmt::Display for ParseError {
 /// arguments. Accepts `--choices <a,b,...>`, `--confirm` (shorthand for `--choices yes,no`), and
 /// `--secret`. Exactly one non-flag word is the question; a second non-flag word is an error to
 /// avoid silently swallowing a mistyped flag as a second question.
+///
+/// # Errors
+///
+/// Returns [`ParseError::MissingQuestion`] if no question word was given,
+/// [`ParseError::MissingValue`] if `--choices` had no value after it, and
+/// [`ParseError::UnknownFlag`] for an unrecognized flag or a second non-flag word.
 pub fn parse(line: &str) -> Result<PromptUserArgs, ParseError> {
     let tokens = tokenize_str(line).unwrap_or_default();
     let words: Vec<String> = tokens
@@ -121,8 +130,11 @@ pub fn parse(line: &str) -> Result<PromptUserArgs, ParseError> {
 /// persists across Golem invocations via the oplog) and returned to the caller in the eval result.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingPrompt {
+    /// The prompt text (with any piped stdin markdown already prepended).
     pub question: String,
+    /// The allowed answers, or `None` for a free-form response.
     pub choices: Option<Vec<String>>,
+    /// Whether the response is sensitive and must be redacted from renders.
     pub secret: bool,
 }
 
@@ -158,12 +170,20 @@ pub enum AnswerInput {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Resolution {
     /// A valid response: stdout bytes (the response + newline) and exit `0`.
-    Answered { stdout: Vec<u8>, secret: bool },
+    Answered {
+        /// The response bytes to emit (the canonical answer plus a trailing newline).
+        stdout: Vec<u8>,
+        /// Whether the response is sensitive and must be redacted from renders.
+        secret: bool,
+    },
     /// Aborted: no stdout, exit `130`.
     Aborted,
     /// The response wasn't one of the prompt's `--choices`: an error message for stderr, and the
     /// prompt stays pending (the caller re-asks). Exit `1`.
-    InvalidChoice { message: String },
+    InvalidChoice {
+        /// The stderr diagnostic explaining the answer wasn't one of the offered choices.
+        message: String,
+    },
 }
 
 /// Resolve a [`PendingPrompt`] against a delivered answer. A response is validated against the

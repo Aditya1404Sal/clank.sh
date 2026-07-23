@@ -18,6 +18,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 
 static NATIVE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
+/// A [`ShellBackend`] backed by an in-process [`Session`] over the real host filesystem.
 pub struct NativeBackend {
     // Field order is drop order: the Session (and its runtime) go before the guard.
     session: Session,
@@ -29,6 +30,11 @@ pub struct NativeBackend {
 }
 
 impl NativeBackend {
+    /// Construct a native backend: a fresh in-process [`Session`] and sandbox for one scenario.
+    ///
+    /// # Errors
+    /// Returns `Err` if the sandbox directory cannot be pre-cleaned or created, if its path is
+    /// not UTF-8, if the tokio runtime fails to build, or if `Session::new` fails.
     pub fn new(scenario: &str) -> anyhow::Result<Self> {
         let guard = NATIVE_LOCK
             .get_or_init(|| Mutex::new(()))

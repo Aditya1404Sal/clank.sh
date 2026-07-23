@@ -374,6 +374,8 @@ impl crate::mcp::client::McpHttp for FakeMcpHttp {
     }
 }
 
+// Taken by value so the many `mcp_json(serde_json::json!({...}))` call sites stay ergonomic.
+#[allow(clippy::needless_pass_by_value)]
 fn mcp_json(value: serde_json::Value) -> crate::mcp::client::HttpResponse {
     crate::mcp::client::HttpResponse {
         status: 200,
@@ -412,6 +414,8 @@ impl crate::mcp::client::McpHttp for FakeGreaseHttp {
 }
 
 /// A 200 JSON response (for `FakeGreaseHttp` routes).
+// Taken by value so the many `grease_json(serde_json::json!({...}))` call sites stay ergonomic.
+#[allow(clippy::needless_pass_by_value)]
 fn grease_json(value: serde_json::Value) -> crate::mcp::client::HttpResponse {
     crate::mcp::client::HttpResponse {
         status: 200,
@@ -445,6 +449,8 @@ impl Drop for GreaseDirsGuard {
         std::env::remove_var("CLANK_GREASE_AGENT_BIN");
     }
 }
+// `static COUNTER` sits with the per-call sequence number it backs, after the lock acquisition.
+#[allow(clippy::items_after_statements)]
 fn set_grease_dirs() -> GreaseDirsGuard {
     let lock = crate::grease::config::TEST_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -476,6 +482,8 @@ impl Drop for McpDirsGuard {
 
 /// A fresh temp `$CLANK_MCP_ETC/$CLANK_MCP_BIN` pair, exported for the duration of the returned
 /// guard (which serializes MCP tests via the shared lock and clears the vars on drop).
+// `static COUNTER` sits with the per-call sequence number it backs, after the lock acquisition.
+#[allow(clippy::items_after_statements)]
 fn set_mcp_dirs() -> McpDirsGuard {
     let lock = crate::mcp::config::TEST_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -567,6 +575,8 @@ impl crate::mcp::client::McpHttp for FakeMcpArtifactHttp {
 /// (initialize + tools/list + prompts/list + prompts/get + resources/list/read), registers the
 /// tools into `McpState` (so `<server> <tool>` works), materializes prompts as $PATH commands and
 /// static resources under /mnt/mcp, and caches the surface so a fresh Session rebuilds it offline.
+// `init` (the JSON-RPC initialize response) reads close to `inst` (the install result) — clear in context.
+#[allow(clippy::similar_names)]
 #[test]
 fn grease_install_an_mcp_server_registers_tools_prompts_resources() {
     on_rt(async {
@@ -648,6 +658,8 @@ fn grease_install_an_mcp_server_registers_tools_prompts_resources() {
 /// file) and one DYNAMIC resource (install read fails → served live). `ls /mnt/mcp/<server>/` lists
 /// both; a top-level `cat` of the dynamic resource fetches it live via resources/read; the same cat
 /// inside `$()` hits the honest Wall-C stub.
+// `init` (the JSON-RPC initialize response) reads close to `inst` (the install result) — clear in context.
+#[allow(clippy::similar_names)]
 #[test]
 fn mcp_resources_virtual_fs_static_and_dynamic() {
     on_rt(async {
@@ -719,6 +731,8 @@ fn mcp_resources_virtual_fs_static_and_dynamic() {
 /// (`resources/templates/list`) → a `<server>-<name>` executable; running it substitutes the arg
 /// into the URI template and reads the constructed resource. `mcp resource info` shows annotations;
 /// `ls /mnt/mcp/<server>` lists the template stub.
+// `init` (the JSON-RPC initialize response) reads close to `inst` (the install result) — clear in context.
+#[allow(clippy::similar_names)]
 #[test]
 fn mcp_templates_and_resource_info() {
     on_rt(async {

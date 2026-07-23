@@ -18,7 +18,9 @@ use brush_parser::{tokenize_str, unquote_str, Token};
 /// A parsed `export --secret NAME=VALUE` invocation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SecretExport {
+    /// The environment variable name being marked sensitive.
     pub name: String,
+    /// The secret value assigned to it (redacted everywhere the shell renders session state).
     pub value: String,
 }
 

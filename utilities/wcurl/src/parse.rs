@@ -10,6 +10,8 @@ use http::Method;
 
 /// A parsed `curl` invocation. (No `Eq`: the timeout fields are `f64`.)
 #[derive(Clone, Debug, PartialEq)]
+// Each bool is a distinct curl flag; folding them into an enum would obscure the 1:1 flag mapping.
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct Request {
     pub url: String,
     pub method: Method,
@@ -43,11 +45,17 @@ pub(crate) struct Request {
 /// A `curl` argument parsing error.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ParseError {
+    /// No URL was given on the command line.
     MissingUrl,
+    /// A flag that requires a value was given none; holds the flag.
     MissingValue(String),
+    /// An unrecognized flag; holds the offending token.
     UnknownFlag(String),
+    /// The `-X` value was not a valid HTTP method; holds the given value.
     BadMethod(String),
+    /// A timeout value did not parse as a number; holds the given value.
     BadNumber(String),
+    /// A `-d @file` payload could not be resolved; holds the explanatory message.
     BadData(String),
 }
 

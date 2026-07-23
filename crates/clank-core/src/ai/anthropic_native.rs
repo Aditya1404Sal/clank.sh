@@ -34,6 +34,7 @@ pub struct ReqwestAnthropicProvider {
 }
 
 impl ReqwestAnthropicProvider {
+    /// A new provider with a fresh `reqwest` client pointed at the real Anthropic Messages API.
     #[must_use]
     pub fn new() -> Self {
         let client = reqwest::Client::builder()

@@ -10,6 +10,8 @@
 //! servers are. Skills are the exception: they are **not commands** — they contribute a system-prompt
 //! listing (via [`Self::skills`]) but no manifest and no `ask` tool.
 
+use std::fmt::Write as _;
+
 use serde::{Deserialize, Serialize};
 
 use crate::grease::pkg::{
@@ -55,14 +57,20 @@ pub struct InstallMarker {
 /// The typed payload of an installed package, tagged by kind.
 #[derive(Clone, Debug)]
 pub enum Payload {
+    /// A prompt package payload.
     Prompt(PromptPackage),
+    /// A shell-script package payload.
     Script(ScriptPackage),
+    /// A skill package payload.
     Skill(SkillPackage),
+    /// An MCP-server package payload.
     Mcp(McpPackage),
+    /// A Golem-agent package payload.
     Agent(AgentPackage),
 }
 
 impl Payload {
+    /// The [`PackageKind`] this payload holds.
     #[must_use]
     pub fn kind(&self) -> PackageKind {
         match self {
@@ -74,6 +82,7 @@ impl Payload {
         }
     }
 
+    /// The package's name.
     #[must_use]
     pub fn name(&self) -> &str {
         match self {
@@ -85,6 +94,7 @@ impl Payload {
         }
     }
 
+    /// The package's one-line description.
     #[must_use]
     pub fn description(&self) -> &str {
         match self {
@@ -100,15 +110,19 @@ impl Payload {
 /// One installed package: its marker + the typed payload.
 #[derive(Clone, Debug)]
 pub struct InstalledPackage {
+    /// The on-disk install marker (kind + registry + integrity).
     pub marker: InstallMarker,
+    /// The typed package payload.
     pub payload: Payload,
 }
 
 impl InstalledPackage {
+    /// The package's name.
     #[must_use]
     pub fn name(&self) -> &str {
         self.payload.name()
     }
+    /// The package's [`PackageKind`].
     #[must_use]
     pub fn kind(&self) -> PackageKind {
         self.payload.kind()
@@ -175,11 +189,13 @@ impl GreaseState {
         self.version = self.version.wrapping_add(1);
     }
 
+    /// All installed packages, sorted by name.
     #[must_use]
     pub fn packages(&self) -> &[InstalledPackage] {
         &self.packages
     }
 
+    /// The installed package named `name`, if any.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&InstalledPackage> {
         self.packages.iter().find(|p| p.name() == name)
@@ -327,11 +343,11 @@ impl GreaseState {
             for r in &m.resources {
                 let mut e =
                     crate::runtime::mcpfs::ResourceEntry::plain(&m.name, &r.rel_path, &r.uri, r.is_static);
-                e.last_modified = r.last_modified.clone();
-                e.audience = r.audience.clone();
+                e.last_modified.clone_from(&r.last_modified);
+                e.audience.clone_from(&r.audience);
                 e.priority = r.priority;
                 e.size = r.size;
-                e.description = r.description.clone();
+                e.description.clone_from(&r.description);
                 out.push(e);
             }
             // Templates appear as stubs in `/mnt/mcp/<server>/` (README:774) — rel_path is the
@@ -339,7 +355,7 @@ impl GreaseState {
             for t in &m.templates {
                 let mut e = crate::runtime::mcpfs::ResourceEntry::plain(&m.name, &t.name, &t.uri_template, false);
                 e.is_template = true;
-                e.description = t.description.clone();
+                e.description.clone_from(&t.description);
                 out.push(e);
             }
         }
@@ -444,14 +460,17 @@ impl GreaseState {
         }
     }
 
+    // Kept as a method for symmetry with the other `pkg_help` describers.
+    #[allow(clippy::unused_self)]
     fn agent_help_text(&self, name: &str, a: &AgentPackage, marker: &InstallMarker) -> String {
         let mut out = format!("{name} — {} [agent]\n", a.description);
-        out.push_str(&format!("\nAgent type: {}\n", a.agent_type));
+        let _ = write!(out, "\nAgent type: {}\n", a.agent_type);
         if !a.constructor_params.is_empty() {
-            out.push_str(&format!(
+            let _ = write!(
+                out,
                 "\nConstructor flags (identify the instance): {}\n",
                 a.constructor_params.iter().map(|p| format!("--{p}")).collect::<Vec<_>>().join(" ")
-            ));
+            );
         }
         if a.methods.is_empty() {
             out.push_str("\nNo methods declared.\n");
@@ -463,19 +482,22 @@ impl GreaseState {
                 } else {
                     format!(" ({})", m.params.iter().map(|p| format!("--{p}")).collect::<Vec<_>>().join(" "))
                 };
-                out.push_str(&format!("  {} — {}{params}\n", m.name, m.description));
+                let _ = write!(out, "  {} — {}{params}\n", m.name, m.description);
             }
         }
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "\nUsage: {name} [--<ctor> val …] <method> [-- --<arg> val …]\n\
              Running `{name}` invokes the agent in the Golem cluster (confirms unless run with sudo; \
              requires a cluster). Installed by grease from {} [{}].\n",
             marker.registry,
             integrity_note(marker),
-        ));
+        );
         out
     }
 
+    // Kept as a method for symmetry with the other `pkg_help` describers.
+    #[allow(clippy::unused_self)]
     fn prompt_help_text(&self, name: &str, p: &PromptPackage, marker: &InstallMarker) -> String {
         let mut out = format!("{name} — {}\n", p.description);
         if p.arguments.is_empty() {
@@ -485,18 +507,21 @@ impl GreaseState {
             for a in &p.arguments {
                 let req = if a.required { " (required)" } else { "" };
                 let def = a.default.as_deref().map(|d| format!(" [default: {d}]")).unwrap_or_default();
-                out.push_str(&format!("  --{} — {}{req}{def}\n", a.name, a.description));
+                let _ = write!(out, "  --{} — {}{req}{def}\n", a.name, a.description);
             }
         }
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "\nRunning `{name}` sends the prompt to the AI model (outbound HTTP; confirms unless run \
              with sudo). Installed by grease from {} [{}].\n",
             marker.registry,
             integrity_note(marker),
-        ));
+        );
         out
     }
 
+    // Kept as a method for symmetry with the other `pkg_help` describers.
+    #[allow(clippy::unused_self)]
     fn script_help_text(&self, name: &str, s: &ScriptPackage, marker: &InstallMarker) -> String {
         let mut out = format!("{name} — {}\n", s.description);
         if s.arguments.is_empty() {
@@ -506,15 +531,16 @@ impl GreaseState {
             for a in &s.arguments {
                 let req = if a.required { " (required)" } else { "" };
                 let def = a.default.as_deref().map(|d| format!(" [default: {d}]")).unwrap_or_default();
-                out.push_str(&format!("  --{} — {}{req}{def}\n", a.name, a.description));
+                let _ = write!(out, "  --{} — {}{req}{def}\n", a.name, a.description);
             }
         }
-        out.push_str(&format!(
+        let _ = write!(
+            out,
             "\nRunning `{name}` executes local shell commands (confirms unless run with sudo). \
              Installed by grease from {} [{}].\n",
             marker.registry,
             integrity_note(marker),
-        ));
+        );
         out
     }
 }
@@ -542,7 +568,9 @@ fn integrity_note(marker: &InstallMarker) -> String {
     };
     if marker.log_verified {
         match marker.log_index {
-            Some(idx) => out.push_str(&format!(", in transparency log @{idx}")),
+            Some(idx) => {
+                let _ = write!(out, ", in transparency log @{idx}");
+            }
             None => out.push_str(", in transparency log"),
         }
     }

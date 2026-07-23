@@ -439,15 +439,14 @@ fn main() -> Result<()> {
     println!("  grease registry add http://localhost:{port} --key {pubkey}\n");
 
     loop {
-        let choice = match Select::new(
+        let Ok(choice) = Select::new(
             "add to the registry:",
             vec!["prompt", "script", "skill", "agent", "mcp", "list", "quit"],
         )
         .prompt()
-        {
-            Ok(c) => c,
+        else {
             // Esc / Ctrl-C at the menu = quit cleanly.
-            Err(_) => break,
+            break;
         };
         let result = match choice {
             "prompt" => author_prompt(&mut reg),

@@ -10,6 +10,7 @@
 //! a hardcoded honest subset — the README's `model list` over a single provider (anthropic) — stated
 //! as such in the help.
 
+use std::fmt::Write as _;
 use std::io::Write;
 
 use brush_core::builtins::{ContentOptions, ContentType, Registration, SimpleCommand};
@@ -130,9 +131,9 @@ fn list(home: &str) -> (String, String, u8) {
     let mut out = String::new();
     for id in CATALOG {
         let marker = if canonicalize(id) == default_id { "* " } else { "  " };
-        out.push_str(&format!("{marker}{id}\n"));
+        let _ = write!(out, "{marker}{id}\n");
     }
-    out.push_str(&format!("\ndefault: {default} (from {source})\n"));
+    let _ = write!(out, "\ndefault: {default} (from {source})\n");
     (out, warn.unwrap_or_default(), 0)
 }
 
@@ -155,6 +156,8 @@ fn set_default(home: &str, id: Option<&str>) -> (String, String, u8) {
     }
 }
 
+// `default` (the resolved model id) and `is_default` (a bool) read clearly despite the shared word.
+#[allow(clippy::similar_names)]
 fn info(home: &str, id: Option<&str>) -> (String, String, u8) {
     let (default, _source, warn) = resolved_default(home);
     let target = id.map_or_else(|| canonicalize(&default), canonicalize);
@@ -162,10 +165,10 @@ fn info(home: &str, id: Option<&str>) -> (String, String, u8) {
     let provider = target.split('/').next().unwrap_or(PROVIDER);
     let in_catalog = CATALOG.iter().any(|c| *c == target);
     let mut out = String::new();
-    out.push_str(&format!("id:        {target}\n"));
-    out.push_str(&format!("provider:  {provider}\n"));
-    out.push_str(&format!("in catalog: {}\n", if in_catalog { "yes" } else { "no (passed through)" }));
-    out.push_str(&format!("default:   {}\n", if is_default { "yes" } else { "no" }));
+    let _ = write!(out, "id:        {target}\n");
+    let _ = write!(out, "provider:  {provider}\n");
+    let _ = write!(out, "in catalog: {}\n", if in_catalog { "yes" } else { "no (passed through)" });
+    let _ = write!(out, "default:   {}\n", if is_default { "yes" } else { "no" });
     (out, warn.unwrap_or_default(), 0)
 }
 

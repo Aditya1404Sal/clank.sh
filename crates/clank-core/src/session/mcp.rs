@@ -1,6 +1,8 @@
 //! `Session` methods for MCP: the `mcp` management command, tool/resource/template dispatch,
 //! session management, and the `/mnt/mcp` dynamic-read + `mcp watch` paths.
 
+use std::fmt::Write as _;
+
 use super::{Session, LineResult, prompt_leading_word, fill_uri_template};
 
 impl Session {
@@ -38,16 +40,22 @@ impl Session {
         let mut out = String::new();
         for name in &names {
             match self.mcp.get(name) {
-                Some(s) if s.installed => out.push_str(&format!(
-                    "{name}  {}  enabled  {} tools\n",
-                    s.config.url,
-                    s.tools.len()
-                )),
-                Some(s) => out.push_str(&format!(
-                    "{name}  {}  not installed  ({})\n",
-                    s.config.url,
-                    s.last_error.as_deref().unwrap_or("unknown error")
-                )),
+                Some(s) if s.installed => {
+                    let _ = writeln!(
+                        out,
+                        "{name}  {}  enabled  {} tools",
+                        s.config.url,
+                        s.tools.len()
+                    );
+                }
+                Some(s) => {
+                    let _ = writeln!(
+                        out,
+                        "{name}  {}  not installed  ({})",
+                        s.config.url,
+                        s.last_error.as_deref().unwrap_or("unknown error")
+                    );
+                }
                 None => {
                     // Configured on disk but not yet loaded into this session.
                     let url = crate::mcp::config::load(name)
@@ -55,7 +63,7 @@ impl Session {
                         .flatten()
                         .map(|c| c.url)
                         .unwrap_or_default();
-                    out.push_str(&format!("{name}  {url}  not loaded (run `mcp reload {name}`)\n"));
+                    let _ = writeln!(out, "{name}  {url}  not loaded (run `mcp reload {name}`)");
                 }
             }
         }
@@ -68,11 +76,12 @@ impl Session {
             Some(s) if s.installed => {
                 let mut out = String::new();
                 for t in &s.tools {
-                    out.push_str(&format!(
-                        "{}  {}\n",
+                    let _ = writeln!(
+                        out,
+                        "{}  {}",
                         t.name,
                         t.description.as_deref().unwrap_or("")
-                    ));
+                    );
                 }
                 LineResult::continue_with_stdout(out.into_bytes())
             }
@@ -145,19 +154,19 @@ impl Session {
             let config = match crate::mcp::config::load(&n) {
                 Ok(Some(c)) => c,
                 Ok(None) => {
-                    out.push_str(&format!("mcp reload: no config for '{n}'\n"));
+                    let _ = writeln!(out, "mcp reload: no config for '{n}'");
                     any_err = true;
                     continue;
                 }
                 Err(e) => {
-                    out.push_str(&format!("mcp reload: {e}\n"));
+                    let _ = writeln!(out, "mcp reload: {e}");
                     any_err = true;
                     continue;
                 }
             };
             if !config.enabled {
                 self.mcp.remove(&n);
-                out.push_str(&format!("{n}: disabled (skipped)\n"));
+                let _ = writeln!(out, "{n}: disabled (skipped)");
                 continue;
             }
             let result = self.mcp_install(&n, config).await;
@@ -235,13 +244,14 @@ impl Session {
         }
         let mut out = String::new();
         for s in sessions {
-            out.push_str(&format!(
-                "{}  {}  {}  {}\n",
+            let _ = writeln!(
+                out,
+                "{}  {}  {}  {}",
                 s.local_id,
                 s.server,
                 s.server_session_id.as_deref().unwrap_or("-"),
                 s.protocol_version
-            ));
+            );
         }
         LineResult::continue_with_stdout(out.into_bytes())
     }
@@ -427,24 +437,24 @@ impl Session {
             );
         };
         let mut out = format!("uri: {}\n", res.uri);
-        out.push_str(&format!("kind: {}\n", if res.is_static { "static" } else { "dynamic" }));
+        let _ = writeln!(out, "kind: {}", if res.is_static { "static" } else { "dynamic" });
         if !res.description.is_empty() {
-            out.push_str(&format!("description: {}\n", res.description));
+            let _ = writeln!(out, "description: {}", res.description);
         }
         if let Some(m) = &res.mime_type {
-            out.push_str(&format!("mime-type: {m}\n"));
+            let _ = writeln!(out, "mime-type: {m}");
         }
         if let Some(s) = res.size {
-            out.push_str(&format!("size: {s}\n"));
+            let _ = writeln!(out, "size: {s}");
         }
         if let Some(lm) = &res.last_modified {
-            out.push_str(&format!("last-modified: {lm}\n"));
+            let _ = writeln!(out, "last-modified: {lm}");
         }
         if let Some(a) = &res.audience {
-            out.push_str(&format!("audience: {a}\n"));
+            let _ = writeln!(out, "audience: {a}");
         }
         if let Some(p) = res.priority {
-            out.push_str(&format!("priority: {p}\n"));
+            let _ = writeln!(out, "priority: {p}");
         }
         LineResult::continue_with_stdout(out.into_bytes())
     }
@@ -453,6 +463,8 @@ impl Session {
     /// push stream across serialized invocations, and the transport is one-shot request/response). We
     /// `resources/subscribe` then poll `resources/read` a fixed number of times, printing the content
     /// each time it changes. Honest about being polling, not push.
+    // `const POLLS` is kept beside the poll loop it bounds, at the point of use.
+    #[allow(clippy::items_after_statements)]
     async fn run_mcp_watch(&mut self, uri: &str) -> LineResult {
         // Resolve which installed server owns this URI (by scheme/prefix match against its resources).
         let server = self.grease.mcp_packages().iter().find_map(|m| {
@@ -495,14 +507,14 @@ impl Session {
             match client.read_resource(uri, session.as_deref()).await {
                 Ok(content) => {
                     if last.as_deref() == Some(content.as_str()) {
-                        out.push_str(&format!("[poll {}] (unchanged)\n", i + 1));
+                        let _ = writeln!(out, "[poll {}] (unchanged)", i + 1);
                     } else {
-                        out.push_str(&format!("[poll {}] {}\n", i + 1, content.trim_end()));
+                        let _ = writeln!(out, "[poll {}] {}", i + 1, content.trim_end());
                         last = Some(content);
                     }
                 }
                 Err(e) => {
-                    out.push_str(&format!("[poll {}] error: {}\n", i + 1, e.message));
+                    let _ = writeln!(out, "[poll {}] error: {}", i + 1, e.message);
                 }
             }
         }
@@ -524,9 +536,8 @@ impl Session {
     /// Positional args fill the template's `{param}` placeholders in order; `--param value` fills by
     /// name. The read awaits under the reactor (top-level only).
     pub(super) async fn run_mcp_template(&mut self, line: &str) -> LineResult {
-        let words = match crate::ai::ask::dequote_words(line) {
-            Some(w) => w,
-            None => return LineResult::from_outcome(Vec::new(), b"mcp template: parse error\n".to_vec(), 2),
+        let Some(words) = crate::ai::ask::dequote_words(line) else {
+            return LineResult::from_outcome(Vec::new(), b"mcp template: parse error\n".to_vec(), 2);
         };
         // Strip a leading sudo (the gate already resolved authz).
         let rest = if words.first().map(String::as_str) == Some("sudo") { &words[1..] } else { &words[..] };

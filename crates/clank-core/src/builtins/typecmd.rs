@@ -14,6 +14,8 @@
 //! intercepted — any Brush-known or mixed line defers wholesale to Brush (a documented scope cut;
 //! single-name lookups, the common case and what tool packaging uses, are fully correct).
 
+use std::fmt::Write as _;
+
 use brush_parser::{tokenize_str, unquote_str, Token};
 
 use crate::registry::CommandRegistry;
@@ -112,7 +114,7 @@ pub fn dispatch(line: &str, registry: &CommandRegistry) -> Option<(String, u8)> 
         if inv.type_only {
             out.push_str("builtin\n");
         } else {
-            out.push_str(&format!("{name} is a shell builtin\n"));
+            let _ = writeln!(out, "{name} is a shell builtin");
         }
     }
     Some((out, 0))

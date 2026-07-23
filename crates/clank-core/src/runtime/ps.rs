@@ -64,6 +64,8 @@ impl SimpleCommand for Ps {
         }
     }
 
+    // `args` (the raw iterator) and `argv` (the collected Vec) intentionally mirror each other.
+    #[allow(clippy::similar_names)]
     fn execute<SE, I, S>(context: ExecutionContext<'_, SE>, args: I) -> Result<ExecutionResult, Error>
     where
         SE: ShellExtensions,

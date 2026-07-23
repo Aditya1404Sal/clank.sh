@@ -109,6 +109,7 @@ fn est_tokens(byte_len: usize) -> usize {
 }
 
 impl Transcript {
+    /// A new, empty transcript with the default token budget.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -234,6 +235,7 @@ impl Transcript {
             // entries are compacted — an unbounded RAM leak that `clear()` doesn't reclaim. Keep the
             // most recent bytes (the text is later read via `from_utf8_lossy`, which tolerates a
             // mid-char cut). See audit P1-3.
+            #[allow(clippy::items_after_statements)] // the cap lives beside its explanatory comment
             const LAST_DROPPED_CAP: usize = 128 * 1024;
             if self.last_dropped.len() > LAST_DROPPED_CAP {
                 let cut = self.last_dropped.len() - LAST_DROPPED_CAP;

@@ -12,6 +12,8 @@
 //!
 //! Prompt and script arguments share the [`PackageArg`] shape and the `{{var}}` [`fill`] machinery.
 
+use std::fmt::Write as _;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -23,9 +25,12 @@ use crate::manifest::{ParamSpec, ParamType};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PackageKind {
+    /// A prompt package (its body is passed to `ask`); the default kind.
     #[default]
     Prompt,
+    /// A shell-script package (its body runs through the Brush engine).
     Script,
+    /// A skill package (capability context surfaced to the model; not a command).
     Skill,
     /// An MCP server's artifacts (tools/prompts/resources) — the server name becomes a command whose
     /// tools are subcommands (README:657).
@@ -65,11 +70,15 @@ impl PackageKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct PackageArg {
+    /// The argument name (the `--<name>` flag and the `{{name}}` placeholder).
     pub name: String,
+    /// One-line description (shown in `--help`).
     #[serde(default)]
     pub description: String,
+    /// Whether the argument must be supplied (a missing required arg is an error).
     #[serde(default)]
     pub required: bool,
+    /// The value substituted when the argument isn't provided; `None` ⇒ no default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
 }
@@ -156,6 +165,8 @@ fn unquote(s: &str) -> &str {
 
 /// Apply one `key: value` field to an argument being built. `required` parses as a bool (`true`/`false`,
 /// default false on anything else); unknown keys are ignored (forgiving).
+// Uniform fallible signature keeps the `?` call sites in `from_markdown` consistent.
+#[allow(clippy::unnecessary_wraps)]
 fn apply_arg_field(arg: &mut PackageArg, key: &str, value: String) -> Result<(), String> {
     match key {
         "name" => arg.name = value,
@@ -188,6 +199,9 @@ pub struct PromptPackage {
 
 impl PromptPackage {
     /// Parse a package from registry JSON.
+    ///
+    /// # Errors
+    /// Returns `Err` if `bytes` is not valid JSON matching the package shape.
     pub fn from_json(bytes: &[u8]) -> Result<Self, String> {
         serde_json::from_slice(bytes).map_err(|e| format!("invalid package JSON: {e}"))
     }
@@ -202,6 +216,10 @@ impl PromptPackage {
     /// set pure-Rust/wasm-clean), covering exactly the scalar keys and the `arguments` list shape
     /// [`PromptPackage`]/[`PackageArg`] need. Unknown frontmatter keys are ignored (forgiving, like the
     /// `#[serde(default)]` JSON path).
+    ///
+    /// # Errors
+    /// Returns `Err` if `bytes` isn't UTF-8, has no leading `---` frontmatter, contains a malformed
+    /// frontmatter line, or is missing the required `name` (or an argument's `name`).
     pub fn from_markdown(bytes: &[u8]) -> Result<Self, String> {
         let text = std::str::from_utf8(bytes).map_err(|_| "prompt .md is not valid UTF-8".to_string())?;
         let (frontmatter, body) = split_frontmatter(text)
@@ -307,6 +325,9 @@ impl PromptPackage {
     }
 
     /// Fill the body's `{{arg}}` placeholders (see [`fill_body`]).
+    ///
+    /// # Errors
+    /// Returns `Err` if a required argument is neither provided nor defaulted.
     pub fn fill(&self, provided: &[(String, String)]) -> Result<String, String> {
         fill_body(&self.body, &self.arguments, provided)
     }
@@ -329,21 +350,30 @@ pub struct ScriptPackage {
 }
 
 impl ScriptPackage {
+    /// Parse a script package from registry JSON.
+    ///
+    /// # Errors
+    /// Returns `Err` if `bytes` is not valid JSON matching the script-package shape.
     pub fn from_json(bytes: &[u8]) -> Result<Self, String> {
         serde_json::from_slice(bytes).map_err(|e| format!("invalid script package JSON: {e}"))
     }
 
+    /// Serialize the package to pretty JSON (for the store).
     #[must_use]
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).unwrap_or_default()
     }
 
+    /// The package's arguments rendered as manifest [`ParamSpec`]s.
     #[must_use]
     pub fn param_specs(&self) -> Vec<ParamSpec> {
         args_to_param_specs(&self.arguments)
     }
 
     /// Fill the shell source's `{{arg}}` placeholders (see [`fill_body`]).
+    ///
+    /// # Errors
+    /// Returns `Err` if a required argument is neither provided nor defaulted.
     pub fn fill(&self, provided: &[(String, String)]) -> Result<String, String> {
         fill_body(&self.body, &self.arguments, provided)
     }
@@ -391,10 +421,15 @@ pub struct SkillPackage {
 }
 
 impl SkillPackage {
+    /// Parse a skill package from registry JSON.
+    ///
+    /// # Errors
+    /// Returns `Err` if `bytes` is not valid JSON matching the skill-package shape.
     pub fn from_json(bytes: &[u8]) -> Result<Self, String> {
         serde_json::from_slice(bytes).map_err(|e| format!("invalid skill package JSON: {e}"))
     }
 
+    /// Serialize the package to pretty JSON (for the store).
     #[must_use]
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).unwrap_or_default()
@@ -407,10 +442,13 @@ impl SkillPackage {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct McpArtifacts {
+    /// Whether the server's tools are exposed (as subcommands).
     #[serde(default = "yes")]
     pub tools: bool,
+    /// Whether the server's prompts are exposed (as `$PATH` prompt commands).
     #[serde(default = "yes")]
     pub prompts: bool,
+    /// Whether the server's resources are exposed (under `/mnt/mcp/<server>/`).
     #[serde(default = "yes")]
     pub resources: bool,
 }
@@ -443,7 +481,9 @@ impl McpArtifacts {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct McpToolCache {
+    /// The tool name (the invocation subcommand).
     pub name: String,
+    /// One-line tool description.
     #[serde(default)]
     pub description: String,
     /// The tool's JSON-schema input (lossless), as a JSON string (kept as a string so the payload is
@@ -457,7 +497,9 @@ pub struct McpToolCache {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct McpPromptCache {
+    /// The prompt name (the `$PATH` command it's surfaced as).
     pub name: String,
+    /// One-line prompt description.
     #[serde(default)]
     pub description: String,
 }
@@ -471,8 +513,10 @@ pub struct McpResourceCache {
     pub uri: String,
     /// The relative path under `/mnt/mcp/<server>/` this resource is mounted at.
     pub rel_path: String,
+    /// One-line resource description.
     #[serde(default)]
     pub description: String,
+    /// The resource's advertised MIME type, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mime_type: Option<String>,
     /// `true` if the resource was materialized as a real static file at install; `false` if it is
@@ -502,6 +546,7 @@ pub struct McpTemplateCache {
     pub name: String,
     /// The RFC-6570 URI template (`{param}` placeholders become command args).
     pub uri_template: String,
+    /// One-line template description.
     #[serde(default)]
     pub description: String,
 }
@@ -514,6 +559,7 @@ pub struct McpTemplateCache {
 pub struct McpPackage {
     /// The kebab-case server/command name (the `/usr/lib/mcp/bin/<name>` command).
     pub name: String,
+    /// One-line server description (the manifest synopsis).
     #[serde(default)]
     pub description: String,
     /// The HTTPS MCP endpoint (README: HTTPS-only, no stdio).
@@ -542,10 +588,15 @@ pub struct McpPackage {
 }
 
 impl McpPackage {
+    /// Parse an MCP package from registry JSON.
+    ///
+    /// # Errors
+    /// Returns `Err` if `bytes` is not valid JSON matching the MCP-package shape.
     pub fn from_json(bytes: &[u8]) -> Result<Self, String> {
         serde_json::from_slice(bytes).map_err(|e| format!("invalid mcp package JSON: {e}"))
     }
 
+    /// Serialize the package to pretty JSON (for the store).
     #[must_use]
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).unwrap_or_default()
@@ -559,6 +610,7 @@ impl McpPackage {
 pub struct AgentMethod {
     /// The kebab-case method name (the invocation subcommand).
     pub name: String,
+    /// One-line method description.
     #[serde(default)]
     pub description: String,
     /// Declared parameter names (the `--<name> value` args this method accepts).
@@ -573,6 +625,7 @@ pub struct AgentMethod {
 pub struct AgentPackage {
     /// The kebab-case command name (the `/usr/lib/agents/bin/<name>` command).
     pub name: String,
+    /// One-line agent description (the manifest synopsis).
     #[serde(default)]
     pub description: String,
     /// The Golem agent **type** name to invoke (the reflected type; may differ from the command name).
@@ -590,10 +643,15 @@ pub struct AgentPackage {
 }
 
 impl AgentPackage {
+    /// Parse an agent package from registry JSON.
+    ///
+    /// # Errors
+    /// Returns `Err` if `bytes` is not valid JSON matching the agent-package shape.
     pub fn from_json(bytes: &[u8]) -> Result<Self, String> {
         serde_json::from_slice(bytes).map_err(|e| format!("invalid agent package JSON: {e}"))
     }
 
+    /// Serialize the package to pretty JSON (for the store).
     #[must_use]
     pub fn to_json(&self) -> String {
         serde_json::to_string_pretty(self).unwrap_or_default()
@@ -614,7 +672,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     let digest = hasher.finalize();
     let mut s = String::with_capacity(64);
     for b in digest {
-        s.push_str(&format!("{b:02x}"));
+        let _ = write!(s, "{b:02x}");
     }
     s
 }
@@ -624,6 +682,10 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 /// key the registry was configured with (`grease registry add --key`). Uses `verify_strict` (rejects
 /// weak/malleable keys). Returns `Ok(())` on a valid signature, `Err(reason)` otherwise — verify-only,
 /// so no RNG and clean on wasm32-wasip2. See [[clank-grease]].
+///
+/// # Errors
+/// Returns `Err` if the key or signature isn't valid base64 / the right length, the key isn't a valid
+/// ed25519 public key, or the signature doesn't verify over `body`.
 pub fn verify_signature(body: &[u8], sig_b64: &str, key_b64: &str) -> Result<(), String> {
     use base64::Engine;
     use ed25519_dalek::{Signature, VerifyingKey};
@@ -652,6 +714,9 @@ pub fn verify_signature(body: &[u8], sig_b64: &str, key_b64: &str) -> Result<(),
 
 /// Validate that `key_b64` decodes to a well-formed 32-byte ed25519 public key (so `grease registry
 /// add --key` rejects a typo at add time). Returns `Ok(())` if usable.
+///
+/// # Errors
+/// Returns `Err` if `key_b64` isn't valid base64, isn't 32 bytes, or isn't a valid ed25519 key.
 pub fn validate_public_key(key_b64: &str) -> Result<(), String> {
     use base64::Engine;
     use ed25519_dalek::VerifyingKey;
@@ -691,6 +756,10 @@ fn rfc6962_node_hash(left: &[u8], right: &[u8]) -> [u8; 32] {
 /// (verified alongside the ed25519 signature), not a public witnessed log — see [[clank-grease]].
 ///
 /// Algorithm: RFC 6962 §2.1.1. Returns `Ok(())` iff the recomputed root equals `root_hash`.
+///
+/// # Errors
+/// Returns `Err` if `leaf_index` is out of range, `root_hash` or a proof node isn't 32 bytes, the
+/// proof is the wrong length, or the recomputed root doesn't match `root_hash`.
 pub fn verify_inclusion_proof(
     leaf: &[u8],
     leaf_index: u64,
@@ -745,6 +814,9 @@ pub fn verify_inclusion_proof(
 /// Read the `kind` field of a raw registry payload without committing to a full parse (so
 /// `grease install` can route to the right typed parser). Defaults to `Prompt` when the payload
 /// carries no `kind` (a grease-v1 prompt payload).
+///
+/// # Errors
+/// Returns `Err` if `bytes` isn't valid JSON, or its `kind` field is an unknown package kind.
 pub fn payload_kind(bytes: &[u8]) -> Result<PackageKind, String> {
     let v: serde_json::Value =
         serde_json::from_slice(bytes).map_err(|e| format!("invalid package JSON: {e}"))?;
@@ -919,6 +991,8 @@ mod tests {
     }
 
     #[test]
+    // The `use base64::Engine;` sits beside its sole use inside the test body.
+    #[allow(clippy::items_after_statements)]
     fn verify_signature_rejects_tamper_and_bad_inputs() {
         // Wrong message → no verify.
         assert!(verify_signature(b"different", RFC8032_SIG, RFC8032_PUB).is_err());

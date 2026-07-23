@@ -20,11 +20,14 @@
 //! space-joins with a trailing newline — every other clank surface is newline-oriented and
 //! LLM-legibility is a first-class constraint. Documented deviation.
 
+use std::fmt::Write as _;
+
 use crate::runtime::proctable::{ProcRow, ProcessTable};
 
 /// Error resolving a `/proc` path — maps to a `cat`/`grep` "No such file or directory".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProcError {
+    /// The requested `/proc` path resolves to no served virtual file; carries the offending path.
     NotFound(String),
 }
 
@@ -53,6 +56,12 @@ pub fn is_proc_path(path: &str) -> bool {
 ///
 /// `table` supplies the process rows (including the synthetic root via [`ProcessTable::find`]);
 /// `environ` is the shell's current environment as `(key, value)` pairs (rendered sorted).
+///
+/// # Errors
+///
+/// Returns [`ProcError::NotFound`] when `path` isn't a served `/proc` file: the `/proc/` prefix or a
+/// path component is missing, the path nests too deep, `<pid>` fails to parse or matches no table
+/// row, or the requested file name isn't one this namespace serves.
 pub fn resolve(
     path: &str,
     table: &ProcessTable,
@@ -116,10 +125,10 @@ fn status(row: &ProcRow) -> String {
     // phantom UUID when present. (agent-revision and the await idempotency-key have no host field
     // here, matching the honest `--revision` stub, so they are not emitted rather than fabricated.)
     if let Some(meta) = &row.agent_meta {
-        out.push_str(&format!("AgentType:\t{}\n", meta.agent_type));
-        out.push_str(&format!("AgentParams:\t{}\n", meta.agent_params));
+        let _ = writeln!(out, "AgentType:\t{}", meta.agent_type);
+        let _ = writeln!(out, "AgentParams:\t{}", meta.agent_params);
         if let Some(uuid) = &meta.phantom_uuid {
-            out.push_str(&format!("PhantomUuid:\t{uuid}\n"));
+            let _ = writeln!(out, "PhantomUuid:\t{uuid}");
         }
     }
     out
@@ -131,7 +140,7 @@ fn environ_block(environ: &[(String, String)]) -> String {
     pairs.sort_by(|a, b| a.0.cmp(&b.0));
     let mut out = String::new();
     for (k, v) in pairs {
-        out.push_str(&format!("{k}={v}\n"));
+        let _ = writeln!(out, "{k}={v}");
     }
     out
 }

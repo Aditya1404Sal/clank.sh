@@ -20,6 +20,7 @@ use brush_builtins::{BuiltinSet, ShellBuilderExt};
 use brush_core::openfiles::{OpenFile, OpenFiles};
 use brush_core::{ExecutionControlFlow, Shell, SourceInfo};
 
+use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 
 use crate::authz::{self, AuthzState, Decision};
@@ -152,9 +153,13 @@ struct PendingInvocation {
 
 /// The result of evaluating one shell line.
 pub struct LineResult {
+    /// The line's captured standard output.
     pub stdout: Vec<u8>,
+    /// The line's captured standard error.
     pub stderr: Vec<u8>,
+    /// The line's exit status (`0` on success; see the README exit-code table).
     pub exit_code: u8,
+    /// Whether the shell should continue or exit after this line.
     pub flow: Flow,
     /// Set when this line surfaced a `prompt-user` question the shell is now awaiting a response
     /// to. The caller must collect a human answer and deliver it via [`Session::answer_prompt`]
@@ -295,6 +300,10 @@ pub struct Session {
 
 impl Session {
     /// Build a non-interactive shell with the full bash-compatible builtin set.
+    ///
+    /// # Errors
+    /// Returns `Err` if the Brush shell fails to build or its `$PATH`/`$HOME` seeding fails (and,
+    /// on wasm, if the current-thread tokio runtime cannot be constructed).
     pub async fn new() -> Result<Self, BoxError> {
         ensure_fs_layout();
         #[cfg(target_arch = "wasm32")]
@@ -488,6 +497,8 @@ impl Session {
     }
 
     /// Emit the shell.log terminal event for a finished (or paused) line.
+    // A method for call-site symmetry with `eval_line`; pairs with the per-`self` log-sink install.
+    #[allow(clippy::unused_self)]
     fn log_line_outcome(&self, line: &str, result: &LineResult) {
         if line.trim().is_empty() {
             return;
@@ -500,6 +511,9 @@ impl Session {
         rec.emit(crate::logging::LogFile::Shell);
     }
 
+    // The single per-line dispatch pipeline: pending-prompt guard, secret-env install, transcript
+    // record, then the ordered intercept ladder ending at the authz gate — one linear read.
+    #[allow(clippy::too_many_lines)]
     async fn eval_line_inner(&mut self, line: &str) -> LineResult {
         // A prompt is already outstanding: the caller must answer it (via `answer_prompt`), not run
         // a new command. The shell never blocks, so it's the caller's job to notice `pending_prompt`
@@ -1428,9 +1442,8 @@ impl Session {
             Ok(f) => f,
             Err(e) => return LineResult::stderr(format!("clank: {e}\n")),
         };
-        let (out_fd, err_fd) = match (stdout_capture.try_clone(), stderr_capture.try_clone()) {
-            (Ok(o), Ok(e)) => (o, e),
-            _ => return LineResult::stderr(b"clank: failed to set up output capture\n".to_vec()),
+        let (Ok(out_fd), Ok(err_fd)) = (stdout_capture.try_clone(), stderr_capture.try_clone()) else {
+            return LineResult::stderr(b"clank: failed to set up output capture\n".to_vec());
         };
 
         let mut params = self.shell.default_exec_params();
@@ -1955,7 +1968,7 @@ fn parse_agent_line(
         }
         // A bare word: the method (first).
         if method.is_empty() {
-            method = w.clone();
+            method.clone_from(w);
             i += 1;
             break;
         }
@@ -1994,14 +2007,14 @@ fn write_install_marker(name: &str, marker: &crate::grease::state::InstallMarker
 fn skill_info_text(sk: &crate::grease::pkg::SkillPackage) -> String {
     let mut out = format!("{} — {} [skill]\n", sk.name, sk.description);
     if let Some(use_) = &sk.intended_use {
-        out.push_str(&format!("\nIntended use: {use_}\n"));
+        let _ = writeln!(out, "\nIntended use: {use_}");
     }
     if !sk.documents.is_empty() {
         out.push_str("\nDocuments (under /usr/share/skills/");
         out.push_str(&sk.name);
         out.push_str("/):\n");
         for d in &sk.documents {
-            out.push_str(&format!("  {}\n", d.path));
+            let _ = writeln!(out, "  {}", d.path);
         }
     }
     if !sk.scripts.is_empty() {
@@ -2009,7 +2022,7 @@ fn skill_info_text(sk: &crate::grease::pkg::SkillPackage) -> String {
         out.push_str(&sk.name);
         out.push_str("/bin/):\n");
         for s in &sk.scripts {
-            out.push_str(&format!("  {}\n", s.name));
+            let _ = writeln!(out, "  {}", s.name);
         }
     }
     out.push_str(
@@ -2023,7 +2036,7 @@ fn skill_info_text(sk: &crate::grease::pkg::SkillPackage) -> String {
 /// tool/prompt listings.
 fn mcp_info_text(m: &crate::grease::pkg::McpPackage) -> String {
     let mut out = format!("{} — {} [mcp]\n", m.name, m.description);
-    out.push_str(&format!("\nServer: {}\n", m.url));
+    let _ = writeln!(out, "\nServer: {}", m.url);
     let mut kinds = Vec::new();
     if m.artifacts.tools {
         kinds.push("tools");
@@ -2034,17 +2047,17 @@ fn mcp_info_text(m: &crate::grease::pkg::McpPackage) -> String {
     if m.artifacts.resources {
         kinds.push("resources");
     }
-    out.push_str(&format!("Artifacts: {}\n", kinds.join(", ")));
+    let _ = writeln!(out, "Artifacts: {}", kinds.join(", "));
     if !m.tools.is_empty() {
-        out.push_str(&format!("\nTools (run as `{} <tool>`):\n", m.name));
+        let _ = writeln!(out, "\nTools (run as `{} <tool>`):", m.name);
         for t in &m.tools {
-            out.push_str(&format!("  {} — {}\n", t.name, t.description));
+            let _ = writeln!(out, "  {} — {}", t.name, t.description);
         }
     }
     if !m.prompts.is_empty() {
         out.push_str("\nPrompts (installed as $PATH commands):\n");
         for p in &m.prompts {
-            out.push_str(&format!("  {} — {}\n", p.name, p.description));
+            let _ = writeln!(out, "  {} — {}", p.name, p.description);
         }
     }
     out
@@ -2092,10 +2105,10 @@ fn ask_reconstruct(args: &crate::ai::ask::AskArgs) -> String {
         line.push_str(" --json");
     }
     if let Some(m) = &args.model {
-        line.push_str(&format!(" --model {m}"));
+        let _ = write!(line, " --model {m}");
     }
     let escaped = args.prompt.replace('\'', r"'\''");
-    line.push_str(&format!(" '{escaped}'"));
+    let _ = write!(line, " '{escaped}'");
     line
 }
 
@@ -2140,7 +2153,6 @@ fn build_mcp_arguments(
             .and_then(|s| s.get("type"))
             .and_then(Value::as_str);
         let coerced = match (ty, value) {
-            (Some("boolean"), None) => Value::Bool(true),
             (Some("boolean"), Some(v)) => Value::Bool(v == "true" || v == "1" || v == "yes"),
             (Some("integer" | "number"), Some(v)) => v
                 .parse::<f64>()
@@ -2172,6 +2184,9 @@ fn build_mcp_arguments(
 /// The README's default `$PATH` — the resolution namespace clank's package layout installs into.
 /// Kept as the documented default and the drift-guard baseline; the value actually installed is
 /// [`effective_path`], which resolves the package dirs through their env-overridable config fns.
+// Referenced only by the drift-guard test (pins `effective_path()` == this with no overrides); kept
+// as the documented baseline, so it reads as dead outside `cfg(test)`.
+#[allow(dead_code)]
 const DEFAULT_PATH: &str =
     "/usr/local/bin:/usr/bin:/usr/lib/mcp/bin:/usr/lib/agents/bin:/usr/lib/prompts/bin:/usr/share/skills/*/bin";
 

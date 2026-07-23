@@ -90,6 +90,8 @@ impl Session {
     /// If `gated_command` is a `grease install <pkg>` line, build a capability-disclosure confirmation
     /// prompt naming the package, its source registries, and its `ask` capability. `None` otherwise
     /// (the caller falls back to the generic confirm text).
+    // Kept a method for call-site symmetry with the other `surface_*`/disclosure helpers on `Session`.
+    #[allow(clippy::unused_self)]
     fn grease_install_disclosure(&self, gated_command: &str, sudo_grant: bool) -> Option<String> {
         let cmd = crate::grease::cmd::classify(gated_command)?.ok()?;
         let crate::grease::cmd::GreaseCommand::Install { name, .. } = cmd else {

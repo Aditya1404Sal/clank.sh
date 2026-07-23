@@ -110,6 +110,9 @@ impl ClankAgentImpl {
                     s.set_golem_cluster(Box::new(crate::golem_cluster::GolemApiCluster));
                     // Install the replay-safe /var/log sink (whole-file rewrite of an in-memory buffer,
                     // so oplog replay never duplicates lines — see crate::log_sink).
+                    // single-threaded wasm agent (Golem serializes per-instance invocations); the
+                    // `set_log_sink` API takes an `Arc`, so Send/Sync is never actually exercised.
+                    #[allow(clippy::arc_with_non_send_sync)]
                     s.set_log_sink(std::sync::Arc::new(crate::log_sink::DurableLogSink::new()));
                     self.session = Some(s);
                 }

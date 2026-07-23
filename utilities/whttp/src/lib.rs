@@ -20,9 +20,13 @@ use std::time::Duration;
 /// A request to perform, including redirect and timeout policy.
 #[derive(Clone, Debug)]
 pub struct Request {
+    /// The HTTP method to perform.
     pub method: Method,
+    /// The absolute URL to request.
     pub url: String,
+    /// Request headers, as `(name, value)` pairs.
     pub headers: Vec<(String, String)>,
+    /// An optional request body.
     pub body: Option<Vec<u8>>,
     /// Follow 3xx `Location` responses (curl `-L`; wget follows by default).
     pub follow_redirects: bool,
@@ -54,8 +58,11 @@ impl Request {
 /// A completed HTTP response.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Response {
+    /// The HTTP status code.
     pub status: u16,
+    /// Response headers, as `(name, value)` pairs.
     pub headers: Vec<(String, String)>,
+    /// The response body bytes.
     pub body: Vec<u8>,
     /// The URL the response actually came from (differs from the request URL after redirects) —
     /// used for `-w`, `--content-disposition`, and wget's default filename.
@@ -97,6 +104,13 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// Perform `req`, following redirects per its policy. Returns the final [`Response`].
+///
+/// # Errors
+///
+/// Returns [`Error::Transport`] on any transport-level failure (connection, DNS, TLS, timeout, or an
+/// unreadable body), [`Error::TooManyRedirects`] when `follow_redirects` is set and the chain exceeds
+/// `max_redirects`, and [`Error::BadRedirect`] when a `Location` header cannot be resolved against the
+/// current URL.
 pub async fn fetch(req: &Request) -> Result<Response, Error> {
     let mut method = req.method.clone();
     let mut url = req.url.clone();
@@ -486,6 +500,7 @@ mod tests {
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod transport_tests {
     use super::*;
+    use std::fmt::Write as _;
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
@@ -509,7 +524,7 @@ mod transport_tests {
                 let mut head = format!("HTTP/1.1 {status} X\r\nContent-Length: {}\r\n", body.len());
                 for (k, v) in headers {
                     let v = v.replace("${BASE}", &base_for_thread);
-                    head.push_str(&format!("{k}: {v}\r\n"));
+                    let _ = write!(head, "{k}: {v}\r\n");
                 }
                 head.push_str("Connection: close\r\n\r\n");
                 let _ = stream.write_all(head.as_bytes());

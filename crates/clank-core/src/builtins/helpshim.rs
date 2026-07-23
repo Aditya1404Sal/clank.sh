@@ -29,6 +29,8 @@ impl<T: SimpleCommand> SimpleCommand for WithHelp<T> {
         T::get_content(name, content_type, options)
     }
 
+    // similar_names: `args`/`argv` are the conventional arg-iterator / arg-vector pair.
+    #[allow(clippy::similar_names)]
     fn execute<SE, I, S>(context: ExecutionContext<'_, SE>, args: I) -> Result<ExecutionResult, Error>
     where
         SE: ShellExtensions,
@@ -80,6 +82,8 @@ mod tests {
             }
         }
 
+        // similar_names: `args`/`argv` are the conventional arg-iterator / arg-vector pair.
+        #[allow(clippy::similar_names)]
         fn execute<SE, I, S>(
             context: ExecutionContext<'_, SE>,
             args: I,
