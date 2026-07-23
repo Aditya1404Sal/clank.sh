@@ -3,14 +3,14 @@
 How clank decides what a command (typed by a human, or emitted by the model inside `ask`) is allowed
 to do, and where that's implemented. Grounded in the code, not the README prose.
 
-Primary source: [`crates/clank-shell/src/authz.rs`](crates/clank-shell/src/authz.rs).
+Primary source: [`crates/clank-core/src/authz.rs`](crates/clank-core/src/authz.rs).
 
 ---
 
 ## The model: three tiers, one enforcement point
 
 Every command carries an **`AuthorizationPolicy`** on its manifest
-([`manifest.rs:33`](crates/clank-shell/src/manifest.rs#L33)):
+([`manifest.rs:33`](crates/clank-core/src/manifest.rs#L33)):
 
 | Tier | Behavior | Assigned to |
 |---|---|---|
@@ -19,7 +19,7 @@ Every command carries an **`AuthorizationPolicy`** on its manifest
 | **`SudoOnly`** | Pauses for **(y)es / (n)o** — strongest tier, no blanket "all" | `rm` (currently the only one) |
 
 The entire decision is a pure function, `decide()`
-([`authz.rs:70`](crates/clank-shell/src/authz.rs#L70)):
+([`authz.rs:70`](crates/clank-core/src/authz.rs#L70)):
 
 ```rust
 Allow    → always Allow
@@ -28,7 +28,7 @@ SudoOnly → Allow if elevated, else Confirm { sudo_grant: true }   // "all" doe
 ```
 
 **Where it's enforced:** in `Session::eval_line` / `run_command`, **before the command reaches
-Brush** ([`authz.rs:5`](crates/clank-shell/src/authz.rs#L5)). Brush's `ShellExtensions` offers no
+Brush** ([`authz.rs:5`](crates/clank-core/src/authz.rs#L5)). Brush's `ShellExtensions` offers no
 dispatch hook, so the clank layer is the single choke point. A gated command surfaces the *same*
 pending-prompt pause that `prompt-user` uses — one mechanism, not two.
 
@@ -45,29 +45,29 @@ model's per-tool-call gate inside `ask`.
 ## What `sudo` and "all" actually do
 
 - **`sudo <cmd>`** means **conscious human authorization, not Unix credentials** — there is no uid 0,
-  no `/etc/sudoers` ([`authz.rs:15`](crates/clank-shell/src/authz.rs#L15)). A `sudo` token marks the
+  no `/etc/sudoers` ([`authz.rs:15`](crates/clank-core/src/authz.rs#L15)). A `sudo` token marks the
   command it prefixes *elevated*, is stripped before the command runs, and **pre-authorizes** that
   command's `Confirm` or `SudoOnly` gate. Elevation is **per-segment**: `sudo curl X | jq` elevates
   the curl, but `sudo echo && rm x` elevates only `echo` — `rm` still prompts (sudo authorizes what
   it prefixes, not a downstream command).
 - **Answering "all"** sets a session-wide `allow_all` grant
-  ([`authz.rs:30`](crates/clank-shell/src/authz.rs#L30)) — every later `Confirm` command proceeds
+  ([`authz.rs:30`](crates/clank-core/src/authz.rs#L30)) — every later `Confirm` command proceeds
   silently. But **"all" never satisfies `SudoOnly`**: `rm` always asks again. That's the deliberately
   strongest guarantee, and the reason `SudoOnly`'s prompt offers only **(y)es / (n)o**, no "all"
-  ([`authz.rs:146`](crates/clank-shell/src/authz.rs#L146)).
+  ([`authz.rs:146`](crates/clank-core/src/authz.rs#L146)).
 
 ---
 
 ## Subcommand-aware gating
 
 A coarse top-level policy would over-gate read-only subcommands, so `authz::resolve`
-([`authz.rs:98`](crates/clank-shell/src/authz.rs#L98)) prefers a matching **subcommand's** policy
+([`authz.rs:98`](crates/clank-core/src/authz.rs#L98)) prefers a matching **subcommand's** policy
 when the line's second word names one. The result:
 
 - **`mcp`** top-level = `Allow`; `mcp add`/`remove`/`reload`/`session open`/`close` = `Confirm`;
-  `mcp list`/`tools` = `Allow` ([`mcp/cmd.rs:277`](crates/clank-shell/src/mcp/cmd.rs#L277)).
+  `mcp list`/`tools` = `Allow` ([`mcp/cmd.rs:277`](crates/clank-core/src/mcp/cmd.rs#L277)).
 - **`grease`** top-level = `Allow`; `install`/`remove`/`update`/`registry` = `Confirm`;
-  `list`/`search`/`info` = `Allow` ([`grease/cmd.rs:142`](crates/clank-shell/src/grease/cmd.rs#L142)).
+  `list`/`search`/`info` = `Allow` ([`grease/cmd.rs:142`](crates/clank-core/src/grease/cmd.rs#L142)).
 - **`golem`** is gated per-subcommand the same way.
 
 So `mcp list` is free but `mcp add` prompts — from the same top-level command.
@@ -78,7 +78,7 @@ So `mcp list` is free but `mcp add` prompts — from the same top-level command.
 
 When the **model** drives the agentic loop, every shell command it emits goes through the **exact
 same `decide()` gate** — the model is not privileged. Two things shape its authority
-([`ai/ask.rs:92`](crates/clank-shell/src/ai/ask.rs#L92)):
+([`ai/ask.rs:92`](crates/clank-core/src/ai/ask.rs#L92)):
 
 1. **The model is told the rules up front.** The system prompt lists every available command with its
    tier in brackets — `[confirm]`, `[sudo-only]` — and explains they "pause for the user's approval
@@ -86,7 +86,7 @@ same `decide()` gate** — the model is not privileged. Two things shape its aut
 2. **`sudo ask` grants blanket confirm-tier authorization** for the whole loop, so the model's
    `curl`/`mcp`/`grease` calls don't pause one-by-one. This elevation is a property of **how the human
    launched `ask`** — carried on the invocation (`AskTailPipe.elevated`,
-   [`ai/ask.rs:582`](crates/clank-shell/src/ai/ask.rs#L582)) — and the model can **never assert it
+   [`ai/ask.rs:582`](crates/clank-core/src/ai/ask.rs#L582)) — and the model can **never assert it
    itself**. Per the README, *"Agents cannot use sudo."*
 
 **The bottom line — what the agent can call:**
@@ -100,7 +100,7 @@ same `decide()` gate** — the model is not privileged. Two things shape its aut
 The durable **pause model** makes this work without ever blocking the agent: the question is recorded
 as durable state and returned immediately in `pending_prompt`; the human answers on a *separate*
 invocation (`answer_prompt`), which resumes the loop
-([`session/mod.rs:501`](crates/clank-shell/src/session/mod.rs#L501)). This exists because Golem
+([`session/mod.rs:501`](crates/clank-core/src/session/mod.rs#L501)). This exists because Golem
 serializes invocations per agent — a parked agent blocking on a human would be unreachable.
 
 ---
@@ -108,7 +108,7 @@ serializes invocations per agent — a parked agent blocking on a human would be
 ## Execution scope — a second manifest field, and how it's actually enforced
 
 Alongside `authorization_policy`, every manifest carries an **`execution_scope`**
-([`manifest.rs:18`](crates/clank-shell/src/manifest.rs#L18)) — `ParentShell` / `ShellInternal` /
+([`manifest.rs:18`](crates/clank-core/src/manifest.rs#L18)) — `ParentShell` / `ShellInternal` /
 `Subprocess`. It's easy to read this as "*where* a command runs," but that's not what it is in the
 implementation.
 
@@ -119,7 +119,7 @@ scope is **not** a dispatch router: a line is routed by *interception pattern* (
 what session state a command may touch**.
 
 **It's enforced in exactly one place — the `ask` model-tool boundary**
-([`session/ask.rs:908`](crates/clank-shell/src/session/ask.rs#L908)). When the model emits a shell
+([`session/ask.rs:908`](crates/clank-core/src/session/ask.rs#L908)). When the model emits a shell
 command as a tool call, clank refuses it if its scope is `ShellInternal` or `ParentShell`:
 
 ```rust
@@ -161,5 +161,5 @@ command hidden inside `$(...)`.
 
 `sudo-only` attempts are recorded to `/var/log/ops.log` **even when blocked** — the audit trail
 captures the attempt, not just the success. The `confirm_question` / `confirm_choices` copy
-([`authz.rs:136`](crates/clank-shell/src/authz.rs#L136)) matches the README's phrasing so the prompt
+([`authz.rs:136`](crates/clank-core/src/authz.rs#L136)) matches the README's phrasing so the prompt
 reads identically whether it came from a human command or a model tool call.

@@ -168,7 +168,7 @@ To add a package to a registry you author, you must, for the new payload bytes:
    a single leaf).
 5. Append the `{name,kind,description,sha256,sig,signer,log}` entry to `index.json`.
 
-The cleanest way to do steps 2–5 correctly is to **edit `crates/clank-shell/examples/grease-fixture.rs`**:
+The cleanest way to do steps 2–5 correctly is to **edit `crates/clank-core/examples/grease-fixture.rs`**:
 add a `Pkg { … }` to the `packages` vec and re-run the example. It does the hashing, signing, and log
 construction for you, in lockstep with the verifier — no chance of a signature mismatch. That is the
 intended authoring loop for the demo.

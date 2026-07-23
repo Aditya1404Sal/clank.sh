@@ -13,10 +13,13 @@ For the durable Golem agent path instead, see [RC_TESTING.md](RC_TESTING.md).
 
 ```bash
 cd ~/Desktop/clank-spike
-cargo build -p clank-shell --bin clank
+cargo build -p clank-cli --bin clank
 ```
 
-Produces `./target/debug/clank`.
+Produces `./target/debug/clank`. (After the R1 restructure the native `clank` binary lives in the
+`clank-cli` crate — `clank-shell` was renamed `clank-core` and is now a pure library, so the old
+`-p clank-shell` invocation errors with "package ID specification `clank-shell` did not match any
+packages". A bare `cargo build` also produces the binary: `clank-cli` is a default workspace member.)
 
 ---
 
@@ -116,15 +119,18 @@ The model runs real shell commands in your shell and answers from the output. Ev
 
 ```bash
 cd ~/Desktop/clank-spike
-cargo test --workspace
+cargo test --workspace -- --test-threads=1
 ```
 
-> **Known flake, not a bug.** `cargo test --workspace` runs each crate's test binary in parallel, and
-> there is one global process cwd shared across every Session. A cwd-sensitive conformance scenario
-> (e.g. `pipeline-exit-codes`) can rarely collide with another crate's `cd`/`pwd` and fail once.
-> `CWD_TEST_LOCK` serializes it within the conformance crate but cannot reach across crate boundaries.
-> Re-run the suite — it passes in isolation:
->
-> ```bash
-> cargo test -p clank-conformance --test native
-> ```
+Expect **599 passed; 0 failed; 44 ignored** (the 44 ignored are the golem-tier conformance scenarios,
+which only run against a live server — see [e2e.md](e2e.md)).
+
+> **Why `--test-threads=1`.** Several tests exercise native pipelines and fd-swaps (`curl | grep`,
+> `pipeline-exit-codes`, the redirect/`$(...)` tests). Brush resets `SIGPIPE` to `SIG_DFL` for POSIX
+> shell semantics, so a write to a pipe whose reader has already closed **kills the whole test
+> process with signal 13** instead of returning `EPIPE`. Under libtest's default parallelism these
+> tests race each other, and the plain `cargo test --workspace` intermittently dies with
+> `SIGPIPE: write on a pipe with no one to read` (exit 101) — it reproduces even for a single crate
+> (`cargo test -p clank-core`). Serializing with `--test-threads=1` removes the race and is
+> deterministically green. This is a test-harness artifact, not a product bug — the same pipelines
+> work fine in the running shell. Full explanation and every other test entry point: [e2e.md](e2e.md).

@@ -312,7 +312,9 @@ the spike now carry `rev = "309a054"`. Don't inherit that number.
   and Brush forks, the `cfg`-gated wasm infrastructure, the hand-rolled text tools: all unaffected.
 - **`wstd = "=0.6.5"` and `serde` are unchanged** in `crates/clank-agent/Cargo.toml` — which is exactly
   why §4's rewrite cost zero new dependencies.
-- **`crates/greeter-agent/` is back in the build.** It was briefly dropped from `members`/added to
+- **`crates/greeter-agent/` is back in the build.** (Paths in this section are as of the analysis-time
+  HEAD `db9a820`; the greeter has since relocated to **`fixtures/greeter-agent/`** in the R1
+  restructure.) It was briefly dropped from `members`/added to
   `exclude` and removed from `golem.yaml` (never deleted) while §3 was stubbed, because it pinned
   `golem-rust 2.1.0`. Restoring it took **three edits and zero source changes**: repoint its one dep to
   the dev-SDK path (`Cargo.toml:17`, in lockstep with clank-agent — greeter is the wRPC *target*, so it
