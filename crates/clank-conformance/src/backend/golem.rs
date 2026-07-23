@@ -8,9 +8,9 @@
 //! - [`wit_string`] — the payload is a WAVE/WIT string literal. Valid escapes are ONLY
 //!   `\\ \" \n \r \t \u{…}`; a raw `\` degrades the whole literal and `\$` is invalid
 //!   (the e2e's documented `$`-trap), so escaping happens totally, here, in one place.
-//! - [`decode_invoke`] — `golem agent invoke -q --format json` output on golem 1.5.x:
-//!   the LAST line carrying a `result_json` document, whose `.result_json.value` is the
-//!   agent's eval-result record with NAMED fields.
+//! - [`decode_invoke`] — `golem agent invoke -q --format json` output. Accepts BOTH the
+//!   released CLI's `result_json` document (named-field record) and the dev SDK CLI's
+//!   `resultJson` document (positional schema-value-tree), taking the LAST result line.
 
 use super::{Outcome, PendingView, ShellBackend};
 use anyhow::{bail, Context};
@@ -172,21 +172,26 @@ pub fn wit_string(s: &str) -> String {
 
 /// Decode `golem agent invoke -q --format json` output into an [`Outcome`].
 ///
-/// The golem 1.5.x CLI prints invocation markers and stream lines first, then the result
-/// document; the e2e's proven recipe is "last line containing `result_json`". A whole-
-/// output parse is the fallback for a pretty-printed document.
+/// The CLI prints invocation markers and stream lines first, then the result document; the
+/// proven recipe is "last line carrying a result document". A whole-output parse is the
+/// fallback for a pretty-printed document. Both wire shapes are accepted:
+/// - **released** golem 1.5.x — a `result_json` (`snake_case`) document whose value is the
+///   eval-result record with NAMED fields (`.stdout`/`.exit_code`/…); and
+/// - **dev SDK** — a `resultJson` (`camelCase`) document whose value is a POSITIONAL
+///   schema-value-tree (`.value.value.fields[0..3]`, each a `{ "value": … }` node in
+///   declaration order). This mirrors `scripts/golem-e2e.sh`'s `EVAL_REMAP`.
 ///
 /// # Errors
-/// Returns `Err` if no `result_json` document is present, if it carries no value, if the
-/// value lacks a numeric `exit_code`, or if that code is outside the `u8` range.
+/// Returns `Err` if no result document is present, if it carries no value, if the value
+/// matches neither shape, if the exit code isn't numeric, or if it's outside `u8` range.
 pub fn decode_invoke(cli_stdout: &str) -> anyhow::Result<Outcome> {
     let mut doc: Option<serde_json::Value> = None;
     for line in cli_stdout.lines() {
-        if !line.contains("\"result_json\"") {
+        if !line.contains("\"result_json\"") && !line.contains("\"resultJson\"") {
             continue;
         }
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-            if v.get("result_json").is_some() {
+            if result_value(&v).is_some() {
                 doc = Some(v);
             }
         }
@@ -195,37 +200,109 @@ pub fn decode_invoke(cli_stdout: &str) -> anyhow::Result<Outcome> {
         Some(d) => d,
         None => serde_json::from_str::<serde_json::Value>(cli_stdout)
             .ok()
-            .filter(|v| v.get("result_json").is_some())
-            .context("no `result_json` document in golem CLI output — is clank deployed on this server?")?,
+            .filter(|v| result_value(v).is_some())
+            .context(
+                "no `result_json`/`resultJson` document in golem CLI output — \
+                 is clank deployed on this server?",
+            )?,
     };
 
-    let value = &doc["result_json"]["value"];
-    if value.is_null() {
-        bail!("`result_json` document carries no value: {doc}");
+    let value = result_value(&doc)
+        .filter(|v| !v.is_null())
+        .with_context(|| format!("result document carries no value: {doc}"))?;
+    decode_eval_value(value).with_context(|| format!("decoding eval-result from {doc}"))
+}
+
+/// The eval-result `value` node, under whichever key the active golem CLI uses:
+/// `result_json` (released 1.5.x) or `resultJson` (dev SDK).
+fn result_value(doc: &serde_json::Value) -> Option<&serde_json::Value> {
+    doc.get("result_json")
+        .or_else(|| doc.get("resultJson"))
+        .map(|outer| &outer["value"])
+}
+
+/// Decode an eval-result `value` node into an [`Outcome`], accepting the released CLI's
+/// NAMED-field record and the dev SDK's POSITIONAL schema-value-tree.
+fn decode_eval_value(value: &serde_json::Value) -> anyhow::Result<Outcome> {
+    // Released shape: `exit_code`/`stdout`/… are named fields directly on `value`.
+    if let Some(exit_code) = value["exit_code"].as_u64() {
+        return Ok(Outcome {
+            stdout: value["stdout"].as_str().unwrap_or_default().to_string(),
+            stderr: value["stderr"].as_str().unwrap_or_default().to_string(),
+            exit_code: u8::try_from(exit_code)
+                .with_context(|| format!("exit_code {exit_code} out of u8 range"))?,
+            pending: decode_pending_named(&value["pending_prompt"]),
+        });
     }
 
-    let exit_code = value["exit_code"]
-        .as_u64()
-        .context("eval-result has no numeric `exit_code` — named-field decode failed (dev-CLI positional output?)")?;
-
-    let pending = match &value["pending_prompt"] {
-        serde_json::Value::Null => None,
-        p => Some(PendingView {
-            question: p["question"].as_str().unwrap_or_default().to_string(),
-            choices: p["choices"].as_array().map(|a| {
-                a.iter()
-                    .filter_map(|c| c.as_str().map(str::to_string))
-                    .collect()
-            }),
-        }),
+    // Dev SDK shape: `value.value.fields` is a positional array of `{ "value": … }` nodes,
+    // in declaration order — stdout, stderr, exit_code, pending_prompt (a tagged option).
+    let fields = value["value"]["fields"].as_array().context(
+        "eval-result has neither a named `exit_code` nor a positional `value.fields` array \
+         — unrecognized golem CLI output shape",
+    )?;
+    let str_field = |i: usize| {
+        fields
+            .get(i)
+            .and_then(|f| f["value"].as_str())
+            .unwrap_or_default()
+            .to_string()
     };
-
+    let exit_code = fields
+        .get(2)
+        .and_then(|f| f["value"].as_u64())
+        .context("positional eval-result field 2 (exit_code) is not a number")?;
     Ok(Outcome {
-        stdout: value["stdout"].as_str().unwrap_or_default().to_string(),
-        stderr: value["stderr"].as_str().unwrap_or_default().to_string(),
-        exit_code: u8::try_from(exit_code).with_context(|| format!("exit_code {exit_code} out of u8 range"))?,
-        pending,
+        stdout: str_field(0),
+        stderr: str_field(1),
+        exit_code: u8::try_from(exit_code)
+            .with_context(|| format!("exit_code {exit_code} out of u8 range"))?,
+        pending: fields.get(3).and_then(|f| decode_pending_positional(&f["value"])),
     })
+}
+
+/// Released shape: `pending_prompt` is null-or-record with named `question`/`choices`.
+fn decode_pending_named(p: &serde_json::Value) -> Option<PendingView> {
+    if p.is_null() {
+        return None;
+    }
+    Some(PendingView {
+        question: p["question"].as_str().unwrap_or_default().to_string(),
+        choices: p["choices"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|c| c.as_str().map(str::to_string)).collect()),
+    })
+}
+
+/// Dev SDK shape: the pending-prompt option node — `.inner` is null when absent, else a
+/// positional record `[question, choices]`, `choices` itself a tagged option of a list.
+fn decode_pending_positional(p: &serde_json::Value) -> Option<PendingView> {
+    let inner = p.get("inner")?;
+    if inner.is_null() {
+        return None;
+    }
+    let fields = inner["value"]["fields"].as_array()?;
+    let question = fields
+        .first()
+        .and_then(|f| f["value"].as_str())
+        .unwrap_or_default()
+        .to_string();
+    let choices = fields.get(1).and_then(|f| {
+        let ci = f["value"].get("inner")?;
+        if ci.is_null() {
+            return None;
+        }
+        Some(
+            ci["value"]["elements"]
+                .as_array()
+                .map_or_else(Vec::new, |els| {
+                    els.iter()
+                        .filter_map(|e| e["value"].as_str().map(str::to_string))
+                        .collect()
+                }),
+        )
+    });
+    Some(PendingView { question, choices })
 }
 
 #[cfg(test)]
@@ -269,11 +346,52 @@ mod tests {
     }
 
     #[test]
-    fn missing_result_json_is_an_error_not_empty() {
-        // The dev-CLI rename (`resultJson`) silently emptied every e2e reader; here it
-        // must be a loud infrastructure error instead.
+    fn missing_result_document_is_a_loud_error() {
+        // No result key at all → a loud infrastructure error, never a silently-empty Outcome.
+        let err = decode_invoke(r#"{"nope":123}"#).unwrap_err();
+        assert!(err.to_string().contains("no `result_json`/`resultJson`"), "{err}");
+    }
+
+    #[test]
+    fn malformed_dev_document_errors_not_empty() {
+        // A `resultJson` doc whose value matches NEITHER shape must still error loudly — the
+        // dev-CLI rename once silently emptied every reader, and that must never recur.
         let err = decode_invoke(r#"{"resultJson":{"value":[]}}"#).unwrap_err();
-        assert!(err.to_string().contains("no `result_json`"), "{err}");
+        // The specific cause is a `with_context` layer, so check the full chain (`{:#}`).
+        assert!(format!("{err:#}").contains("unrecognized golem CLI output shape"), "{err:#}");
+    }
+
+    #[test]
+    fn decodes_the_dev_sdk_positional_shape() {
+        // Dev SDK: camelCase `resultJson`, value is a positional schema-value-tree
+        // (stdout, stderr, exit_code, pending_prompt) — mirrors golem-e2e.sh's EVAL_REMAP.
+        let cli = concat!(
+            "some invocation marker\n",
+            r#"{"resultJson":{"value":{"value":{"fields":[{"value":"hi\n"},{"value":""},{"value":0},{"value":{"inner":null}}]}}}}"#,
+            "\n"
+        );
+        let o = decode_invoke(cli).unwrap();
+        assert_eq!(o.stdout, "hi\n");
+        assert_eq!(o.exit_code, 0);
+        assert!(o.pending.is_none());
+    }
+
+    #[test]
+    fn decodes_a_dev_sdk_pending_prompt_with_choices() {
+        // The pending_prompt option (field 3) present, with a choices list.
+        let cli = concat!(
+            r#"{"resultJson":{"value":{"value":{"fields":["#,
+            r#"{"value":"Deploy?\n"},{"value":""},{"value":0},"#,
+            r#"{"value":{"inner":{"value":{"fields":["#,
+            r#"{"value":"Deploy?"},"#,
+            r#"{"value":{"inner":{"value":{"elements":[{"value":"staging"},{"value":"production"}]}}}}"#,
+            r#"]}}}}]}}}}"#,
+            "\n"
+        );
+        let o = decode_invoke(cli).unwrap();
+        let p = o.pending.expect("pending");
+        assert_eq!(p.question, "Deploy?");
+        assert_eq!(p.choices.as_deref(), Some(&["staging".to_string(), "production".to_string()][..]));
     }
 
     #[test]
