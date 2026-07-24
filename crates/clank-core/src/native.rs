@@ -207,7 +207,12 @@ async fn run_interactive(session: &mut Session) -> Result<(), Box<dyn std::error
             continue;
         }
 
-        let result = session.eval_line(&line_str).await;
+        let label = if line_str.split_whitespace().next() == Some("ask") {
+            "thinking"
+        } else {
+            "working"
+        };
+        let result = with_thinking_ticker(session.eval_line(&line_str), label).await;
         render_output(&result.stdout, &result.stderr)?;
         last_ok = result.exit_code == 0;
         let flow = result.flow;
@@ -226,10 +231,11 @@ async fn run_interactive(session: &mut Session) -> Result<(), Box<dyn std::error
             while session.has_pending_prompt() {
                 line.clear();
                 let answer = if read_line_raw(&mut line)? == 0 {
-                    session.answer_prompt(None).await // EOF → abort
+                    // EOF → abort the pending prompt.
+                    with_thinking_ticker(session.answer_prompt(None), "thinking").await
                 } else {
                     let answer_str = String::from_utf8_lossy(trim_eol(line.as_bytes())).into_owned();
-                    session.answer_prompt(Some(answer_str)).await
+                    with_thinking_ticker(session.answer_prompt(Some(answer_str)), "thinking").await
                 };
                 render_output(&answer.stdout, &answer.stderr)?;
                 last_ok = answer.exit_code == 0;
@@ -323,6 +329,55 @@ fn history_path() -> Option<std::path::PathBuf> {
     let dir = base.join("clank");
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir.join("history.txt"))
+}
+
+/// Await `fut` (one `eval_line`/`answer_prompt`) while showing a minimal `⣾ {label}… {n}s` ticker,
+/// so a slow command — above all a multi-second `ask` — reads as working, not frozen. Native batches
+/// all command output to the end, so the terminal is otherwise silent during the await. The ticker
+/// only appears on a terminal, and only after ~350ms so quick commands never flash it. It runs on a
+/// sibling OS thread woken via a channel (the command future is `?Send` and stays on this task; the
+/// thread only paints), avoiding any tokio `time`/`macros` feature that clank-core doesn't enable.
+async fn with_thinking_ticker<F: std::future::Future>(fut: F, label: &'static str) -> F::Output {
+    use std::io::IsTerminal;
+    if !std::io::stderr().is_terminal() {
+        return fut.await;
+    }
+    let (tx, rx) = std::sync::mpsc::channel::<()>();
+    let handle = std::thread::spawn(move || ticker_thread(&rx, label));
+    let out = fut.await;
+    drop(tx); // wakes the thread immediately (Disconnected) — no join latency for fast commands
+    let _ = handle.join();
+    out
+}
+
+/// The ticker paint loop: every ~110ms until the channel closes, redraw `⣾ {label}… {secs}s` in place
+/// once ~350ms have elapsed. Clears its line on exit so the following output starts clean.
+fn ticker_thread(rx: &std::sync::mpsc::Receiver<()>, label: &str) {
+    use std::io::Write;
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::time::{Duration, Instant};
+    const SPIN: [&str; 8] = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
+    let start = Instant::now();
+    let (mut frame, mut shown) = (0usize, false);
+    loop {
+        match rx.recv_timeout(Duration::from_millis(110)) {
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+        let elapsed = start.elapsed();
+        if elapsed < Duration::from_millis(350) {
+            continue;
+        }
+        shown = true;
+        let spin = SPIN[frame % SPIN.len()];
+        frame += 1;
+        eprint!("\r\x1b[96m{spin}\x1b[0m {label}… {}s\x1b[K", elapsed.as_secs());
+        let _ = std::io::stderr().flush();
+    }
+    if shown {
+        eprint!("\r\x1b[2K");
+        let _ = std::io::stderr().flush();
+    }
 }
 
 /// Write `stdout` verbatim, then `stderr` (dimmed if it carries no ANSI of its own), and guarantee
@@ -543,7 +598,7 @@ async fn run_repl(
         }
 
         // Otherwise it's a prompt: one model turn against the isolated transcript.
-        let reply = session.repl_turn(&input).await;
+        let reply = with_thinking_ticker(session.repl_turn(&input), "thinking").await;
         write_stdout(reply.as_bytes())?;
         if !reply.ends_with('\n') {
             write_stdout(b"\n")?;

@@ -36,6 +36,8 @@ jaq-json = "2.0"
 jaq-std = "3.0"
 regex = "1"
 similar = "2.7"
+# Display-cell width for laying out the `ask` answer/tools boxes (emoji labels are 2 cells wide).
+unicode-width = "0.1"
 # Internal coreutils (uutils), registered as clank builtins. uucore is patched for wasm32-wasip2
 # via [patch.crates-io] in the workspace root.
 uu_cat = "0.9"

@@ -674,7 +674,15 @@ impl Session {
             return LineResult::from_outcome(Vec::new(), stderr, 6);
         }
 
-        LineResult::from_outcome(final_text.into_bytes(), state.trace, 0)
+        // Frame the output for an interactive terminal (COLUMNS set): a box around the answer and a
+        // box around the tool trace, so the two stop blending. Non-interactive (scripts, `agent
+        // invoke`, conformance — COLUMNS unset) keeps the plain answer/`[tool]` bytes. `--json`
+        // returned above, so it never reaches here.
+        let (stdout, stderr) = match self.columns() {
+            Some(width) => render_ask_boxes(&final_text, &state.trace, width),
+            None => (final_text.into_bytes(), state.trace),
+        };
+        LineResult::from_outcome(stdout, stderr, 0)
     }
 
     /// Surface the human-facing prompt for a paused `ask` loop and stash the loop state. Returns a
@@ -1043,5 +1051,223 @@ impl Session {
             name: call.name.clone(),
             outcome: Ok(payload.to_string()),
         }
+    }
+}
+
+// ---- `ask` output framing: box the answer and the tool trace ----------------------------------
+
+const ASK_ANSI_RESET: &str = "\x1b[0m";
+
+/// Display width (terminal cells) of `s` — accounts for wide chars / the 2-cell emoji labels.
+fn dwidth(s: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(s)
+}
+fn cwidth(c: char) -> usize {
+    unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)
+}
+
+/// Box `ask`'s answer (→ stdout) and its `[tool]` trace (→ stderr) into labelled panels sized to the
+/// terminal `width`. Only used for an interactive terminal (COLUMNS set); non-interactive output
+/// stays plain so `ask --json` / scripts / the conformance harness are unaffected. An empty answer or
+/// empty trace yields an empty buffer for that side (no empty box). The trace box carries ANSI so
+/// native's stderr-dim pass leaves it as styled; the answer box is bright, the trace box dim.
+fn render_ask_boxes(answer: &str, trace: &[u8], width: usize) -> (Vec<u8>, Vec<u8>) {
+    let width = width.clamp(24, 200);
+    let color = std::env::var_os("NO_COLOR").is_none();
+    let inner = width.saturating_sub(4).max(1);
+
+    let stdout = if answer.trim().is_empty() {
+        Vec::new()
+    } else {
+        let lines = wrap_text(answer.trim_end(), inner);
+        let border = if color { "\x1b[96m" } else { "" }; // bright cyan
+        render_box("💬 answer", &lines, width, border).into_bytes()
+    };
+
+    let stderr = if trace.is_empty() {
+        Vec::new()
+    } else {
+        let text = String::from_utf8_lossy(trace);
+        let lines: Vec<String> = text.lines().map(|l| truncate_to(l, inner)).collect();
+        let border = if color { "\x1b[90m" } else { "" }; // dim grey
+        render_box("🔧 tools", &lines, width, border).into_bytes()
+    };
+
+    (stdout, stderr)
+}
+
+/// Draw a labelled box of `width` cells around pre-fitted `lines`: `╭─ label ─…─╮`, `│ line │` rows
+/// padded to the inner width, `╰──…──╯`. `border` is an optional ANSI colour applied to the frame
+/// glyphs only (content is left as-is); empty `border` = no colour.
+fn render_box(label: &str, lines: &[String], width: usize, border: &str) -> String {
+    let reset = if border.is_empty() { "" } else { ASK_ANSI_RESET };
+    let inner = width.saturating_sub(4).max(1);
+    let mut out = String::new();
+    // Top: ╭─ {label} ─…─╮  (total = width cells)
+    let dashes = width.saturating_sub(4 + dwidth(label) + 1); // "╭─ " + label + " " ... "╮"
+    out.push_str(border);
+    out.push_str("╭─ ");
+    out.push_str(label);
+    out.push(' ');
+    out.push_str(&"─".repeat(dashes));
+    out.push('╮');
+    out.push_str(reset);
+    out.push('\n');
+    // Body: │ {line padded to inner} │
+    for line in lines {
+        let pad = inner.saturating_sub(dwidth(line));
+        out.push_str(border);
+        out.push('│');
+        out.push_str(reset);
+        out.push(' ');
+        out.push_str(line);
+        out.push_str(&" ".repeat(pad));
+        out.push(' ');
+        out.push_str(border);
+        out.push('│');
+        out.push_str(reset);
+        out.push('\n');
+    }
+    // Bottom: ╰──…──╯
+    out.push_str(border);
+    out.push('╰');
+    out.push_str(&"─".repeat(width.saturating_sub(2)));
+    out.push('╯');
+    out.push_str(reset);
+    out.push('\n');
+    out
+}
+
+/// Greedy word-wrap `text` to `width` cells: break on whitespace, hard-break tokens wider than
+/// `width`, and keep existing newlines (blank lines become blank rows). For the answer prose.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut out = Vec::new();
+    for raw in text.split('\n') {
+        let mut line = String::new();
+        let mut w = 0usize;
+        for word in raw.split_whitespace() {
+            let ww = dwidth(word);
+            if w != 0 && w + 1 + ww <= width {
+                line.push(' ');
+                line.push_str(word);
+                w += 1 + ww;
+                continue;
+            }
+            if w != 0 {
+                out.push(std::mem::take(&mut line));
+                w = 0;
+            }
+            if ww <= width {
+                line.push_str(word);
+                w = ww;
+            } else {
+                // Hard-break a token wider than the box.
+                for ch in word.chars() {
+                    let cw = cwidth(ch);
+                    if w + cw > width {
+                        out.push(std::mem::take(&mut line));
+                        w = 0;
+                    }
+                    line.push(ch);
+                    w += cw;
+                }
+            }
+        }
+        out.push(line);
+    }
+    out
+}
+
+/// Truncate `line` to `width` cells, appending `…` when it was cut. For the tool-trace lines (kept
+/// verbatim, not word-wrapped — they're commands).
+fn truncate_to(line: &str, width: usize) -> String {
+    if dwidth(line) <= width {
+        return line.to_string();
+    }
+    let budget = width.saturating_sub(1);
+    let mut s = String::new();
+    let mut w = 0usize;
+    for ch in line.chars() {
+        let cw = cwidth(ch);
+        if w + cw > budget {
+            break;
+        }
+        s.push(ch);
+        w += cw;
+    }
+    s.push('…');
+    s
+}
+
+#[cfg(test)]
+mod box_tests {
+    use super::{render_ask_boxes, truncate_to, wrap_text};
+
+    #[test]
+    fn wrap_breaks_on_words_and_keeps_blank_lines() {
+        let w = wrap_text("the quick brown fox", 9);
+        assert_eq!(w, vec!["the quick", "brown fox"]);
+        assert_eq!(wrap_text("a\n\nb", 10), vec!["a", "", "b"]);
+    }
+
+    #[test]
+    fn wrap_hard_breaks_an_overlong_token() {
+        let w = wrap_text("abcdefghij", 4);
+        assert_eq!(w, vec!["abcd", "efgh", "ij"]);
+    }
+
+    #[test]
+    fn truncate_adds_ellipsis_only_when_cut() {
+        assert_eq!(truncate_to("short", 10), "short");
+        assert_eq!(truncate_to("abcdefgh", 5), "abcd…");
+    }
+
+    #[test]
+    fn boxes_frame_answer_and_tools_at_width() {
+        let (out, err) = render_ask_boxes("hello there", b"[tool] $ ls\n[tool] exit 0", 30);
+        let out = String::from_utf8(out).unwrap();
+        let err = String::from_utf8(err).unwrap();
+        // Answer box: top/bottom rules + the content, labelled.
+        assert!(out.contains("answer"));
+        assert!(out.contains("╭─"));
+        assert!(out.contains("╰"));
+        assert!(out.contains("hello there"));
+        // Tools box carries the trace lines and its own label.
+        assert!(err.contains("tools"));
+        assert!(err.contains("$ ls"));
+        // Every rendered line is exactly `width` cells wide (frame aligns).
+        for line in out.lines().chain(err.lines()) {
+            let stripped = strip_ansi(line);
+            assert_eq!(
+                unicode_width::UnicodeWidthStr::width(stripped.as_str()),
+                30,
+                "line not full width: {line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_answer_or_trace_yields_no_box() {
+        let (out, err) = render_ask_boxes("", b"", 40);
+        assert!(out.is_empty());
+        assert!(err.is_empty());
+    }
+
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+            if c == '\x1b' {
+                for e in chars.by_ref() {
+                    if e == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
     }
 }
