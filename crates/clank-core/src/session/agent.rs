@@ -97,19 +97,41 @@ impl Session {
             _ => {}
         }
 
-        if pkg.method(&parsed.method).is_none() {
+        let Some(method) = pkg.method(&parsed.method) else {
             return LineResult::from_outcome(
                 Vec::new(),
                 format!("{name}: unknown method '{}' (try `{name} --help`)\n", parsed.method).into_bytes(),
                 2,
             );
-        }
+        };
+
+        // Validate the constructor and method args against the agent's DECLARED schema before the
+        // wRPC call. The wire encoding is positional and the Golem host wants exactly the declared
+        // arity — a missing or unexpected flag reaching `WasmRpc::new`/`invoke` is not an error there
+        // but a wasm TRAP ("Invalid constructor input: expected N parameters, got M"), which is fatal:
+        // it wedges the durable agent instance (it can't even resume). Catch it here as a clean exit-2
+        // usage error, and reorder the args into declared order so the positional encoding lines up.
+        let constructor = match order_agent_params(&parsed.constructor, &pkg.constructor_params) {
+            Ok(v) => v,
+            Err(e) => {
+                let msg = format!("{name}: {e} for the agent constructor (try `{name} --help`)\n");
+                return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 2);
+            }
+        };
+        let args = match order_agent_params(&parsed.args, &method.params) {
+            Ok(v) => v,
+            Err(e) => {
+                let msg =
+                    format!("{name}: {e} for method '{}' (try `{name} --help`)\n", parsed.method);
+                return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 2);
+            }
+        };
 
         let inv = crate::golem::agent::AgentInvocation {
             agent_type: pkg.agent_type.clone(),
-            constructor: parsed.constructor,
+            constructor,
             method: parsed.method,
-            args: parsed.args,
+            args,
             mode: parsed.mode.clone(),
             phantom: parsed.phantom,
         };
@@ -299,5 +321,64 @@ impl Session {
             self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(old.pid);
         }
         pid
+    }
+}
+
+/// Reorder the user's `--name value` pairs into the agent's `declared` parameter order, so the
+/// positional wire encoding matches the agent's declared arity exactly. Returns a usage error
+/// (missing / unexpected flag) rather than letting a mismatched arity reach the Golem host, which
+/// TRAPS on it. Every declared parameter must be supplied (agent parameters are positional and the
+/// host wants them all); an undeclared flag is rejected so it can't inflate the arity.
+fn order_agent_params(
+    provided: &[(String, String)],
+    declared: &[String],
+) -> Result<Vec<(String, String)>, String> {
+    if let Some((flag, _)) = provided.iter().find(|(n, _)| !declared.iter().any(|d| d == n)) {
+        return Err(format!("unexpected flag --{flag}"));
+    }
+    let mut ordered = Vec::with_capacity(declared.len());
+    for name in declared {
+        match provided.iter().find(|(n, _)| n == name) {
+            Some((_, value)) => ordered.push((name.clone(), value.clone())),
+            None => return Err(format!("missing required flag --{name}")),
+        }
+    }
+    Ok(ordered)
+}
+
+#[cfg(test)]
+mod agent_param_tests {
+    use super::order_agent_params;
+
+    fn pairs(kv: &[(&str, &str)]) -> Vec<(String, String)> {
+        kv.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+    fn names(n: &[&str]) -> Vec<String> {
+        n.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn reorders_into_declared_order() {
+        let out = order_agent_params(&pairs(&[("b", "2"), ("a", "1")]), &names(&["a", "b"])).unwrap();
+        assert_eq!(out, pairs(&[("a", "1"), ("b", "2")]));
+    }
+
+    #[test]
+    fn missing_required_flag_is_a_clean_error_not_a_trap() {
+        // The exact repro: `greeter greet` with no `--name` — declared ctor is [name], provided none.
+        let err = order_agent_params(&[], &names(&["name"])).unwrap_err();
+        assert_eq!(err, "missing required flag --name");
+    }
+
+    #[test]
+    fn unexpected_flag_is_rejected() {
+        let err = order_agent_params(&pairs(&[("name", "x"), ("foo", "y")]), &names(&["name"]))
+            .unwrap_err();
+        assert_eq!(err, "unexpected flag --foo");
+    }
+
+    #[test]
+    fn zero_declared_zero_provided_is_ok() {
+        assert_eq!(order_agent_params(&[], &[]).unwrap(), Vec::new());
     }
 }
