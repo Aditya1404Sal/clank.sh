@@ -935,6 +935,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "unicode-width 0.1.14",
  "uu_cat",
  "uu_cp",
  "uu_cut",
