@@ -84,7 +84,12 @@ impl EmbeddedShell {
     /// Evaluate one command line — the body of the agent's `eval` method.
     pub async fn eval(&mut self, cmd: &str) -> EvalResult {
         match self.ensure().await {
-            Ok(session) => eval_result(session.eval_line(cmd).await),
+            Ok(session) => {
+                let result = session.eval_line(cmd).await;
+                // Read the cwd AFTER the line runs, so a `cd` is reflected; the eval borrow has ended.
+                let cwd = session.cwd().display().to_string();
+                eval_result(result, cwd)
+            }
             Err(failure) => failure,
         }
     }
@@ -94,7 +99,11 @@ impl EmbeddedShell {
     /// methods rather than an empty-string sentinel so `""` stays a valid *answer*.
     pub async fn answer(&mut self, response: Option<String>) -> EvalResult {
         match self.ensure().await {
-            Ok(session) => eval_result(session.answer_prompt(response).await),
+            Ok(session) => {
+                let result = session.answer_prompt(response).await;
+                let cwd = session.cwd().display().to_string();
+                eval_result(result, cwd)
+            }
             Err(failure) => failure,
         }
     }
@@ -116,6 +125,8 @@ impl EmbeddedShell {
                         stderr: format!("clank: failed to start shell: {e}\n"),
                         exit_code: 1,
                         pending_prompt: None,
+                        // No session yet, so no cwd to report; the shell shows the bare label.
+                        cwd: String::new(),
                     });
                 }
             }
@@ -130,8 +141,8 @@ impl Default for EmbeddedShell {
     }
 }
 
-/// Map a shell [`LineResult`] to the wire [`EvalResult`].
-fn eval_result(result: LineResult) -> EvalResult {
+/// Map a shell [`LineResult`] to the wire [`EvalResult`], stamping the shell's post-command `cwd`.
+fn eval_result(result: LineResult, cwd: String) -> EvalResult {
     EvalResult {
         // Move the bytes into a String on the valid-UTF-8 common path (no copy); only allocate a lossy
         // copy on the rare invalid-byte path.
@@ -144,6 +155,7 @@ fn eval_result(result: LineResult) -> EvalResult {
             question: p.question,
             choices: p.choices,
         }),
+        cwd,
     }
 }
 
@@ -173,10 +185,11 @@ mod tests {
                 choices: Some(vec!["a".to_string(), "b".to_string()]),
                 secret: false,
             }),
-        });
+        }, "/work".to_string());
         assert_eq!(mapped.stdout, "out\n");
         assert_eq!(mapped.stderr, "err\n");
         assert_eq!(mapped.exit_code, 3);
+        assert_eq!(mapped.cwd, "/work");
         let p = mapped.pending_prompt.expect("prompt mapped");
         assert_eq!(p.question, "Which?");
         assert_eq!(p.choices.as_deref(), Some(&["a".to_string(), "b".to_string()][..]));
@@ -190,7 +203,7 @@ mod tests {
             exit_code: 0,
             flow: Flow::Continue,
             pending_prompt: None,
-        });
+        }, String::new());
         // The replacement character marks the bad bytes; the valid tail survives.
         assert!(mapped.stdout.contains('\u{FFFD}'));
         assert!(mapped.stdout.ends_with('x'));

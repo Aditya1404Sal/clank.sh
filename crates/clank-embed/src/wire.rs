@@ -12,7 +12,10 @@ use serde::{Deserialize, Serialize};
 
 /// The result of one shell-surface call (`eval` / `answer_prompt` / `abort_prompt`).
 ///
-/// Positional wire order: `stdout`, `stderr`, `exit_code`, `pending_prompt` — do not reorder.
+/// Positional wire order: `stdout`, `stderr`, `exit_code`, `pending_prompt`, `cwd` — do not reorder.
+/// `cwd` is LAST so it stays an *optional trailing* field: `agent shell` decodes the record
+/// positionally and reads it only if present, so a consumer built against the four-field shape
+/// still decodes cleanly (see golem-cli's `extract_cwd`).
 #[derive(Clone, Debug, Schema, Serialize, Deserialize)]
 pub struct EvalResult {
     pub stdout: String,
@@ -22,6 +25,9 @@ pub struct EvalResult {
     /// to. The caller must collect a human answer and deliver it via `answer_prompt` — the shell
     /// never blocks. `None` for every ordinary command.
     pub pending_prompt: Option<PendingPromptView>,
+    /// The shell's working directory after this call (the agent's absolute path), so an interactive
+    /// caller can show it in its prompt and reflect a `cd` live. Kept last — see the type doc.
+    pub cwd: String,
 }
 
 /// The wire view of a pending `prompt-user` question surfaced to the caller.
