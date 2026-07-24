@@ -46,6 +46,17 @@ expect_used = "warn"
 # `git`+`rev` pin like the coreutils/brush entries below.
 reedline = { path = "reedline-fork" }
 
+# crossterm forked for ONE fix, paired with the reedline fork above. crossterm's cursor::position()
+# (which reedline calls in initialize_prompt_position) and its keyboard-enhancement probe poll for a
+# terminal DSR reply with a 2000ms ceiling — a terminal that answers late (right after `ask` dumps a
+# burst of output) makes that query block ~1s every prompt. The fork cuts both ceilings to 250ms so
+# the query fails fast; reedline-fork then falls back to (col 0, bottom row) immediately instead of
+# stalling. A responsive terminal replies in <10ms, far inside the window, so it is unaffected.
+# Vendored (published 0.28.1 source + two one-line timeout changes), native-only, never in the wasm
+# build. Only affects crossterm 0.28 (reedline's); brush's crossterm 0.25 is a different version and
+# is left untouched. See crossterm-fork/src/cursor/sys/unix.rs + terminal/sys/unix.rs.
+crossterm = { path = "crossterm-fork" }
+
 # The coreutils fork carries wasip2 fixes: a stable OsStr encoded-bytes shim + empty-argv guard in
 # uucore, and a wasi `set_permissions` skip in uu_cp. Patch uucore AND every uu_* command crate
 # clank registers — the published uu_* crates only share the patched `uucore`, so a fix inside a
