@@ -236,23 +236,22 @@ The transcript is a first-class value: a sliding window of the commands you ran 
 which is exactly what `ask` sends the model. `context` manages it.
 
 ```
-context [show | clear | budget [n] | trim <n> | summarize]
+context [show | clear | trim <n> | summarize]
 ```
 
 | Subcommand | Effect |
 |---|---|
 | `show` (or bare `context`) | Print the transcript. **Not** recorded back into itself. |
 | `clear` | Discard the whole transcript. |
-| `budget` | Print the current sliding-window token budget. |
-| `budget <n>` | Set the token budget to `<n>` and re-enforce it immediately. |
 | `trim <n>` | Drop the oldest `<n>` entries. Pure/synchronous — composes everywhere (pipes, `$()`). |
 | `summarize` | Print an **AI summary** of the transcript (one LLM turn). Needs the model. |
+
+The transcript also **auto-bounds** itself at a safety cap (see [Auto-compaction](#auto-compaction)
+below) — that cap is fixed from config, not a runtime knob, so there is no `context budget` command.
 
 ```sh
 context show                 # what the model will see
 context show | grep FATAL    # composes like any command
-context budget               # e.g. -> 8000
-context budget 16000         # widen the window
 context trim 5               # drop the 5 oldest entries
 S=$(context show)            # capture it (works via the nested-context builtin)
 context summarize            # top-level only; confirms unless run with sudo
@@ -266,10 +265,17 @@ context summarize` pre-approves.
 
 ### Auto-compaction
 
-When recording a new line evicts old entries to stay under the token budget, clank asynchronously
-replaces the leading "dropped count" marker with a **model-generated summary block** rendered as
-`[summary of N earlier entries] …`. This keeps the context legible instead of just truncating. It is
-a no-op when nothing was dropped or when no provider is configured. (README `### context builtin`.)
+When recording a new line pushes the window past its **safety cap** (an estimated-token limit), clank
+evicts the oldest entries and asynchronously replaces the leading "dropped count" marker with a
+**model-generated summary block** rendered as `[summary of N earlier entries] …`. This keeps the
+context legible instead of just truncating. It is a no-op when nothing was dropped or when no provider
+is configured. (README `### context builtin`.)
+
+The cap is a fixed safety limit, not a runtime knob — there is **no `context budget` command**. Its
+value comes from the `CLANK_CONTEXT_CAP_TOKENS` environment variable, which the durable agent receives
+from `golem.yaml` (`components.clank:agent.env`) — edit that value to tune it. Unset or non-positive
+falls back to the built-in default (24000 estimated tokens). Natively it is an ordinary environment
+variable.
 
 ---
 

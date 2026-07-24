@@ -16,7 +16,7 @@ When running on Golem, clank.sh instances become fully durable agents. The trans
 
 ## How It Works
 
-The shell's transcript is both the human's session history and the AI's context window. Every command typed, every output rendered to the terminal, every AI response is appended to a sliding window. When you invoke `ask`, the model receives that window — no curation step, no context-population phase, no synchronization problem. The window compacts automatically at the leading edge when it approaches the token budget: the oldest portion is summarized and replaced with a visible summary block, keeping the boundary between summarized and live history explicit. Inside Golem, the full uncompacted record is preserved in the component's oplog. Content piped directly into `ask` via stdin arrives as supplementary input alongside the transcript, on a separate channel — it was never rendered to the terminal and is not part of the shared window.
+The shell's transcript is both the human's session history and the AI's context window. Every command typed, every output rendered to the terminal, every AI response is appended to a sliding window. When you invoke `ask`, the model receives that window — no curation step, no context-population phase, no synchronization problem. The window compacts automatically at the leading edge when it approaches its safety cap: the oldest portion is summarized and replaced with a visible summary block, keeping the boundary between summarized and live history explicit. Inside Golem, the full uncompacted record is preserved in the component's oplog. Content piped directly into `ask` via stdin arrives as supplementary input alongside the transcript, on a separate channel — it was never rendered to the terminal and is not part of the shared window.
 
 Every capability in clank.sh is a CLI command. Prompts install as executables. MCP tools install as subcommands under their server name. Golem agents install as executables with their constructor parameters as flags and their methods as subcommands. Shell scripts are executables. All of them live on `$PATH`, all have `--help`, all have a command manifest that drives tab completion, authorization policy, and provider tool packaging, and all compose via pipes. The AI sees the same command surface the human does and operates it the same way. LLMs are immediately capable operators because this interface is modeled on Linux — an environment with billions of tokens of training data behind it.
 
@@ -311,7 +311,7 @@ Every process type returns a meaningful exit code. `&&`, `||`, `;` chaining work
 
 The shell maintains a sliding-window transcript of everything rendered to the terminal: every command typed, every output produced, every AI response. This is what `ask` operates on. It is not a separate AI context that must be populated — it is the shell's own history, extended to include AI exchanges and treated as a first-class value.
 
-The transcript is a sliding window. When it approaches the token budget, the shell compacts the leading edge: the oldest portion is summarized and replaced with a visible summary block, so the boundary between summarized and live history is always explicit rather than silently rewritten. The window then looks like:
+The transcript is a sliding window. When it approaches its safety cap, the shell compacts the leading edge: the oldest portion is summarized and replaced with a visible summary block, so the boundary between summarized and live history is always explicit rather than silently rewritten. The window then looks like:
 
 ```
 [summary of prior shell transcript]
@@ -427,7 +427,7 @@ ask repl --fresh      # empty transcript
 ask repl --inherit    # full parent transcript inherited as-is
 ```
 
-The default is summary injection, not full inheritance. The transcript is a sliding window maintained at roughly half token-budget capacity; inheriting it in full by default would start the REPL already half-consumed. Summary injection gives the model useful orientation without burning context. `--inherit` is available for cases where the full detail genuinely matters.
+The default is summary injection, not full inheritance. The transcript is a sliding window maintained at roughly half its token cap; inheriting it in full by default would start the REPL already half-consumed. Summary injection gives the model useful orientation without burning context. `--inherit` is available for cases where the full detail genuinely matters.
 
 ### Models and providers
 

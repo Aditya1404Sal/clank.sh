@@ -313,7 +313,7 @@ impl Session {
             let shell = rt.block_on(build_shell())?;
             let mut session = Self {
                 shell,
-                transcript: Arc::new(Mutex::new(Transcript::new())),
+                transcript: Arc::new(Mutex::new(Transcript::with_cap(crate::configured_context_cap()))),
                 registry: crate::registry::build(),
                 proc_table: Arc::new(Mutex::new(ProcessTable::new())),
                 pending: None,
@@ -343,7 +343,7 @@ impl Session {
             let shell = build_shell().await?;
             let mut session = Self {
                 shell,
-                transcript: Arc::new(Mutex::new(Transcript::new())),
+                transcript: Arc::new(Mutex::new(Transcript::with_cap(crate::configured_context_cap()))),
                 registry: crate::registry::build(),
                 proc_table: Arc::new(Mutex::new(ProcessTable::new())),
                 pending: None,
@@ -367,6 +367,16 @@ impl Session {
             session.reconstruct_mcp_from_configs();
             Ok(session)
         }
+    }
+
+    /// Test-only: set the transcript safety cap at runtime to force eviction. There is no user
+    /// command for this — production sets the cap once at construction from [`crate::configured_context_cap`].
+    #[cfg(test)]
+    pub(crate) fn set_context_cap(&self, cap_tokens: usize) {
+        self.transcript
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .set_cap(cap_tokens);
     }
 
     /// Re-register grease-installed MCP servers into `McpState` from their cached grease payloads.
@@ -846,7 +856,7 @@ impl Session {
         let blanket = elevated || self.authz.allow_all;
         let result = self.run_command(&effective, pid, blanket).await;
         self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record_output(&result.terminal_output());
-        // If recording just evicted old entries to stay under budget, upgrade the leading count marker
+        // If recording just evicted old entries to stay under the cap, upgrade the leading count marker
         // into a model-generated summary block (no-op when nothing was dropped or no provider exists).
         self.compact_dropped_span().await;
         result

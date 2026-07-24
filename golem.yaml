@@ -25,6 +25,12 @@ components:
       # exports an empty default before deploying; with an empty/unset key `ask` reports "not
       # configured" (exit 4) and the e2e skips its network assertions.
       ANTHROPIC_API_KEY: "{{ ANTHROPIC_API_KEY }}"
+      # Safety cap (estimated tokens) for the in-memory session transcript. When the window exceeds
+      # this, the oldest entries are auto-evicted and summarized (leading-edge auto-compaction). This
+      # is the only knob — there is no `context` subcommand to change it at runtime. Edit this value to
+      # tune the cap; a non-positive/unset value falls back to the built-in default (24000). A literal
+      # (not a host passthrough), so no host var is required to deploy.
+      CLANK_CONTEXT_CAP_TOKENS: "24000"
   # A minimal second agent (fixtures/greeter-agent) deployed alongside clank:agent purely to be the
   # target of a grease-installed agent invocation — proving clank's WasmRpcInvoker wRPC round-trips.
   greeter:agent:
