@@ -59,6 +59,15 @@ expect_used = "warn"
 # feature). Our fork adds a stable encoded-bytes shim. This redirects every transitive uucore
 # (via the uu_* coreutils crates) to the patched fork on both targets.
 [patch.crates-io]
+# reedline (the native REPL's line editor) forked for ONE fix: its `initialize_prompt_position`
+# propagates a `cursor::position()` timeout with `?`, so a terminal that answers the DSR query late
+# (right after a burst like `ask`'s output) aborts read_line and drops the shell into a degraded
+# fallback. The fork makes that one call tolerant — fall back to (col 0, bottom row), which is
+# correct because clank always ends output in a newline. Vendored (not a git dep) because it is the
+# exact published 0.38.0 source plus a one-line patch; native-only, never in the wasm build. See
+# reedline-fork/src/painting/painter.rs.
+reedline = { path = "reedline-fork" }
+
 # The coreutils fork carries wasip2 fixes: a stable OsStr encoded-bytes shim + empty-argv guard in
 # uucore, and a wasi `set_permissions` skip in uu_cp. Patch uucore AND every uu_* command crate
 # clank registers — the published uu_* crates only share the patched `uucore`, so a fix inside a
