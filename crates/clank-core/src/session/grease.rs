@@ -48,7 +48,7 @@ impl Session {
             return LineResult::continue_with_stdout(help.into_bytes());
         }
         if let Some(sk) = self.grease.skill(name) {
-            return LineResult::continue_with_stdout(skill_info_text(sk).into_bytes());
+            return LineResult::continue_with_stdout(skill_info_text(sk, self.columns()).into_bytes());
         }
         if let Some(m) = self.grease.mcp(name) {
             return LineResult::continue_with_stdout(mcp_info_text(m).into_bytes());

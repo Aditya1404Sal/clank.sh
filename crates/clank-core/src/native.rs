@@ -137,6 +137,11 @@ async fn run_interactive(session: &mut Session) -> Result<(), Box<dyn std::error
     let mut last_ok = true;
 
     loop {
+        // Track the terminal width so a terminal-style `ls` (and other columnar output) fills the
+        // window and reflows on resize. Best-effort — a size query failure just leaves the last value.
+        if let Ok((cols, _)) = crossterm::terminal::size() {
+            session.set_columns(cols);
+        }
         let prompt = StarshipPrompt::new(last_ok);
         let buffer = match editor.read_line(&prompt) {
             Ok(Signal::Success(buffer)) => buffer,

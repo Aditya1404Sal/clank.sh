@@ -554,6 +554,106 @@ fn is_flag(arg: &str) -> bool {
     arg.starts_with('-')
 }
 
+thread_local! {
+    /// Whether the line currently being evaluated is a *plain single command* — no pipe, redirect,
+    /// substitution, or compound operator. Set per line by [`note_simple_line`] (from `eval_line`),
+    /// read by [`Ls::execute`] to decide whether a bare `ls` may render like a terminal (multi-column,
+    /// coloured). Defaults to `false`, so any path that doesn't set it leaves `ls` one-per-line.
+    static SIMPLE_LINE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Record whether `line` is a plain single command, for [`Ls::execute`]'s terminal-style rendering.
+///
+/// True iff the raw line contains no pipe / redirect / substitution / compound operator — none of
+/// `|`, `<`, `>`, `;`, `&`, `(`, `)`, a backtick, or a newline. This is
+/// deliberately conservative and **safe by construction**: every pipe / redirect / substitution /
+/// compound necessarily contains one of those characters, so a piped or redirected `ls` is *never*
+/// classified simple and thus never columnised — `ls | grep` keeps its one-per-line, uncoloured
+/// output exactly like GNU `ls`. The only imprecision is harmless under-triggering (e.g. `ls $(pwd)`,
+/// `foo; ls`, or a quoted operator like `ls "a(b)"` stay one-per-line). Bare `$VAR` is allowed.
+pub(crate) fn note_simple_line(line: &str) {
+    let simple = !line.contains(|c: char| {
+        matches!(c, '|' | '<' | '>' | ';' | '&' | '(' | ')' | '`' | '\n')
+    });
+    SIMPLE_LINE.with(|s| s.set(simple));
+}
+
+/// Pack short items into terminal-style columns (down-then-across, like `ls -C`), filling `width`
+/// characters before wrapping. Each cell is padded to the widest item + 2. Returns a newline-joined
+/// block (no trailing newline). Used for `ls` of the virtual `/bin`·`/mnt/mcp`·`/proc` namespaces and
+/// for skill script-name listings — the short-single-token lists that read better horizontally.
+pub(crate) fn format_columns<S: AsRef<str>>(items: &[S], width: usize) -> String {
+    if items.is_empty() {
+        return String::new();
+    }
+    let gap = 2;
+    let col_w = items
+        .iter()
+        .map(|s| s.as_ref().chars().count())
+        .max()
+        .unwrap_or(0)
+        + gap;
+    let cols = (width / col_w).max(1);
+    // Ceil-divide into `cols` columns; item (r, c) sits at index r + c*rows (column-major).
+    let rows = items.len().div_ceil(cols);
+    let mut out = String::new();
+    for r in 0..rows {
+        let mut line = String::new();
+        for c in 0..cols {
+            let i = r + c * rows;
+            let Some(item) = items.get(i).map(AsRef::as_ref) else {
+                continue;
+            };
+            line.push_str(item);
+            // Pad every cell except the row's last, so trailing whitespace is trimmed off.
+            if i + rows < items.len() {
+                for _ in 0..col_w.saturating_sub(item.chars().count()) {
+                    line.push(' ');
+                }
+            }
+        }
+        out.push_str(line.trim_end());
+        if r + 1 < rows {
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// Render a virtual-namespace listing: terminal-style [columns](format_columns) when a width is known
+/// (interactive), else one name per line (non-interactive — scripts/pipes parse it).
+fn list_lines(children: &[String], columns: Option<usize>) -> String {
+    columns.map_or_else(|| children.join("\n"), |w| format_columns(children, w))
+}
+
+/// The terminal width to lay columns out to, read from the shell's `COLUMNS` variable — set natively
+/// per prompt (`Session::set_columns`) and by the client's `export COLUMNS` in `agent shell`. `None`
+/// when unset/unparseable, so callers fall back to a default (`uu_ls` uses 80).
+fn shell_columns<SE: ShellExtensions>(context: &ExecutionContext<'_, SE>) -> Option<usize> {
+    let (_, var) = context.shell.env().get("COLUMNS")?;
+    let value = var.value().to_cow_str(context.shell);
+    value.trim().parse::<usize>().ok().filter(|w| *w > 0)
+}
+
+/// Whether an `ls` argument already picks a layout/colour/width, so clank must not inject its
+/// terminal-style defaults over the user's explicit choice. Covers the long forms and the short
+/// bundle letters (`-l`, `-la`, `-1`, `-C`, `-x`, `-m`, `-w`).
+fn is_ls_layout_flag(arg: &str) -> bool {
+    if let Some(long) = arg.strip_prefix("--") {
+        let name = long.split('=').next().unwrap_or(long);
+        return matches!(
+            name,
+            "long" | "format" | "color" | "colour" | "columns" | "width"
+        );
+    }
+    if arg.starts_with('-') && arg.len() > 1 {
+        return arg[1..]
+            .chars()
+            .any(|c| matches!(c, 'l' | '1' | 'C' | 'x' | 'm' | 'w'));
+    }
+    false
+}
+
 /// `cat`, hand-written to serve the virtual `/proc` namespace. If no operand is a `/proc` path, the
 /// whole argv is delegated to `uu_cat::uumain` unchanged (real-file behavior + all flags preserved).
 /// Otherwise each operand is served in order: `/proc` paths from the process-table resolver, real
@@ -760,7 +860,14 @@ impl SimpleCommand for Ls {
         I: Iterator<Item = S>,
         S: AsRef<str>,
     {
-        let argv: Vec<String> = args.map(|s| s.as_ref().to_string()).collect();
+        let mut argv: Vec<String> = args.map(|s| s.as_ref().to_string()).collect();
+
+        // Terminal-style column output is gated on `COLUMNS` being set — the signal that an
+        // interactive terminal is driving this session (the native REPL sets it per prompt; the
+        // `agent shell` client sends `export COLUMNS`). `None` in a non-interactive context (a
+        // script, `agent invoke`, the conformance harness), where `ls` must stay one-per-line for
+        // parseability, exactly like GNU `ls` writing to a pipe.
+        let columns = shell_columns(&context);
 
         // `/bin` (the virtual builtin namespace): `ls /bin` lists every command name; `ls /bin/<name>`
         // names the file (like real `ls` on a file), since `/bin/<name>` resolves but isn't a dir.
@@ -772,7 +879,7 @@ impl SimpleCommand for Ls {
         if let Some(op) = bin_operand {
             let mut out = context.stdout();
             if let Some(children) = crate::runtime::binfs::list_children(&op) {
-                let _ = writeln!(out, "{}", children.join("\n"));
+                let _ = writeln!(out, "{}", list_lines(&children, columns));
                 return Ok(ExecutionResult::new(0));
             }
             // `/bin/<name>`: a file, not a directory. Exists → print its path; else not found.
@@ -797,7 +904,7 @@ impl SimpleCommand for Ls {
             let mut out = context.stdout();
             match crate::runtime::mcpfs::classify(&op, &index) {
                 crate::runtime::mcpfs::McpPathKind::Directory(children) => {
-                    let _ = writeln!(out, "{}", children.join("\n"));
+                    let _ = writeln!(out, "{}", list_lines(&children, columns));
                     return Ok(ExecutionResult::new(0));
                 }
                 crate::runtime::mcpfs::McpPathKind::Static
@@ -824,14 +931,32 @@ impl SimpleCommand for Ls {
         if let Some(op) = proc_operand {
             if let Some(children) = crate::runtime::procfs::list_children(&op) {
                 let mut out = context.stdout();
-                let _ = writeln!(out, "{}", children.join("\n"));
+                let _ = writeln!(out, "{}", list_lines(&children, columns));
                 return Ok(ExecutionResult::new(0));
             }
             let _ = writeln!(context.stderr(), "ls: {op}: No such file or directory");
             return Ok(ExecutionResult::new(1));
         }
 
-        // No virtual operand → delegate unchanged.
+        // No virtual operand → delegate to uu_ls. For a plain, user-facing `ls` (the whole line is a
+        // single command — SIMPLE_LINE — so `ls | grep` and `ls > f` are excluded) with no explicit
+        // layout/colour/width flag, inject terminal-style defaults: multi-column, type colours, sized
+        // to the shell width. `-C`/`--color=always` force columns+colour despite the captured (non-tty)
+        // stdout; the client terminal renders the colours. Otherwise the argv is delegated unchanged.
+        if let Some(width) = columns {
+            if SIMPLE_LINE.with(std::cell::Cell::get)
+                && !argv.iter().skip(1).any(|a| is_ls_layout_flag(a))
+            {
+                argv.splice(
+                    1..1,
+                    [
+                        "-C".to_string(),
+                        format!("--width={width}"),
+                        "--color=always".to_string(),
+                    ],
+                );
+            }
+        }
         let os_argv = argv.iter().map(std::ffi::OsString::from);
         let code = run_uu(&context, move || uu_ls::uumain(os_argv));
         Ok(ExecutionResult::new(code.clamp(0, 255) as u8))
@@ -898,4 +1023,83 @@ pub(crate) fn manifests() -> Vec<crate::manifest::Manifest> {
              supported.",
         ),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_columns, is_ls_layout_flag, note_simple_line, SIMPLE_LINE};
+
+    fn simple(line: &str) -> bool {
+        note_simple_line(line);
+        SIMPLE_LINE.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn simple_line_accepts_plain_commands() {
+        assert!(simple("ls"));
+        assert!(simple("ls -la"));
+        assert!(simple("ls /usr/share/skills"));
+        assert!(simple("ls $HOME")); // bare $VAR is not a substitution
+    }
+
+    #[test]
+    fn simple_line_rejects_pipes_redirects_and_compounds() {
+        // Every one of these carries a disqualifying operator, so a piped/redirected/substituted `ls`
+        // is never mistaken for a plain one — the guarantee that `ls | grep` stays one-per-line.
+        assert!(!simple("ls | grep x"));
+        assert!(!simple("ls > out.txt"));
+        assert!(!simple("ls; echo done"));
+        assert!(!simple("ls && pwd"));
+        assert!(!simple("echo $(ls)"));
+        assert!(!simple("ls `pwd`"));
+    }
+
+    #[test]
+    fn ls_layout_flags_are_detected() {
+        for f in [
+            "-l",
+            "-la",
+            "-1",
+            "-C",
+            "-x",
+            "-m",
+            "-w",
+            "--long",
+            "--format=across",
+            "--color=never",
+            "--width=50",
+        ] {
+            assert!(is_ls_layout_flag(f), "{f} should count as a layout flag");
+        }
+        for f in ["-a", "-A", "-h", "-R", "--all", "--", "-"] {
+            assert!(!is_ls_layout_flag(f), "{f} should NOT count as a layout flag");
+        }
+    }
+
+    #[test]
+    fn format_columns_empty_is_empty() {
+        let empty: [&str; 0] = [];
+        assert_eq!(format_columns(&empty, 80), "");
+    }
+
+    #[test]
+    fn format_columns_one_per_line_when_narrower_than_items() {
+        let items = ["alpha", "beta", "gamma"];
+        // Width smaller than the widest item → a single column (one per line).
+        assert_eq!(format_columns(&items, 3), "alpha\nbeta\ngamma");
+    }
+
+    #[test]
+    fn format_columns_packs_and_trims() {
+        let items = ["a", "bb", "ccc", "dddd", "e", "ff"];
+        let out = format_columns(&items, 40);
+        // Every item present, multiple per row, and no trailing whitespace on any row.
+        for it in items {
+            assert!(out.contains(it), "missing {it}");
+        }
+        assert!(out.lines().any(|l| l.split_whitespace().count() > 1));
+        for line in out.lines() {
+            assert_eq!(line, line.trim_end());
+        }
+    }
 }

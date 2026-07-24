@@ -489,8 +489,32 @@ impl Session {
     /// The shell's current working directory — Brush's tracked `working_dir`, which `cd` updates
     /// (see the `ShellCwd` guard; clank never moves the *process* cwd). Surfaced so an interactive
     /// caller (e.g. `golem agent shell`) can show the cwd in its prompt and reflect `cd` live.
+    #[must_use]
     pub fn cwd(&self) -> &std::path::Path {
         self.shell.working_dir()
+    }
+
+    /// Set the shell's `COLUMNS` to the terminal width, so a terminal-style `ls` (and other columnar
+    /// output) lays its columns out to the real window. The native REPL calls this per prompt from
+    /// `crossterm::terminal::size()`; in `agent shell` the client sends `export COLUMNS=<w>` instead.
+    /// A no-op if the value can't be stored (`COLUMNS` is a plain shell var, so this never fails in
+    /// practice).
+    pub fn set_columns(&mut self, cols: u16) {
+        let mut var = brush_core::variables::ShellVariable::new(cols.to_string());
+        var.export();
+        let _ = self.shell.env_mut().set_global("COLUMNS", var);
+    }
+
+    /// The terminal width from the shell's `COLUMNS` (see [`set_columns`](Self::set_columns)), or
+    /// `None` when unset — i.e. non-interactive (a script, `agent invoke`, the conformance harness),
+    /// where clank's listings stay one-per-line. `Some` marks an interactive terminal, so columnar
+    /// output is safe.
+    pub(crate) fn columns(&self) -> Option<usize> {
+        self.shell
+            .env()
+            .get("COLUMNS")
+            .and_then(|(_, var)| var.value().to_cow_str(&self.shell).trim().parse::<usize>().ok())
+            .filter(|w| *w > 0)
     }
 
     /// Evaluate one input line: record it, serve the clank-specific `context` builtin, otherwise
@@ -500,6 +524,10 @@ impl Session {
     /// `prompt-user`/authorization question (the eventual `end` is logged when `answer_prompt` resolves
     /// it). The actual command dispatch lives in [`eval_line_inner`](Self::eval_line_inner).
     pub async fn eval_line(&mut self, line: &str) -> LineResult {
+        // Record whether this line is a plain single command, so a bare `ls` may render like a
+        // terminal (columns + colour) while a piped/redirected `ls` stays one-per-line. See
+        // `note_simple_line`.
+        crate::tools::coreutils::note_simple_line(line);
         // Install this session's log sink for the whole line so every logging call site (shell/http/mcp/
         // ops, deep in run_command / McpClient::call / coreutils) routes through it.
         let _log = crate::logging::install(self.log_sink.clone());
@@ -2024,7 +2052,7 @@ fn write_install_marker(name: &str, marker: &crate::grease::state::InstallMarker
 
 /// `grease info <skill>` text: the skill is not a command, so we describe its envelope + the bundled
 /// documents/scripts rather than generated command help.
-fn skill_info_text(sk: &crate::grease::pkg::SkillPackage) -> String {
+fn skill_info_text(sk: &crate::grease::pkg::SkillPackage, columns: Option<usize>) -> String {
     let mut out = format!("{} — {} [skill]\n", sk.name, sk.description);
     if let Some(use_) = &sk.intended_use {
         let _ = writeln!(out, "\nIntended use: {use_}");
@@ -2041,8 +2069,23 @@ fn skill_info_text(sk: &crate::grease::pkg::SkillPackage) -> String {
         out.push_str("\nBundled scripts (on $PATH via /usr/share/skills/");
         out.push_str(&sk.name);
         out.push_str("/bin/):\n");
-        for s in &sk.scripts {
-            let _ = writeln!(out, "  {}", s.name);
+        // Short script basenames read better filled horizontally (like `ls`) when a terminal is
+        // driving this (COLUMNS set → `Some`); non-interactive output stays one-per-line. Each row is
+        // indented by 2 to match the section, so pack to `width - 2`.
+        let names: Vec<&str> = sk.scripts.iter().map(|s| s.name.as_str()).collect();
+        match columns {
+            Some(w) => {
+                for line in
+                    crate::tools::coreutils::format_columns(&names, w.saturating_sub(2)).lines()
+                {
+                    let _ = writeln!(out, "  {line}");
+                }
+            }
+            None => {
+                for name in &names {
+                    let _ = writeln!(out, "  {name}");
+                }
+            }
         }
     }
     out.push_str(
