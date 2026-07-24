@@ -11,6 +11,11 @@ pub(crate) struct EvalResult {
     /// to. The caller must collect a human answer and deliver it via `answer_prompt` — the shell
     /// never blocks. `None` for every ordinary command.
     pub pending_prompt: Option<PendingPromptView>,
+    /// The shell's working directory after this command (the agent's absolute path), so an
+    /// interactive caller can show it in its prompt and reflect `cd` live. Kept LAST: `agent
+    /// shell` decodes the eval-result positionally and reads this as an optional trailing field,
+    /// so agents that predate it (returning the first four fields only) still decode cleanly.
+    pub cwd: String,
 }
 
 /// The wire view of a pending `prompt-user` question surfaced to the caller.
@@ -66,8 +71,11 @@ impl ClankAgent for ClankAgentImpl {
         }
         // `ensure_session` (above) returned Ok, so `session` is Some.
         #[allow(clippy::unwrap_used)]
-        let result = self.session.as_mut().unwrap().eval_line(&cmd).await;
-        eval_result(result)
+        let session = self.session.as_mut().unwrap();
+        let result = session.eval_line(&cmd).await;
+        // Read the cwd AFTER the line runs (so a `cd` is reflected); the eval borrow has ended.
+        let cwd = session.cwd().display().to_string();
+        eval_result(result, cwd)
     }
 
     async fn answer_prompt(&mut self, response: String) -> EvalResult {
@@ -76,13 +84,10 @@ impl ClankAgent for ClankAgentImpl {
         }
         // `ensure_session` (above) returned Ok, so `session` is Some.
         #[allow(clippy::unwrap_used)]
-        let result = self
-            .session
-            .as_mut()
-            .unwrap()
-            .answer_prompt(Some(response))
-            .await;
-        eval_result(result)
+        let session = self.session.as_mut().unwrap();
+        let result = session.answer_prompt(Some(response)).await;
+        let cwd = session.cwd().display().to_string();
+        eval_result(result, cwd)
     }
 
     async fn abort_prompt(&mut self) -> EvalResult {
@@ -91,8 +96,10 @@ impl ClankAgent for ClankAgentImpl {
         }
         // `ensure_session` (above) returned Ok, so `session` is Some.
         #[allow(clippy::unwrap_used)]
-        let result = self.session.as_mut().unwrap().answer_prompt(None).await;
-        eval_result(result)
+        let session = self.session.as_mut().unwrap();
+        let result = session.answer_prompt(None).await;
+        let cwd = session.cwd().display().to_string();
+        eval_result(result, cwd)
     }
 
 }
@@ -128,6 +135,8 @@ impl ClankAgentImpl {
                         stderr: format!("clank: failed to start shell: {e}\n"),
                         exit_code: 1,
                         pending_prompt: None,
+                        // No session yet, so no cwd to report; the shell shows the bare label.
+                        cwd: String::new(),
                     });
                 }
             }
@@ -136,8 +145,8 @@ impl ClankAgentImpl {
     }
 }
 
-/// Map a shell [`LineResult`] to the wire [`EvalResult`].
-fn eval_result(result: LineResult) -> EvalResult {
+/// Map a shell [`LineResult`] to the wire [`EvalResult`], stamping the shell's post-command `cwd`.
+fn eval_result(result: LineResult, cwd: String) -> EvalResult {
     EvalResult {
         // Move the bytes into a String on the valid-UTF-8 common path (no copy); only allocate a lossy
         // copy on the rare invalid-byte path.
@@ -150,5 +159,6 @@ fn eval_result(result: LineResult) -> EvalResult {
             question: p.question,
             choices: p.choices,
         }),
+        cwd,
     }
 }

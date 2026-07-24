@@ -486,6 +486,13 @@ impl Session {
         self.log_sink = sink;
     }
 
+    /// The shell's current working directory — Brush's tracked `working_dir`, which `cd` updates
+    /// (see the `ShellCwd` guard; clank never moves the *process* cwd). Surfaced so an interactive
+    /// caller (e.g. `golem agent shell`) can show the cwd in its prompt and reflect `cd` live.
+    pub fn cwd(&self) -> &std::path::Path {
+        self.shell.working_dir()
+    }
+
     /// Evaluate one input line: record it, serve the clank-specific `context` builtin, otherwise
     /// execute it through Brush.
     /// Evaluate one command line, logging its lifecycle to `shell.log`: a `start` event as the line
