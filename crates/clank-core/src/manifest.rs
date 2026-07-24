@@ -217,7 +217,7 @@ mod tests {
         let m = Manifest::builtin("context", "manage the transcript")
             .with_scope(ExecutionScope::ShellInternal)
             .with_policy(AuthorizationPolicy::Confirm)
-            .with_help("context show|clear|budget — manage the session transcript");
+            .with_help("context show|clear|trim — manage the session transcript");
         assert_eq!(m.execution_scope, ExecutionScope::ShellInternal);
         assert_eq!(m.authorization_policy, AuthorizationPolicy::Confirm);
         assert!(m.help_text.contains("session transcript"));

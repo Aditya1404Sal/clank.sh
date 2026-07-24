@@ -12,7 +12,7 @@
 //! - [`dispatch_context`] — the clank-specific `context` builtin over that transcript.
 //!
 //! The transcript is in-memory for the session (not disk-backed); it is a sliding window that
-//! auto-compacts at the leading edge when it exceeds its token budget — the oldest entries are
+//! auto-compacts at the leading edge when it exceeds its safety cap — the oldest entries are
 //! evicted into a leading [`Entry::Elided`] marker, which the Session's async step then upgrades to
 //! a model-generated summary block. Brush runs on both targets through [`session::Session`].
 
@@ -41,7 +41,7 @@ pub mod native;
 /// The interactive prompt written before each line is read.
 pub const PROMPT: &[u8] = b"clank$ ";
 
-const HELP: &[u8] = b"clank.sh builtins:\n  echo [args...]     write arguments to stdout\n  help               show this listing\n  context show       print the session transcript\n  context clear      discard the session transcript\n  context budget [n] show or set the transcript token budget\n  context trim <n>   drop the oldest n transcript entries\n  context summarize  print an AI summary of the transcript (top-level only)\n  exit               leave the shell\n";
+const HELP: &[u8] = b"clank.sh builtins:\n  echo [args...]     write arguments to stdout\n  help               show this listing\n  context show       print the session transcript\n  context clear      discard the session transcript\n  context trim <n>   drop the oldest n transcript entries\n  context summarize  print an AI summary of the transcript (top-level only)\n  exit               leave the shell\n";
 
 /// What the loop should do after evaluating a line.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -52,17 +52,34 @@ pub enum Flow {
     Exit,
 }
 
-/// Default sliding-window budget, in estimated tokens. Sized so an ordinary session accumulates
-/// freely but a runaway one is bounded before it would blow an LLM context window. Tunable via
-/// [`Transcript::with_budget`] / [`Transcript::set_budget`]; the AI layer will drive this from
-/// the model's real context size later.
-pub const DEFAULT_TOKEN_BUDGET: usize = 24_000;
+/// Default transcript safety cap, in estimated tokens. Sized so an ordinary session accumulates
+/// freely but a runaway one is bounded before it would blow an LLM context window. This is a fixed
+/// safety limit, not a user-tunable knob: it is set once at session construction from
+/// [`configured_context_cap`] — there is no `context` subcommand to change it at runtime.
+pub const DEFAULT_CONTEXT_CAP_TOKENS: usize = 24_000;
+
+/// The environment variable that overrides [`DEFAULT_CONTEXT_CAP_TOKENS`]. On the durable agent it is
+/// injected by `golem.yaml` (`components.clank:agent.env`); natively it is an ordinary env var. Unset
+/// or non-positive ⇒ the default.
+const CONTEXT_CAP_ENV: &str = "CLANK_CONTEXT_CAP_TOKENS";
+
+/// The configured transcript safety cap: `CLANK_CONTEXT_CAP_TOKENS` when set to a positive integer,
+/// else [`DEFAULT_CONTEXT_CAP_TOKENS`]. Read once by [`session::Session::new`] and passed to
+/// [`Transcript::with_cap`]; [`Transcript::new`] itself stays on the default so unit tests are hermetic.
+#[must_use]
+pub fn configured_context_cap() -> usize {
+    std::env::var(CONTEXT_CAP_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_CONTEXT_CAP_TOKENS)
+}
 
 /// A shell-owned, in-memory record of the session: each command typed and the output it
 /// produced. Owned by the shell (not the terminal), accumulated for the whole session.
 ///
-/// The record is a **sliding window**: it is kept under [`token_budget`](Self::token_budget)
-/// estimated tokens by dropping the oldest entries once the budget is exceeded. Dropped entries
+/// The record is a **sliding window**: it is kept under [`cap_tokens`](Self::cap_tokens)
+/// estimated tokens by dropping the oldest entries once the cap is exceeded. Dropped entries
 /// are replaced by a single leading [`Entry::Elided`] marker so the boundary between discarded
 /// and live history stays explicit (rather than history silently vanishing). Today the marker
 /// just records how many entries were dropped; when the AI layer lands it becomes the slot for a
@@ -70,9 +87,9 @@ pub const DEFAULT_TOKEN_BUDGET: usize = 24_000;
 #[derive(Clone)]
 pub struct Transcript {
     entries: Vec<Entry>,
-    token_budget: usize,
+    cap_tokens: usize,
     /// Rendered text of entries dropped by the most recent eviction, awaiting an async summary.
-    /// Populated as `enforce_budget`/`trim` remove entries; drained by [`pending_summary`](Self::pending_summary)
+    /// Populated as `enforce_cap`/`trim` remove entries; drained by [`pending_summary`](Self::pending_summary)
     /// once the Session layer has summarized it. Transient — never part of the window, never serialized.
     last_dropped: Vec<u8>,
 }
@@ -81,7 +98,7 @@ impl Default for Transcript {
     fn default() -> Self {
         Self {
             entries: Vec::new(),
-            token_budget: DEFAULT_TOKEN_BUDGET,
+            cap_tokens: DEFAULT_CONTEXT_CAP_TOKENS,
             last_dropped: Vec::new(),
         }
     }
@@ -91,7 +108,7 @@ impl Default for Transcript {
 enum Entry {
     /// A command line and the output it produced.
     Command { command: String, output: Vec<u8> },
-    /// A leading marker standing in for `count` older entries dropped to stay under budget. Once the
+    /// A leading marker standing in for `count` older entries dropped to stay under the cap. Once the
     /// Session's async compaction step has summarized the dropped span, `summary` holds that text and
     /// `render` prints it as a visible summary block; until then (or on native / model error) it stays
     /// `None` and renders as a bare `[N earlier entries dropped]` count marker.
@@ -109,32 +126,29 @@ fn est_tokens(byte_len: usize) -> usize {
 }
 
 impl Transcript {
-    /// A new, empty transcript with the default token budget.
+    /// A new, empty transcript with the default safety cap.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Build a transcript with an explicit token budget (mainly for tests and tuning).
+    /// Build a transcript with an explicit safety cap. Used to construct from config
+    /// ([`configured_context_cap`]) and, with a tiny cap, to force eviction in tests.
     #[must_use]
-    pub fn with_budget(token_budget: usize) -> Self {
+    pub fn with_cap(cap_tokens: usize) -> Self {
         Self {
             entries: Vec::new(),
-            token_budget,
+            cap_tokens,
             last_dropped: Vec::new(),
         }
     }
 
-    /// The current sliding-window budget, in estimated tokens.
-    #[must_use]
-    pub fn budget(&self) -> usize {
-        self.token_budget
-    }
-
-    /// Set the sliding-window budget and immediately re-enforce it.
-    pub fn set_budget(&mut self, token_budget: usize) {
-        self.token_budget = token_budget;
-        self.enforce_budget();
+    /// Set the safety cap and immediately re-enforce it. Internal, test-only: the cap is fixed at
+    /// construction from config, and no `context` subcommand exposes it — it is not a user setting.
+    #[cfg(test)]
+    pub(crate) fn set_cap(&mut self, cap_tokens: usize) {
+        self.cap_tokens = cap_tokens;
+        self.enforce_cap();
     }
 
     /// Record a command line as typed (newline already stripped). Starts a new entry whose
@@ -151,7 +165,7 @@ impl Transcript {
         });
     }
 
-    /// Append output bytes to the most recent command's entry, then enforce the window budget.
+    /// Append output bytes to the most recent command's entry, then enforce the window cap.
     /// Enforcement runs here (not in `record_command`) so an entry is costed with its output.
     ///
     /// Any active `export --secret` value in the output is masked before it enters the window — a
@@ -167,7 +181,7 @@ impl Transcript {
                 Err(_) => buf.extend_from_slice(output),
             }
         }
-        self.enforce_budget();
+        self.enforce_cap();
     }
 
     /// Estimated token cost of a single entry.
@@ -175,8 +189,8 @@ impl Transcript {
         match entry {
             Entry::Command { command, output } => est_tokens(command.len() + output.len()),
             // A bare count marker is tiny and bounded; count it as negligible so a run of drops
-            // doesn't itself push the window over budget. A marker carrying a generated summary is
-            // costed by its summary text so a summarized window is honestly budgeted.
+            // doesn't itself push the window over the cap. A marker carrying a generated summary is
+            // costed by its summary text so a summarized window is honestly costed.
             Entry::Elided { summary, .. } => summary.as_ref().map_or(0, |s| est_tokens(s.len())),
         }
     }
@@ -186,12 +200,12 @@ impl Transcript {
         self.entries.iter().map(Self::entry_tokens).sum()
     }
 
-    /// Drop oldest `Command` entries until the window fits the budget, folding each drop into a
+    /// Drop oldest `Command` entries until the window fits the cap, folding each drop into a
     /// single leading `Elided` marker. Never drops the marker itself, and never drops the most
     /// recent entry (a single oversized entry stays — degenerate but honest, and the loop can't
     /// spin forever).
-    fn enforce_budget(&mut self) {
-        while self.total_tokens() > self.token_budget {
+    fn enforce_cap(&mut self) {
+        while self.total_tokens() > self.cap_tokens {
             // Index of the oldest `Command` entry, and whether a leading marker already exists.
             let has_marker = matches!(self.entries.first(), Some(Entry::Elided { .. }));
             let oldest_cmd = usize::from(has_marker);
@@ -290,8 +304,8 @@ impl Transcript {
     }
 
     /// Drop the oldest `n` `Command` entries, folding each into the leading [`Entry::Elided`] marker
-    /// (the same eviction shape as [`enforce_budget`](Self::enforce_budget), but count-driven rather
-    /// than budget-driven). Never drops the marker itself, and never drops the last (current) entry —
+    /// (the same eviction shape as [`enforce_cap`](Self::enforce_cap), but count-driven rather
+    /// than cap-driven). Never drops the marker itself, and never drops the last (current) entry —
     /// so a live session always keeps at least its most recent command. Returns how many entries were
     /// actually dropped (may be `< n` if the window is short). `context trim <n>`.
     pub fn trim(&mut self, n: usize) -> usize {
@@ -343,7 +357,7 @@ impl Transcript {
 
     /// Write a generated `summary` into the leading [`Entry::Elided`] marker and drain the transient
     /// dropped-text buffer. No-op if there is no leading marker (the window was cleared/changed between
-    /// the async summary starting and finishing). Does NOT re-enforce the budget here: enforcing would
+    /// the async summary starting and finishing). Does NOT re-enforce the cap here: enforcing would
     /// risk immediately evicting the entry that folds into this very marker and clearing the summary we
     /// just set. The marker's summary tokens ([`entry_tokens`](Self::entry_tokens)) are honestly costed
     /// on the next [`record_output`](Self::record_output) eviction pass instead.
@@ -388,19 +402,6 @@ pub(crate) fn apply_context<'a>(
             transcript.clear();
             Vec::new()
         }
-        // `context budget [<n>]` — with no argument, prints the current sliding-window token
-        // budget; with a number, sets it (and re-enforces immediately). This is the runtime knob
-        // for the window until the AI layer drives it from the model's real context size.
-        Some("budget") => match args.next() {
-            None => format!("{}\n", transcript.budget()).into_bytes(),
-            Some(arg) => match arg.parse::<usize>() {
-                Ok(n) => {
-                    transcript.set_budget(n);
-                    Vec::new()
-                }
-                Err(_) => format!("context: budget: not a number: {arg}\n").into_bytes(),
-            },
-        },
         // `context trim <n>` — drop the oldest `n` entries (pure/sync; no LLM). Composable everywhere.
         Some("trim") => match args.next() {
             None => b"context: trim: expects a count\n".to_vec(),
@@ -598,7 +599,7 @@ mod tests {
         assert!(dispatch_context(&mut t, "").is_none());
     }
 
-    // --- Sliding window / token budget ---
+    // --- Sliding window / safety cap ---
 
     /// Record a `command` + `output` pair into the transcript.
     fn record(t: &mut Transcript, command: &str, output: &[u8]) {
@@ -616,9 +617,9 @@ mod tests {
     }
 
     #[test]
-    fn under_budget_keeps_everything_with_no_marker() {
-        // Generous budget: nothing is evicted, render matches the plain format exactly.
-        let mut t = Transcript::with_budget(10_000);
+    fn under_cap_keeps_everything_with_no_marker() {
+        // Generous cap: nothing is evicted, render matches the plain format exactly.
+        let mut t = Transcript::with_cap(10_000);
         record(&mut t, "echo a", b"a\n");
         record(&mut t, "echo b", b"b\n");
         let rendered = String::from_utf8(t.render()).unwrap();
@@ -627,12 +628,12 @@ mod tests {
     }
 
     #[test]
-    fn over_budget_drops_oldest_and_marks_it() {
-        // Tiny budget forces eviction. Each entry ~ est_tokens(len(cmd)+len(out)).
-        let mut t = Transcript::with_budget(4);
+    fn over_cap_drops_oldest_and_marks_it() {
+        // Tiny cap forces eviction. Each entry ~ est_tokens(len(cmd)+len(out)).
+        let mut t = Transcript::with_cap(4);
         record(&mut t, "aaaa", b"aaaa"); // 8 bytes -> 2 tokens
-        record(&mut t, "bbbb", b"bbbb"); // pushes total to 4 tokens (== budget, ok)
-        record(&mut t, "cccc", b"cccc"); // now over budget -> evict oldest
+        record(&mut t, "bbbb", b"bbbb"); // pushes total to 4 tokens (== cap, ok)
+        record(&mut t, "cccc", b"cccc"); // now over cap -> evict oldest
         let rendered = String::from_utf8(t.render()).unwrap();
         // Newest survives, oldest is gone, a marker leads.
         assert!(rendered.starts_with("[1 earlier entries dropped]\n"));
@@ -642,7 +643,7 @@ mod tests {
 
     #[test]
     fn consecutive_evictions_coalesce_into_one_marker() {
-        let mut t = Transcript::with_budget(2); // ~8 bytes of headroom
+        let mut t = Transcript::with_cap(2); // ~8 bytes of headroom
         for i in 0..6 {
             record(&mut t, &format!("cmd{i}"), b"xxxx");
         }
@@ -663,7 +664,7 @@ mod tests {
     #[test]
     fn pending_summary_exposes_the_dropped_span_then_clears() {
         // Eviction stashes the dropped entry's rendered text; pending_summary surfaces it.
-        let mut t = Transcript::with_budget(4);
+        let mut t = Transcript::with_cap(4);
         record(&mut t, "aaaa", b"aaaa");
         record(&mut t, "bbbb", b"bbbb");
         record(&mut t, "cccc", b"cccc"); // evicts "aaaa"
@@ -680,7 +681,7 @@ mod tests {
     fn stash_dropped_buffer_is_bounded() {
         // Audit P1-3: a durable agent that never summarizes must not accumulate the dropped-span
         // text without limit. Evict far more than the cap and confirm the pending span stays bounded.
-        let mut t = Transcript::with_budget(2);
+        let mut t = Transcript::with_cap(2);
         let big = vec![b'x'; 50 * 1024];
         for i in 0..8 {
             record(&mut t, &format!("cmd{i}"), big.as_slice()); // 6 evictions × ~50KB stashed
@@ -697,7 +698,7 @@ mod tests {
     fn discard_dropped_span_clears_text_but_keeps_the_count() {
         // P1-3: the no-model path discards the pending text (never summarizable) while keeping the
         // count marker.
-        let mut t = Transcript::with_budget(4);
+        let mut t = Transcript::with_cap(4);
         record(&mut t, "aaaa", b"aaaa");
         record(&mut t, "bbbb", b"bbbb");
         record(&mut t, "cccc", b"cccc"); // evicts "aaaa" → a span is pending
@@ -712,7 +713,7 @@ mod tests {
 
     #[test]
     fn set_marker_summary_renders_a_visible_summary_block() {
-        let mut t = Transcript::with_budget(4);
+        let mut t = Transcript::with_cap(4);
         record(&mut t, "aaaa", b"aaaa");
         record(&mut t, "bbbb", b"bbbb");
         record(&mut t, "cccc", b"cccc"); // evicts "aaaa"
@@ -727,7 +728,7 @@ mod tests {
 
     #[test]
     fn no_pending_summary_without_eviction() {
-        let mut t = Transcript::with_budget(10_000);
+        let mut t = Transcript::with_cap(10_000);
         record(&mut t, "echo a", b"a\n");
         assert!(t.pending_summary().is_none());
     }
@@ -736,7 +737,7 @@ mod tests {
     fn a_summarized_marker_costs_its_summary_tokens() {
         // A bare marker costs 0; once it carries a summary, entry_tokens counts the summary text — so
         // the summarized window is honestly larger than the same window with a bare count marker.
-        let mut t = Transcript::with_budget(10_000); // generous: control eviction manually
+        let mut t = Transcript::with_cap(10_000); // generous: control eviction manually
         record(&mut t, "aaaa", b"aaaa");
         record(&mut t, "bbbb", b"bbbb"); // a second entry so trim can drop the first
         assert_eq!(t.trim(1), 1); // fold "aaaa" into a bare marker (count 1, no summary)
@@ -751,7 +752,7 @@ mod tests {
 
     #[test]
     fn a_fresh_eviction_clears_a_prior_summary() {
-        let mut t = Transcript::with_budget(4);
+        let mut t = Transcript::with_cap(4);
         record(&mut t, "aaaa", b"aaaa");
         record(&mut t, "bbbb", b"bbbb");
         record(&mut t, "cccc", b"cccc"); // evicts "aaaa"
@@ -770,8 +771,8 @@ mod tests {
 
     #[test]
     fn single_oversized_entry_is_kept_not_looped() {
-        // One entry alone exceeds the budget; it must stay (no infinite loop, no empty window).
-        let mut t = Transcript::with_budget(1);
+        // One entry alone exceeds the cap; it must stay (no infinite loop, no empty window).
+        let mut t = Transcript::with_cap(1);
         record(&mut t, "big", &vec![b'x'; 1000]);
         let rendered = String::from_utf8(t.render()).unwrap();
         assert!(rendered.contains("clank$ big"));
@@ -780,7 +781,7 @@ mod tests {
 
     #[test]
     fn clear_wipes_entries_and_marker() {
-        let mut t = Transcript::with_budget(2);
+        let mut t = Transcript::with_cap(2);
         for i in 0..5 {
             record(&mut t, &format!("cmd{i}"), b"xxxx");
         }
@@ -790,27 +791,8 @@ mod tests {
     }
 
     #[test]
-    fn context_budget_reports_and_sets() {
-        let mut t = Transcript::new();
-        // No arg → prints the default budget.
-        let shown = dispatch_context(&mut t, "context budget").unwrap();
-        assert_eq!(
-            String::from_utf8(shown).unwrap(),
-            format!("{DEFAULT_TOKEN_BUDGET}\n")
-        );
-        // Set → empty output, and the new value sticks.
-        assert!(dispatch_context(&mut t, "context budget 5")
-            .unwrap()
-            .is_empty());
-        assert_eq!(t.budget(), 5);
-        // Non-numeric → error message.
-        let err = dispatch_context(&mut t, "context budget nope").unwrap();
-        assert!(String::from_utf8(err).unwrap().contains("not a number"));
-    }
-
-    #[test]
     fn trim_drops_oldest_and_folds_into_marker() {
-        let mut t = Transcript::with_budget(10_000); // big budget: no auto-eviction
+        let mut t = Transcript::with_cap(10_000); // big cap: no auto-eviction
         for i in 0..4 {
             record(&mut t, &format!("cmd{i}"), b"out");
         }
@@ -824,7 +806,7 @@ mod tests {
 
     #[test]
     fn trim_more_than_present_keeps_the_last_entry() {
-        let mut t = Transcript::with_budget(10_000);
+        let mut t = Transcript::with_cap(10_000);
         for i in 0..3 {
             record(&mut t, &format!("cmd{i}"), b"out");
         }
@@ -838,7 +820,7 @@ mod tests {
 
     #[test]
     fn trim_zero_and_empty_are_noops() {
-        let mut t = Transcript::with_budget(10_000);
+        let mut t = Transcript::with_cap(10_000);
         record(&mut t, "only", b"out");
         assert_eq!(t.trim(0), 0);
         assert!(String::from_utf8(t.render()).unwrap().contains("clank$ only"));
@@ -849,9 +831,9 @@ mod tests {
 
     #[test]
     fn trim_folds_into_an_existing_marker() {
-        // A window that already has a leading Elided marker (from budget eviction) accumulates the
+        // A window that already has a leading Elided marker (from cap eviction) accumulates the
         // trim drops into the SAME marker rather than inserting a second one.
-        let mut t = Transcript::with_budget(2);
+        let mut t = Transcript::with_cap(2);
         for i in 0..5 {
             record(&mut t, &format!("cmd{i}"), b"xxxx"); // forces eviction → a marker exists
         }
@@ -863,7 +845,7 @@ mod tests {
 
     #[test]
     fn context_trim_via_dispatch() {
-        let mut t = Transcript::with_budget(10_000);
+        let mut t = Transcript::with_cap(10_000);
         for i in 0..4 {
             record(&mut t, &format!("cmd{i}"), b"out");
         }
@@ -891,13 +873,14 @@ mod tests {
     }
 
     #[test]
-    fn shrinking_budget_reenforces_immediately() {
-        let mut t = Transcript::with_budget(10_000);
+    fn shrinking_the_cap_reenforces_immediately() {
+        // The internal `set_cap` (construction-from-config / test only) re-enforces on the spot.
+        let mut t = Transcript::with_cap(10_000);
         record(&mut t, "aaaa", b"aaaa");
         record(&mut t, "bbbb", b"bbbb");
         record(&mut t, "cccc", b"cccc");
         assert!(!String::from_utf8(t.render()).unwrap().contains("dropped"));
-        t.set_budget(2);
+        t.set_cap(2);
         let rendered = String::from_utf8(t.render()).unwrap();
         assert!(rendered.contains("dropped"));
         assert!(rendered.contains("cccc")); // newest retained

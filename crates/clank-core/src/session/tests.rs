@@ -2393,8 +2393,8 @@ fn ask_returns_reply_and_feeds_transcript_as_context() {
     });
 }
 
-/// When recording a command evicts old entries to stay under budget, the leading count marker is
-/// upgraded into a model-generated summary block (the README's summarize-at-leading-edge compaction).
+/// When recording a command evicts old entries to stay under the safety cap, the leading count marker
+/// is upgraded into a model-generated summary block (the README's summarize-at-leading-edge compaction).
 #[test]
 fn auto_compaction_summarizes_the_dropped_span() {
     on_rt(async {
@@ -2407,8 +2407,9 @@ fn auto_compaction_summarizes_the_dropped_span() {
             seen.clone(),
         )));
 
-        // Shrink the window so the next few commands force an eviction.
-        session.eval_line("context budget 4").await;
+        // Shrink the safety cap so the next few commands force an eviction (there is no user
+        // command for this; the cap is fixed from config in production).
+        session.set_context_cap(4);
         session.run_line("echo marker_one").await;
         session.run_line("echo marker_two").await;
         session.run_line("echo marker_three").await;
@@ -2438,7 +2439,7 @@ fn auto_compaction_falls_back_to_count_marker_without_a_provider() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
         // No ask_provider injected.
-        session.eval_line("context budget 4").await;
+        session.set_context_cap(4);
         session.run_line("echo marker_one").await;
         session.run_line("echo marker_two").await;
         session.run_line("echo marker_three").await;

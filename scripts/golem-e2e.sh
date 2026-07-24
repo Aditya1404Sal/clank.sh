@@ -422,15 +422,15 @@ expect "sleep 0 returns success"             'sleep 0; echo slept'              
 expect_contains "env lists variables"        'env'                                                'GOLEM_AGENT_TYPE='
 
 # ============================================================================
-# 2c. Transcript sliding window — force eviction with a tiny budget, see the marker
+# 2c. Transcript sliding window — force auto-eviction by volume, see the marker
 # ============================================================================
-# Start from a clean transcript so this check is independent of the commands run above, then set a
-# tiny token budget and run several commands. The oldest entries must be dropped behind a marker
-# while the newest survives. (`context show`/`context clear`/`context budget` are themselves
-# recorded as command entries, so the budget is kept small-but-nonzero and we assert on substrings
-# rather than exact counts.)
+# The transcript auto-bounds at a fixed safety cap (CLANK_CONTEXT_CAP_TOKENS, default ~24000 est.
+# tokens ≈ 96KB) — there is no runtime `context budget` knob. So force eviction the honest way:
+# start clean, record ONE command whose output alone exceeds the cap, then run a few short commands.
+# The oversized entry becomes the oldest and is dropped behind a marker while the newest survives.
 run_line 'context clear' >/dev/null
-run_line 'context budget 6' >/dev/null
+# printf a ~150KB blob (≈37500 est. tokens) as one recorded entry — comfortably over the 24000 cap.
+run_line "printf '%150000s' ''" >/dev/null
 run_line 'echo alpha' >/dev/null
 run_line 'echo bravo' >/dev/null
 run_line 'echo charlie' >/dev/null
@@ -440,8 +440,6 @@ run_line 'echo delta' >/dev/null
 # "earlier entries", so assert on that common substring.
 expect_contains "window inserts a drop marker"   'context show'  'earlier entries'
 expect_contains "window keeps the newest entry"  'context show'  'echo delta'
-# restore a roomy budget so it doesn't interfere with anything after
-run_line 'context budget 24000' >/dev/null
 
 # context trim <n> — drop the oldest n entries (pure/sync, no LLM). Fresh window, trim, assert the
 # oldest is gone and the newest survives.
@@ -1522,7 +1520,8 @@ expect_eval "grep miss exits 2"            "$GREP_MISS" '.exit_code' '2'
 
 # A2 — `context` is now a real Brush builtin in nested contexts (via the per-line transcript
 # slot), and the other session commands error HONESTLY there instead of "operation not supported".
-expect_contains "context composes in \$( )"   'B=$(context budget); echo "budget=$B"'  'budget='
+run_line 'echo compose_probe_af8' >/dev/null
+expect_contains "context show composes in \$( )"   'B=$(context show); echo "$B"'  'compose_probe_af8'
 # Content-independent (line 1 may be the elision marker once the window has compacted): the
 # assertion is that context's output flows through the pipe and head truncates it to one line.
 expect "context show pipes"                   'context show | head -n 1 | wc -l'       $'1'
