@@ -33,6 +33,14 @@ features = [
     "sqlite",
 ]
 
+# Vendored third-party source: we carry a one-line cursor-position-fallback patch, not reedline's
+# own lint hygiene. Cap all warnings so a clank build stays clean — cargo auto-caps registry deps
+# this way (`--cap-lints allow`), but a `[patch]` path dep is treated as local, so upstream's
+# pre-existing warnings (13 mismatched_lifetime_syntaxes) would otherwise print on every build.
+# This mirrors what a fresh clone of the published 0.38.0 crate gets.
+[lints.rust]
+warnings = "allow"
+
 [lib]
 name = "reedline"
 path = "src/lib.rs"

@@ -21,6 +21,14 @@ autotests = false
 [package.metadata.docs.rs]
 all-features = true
 
+# Vendored third-party source: we carry a two-line DSR-timeout patch, not crossterm's own lint
+# hygiene. Cap all warnings so a clank build stays clean — cargo auto-caps registry deps this way
+# (`--cap-lints allow`), but a `[patch]` path dep is treated as local, so upstream's pre-existing
+# warnings (legacy winapi cfgs, an unused_parens, a dead InternalEventFilter) would otherwise print
+# on every build. This mirrors what a fresh clone of the published 0.28.1 crate gets.
+[lints.rust]
+warnings = "allow"
+
 [lib]
 name = "crossterm"
 path = "src/lib.rs"
