@@ -424,7 +424,23 @@ pub struct AskArgs {
 /// unaffected — this is only consulted by the model-tool gate.
 #[must_use]
 pub fn contains_command_substitution(s: &str) -> bool {
-    s.contains("$(") || s.contains('`') || s.contains("<(") || s.contains(">(")
+    if s.contains('`') || s.contains("<(") || s.contains(">(") {
+        return true;
+    }
+    // `$(` is command substitution and IS refused — but `$((` opens ARITHMETIC expansion, which
+    // never runs a command, so it is allowed (scripts are full of `$((i + 1))`). A real command
+    // substitution nested inside arithmetic (`$(( $(cmd) ))`) still trips on its own inner `$(`,
+    // which this scan reaches, so nothing is smuggled through. `$( (subshell) )` needs a space and
+    // so has a non-`(` char after `$(`, keeping it refused.
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'$' && bytes[i + 1] == b'(' && bytes.get(i + 2) != Some(&b'(') {
+            return true;
+        }
+        i += 1;
+    }
+    false
 }
 
 /// If `line`'s leading command word is `ask`, parse its flags and prompt into [`AskArgs`]; `None` for
@@ -694,6 +710,20 @@ mod tests {
         assert!(!contains_command_substitution("echo hello world"));
         assert!(!contains_command_substitution("echo ${HOME}"));
         assert!(!contains_command_substitution("ls -la /tmp && pwd"));
+    }
+
+    #[test]
+    fn arithmetic_expansion_is_allowed_but_nested_substitution_is_not() {
+        // `$((…))` is arithmetic (no command runs) — the common case a shell script needs.
+        assert!(!contains_command_substitution("i=$((i + 1))"));
+        assert!(!contains_command_substitution("spaces=$((height - i)); stars=$((2 * i - 1))"));
+        assert!(!contains_command_substitution(
+            "while [ $i -le $height ]; do printf '*'; i=$((i + 1)); done"
+        ));
+        // But a real command substitution nested inside arithmetic is still refused.
+        assert!(contains_command_substitution("x=$(( $(id -u) + 1 ))"));
+        // And `$( (subshell) )` (space after `$(`) stays refused.
+        assert!(contains_command_substitution("echo $( (echo hi) )"));
     }
 
     #[test]
