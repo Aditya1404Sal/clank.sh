@@ -2177,7 +2177,7 @@ fn ask_reconstruct(args: &crate::ai::ask::AskArgs) -> String {
 
 /// The most tool-calling turns the agentic `ask` loop will drive before giving up. Bounds runaway
 /// tool use; the loop exits 0 with whatever text it has plus a stderr notice on hitting the cap.
-const ASK_MAX_ITERATIONS: usize = 16;
+const ASK_MAX_ITERATIONS: usize = 40;
 
 /// Per-stream byte cap on a tool result fed back to the model. Bounds context growth from a `cat` of a
 /// large file; the payload is truncated with a marker, the JSON envelope is not.
