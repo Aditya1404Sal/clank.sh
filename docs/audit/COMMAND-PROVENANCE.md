@@ -57,9 +57,9 @@ command semantics are clank's own.
 | **`which`** | ~120 | none | `tools/which.rs` | The `which` crate does exec-bit fs checks that *lie* on wasip2 (see [[wasip2-fs-existence-checks]] — `Path::exists()` used instead). **Wasm-justified — keep.** |
 | **`ps`** | — | none | `runtime/ps.rs` | Novel: reads clank's own agent proc table. No crate could exist. **Correct as-is.** |
 | **`man`** | ~140 | none | `tools/man.rs` | Help-text shim, not real man. Trivial. **Fine.** |
-| **`find`** | ~370 | `regex` | `tools/find.rs` | Hand-rolled directory walk + predicates. **Reconsider — see §4.** |
-| **`xargs`** | ~230 | `clap` | `tools/xargs.rs` | Hand-rolled batching. **Reconsider — see §4.** |
-| **URL resolution** | — | none | `utilities/whttp/src/lib.rs:178` (`resolve_url`), `:218` (`has_scheme`) | Hand-rolled RFC-3986 relative resolution via `split_once("://")`. **Reconsider — see §4.** |
+| **`find`** | ~370 | `regex`, `walkdir` | `tools/find.rs` | Traversal now via **`walkdir`**; glob/predicate layer + virtual `/bin`,`/proc` walks hand-rolled. **Actioned — see §4.** |
+| **`xargs`** | ~230 | `clap` | `tools/xargs.rs` | Hand-rolled batching + no-exec `run_string` re-entry (no viable library for a no-exec shell). **Kept — see §4.** |
+| **URL resolution** | — | `iri-string` | `utilities/whttp/src/lib.rs` (`resolve_url`) | RFC-3986 §5 resolution now via **`iri-string`** (pure-Rust, no icu). **Actioned — see §4.** |
 
 ---
 
@@ -73,18 +73,26 @@ HTTP, serde, `golem-rust`). Nothing to "un-reinvent." Registered via
 
 ---
 
-## 4. The three worth acting on
+## 4. The three worth acting on — outcome (actioned 2026-07-24)
 
-1. **URL resolution → adopt the `url` crate.** `whttp` hand-rolls relative-reference resolution
-   (`resolve_url` / `has_scheme`, `utilities/whttp/src/lib.rs:178`) — the classic footgun surface
-   (ports, userinfo, `..` segments, scheme-relative `//host`). The `url` crate (servo/rust-url) is
-   *the* production standard and is pure-Rust / wasm-clean. Low-risk, high-payoff swap; keep the
-   redirect-policy logic, replace the parsing/joining.
-2. **`find` walk → `walkdir`.** Mature, pure-Rust; builds on `std::fs`, which clank already relies on
-   under wasip2 (worth a quick `--target wasm32-wasip2` confirmation). Keep the predicate/flag layer,
-   replace the hand-rolled traversal.
-3. **`find` + `xargs` → or lift from `uutils/findutils`.** Stays in the uutils family already forked
-   here, and covers **both** bespoke tools from one maintained source.
+1. **URL resolution → `iri-string`** ✅ *done* (the audit's `url` pick was corrected). `whttp` hand-rolled
+   relative-reference resolution (`resolve_url`/`has_scheme`/`remove_dot_segments`) over the footgun
+   surface (ports, userinfo, `..` segments, scheme-relative `//host`). We adopted a production
+   RFC-3986 crate — **but not `url`**: empirically, `url` drags in the `idna`→`icu` stack (~15 MB of
+   Unicode-data rlibs on `wasm32-wasip2`) for host-IDNA the redirect path never needs, confirming the
+   existing code comment. **`iri-string`** does the same RFC 3986 §5 resolution, is pure-Rust, pulls
+   no icu/idna/libc, and builds clean on wasm — the right "don't reinvent the wheel" crate *for this
+   target*. `resolve_url` now delegates to it (`utilities/whttp/src/lib.rs`); redirect-policy logic
+   unchanged.
+2. **`find` walk → `walkdir`** ✅ *done*. The real-filesystem traversal in `tools/find.rs` now uses
+   `walkdir` (pure-Rust over `std::fs`; ~0.76 MB, no icu/libc; confirmed building + testing on
+   `wasm32-wasip2`). The glob/predicate layer and the virtual `/bin`,`/proc` walks stay clank's own.
+3. **`find` + `xargs` → uutils/findutils** ❌ *rejected — not viable on this target*. `find`: findutils
+   is bin-only with a C `onig` dependency that doesn't build for `wasm32-wasip2` (already noted in
+   `tools/find.rs`). `xargs`: findutils/uutils `xargs` **exec-spawns**; clank has *no exec* — its
+   `xargs` re-enters the Brush shell via `run_string` (`tools/xargs.rs`). Architecturally
+   incompatible, not merely a build issue. Both stay hand-rolled (find's traversal now via `walkdir`,
+   per #2; xargs unchanged — no viable library exists for a no-exec shell).
 
 **Leave alone** (wasm forces it, or no viable lib): `awk`, `sed`, `stat`, `which`, `ps`, `man`. For
 `awk`/`sed` the production-readiness lever isn't a crate swap (none exists) — it's **test coverage**,

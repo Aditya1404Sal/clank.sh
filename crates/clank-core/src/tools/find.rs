@@ -153,37 +153,37 @@ impl FindOpts {
     }
 }
 
-/// Depth-first walk of one real-filesystem root. Children are sorted for deterministic output.
-fn walk(path: &str, depth: usize, opts: &FindOpts, out: &mut dyn Write, errs: &mut Vec<String>) {
-    let md = match std::fs::symlink_metadata(path) {
-        Ok(md) => md,
-        Err(e) => {
-            errs.push(match e.kind() {
-                std::io::ErrorKind::NotFound => {
-                    format!("'{path}': No such file or directory")
-                }
-                _ => format!("'{path}': {e}"),
-            });
-            return;
-        }
-    };
-    let is_dir = md.is_dir();
-    if depth >= opts.mindepth && opts.matches(path, is_dir) {
-        let _ = writeln!(out, "{path}");
+/// Walk one real-filesystem root via `walkdir`, applying the predicates. Siblings are visited in
+/// sorted order for deterministic output; symlinks are not followed (matching the old
+/// `symlink_metadata` walk). Depth bounds map directly onto walkdir's `min_depth`/`max_depth`.
+fn walk(path: &str, opts: &FindOpts, out: &mut dyn Write, errs: &mut Vec<String>) {
+    let mut walker = walkdir::WalkDir::new(path)
+        .min_depth(opts.mindepth)
+        .sort_by_file_name();
+    if let Some(max) = opts.maxdepth {
+        walker = walker.max_depth(max);
     }
-    if is_dir && opts.maxdepth.is_none_or(|max| depth < max) {
-        match std::fs::read_dir(path) {
-            Ok(rd) => {
-                let mut children: Vec<String> = rd
-                    .filter_map(std::result::Result::ok)
-                    .map(|e| e.path().to_string_lossy().into_owned())
-                    .collect();
-                children.sort();
-                for child in children {
-                    walk(&child, depth + 1, opts, out, errs);
+    for entry in walker {
+        match entry {
+            Ok(e) => {
+                let p = e.path().to_string_lossy();
+                if opts.matches(&p, e.file_type().is_dir()) {
+                    let _ = writeln!(out, "{p}");
                 }
             }
-            Err(e) => errs.push(format!("'{path}': {e}")),
+            Err(e) => {
+                // Report against the offending path (the root itself when the top-level open fails).
+                let where_ = e
+                    .path()
+                    .map_or_else(|| path.to_string(), |p| p.to_string_lossy().into_owned());
+                let msg = match e.io_error().map(std::io::Error::kind) {
+                    Some(std::io::ErrorKind::NotFound) => {
+                        format!("'{where_}': No such file or directory")
+                    }
+                    _ => format!("'{where_}': {e}"),
+                };
+                errs.push(msg);
+            }
         }
     }
 }
@@ -263,7 +263,7 @@ impl SimpleCommand for Find {
                     errs.push(format!("'{root}': No such file or directory"));
                 }
             } else {
-                walk(root, 0, &opts, &mut out, &mut errs);
+                walk(root, &opts, &mut out, &mut errs);
             }
         }
         let failed = !errs.is_empty();
@@ -335,7 +335,7 @@ mod tests {
             let opts = parse_find_args(&args).unwrap();
             let mut out = Vec::new();
             let mut errs = Vec::new();
-            walk(&rootstr, 0, &opts, &mut out, &mut errs);
+            walk(&rootstr, &opts, &mut out, &mut errs);
             assert!(errs.is_empty(), "{errs:?}");
             String::from_utf8(out).unwrap()
         };
