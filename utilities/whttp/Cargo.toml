@@ -17,10 +17,14 @@ workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-# `http::Method` in the public API. Redirect `Location` resolution is hand-rolled (see
-# `resolve_url`) rather than pulling `url` — its `idna`→`icu` dependency compiled ~180 MB of
-# Unicode tables into the wasm agent, which broke unrelated agent behavior and bloated the binary.
+# `http::Method` in the public API.
 http = "1"
+
+# Redirect `Location` resolution (RFC 3986 §5 reference resolution). We deliberately do NOT use the
+# `url` crate: its `idna`→`icu` stack compiles multiple MB of Unicode tables into the wasm agent for
+# host IDNA we never need. `iri-string` is pure-Rust, has zero runtime deps, pulls no icu/idna, and
+# builds clean on wasm32-wasip2 — the right "don't reinvent RFC 3986" crate for this target.
+iri-string = "0.7"
 
 # wasm: wstd's WASI-HTTP client (the only HTTP that works inside a Golem/wasip2 component). Pinned
 # to the exact version clank-agent uses so the whole app resolves one wstd.

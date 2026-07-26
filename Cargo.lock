@@ -592,6 +592,7 @@ dependencies = [
  "uu_wc",
  "uucore 0.9.0",
  "waget",
+ "walkdir",
  "wasip3",
  "wcurl",
  "wit-bindgen 0.57.1",
@@ -2345,6 +2346,16 @@ name = "ipnet"
 version = "2.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
+
+[[package]]
+name = "iri-string"
+version = "0.7.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95b1e6eaf9624f23be1969198c8f8e649ea8791e7ecfd6275ede2bdfeb88e168"
+dependencies = [
+ "memchr",
+ "serde",
+]
 
 [[package]]
 name = "is_terminal_polyfill"
@@ -4865,6 +4876,7 @@ name = "whttp"
 version = "0.1.0"
 dependencies = [
  "http",
+ "iri-string",
  "reqwest",
  "tokio",
  "wstd",

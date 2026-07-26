@@ -8,8 +8,9 @@
 //! Redirect following lives here, not in the transport: `wstd` does not follow redirects at all and
 //! `reqwest` follows by default, so leaving it to the transport made `curl`/`wget` behave
 //! differently on the two targets. The native path disables reqwest's auto-follow so this loop is
-//! the single source of truth. `Location` resolution is hand-rolled (see [`resolve_url`]) to keep
-//! the `url` crate's `idna`→`icu` Unicode tables out of the wasm agent.
+//! the single source of truth. `Location` resolution (see [`resolve_url`]) uses `iri-string` for
+//! RFC 3986 reference resolution — pure-Rust and wasm-clean, avoiding the `url` crate's `idna`→`icu`
+//! Unicode tables.
 //!
 //! [`fetch`] is `async` and creates no runtime — the caller awaits it under whatever executor is
 //! live (clank awaits one level under the Golem SDK's `wstd::block_on`).
@@ -172,82 +173,23 @@ fn redirect_method(method: &Method, status: u16, body: Option<Vec<u8>>) -> (Meth
 }
 
 /// Resolve a `Location` value (absolute, network-path, absolute-path, or relative) against the
-/// current absolute URL — RFC 3986 §5 for the cases redirects actually use. Hand-rolled rather than
-/// pulling the `url` crate, whose `idna`→`icu` dependency added ~180 MB of Unicode tables to the
-/// wasm agent for what is a handful of string operations here.
+/// current absolute URL — RFC 3986 §5 reference resolution, via `iri-string` (pure-Rust, no
+/// `idna`/`icu`, wasm-clean). Returns `None` if the base isn't a valid absolute URI or the location
+/// isn't a valid URI reference — the caller turns that into a `BadRedirect`.
 fn resolve_url(base: &str, location: &str) -> Option<String> {
+    use iri_string::types::{UriAbsoluteStr, UriReferenceStr};
+
     let loc = location.trim();
+    // An empty `Location` re-resolves to the current URL: keep the base verbatim (nothing to merge).
     if loc.is_empty() {
         return Some(base.to_string());
     }
-    // Absolute URL — use as-is.
-    if has_scheme(loc) {
-        return Some(loc.to_string());
-    }
-
-    let (scheme, rest) = base.split_once("://")?;
-    let (authority, base_path) = match rest.find('/') {
-        Some(i) => (&rest[..i], &rest[i..]),
-        None => (rest, "/"),
-    };
-    let base_path = base_path.split(['?', '#']).next().unwrap_or("/");
-
-    // Network-path reference (`//host/path`): inherit only the scheme.
-    if let Some(after) = loc.strip_prefix("//") {
-        return Some(format!("{scheme}://{after}"));
-    }
-    // Absolute path.
-    if loc.starts_with('/') {
-        return Some(format!("{scheme}://{authority}{}", remove_dot_segments(loc)));
-    }
-    // Query- or fragment-only reference: keep the base path.
-    if loc.starts_with('?') || loc.starts_with('#') {
-        return Some(format!("{scheme}://{authority}{base_path}{loc}"));
-    }
-    // Relative path: merge against the base's directory, then normalize dot-segments.
-    let dir = match base_path.rfind('/') {
-        Some(i) => &base_path[..=i],
-        None => "/",
-    };
-    let merged = remove_dot_segments(&format!("{dir}{loc}"));
-    Some(format!("{scheme}://{authority}{merged}"))
-}
-
-/// Whether `s` begins with a URI scheme (`scheme://…`): an ALPHA followed by ALPHA/DIGIT/`+`/`-`/`.`
-/// up to `://`.
-fn has_scheme(s: &str) -> bool {
-    match s.find("://") {
-        Some(i) if i > 0 => {
-            let scheme = s.as_bytes();
-            scheme[0].is_ascii_alphabetic()
-                && s[..i]
-                    .bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'-' | b'.'))
-        }
-        _ => false,
-    }
-}
-
-/// RFC 3986 §5.2.4 dot-segment removal on an absolute path (`.`/`..`), preserving the leading slash
-/// and a trailing slash.
-fn remove_dot_segments(path: &str) -> String {
-    let trailing_slash = path.ends_with('/');
-    let mut out: Vec<&str> = Vec::new();
-    for seg in path.split('/') {
-        match seg {
-            "" | "." => {}
-            ".." => {
-                out.pop();
-            }
-            s => out.push(s),
-        }
-    }
-    let mut result = String::from("/");
-    result.push_str(&out.join("/"));
-    if trailing_slash && !result.ends_with('/') {
-        result.push('/');
-    }
-    result
+    // RFC 3986 §5.1: the base's own fragment plays no part in resolution, and the `absolute-URI`
+    // grammar `iri-string` enforces for a base forbids one — so drop any `#…` before parsing.
+    let base_no_frag = base.split('#').next().unwrap_or(base);
+    let base_uri = UriAbsoluteStr::new(base_no_frag).ok()?;
+    let reference = UriReferenceStr::new(loc).ok()?;
+    Some(reference.resolve_against(base_uri).to_string())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -475,12 +417,19 @@ mod tests {
     }
 
     #[test]
-    fn scheme_detection() {
-        assert!(has_scheme("https://x"));
-        assert!(has_scheme("http://x"));
-        assert!(!has_scheme("//x"));
-        assert!(!has_scheme("/path"));
-        assert!(!has_scheme("relative"));
+    fn resolve_rejects_a_non_absolute_base() {
+        // The base must be an absolute URI; a bare relative base can't anchor resolution.
+        assert_eq!(resolve_url("not-a-url", "/x"), None);
+        assert_eq!(resolve_url("/only/a/path", "x"), None);
+    }
+
+    #[test]
+    fn resolve_tolerates_a_fragment_in_the_base() {
+        // RFC 3986 §5.1: the base's fragment is not used in resolution. It must not break parsing.
+        assert_eq!(
+            resolve_url("http://a.test/one/two#frag", "three").as_deref(),
+            Some("http://a.test/one/three")
+        );
     }
 
     #[test]
