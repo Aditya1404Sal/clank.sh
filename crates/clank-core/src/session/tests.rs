@@ -4268,6 +4268,82 @@ fn ask_malformed_tool_args_error_and_continue() {
     });
 }
 
+/// A half-installed package is reported and recoverable, not silently invisible.
+///
+/// Regression: `load_one` was six `.ok()?`s, so a marker whose payload was missing or corrupt
+/// vanished from `grease list` while the marker file survived — and `grease remove` then said "is
+/// not installed", leaving no way to clean it up. The digest recorded in the marker was also never
+/// re-checked after install, so `grease info` kept printing "verified" for a tampered payload.
+#[test]
+fn a_half_installed_package_is_reported_and_can_be_removed() {
+    on_rt(async {
+        let _dirs = set_grease_dirs();
+        // A marker with no payload at all — the state a crash between the two writes leaves.
+        let etc = crate::grease::config::etc_dir();
+        std::fs::write(
+            etc.join("ghost.toml"),
+            "kind = \"prompt\"\nregistry = \"https://reg.example\"\nsha256 = \"\"\n\
+             verified = false\nsignature_verified = false\nlog_verified = false\n",
+        )
+        .unwrap();
+
+        let mut session = Session::new().await.unwrap();
+        assert_eq!(
+            session.grease.broken().len(),
+            1,
+            "the orphan marker must be detected, not skipped"
+        );
+
+        // `grease list` names it and reports failure so a driver notices.
+        let listed = session.eval_line("grease list").await;
+        assert_ne!(listed.exit_code, 0, "a broken install is not a clean list");
+        let stdout = String::from_utf8(listed.stdout).unwrap();
+        assert!(stdout.contains("ghost"), "got {stdout:?}");
+        assert!(stdout.contains("[broken]"), "got {stdout:?}");
+
+        // And the obvious recovery works instead of denying the package exists.
+        // `sudo` because grease remove is Confirm-tier; without it the line pauses for authorization.
+        let removed = session.eval_line("sudo grease remove ghost").await;
+        assert_eq!(
+            removed.exit_code,
+            0,
+            "stdout: {} stderr: {}",
+            String::from_utf8_lossy(&removed.stdout),
+            String::from_utf8_lossy(&removed.stderr)
+        );
+        assert!(!etc.join("ghost.toml").exists(), "marker must be gone");
+        assert!(session.grease.broken().is_empty());
+    });
+}
+
+/// A corrupt payload is reported as broken rather than dropped.
+#[test]
+fn a_corrupt_payload_is_reported_not_silently_skipped() {
+    on_rt(async {
+        let _dirs = set_grease_dirs();
+        let etc = crate::grease::config::etc_dir();
+        let store = crate::grease::config::store_dir().join("corrupt");
+        std::fs::create_dir_all(&store).unwrap();
+        // Truncated mid-write — what a crash during persist_package leaves behind.
+        std::fs::write(store.join("prompt.json"), b"{\"name\": \"corr").unwrap();
+        std::fs::write(
+            etc.join("corrupt.toml"),
+            "kind = \"prompt\"\nregistry = \"https://reg.example\"\nsha256 = \"\"\n\
+             verified = false\nsignature_verified = false\nlog_verified = false\n",
+        )
+        .unwrap();
+
+        let session = Session::new().await.unwrap();
+        let broken = session.grease.broken();
+        assert_eq!(broken.len(), 1, "a corrupt payload must be reported");
+        assert!(
+            broken[0].1.contains("not a valid prompt package"),
+            "got {:?}",
+            broken[0].1
+        );
+    });
+}
+
 /// `grease search` must not answer "no packages match" when it could not read a single registry.
 ///
 /// Regression: the fetch, the status check and the JSON parse were all `if let Ok(..)` with no else,

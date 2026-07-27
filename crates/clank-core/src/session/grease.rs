@@ -36,7 +36,8 @@ impl Session {
     /// `grease list`: installed packages (all kinds), each tagged with its kind.
     fn grease_list(&self) -> LineResult {
         let packages = self.grease.packages();
-        if packages.is_empty() {
+        let broken = self.grease.broken();
+        if packages.is_empty() && broken.is_empty() {
             return LineResult::continue_with_stdout(b"no packages installed\n".to_vec());
         }
         let mut out = String::new();
@@ -49,7 +50,23 @@ impl Session {
                 p.payload.description()
             );
         }
-        LineResult::continue_with_stdout(out.into_bytes())
+        // Half-installed packages are LISTED, not hidden. Silently skipping them was the worst
+        // possible behaviour: the package was invisible here, so the obvious recovery
+        // (`grease remove <name>`) reported "is not installed" and the orphaned marker survived
+        // forever. Naming them makes the state recoverable and exits non-zero so a driver notices.
+        let mut err = String::new();
+        for (name, reason) in broken {
+            let _ = writeln!(out, "{name}  [broken]  {reason}");
+            let _ = writeln!(
+                err,
+                "grease list: '{name}' is installed but unusable: {reason}"
+            );
+        }
+        LineResult::from_outcome(
+            out.into_bytes(),
+            err.into_bytes(),
+            u8::from(!broken.is_empty()),
+        )
     }
 
     /// `grease info <name>`: an installed package's metadata. Command packages (prompt/script) show
@@ -715,6 +732,16 @@ impl Session {
             Payload::Mcp(m) => m.to_json(),
             Payload::Agent(a) => a.to_json(),
         };
+        // `to_json` is `to_string_pretty(..).unwrap_or_default()`, so a serialization failure yields
+        // an EMPTY string. Writing that produces a zero-byte payload that installs "successfully"
+        // and then fails to parse on the next boot — a broken package created by the success path.
+        // Refuse instead; the marker is written after this, so nothing half-lands.
+        if json.trim().is_empty() {
+            return Err(format!(
+                "grease install: refusing to write an empty {} payload for '{name}'\n",
+                kind.label()
+            ));
+        }
         std::fs::write(store.join(kind.payload_file()), json)
             .map_err(|e| format!("grease install: cannot write payload: {e}\n"))
     }
@@ -778,6 +805,19 @@ impl Session {
     /// deregister.
     fn grease_remove(&mut self, name: &str) -> LineResult {
         let Some(kind) = self.grease.kind_of(name) else {
+            // A half-installed package has no loadable kind, but its marker (and possibly a partial
+            // store dir) IS on disk — so "is not installed" would be false, and would leave the user
+            // with no way to clean it up. Remove what exists and say so.
+            if self.grease.broken().iter().any(|(n, _)| n == name) {
+                let _ = std::fs::remove_file(
+                    crate::grease::config::etc_dir().join(format!("{name}.toml")),
+                );
+                let _ = std::fs::remove_dir_all(crate::grease::config::store_dir().join(name));
+                self.grease.forget_broken(name);
+                return LineResult::continue_with_stdout(
+                    format!("removed {name} (was a half-installed package)\n").into_bytes(),
+                );
+            }
             return LineResult::from_outcome(
                 Vec::new(),
                 format!("grease remove: '{name}' is not installed\n").into_bytes(),
