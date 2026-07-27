@@ -2172,14 +2172,21 @@ fn grease_install_verifies_transparency_log_inclusion() {
             "install stderr: {}",
             String::from_utf8_lossy(&inst.stderr)
         );
+        // The proof was checked, and that is ALL the wording claims. It deliberately no longer says
+        // "in log": the signature covers only the payload body, so the index entry carrying the log
+        // root is unauthenticated and the tree is single-leaf — the proof reduces to a hash of the
+        // payload against a root the same party supplied. Calling that "in transparency log"
+        // overstated it to the two readers least able to check: the user skimming `grease info` and
+        // the model reading it as context.
+        let stdout = String::from_utf8(inst.stdout).unwrap();
         assert!(
-            String::from_utf8(inst.stdout).unwrap().contains("in log"),
-            "reports in-log"
+            stdout.contains("log proof (registry-asserted root)"),
+            "reports the proof without overclaiming: {stdout}"
         );
         let info = String::from_utf8(session.eval_line("grease info logged").await.stdout).unwrap();
         assert!(
-            info.contains("transparency log @0"),
-            "info shows log index: {info}"
+            info.contains("log proof @0 (registry-asserted root)"),
+            "info shows the log index, qualified: {info}"
         );
     });
 }
@@ -2523,7 +2530,31 @@ fn grease_install_confirms_and_errors_without_registry() {
         assert_eq!(bad.exit_code, 2);
         assert!(String::from_utf8(bad.stderr)
             .unwrap()
-            .contains("not an http"));
+            .contains("not an absolute http(s) URL"));
+
+        // Plain http to a remote host is refused: the transport offers no integrity underneath the
+        // signature checks, and one confirmed install from it lands a script on $PATH.
+        let cleartext = session
+            .eval_line("grease registry add http://attacker.example")
+            .await;
+        assert_eq!(cleartext.exit_code, 2);
+        assert!(String::from_utf8(cleartext.stderr)
+            .unwrap()
+            .contains("plain http"));
+
+        // Loopback is exempt — it is the documented `grease-populate` dev workflow.
+        let local = session
+            .eval_line("grease registry add http://localhost:8823")
+            .await;
+        assert_eq!(
+            local.exit_code,
+            0,
+            "stderr: {}",
+            String::from_utf8_lossy(&local.stderr)
+        );
+        session
+            .eval_line("grease registry remove http://localhost:8823")
+            .await;
 
         // `install` is Confirm — a bare invocation pauses.
         let confirm = session.eval_line("grease install summarize").await;
@@ -4270,6 +4301,69 @@ fn ask_malformed_tool_args_error_and_continue() {
             tr.outcome.unwrap_err().contains("malformed"),
             "expected a malformed-args error"
         );
+    });
+}
+
+/// `xargs` must not launder a command past the authorization gate.
+///
+/// Regression: xargs re-enters via `shell.run_string`, which goes straight into Brush and never
+/// returns through `eval_line`'s gate — so `echo /path | xargs rm` DELETED the file at exit 0 with no
+/// confirmation, while bare `rm` is sudo-only and pauses. The re-entry was a hole in the
+/// authorization model rather than a corner of it, and `find … | xargs rm -rf` is a line an LLM
+/// writes without prompting.
+#[test]
+fn xargs_cannot_launder_a_command_past_the_authz_gate() {
+    // Outside `on_rt`: the guard must not be held across an await (clippy `await_holding_lock`).
+    let _cwd = CWD_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    on_rt(async {
+        let dir = std::env::temp_dir().join(format!("clank-xargs-authz-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let victim = dir.join("victim");
+        std::fs::write(&victim, b"x").unwrap();
+
+        let mut session = Session::new().await.unwrap();
+        let gated = session
+            .eval_line(&format!("echo {} | xargs rm", victim.display()))
+            .await;
+        // It PAUSES for confirmation, exactly as a bare `rm` does — the gate now sees through the
+        // wrapper to the command it will re-enter with, so `xargs rm` is treated as `rm`.
+        let prompt = gated
+            .pending_prompt
+            .as_ref()
+            .map(|p| p.question.clone())
+            .unwrap_or_default();
+        assert!(
+            prompt.contains("rm"),
+            "must pause naming rm, got prompt {prompt:?} exit {}",
+            gated.exit_code
+        );
+        assert!(victim.exists(), "nothing runs before the human answers");
+
+        // Declining leaves the file alone.
+        let declined = session.answer_prompt(Some("n".into())).await;
+        assert_ne!(declined.exit_code, 0, "a declined gate must not succeed");
+        assert!(victim.exists(), "the file survives a declined xargs rm");
+
+        // Approving runs it — the gate is a gate, not a wall.
+        //
+        // Approval goes through the prompt rather than `sudo`, because clank only strips a LEADING
+        // `sudo`: on a pipeline `sudo` would have to sit on the `xargs` segment to elevate it, and a
+        // mid-line `sudo` is not dispatchable today. That limitation is orthogonal to this fix.
+        let again = session
+            .eval_line(&format!("echo {} | xargs rm", victim.display()))
+            .await;
+        assert!(again.pending_prompt.is_some(), "gates again");
+        let approved = session.answer_prompt(Some("y".into())).await;
+        assert_eq!(
+            approved.exit_code,
+            0,
+            "stderr: {}",
+            String::from_utf8_lossy(&approved.stderr)
+        );
+        assert!(!victim.exists(), "an approved xargs rm removes the file");
+        let _ = std::fs::remove_dir_all(&dir);
     });
 }
 

@@ -130,6 +130,11 @@ impl Session {
                 2,
             );
         }
+        // The README advertises "MCP server tools (HTTPS only)"; nothing enforced it, so a bearer
+        // token configured via --auth-env would have gone out in cleartext to any host.
+        if let Err(e) = crate::config::require_secure_url(url) {
+            return LineResult::from_outcome(Vec::new(), format!("mcp add: {e}\n").into_bytes(), 2);
+        }
         // Reject a name that collides with a built-in command (it would shadow it).
         if self.registry.get(name).is_some() {
             return LineResult::from_outcome(

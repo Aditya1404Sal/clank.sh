@@ -657,15 +657,35 @@ fn integrity_note(marker: &InstallMarker) -> String {
     } else {
         format!("{sha}, unsigned")
     };
+    // The inclusion proof is verified and recorded, but it is NOT reported as an assurance — see
+    // `log_inclusion_note`.
     if marker.log_verified {
-        match marker.log_index {
-            Some(idx) => {
-                let _ = write!(out, ", in transparency log @{idx}");
-            }
-            None => out.push_str(", in transparency log"),
-        }
+        out.push_str(log_inclusion_note(marker.log_index).as_str());
     }
     out
+}
+
+/// How a verified inclusion proof is described to the user and the model.
+///
+/// It is deliberately **not** phrased as an assurance. The RFC-6962 verifier is correct (it has an
+/// independent-oracle test suite), but what it verifies is currently circular: the signature covers
+/// the payload body ONLY, so the index entry carrying `sha256`, `sig` and the whole `log` object is
+/// unauthenticated, and the authoring tool emits a single-leaf tree per package. The proof therefore
+/// reduces to `sha256(0x00 ‖ sha256_hex(payload)) == root` where `root` came from the same party as
+/// `payload` — trivially forgeable by anyone who controls the index.
+///
+/// Saying "in transparency log" for that overstates it to exactly the readers least able to check:
+/// the user skimming `grease info`, and the model reading it as context. The wording says what is
+/// true — a proof was present and checked — and nothing more.
+///
+/// Making it real needs the signature to cover a canonical `{name, kind, sha256, log-root,
+/// tree-size}`, a genuine append-only multi-leaf log with a signed tree head, and ideally external
+/// witnessing. The verifier is already built and tested for that day.
+fn log_inclusion_note(index: Option<u64>) -> String {
+    match index {
+        Some(idx) => format!(", log proof @{idx} (registry-asserted root)"),
+        None => ", log proof present (registry-asserted root)".to_string(),
+    }
 }
 
 /// Load one installed package (`<etc>/<name>.toml` marker + `<store>/<name>/<kind>.json` payload).

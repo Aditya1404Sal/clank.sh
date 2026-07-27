@@ -1064,6 +1064,15 @@ pub(crate) fn manifests() -> Vec<crate::manifest::Manifest> {
         Manifest::builtin(Sort::NAME, Sort::SYNOPSIS),
         Manifest::builtin(Mkdir::NAME, Mkdir::SYNOPSIS),
         // Destructive: sudo-only (README's authorization example table).
+        //
+        // `rm` is the only command in this tier, and that is narrower than the property the tier
+        // exists to protect: `mv`/`cp`/`tee` all destroy an existing file by overwriting it, and
+        // `> file` truncation is not gated at all. Widening by COMMAND NAME was tried and reverted —
+        // it gates `cp a b` where `b` does not exist (overwhelmingly the common case) as harshly as
+        // an overwrite, and it still would not cover the redirection hole, which never reaches a
+        // manifest. The criterion that matters is "this call would destroy existing data", which
+        // needs the path-aware policy this module's header already notes as future work. Recorded in
+        // docs/audit/ rather than half-applied here.
         Manifest::builtin(Rm::NAME, Rm::SYNOPSIS).with_policy(AuthorizationPolicy::SudoOnly),
         Manifest::builtin(Mv::NAME, Mv::SYNOPSIS),
         Manifest::builtin(Cp::NAME, Cp::SYNOPSIS),

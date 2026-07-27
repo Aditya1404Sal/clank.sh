@@ -32,6 +32,43 @@ pub mod net {
     pub const LLM_TIMEOUT: Duration = Duration::from_mins(5);
 }
 
+/// Reject a URL that would carry package payloads or tool traffic over cleartext.
+///
+/// The README promises "MCP server tools (HTTPS only)", but `grease registry add` and `mcp add`
+/// accepted any string — so `grease registry add http://attacker` was one confirmed `grease install`
+/// away from an attacker-authored script on `$PATH`, with the transport offering no integrity at all
+/// underneath the signature checks.
+///
+/// **Loopback is allowed.** `http://localhost:<port>` is the documented workflow for the bundled
+/// registry authoring tool (`grease-populate` serves on `127.0.0.1`), and traffic that never leaves
+/// the machine has no meaningful interception surface.
+///
+/// # Errors
+/// Returns a human-readable message when the scheme is missing, unsupported, or plain `http` to a
+/// non-loopback host.
+pub fn require_secure_url(url: &str) -> Result<(), String> {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return Err(format!("'{url}' is not an absolute http(s) URL"));
+    };
+    let host = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .rsplit('@') // skip any userinfo
+        .next()
+        .unwrap_or("");
+    let bare = host.rsplit_once(':').map_or(host, |(h, _port)| h);
+    let is_loopback = matches!(bare, "localhost" | "127.0.0.1" | "::1" | "[::1]");
+    match scheme.to_ascii_lowercase().as_str() {
+        "https" => Ok(()),
+        "http" if is_loopback => Ok(()),
+        "http" => Err(format!(
+            "'{url}' uses plain http; use https (loopback is exempt for local registries)"
+        )),
+        other => Err(format!("'{url}' uses unsupported scheme '{other}'")),
+    }
+}
+
 /// Bounds on the work a single command can be made to do.
 ///
 /// These exist because the shell is driven by a model, not only by a person. A malformed format

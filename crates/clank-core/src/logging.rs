@@ -309,12 +309,41 @@ const SECRET_QUERY_PARAMS: &[&str] = &[
     "signature",
 ];
 
-/// Mask secret query-parameter values in a URL before it is logged, e.g.
-/// `https://h/mcp?token=sk-abc&x=1` → `https://h/mcp?token=<redacted>&x=1`. Anything before the `?` is
-/// untouched. A parameter whose name (case-insensitive) is in [`SECRET_QUERY_PARAMS`] has its value
-/// replaced. Non-secret params and a URL with no query string pass through unchanged.
+/// Mask the password in a URL's `userinfo` (`scheme://user:secret@host` → `scheme://user:<redacted>@host`).
+///
+/// `redact_url` used to document that "anything before the `?` is untouched", which meant a URL
+/// carrying credentials in its authority wrote them verbatim to http.log — the same leak class as
+/// the `model add --key` one, on a shape that `curl -u`, MCP configs and registry URLs all produce.
+/// Only the password is masked; the username stays legible because it is useful for debugging and is
+/// not the secret.
+fn redact_userinfo(url: &str) -> std::borrow::Cow<'_, str> {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return std::borrow::Cow::Borrowed(url);
+    };
+    // The userinfo ends at the first `@` BEFORE the first `/` — a later `@` is in the path or query.
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    let Some(at) = rest[..authority_end].find('@') else {
+        return std::borrow::Cow::Borrowed(url);
+    };
+    let (userinfo, after) = rest.split_at(at);
+    match userinfo.split_once(':') {
+        Some((user, _secret)) => {
+            std::borrow::Cow::Owned(format!("{scheme}://{user}:<redacted>{after}"))
+        }
+        // No password component — nothing secret to mask.
+        None => std::borrow::Cow::Borrowed(url),
+    }
+}
+
+/// Redact a URL for logging: the `userinfo` password (via [`redact_userinfo`]) and any secret
+/// query-parameter value, e.g. `https://h/mcp?token=sk-abc&x=1` → `https://h/mcp?token=<redacted>&x=1`.
+///
+/// A parameter whose name (case-insensitive) is in [`SECRET_QUERY_PARAMS`] has its value replaced.
+/// Non-secret params, and a URL with neither credentials nor a query string, pass through unchanged.
 #[must_use]
 pub fn redact_url(url: &str) -> String {
+    let url = redact_userinfo(url);
+    let url: &str = &url;
     let Some((base, query)) = url.split_once('?') else {
         return url.to_string();
     };
