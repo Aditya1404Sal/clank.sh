@@ -25,6 +25,13 @@ jobs:
       - uses: actions/checkout@v4
       # rustup picks up rust-toolchain.toml (stable + wasm32-wasip2) automatically.
       - uses: Swatinem/rust-cache@v2
+      # The library suites — the bulk of the repo's tests (ed25519/Merkle vectors, redirect
+      # policy, the session suite). Enumerated with `-p` rather than `--workspace` because the
+      # wasm cdylib crates (clank-agent, greeter-agent) don't link natively.
+      - name: Unit tests (library crates)
+        run: >-
+          cargo test
+          -p clank-core -p clank-cli -p whttp -p wcurl -p waget -p grease-tool
       - name: Unit tests (parser, matcher, wire contracts)
         run: cargo test -p clank-conformance --lib
       - name: Native conformance tier
@@ -48,7 +55,7 @@ jobs:
       - name: Clippy — native crates (warnings are errors)
         run: >-
           cargo clippy
-          -p clank-core -p clank-cli -p clank-embed -p whttp -p wcurl -p waget
+          -p clank-core -p clank-cli -p whttp -p wcurl -p waget
           -p clank-conformance -p grease-tool
           --all-targets -- -D warnings
       - name: Clippy — wasm guest crates (warnings are errors)

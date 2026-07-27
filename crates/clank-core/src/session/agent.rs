@@ -409,7 +409,7 @@ mod agent_param_tests {
             .collect()
     }
     fn names(n: &[&str]) -> Vec<String> {
-        n.iter().map(|s| s.to_string()).collect()
+        n.iter().map(|s| (*s).to_string()).collect()
     }
 
     #[test]

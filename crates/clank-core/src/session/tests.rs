@@ -1075,6 +1075,7 @@ impl crate::golem::cluster::GolemCluster for FakeGolemCluster {
 /// through the injected invoker (await mode), printing the result. Missing method → exit 2; no
 /// invoker → honest "needs a cluster".
 #[test]
+#[allow(clippy::too_many_lines)]
 fn grease_install_then_invoke_a_golem_agent() {
     on_rt(async {
         let _dirs = set_grease_dirs();
