@@ -304,6 +304,9 @@ impl Session {
     /// # Errors
     /// Returns `Err` if the Brush shell fails to build or its `$PATH`/`$HOME` seeding fails (and,
     /// on wasm, if the current-thread tokio runtime cannot be constructed).
+    // wasm builds the shell via `rt.block_on` (no `.await`), so clippy sees an unused `async`; the
+    // native arm awaits and the signature must stay async for both. Suppress on wasm only.
+    #[cfg_attr(target_arch = "wasm32", allow(clippy::unused_async))]
     pub async fn new() -> Result<Self, BoxError> {
         ensure_fs_layout();
         #[cfg(target_arch = "wasm32")]
@@ -1546,6 +1549,9 @@ impl Session {
     }
 
     #[cfg(target_arch = "wasm32")]
+    // Drives Brush inline (block_on at the call boundary); the mirror native `execute_impl` awaits, so
+    // this stays async for parity even though its wasm body doesn't `.await`.
+    #[allow(clippy::unused_async)]
     async fn execute_impl(&mut self, line: &str, stdin_bytes: Option<&[u8]>) -> LineResult {
         let stdout_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
         let stderr_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
@@ -2398,7 +2404,7 @@ fn finish(
 }
 
 /// An in-memory sink implementing `brush_core::openfiles::Stream` for wasm output capture. The
-/// fd-returning trait methods are `#[cfg(unix)]`, so on wasm only Read/Write/clone_box are needed.
+/// fd-returning trait methods are `#[cfg(unix)]`, so on wasm only `Read`/`Write`/`clone_box` are needed.
 #[cfg(target_arch = "wasm32")]
 #[derive(Clone)]
 struct BufSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
