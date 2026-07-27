@@ -127,8 +127,12 @@ pub trait AgentInvoker {
 /// # Errors
 /// Returns a human-readable message if the string is malformed, a field is out of range, or the
 /// instant is before the Unix epoch.
-pub fn parse_epoch_secs(s: &str) -> Result<u64, String> {
-    let err = || format!("invalid --schedule time '{s}' (expected YYYY-MM-DDThh:mm:ssZ)");
+pub fn parse_epoch_secs(s: &str) -> crate::golem::error::Result<u64> {
+    let err = || {
+        crate::golem::Error::Invalid(format!(
+            "invalid --schedule time '{s}' (expected YYYY-MM-DDThh:mm:ssZ)"
+        ))
+    };
     let trimmed = s.trim().trim_end_matches('Z');
     let (date, time) = trimmed.split_once('T').ok_or_else(err)?;
     let mut d = date.split('-');
@@ -159,7 +163,9 @@ pub fn parse_epoch_secs(s: &str) -> Result<u64, String> {
     let days = era * 146_097 + doe - 719_468;
     let secs = days * 86400 + hh * 3600 + mm * 60 + ss;
     if secs < 0 {
-        return Err("scheduled time is before the epoch".to_string());
+        return Err(crate::golem::Error::Invalid(
+            "scheduled time is before the epoch".to_string(),
+        ));
     }
     // guarded by the `secs < 0` check immediately above
     #[allow(clippy::cast_sign_loss)]

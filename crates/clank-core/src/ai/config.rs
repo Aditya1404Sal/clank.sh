@@ -20,6 +20,11 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+/// Failures here are all ask.toml read/write/serialize work.
+fn cfg_err(msg: impl Into<String>) -> crate::ai::Error {
+    crate::ai::Error::Config(msg.into())
+}
+
 /// The parsed `ask.toml`. All sections default so a partial file round-trips.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AskConfig {
@@ -80,14 +85,14 @@ pub fn config_path(home: &str) -> PathBuf {
 /// # Errors
 ///
 /// Returns `Err` when the file exists but cannot be read, or its contents fail to parse as TOML.
-pub fn load(home: &str) -> Result<Option<AskConfig>, String> {
+pub fn load(home: &str) -> crate::ai::error::Result<Option<AskConfig>> {
     let path = config_path(home);
     match std::fs::read_to_string(&path) {
         Ok(text) => toml::from_str(&text)
             .map(Some)
-            .map_err(|e| format!("ask.toml parse error: {e}")),
+            .map_err(|e| cfg_err(format!("ask.toml parse error: {e}"))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("ask.toml read error: {e}")),
+        Err(e) => Err(cfg_err(format!("ask.toml read error: {e}"))),
     }
 }
 
@@ -98,17 +103,17 @@ pub fn load(home: &str) -> Result<Option<AskConfig>, String> {
 ///
 /// Returns `Err` when the existing file cannot be loaded, the config directory cannot be created, the
 /// config cannot be serialized, or the file cannot be written.
-pub fn save_default_model(home: &str, model: &str) -> Result<(), String> {
+pub fn save_default_model(home: &str, model: &str) -> crate::ai::error::Result<()> {
     let mut config = load(home)?.unwrap_or_default();
     config.ask.default_model = Some(model.to_string());
     let path = config_path(home);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)
-            .map_err(|e| format!("ask.toml: cannot create {}: {e}", dir.display()))?;
+            .map_err(|e| cfg_err(format!("ask.toml: cannot create {}: {e}", dir.display())))?;
     }
-    let text =
-        toml::to_string_pretty(&config).map_err(|e| format!("ask.toml serialize error: {e}"))?;
-    std::fs::write(&path, text).map_err(|e| format!("ask.toml write error: {e}"))
+    let text = toml::to_string_pretty(&config)
+        .map_err(|e| cfg_err(format!("ask.toml serialize error: {e}")))?;
+    std::fs::write(&path, text).map_err(|e| cfg_err(format!("ask.toml write error: {e}")))
 }
 
 /// The default model resolved from `ask.toml`, if any. A parse error returns `Err` so the caller can
@@ -117,7 +122,7 @@ pub fn save_default_model(home: &str, model: &str) -> Result<(), String> {
 /// # Errors
 ///
 /// Returns `Err` when `ask.toml` exists but cannot be read or parsed (propagated from [`load`]).
-pub fn default_model(home: &str) -> Result<Option<String>, String> {
+pub fn default_model(home: &str) -> crate::ai::error::Result<Option<String>> {
     Ok(load(home)?.and_then(|c| c.ask.default_model))
 }
 
@@ -140,7 +145,7 @@ pub fn provider_key(home: &str, provider: &str) -> Option<String> {
 ///
 /// Returns `Err` when the existing file cannot be loaded, the config directory cannot be created, the
 /// config cannot be serialized, or the file cannot be written.
-pub fn save_provider_key(home: &str, provider: &str, key: &str) -> Result<(), String> {
+pub fn save_provider_key(home: &str, provider: &str, key: &str) -> crate::ai::error::Result<()> {
     let mut config = load(home)?.unwrap_or_default();
     config
         .providers
@@ -150,11 +155,11 @@ pub fn save_provider_key(home: &str, provider: &str, key: &str) -> Result<(), St
     let path = config_path(home);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)
-            .map_err(|e| format!("ask.toml: cannot create {}: {e}", dir.display()))?;
+            .map_err(|e| cfg_err(format!("ask.toml: cannot create {}: {e}", dir.display())))?;
     }
-    let text =
-        toml::to_string_pretty(&config).map_err(|e| format!("ask.toml serialize error: {e}"))?;
-    std::fs::write(&path, text).map_err(|e| format!("ask.toml write error: {e}"))
+    let text = toml::to_string_pretty(&config)
+        .map_err(|e| cfg_err(format!("ask.toml serialize error: {e}")))?;
+    std::fs::write(&path, text).map_err(|e| cfg_err(format!("ask.toml write error: {e}")))
 }
 
 /// Clear any stored key for `provider` from `ask.toml`, preserving the default model and other
@@ -166,7 +171,7 @@ pub fn save_provider_key(home: &str, provider: &str, key: &str) -> Result<(), St
 ///
 /// Returns `Err` when the existing file cannot be loaded, the config directory cannot be created, the
 /// config cannot be serialized, or the file cannot be rewritten.
-pub fn remove_provider_key(home: &str, provider: &str) -> Result<bool, String> {
+pub fn remove_provider_key(home: &str, provider: &str) -> crate::ai::error::Result<bool> {
     let Some(mut config) = load(home)? else {
         return Ok(false); // no ask.toml → nothing stored
     };
@@ -186,11 +191,11 @@ pub fn remove_provider_key(home: &str, provider: &str) -> Result<bool, String> {
     let path = config_path(home);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)
-            .map_err(|e| format!("ask.toml: cannot create {}: {e}", dir.display()))?;
+            .map_err(|e| cfg_err(format!("ask.toml: cannot create {}: {e}", dir.display())))?;
     }
-    let text =
-        toml::to_string_pretty(&config).map_err(|e| format!("ask.toml serialize error: {e}"))?;
-    std::fs::write(&path, text).map_err(|e| format!("ask.toml write error: {e}"))?;
+    let text = toml::to_string_pretty(&config)
+        .map_err(|e| cfg_err(format!("ask.toml serialize error: {e}")))?;
+    std::fs::write(&path, text).map_err(|e| cfg_err(format!("ask.toml write error: {e}")))?;
     Ok(true)
 }
 

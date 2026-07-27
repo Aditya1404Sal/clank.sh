@@ -43,7 +43,13 @@ impl Session {
 
         let parsed = match parse_agent_line(&rest[1..], &pkg) {
             Ok(p) => p,
-            Err(msg) => return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 2),
+            Err(msg) => {
+                return LineResult::from_outcome(
+                    Vec::new(),
+                    msg.to_string().into_bytes(),
+                    msg.exit_code(),
+                )
+            }
         };
 
         // `--revision` has no wasm-rpc constructor slot — it's a golem:api concept (component-revision

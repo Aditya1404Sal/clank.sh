@@ -226,6 +226,11 @@ pub struct AskToolResult {
     pub name: String,
     /// `Ok(result_json)` when the tool ran (even on a nonzero exit — the payload carries the code);
     /// `Err(message)` only for a guard/authorization refusal the tool never executed.
+    ///
+    /// Deliberately a `String`, not a typed error. This is not a failure travelling up to a caller —
+    /// it is the text sent back to the MODEL as the tool's result, and the model is the only reader.
+    /// There is no kind to branch on: a refusal is a refusal, and giving it a variant would add a
+    /// taxonomy nothing consults.
     pub outcome: Result<String, String>,
 }
 

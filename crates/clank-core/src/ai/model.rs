@@ -182,7 +182,7 @@ fn set_default(home: &str, id: Option<&str>) -> (String, String, u8) {
     // Canonicalize a bare id to `anthropic/…`; reject an unknown provider prefix.
     let canon = match canonicalize_checked(id) {
         Ok(c) => c,
-        Err(e) => return (String::new(), e, 2),
+        Err(e) => return (String::new(), e.to_string(), e.exit_code()),
     };
     let mut warn = String::new();
     if !CATALOG.iter().any(|c| *c == canon) {
@@ -346,13 +346,13 @@ fn canonicalize(id: &str) -> String {
 
 /// Like [`canonicalize`] but rejects an unknown provider prefix. A bare id defaults to the
 /// [`PROVIDER`]; any of the known [`PROVIDERS`] is accepted.
-fn canonicalize_checked(id: &str) -> Result<String, String> {
+fn canonicalize_checked(id: &str) -> crate::ai::error::Result<String> {
     if let Some((provider, _)) = id.split_once('/') {
         if !is_known_provider(provider) {
-            return Err(format!(
+            return Err(crate::ai::Error::Model(format!(
                 "model default: unknown provider '{provider}' (known: {})\n",
                 PROVIDERS.join(", ")
-            ));
+            )));
         }
         Ok(id.to_string())
     } else {

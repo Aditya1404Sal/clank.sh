@@ -44,8 +44,10 @@ pub mod net {
 /// the machine has no meaningful interception surface.
 ///
 /// # Errors
-/// Returns a human-readable message when the scheme is missing, unsupported, or plain `http` to a
-/// non-loopback host.
+/// Returns the REASON as text, not a typed error: this is a shared validator, and its two callers
+/// (`grease registry add`, `mcp add`) each embed the reason in their own subsystem error. A type
+/// here would have to belong to neither subsystem, which is worse than a string that is only ever
+/// interpolated.
 pub fn require_secure_url(url: &str) -> Result<(), String> {
     let Some((scheme, rest)) = url.split_once("://") else {
         return Err(format!("'{url}' is not an absolute http(s) URL"));

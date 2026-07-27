@@ -171,7 +171,7 @@ impl GreaseState {
                 }
                 match load_one(name) {
                     Ok(p) => packages.push(p),
-                    Err(reason) => broken.push((name.to_string(), reason)),
+                    Err(reason) => broken.push((name.to_string(), reason.to_string())),
                 }
             }
         }
@@ -693,17 +693,22 @@ fn log_inclusion_note(index: Option<u64>) -> String {
 /// Returns `Err(reason)` rather than `None` so [`GreaseState::load`] can REPORT a half-installed
 /// package instead of pretending it isn't there. Every failure here means the marker exists but the
 /// package is unusable — the state a crash between the marker write and the payload write leaves.
-fn load_one(name: &str) -> Result<InstalledPackage, String> {
+fn load_one(name: &str) -> crate::grease::error::Result<InstalledPackage> {
     let marker_path = crate::grease::config::etc_dir().join(format!("{name}.toml"));
-    let marker_text = std::fs::read_to_string(&marker_path)
-        .map_err(|e| format!("cannot read marker {}: {e}", marker_path.display()))?;
-    let marker: InstallMarker =
-        toml::from_str(&marker_text).map_err(|e| format!("marker is not valid TOML: {e}"))?;
+    let marker_text = std::fs::read_to_string(&marker_path).map_err(|e| {
+        crate::grease::Error::Io(format!("cannot read marker {}: {e}", marker_path.display()))
+    })?;
+    let marker: InstallMarker = toml::from_str(&marker_text)
+        .map_err(|e| crate::grease::Error::Malformed(format!("marker is not valid TOML: {e}")))?;
     let payload_path = crate::grease::config::store_dir()
         .join(name)
         .join(marker.kind.payload_file());
-    let bytes = std::fs::read(&payload_path)
-        .map_err(|e| format!("cannot read payload {}: {e}", payload_path.display()))?;
+    let bytes = std::fs::read(&payload_path).map_err(|e| {
+        crate::grease::Error::Io(format!(
+            "cannot read payload {}: {e}",
+            payload_path.display()
+        ))
+    })?;
 
     // NOTE on `marker.sha256`: it is NOT a digest of this file and must not be compared against one.
     // It records the hash of the artifact as FETCHED from the registry (that is what the install-time
@@ -713,10 +718,10 @@ fn load_one(name: &str) -> Result<InstalledPackage, String> {
     // digest of the persisted file; until then, corruption is caught by the parse below, which
     // rejects anything that no longer deserializes.
     let bad = |e: crate::grease::Error| {
-        format!(
+        crate::grease::Error::Malformed(format!(
             "payload is not a valid {} package: {e}",
             marker.kind.label()
-        )
+        ))
     };
     let payload = match marker.kind {
         PackageKind::Prompt => Payload::Prompt(PromptPackage::from_json(&bytes).map_err(bad)?),

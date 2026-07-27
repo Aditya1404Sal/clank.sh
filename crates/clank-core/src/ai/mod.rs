@@ -5,6 +5,10 @@
 //! in `clank-agent` (wasm), and the native reqwest→Anthropic provider is [`anthropic_native`]. This
 //! crate owns the target-agnostic [`ask::AskProvider`] seam.
 
+pub mod error;
+
+pub use error::Error;
+
 pub mod ask;
 // The native (reqwest) `ask` providers. wasm uses the injected durable golem-ai-llm dispatcher from
 // `clank-agent`; these fill the same seam off-Golem. cfg-gated so `reqwest` never reaches wasm.

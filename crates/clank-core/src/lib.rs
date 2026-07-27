@@ -20,7 +20,10 @@ pub mod ai;
 pub mod authz;
 pub mod builtins;
 pub mod config;
+pub mod error;
 pub mod golem;
+
+pub use error::ShellError;
 pub mod grease;
 pub mod logging;
 pub mod manifest;

@@ -45,8 +45,9 @@ struct StatInfo {
 
 /// Resolve one operand to a [`StatInfo`], serving the virtual namespaces before the real fs.
 /// `follow` selects `metadata` (follow symlinks, `-L`) over the default `symlink_metadata`.
-fn resolve(path: &str, follow: bool) -> Result<StatInfo, String> {
-    let not_found = || format!("cannot stat '{path}': No such file or directory");
+fn resolve(path: &str, follow: bool) -> crate::error::Result<StatInfo> {
+    let not_found =
+        || crate::ShellError::not_found(format!("cannot stat '{path}': No such file or directory"));
 
     if path == "/dev/null" {
         // The emulated null device (redirects handle it in the shell layer; not a real fs entry).
@@ -110,7 +111,9 @@ fn resolve(path: &str, follow: bool) -> Result<StatInfo, String> {
     }
     .map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => not_found(),
-        _ => format!("cannot stat '{path}': {e}"),
+        // Anything else (permissions, a broken mount) is an I/O failure, not an absent path — the
+        // distinction the flat String could not carry.
+        _ => crate::ShellError::io(format!("cannot stat '{path}': {e}")),
     })?;
     let ft = md.file_type();
     let kind = if ft.is_dir() {
@@ -347,7 +350,10 @@ mod tests {
     #[test]
     fn resolve_missing_file_is_an_error() {
         let err = resolve("/definitely/not/here", false).unwrap_err();
-        assert!(err.contains("No such file or directory"), "got: {err}");
+        assert!(
+            err.to_string().contains("No such file or directory"),
+            "got: {err}"
+        );
     }
 
     #[test]

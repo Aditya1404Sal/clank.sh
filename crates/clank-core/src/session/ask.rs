@@ -88,7 +88,13 @@ impl Session {
         // an error before any model call.
         let (model, model_warning) = match self.resolve_ask_model(args.model.as_deref()) {
             Ok(pair) => pair,
-            Err(msg) => return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 2),
+            Err(msg) => {
+                return LineResult::from_outcome(
+                    Vec::new(),
+                    msg.to_string().into_bytes(),
+                    msg.exit_code(),
+                )
+            }
         };
 
         let mut trace = Vec::new();
@@ -209,9 +215,14 @@ impl Session {
     ///
     /// # Panics
     /// Panics if the transcript mutex is poisoned (a thread panicked while holding it).
-    pub fn repl_start(&mut self, args: &crate::ai::ask::ReplArgs) -> Result<String, String> {
+    pub fn repl_start(
+        &mut self,
+        args: &crate::ai::ask::ReplArgs,
+    ) -> crate::ai::error::Result<String> {
         if self.ask_provider.is_none() {
-            return Err("ask repl: no model provider configured\n".to_string());
+            return Err(crate::ai::Error::NotConfigured(
+                "ask repl: no model provider configured\n".to_string(),
+            ));
         }
         let (model, _warning) = self.resolve_ask_model(args.model.as_deref())?;
         let transcript = match args.seed {
@@ -329,7 +340,13 @@ impl Session {
 
         let (model, _warning) = match self.resolve_ask_model(None) {
             Ok(pair) => pair,
-            Err(msg) => return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 2),
+            Err(msg) => {
+                return LineResult::from_outcome(
+                    Vec::new(),
+                    msg.to_string().into_bytes(),
+                    msg.exit_code(),
+                )
+            }
         };
 
         match self.summarize_text(&rendered, &model).await {
@@ -421,7 +438,7 @@ impl Session {
     fn resolve_ask_model(
         &self,
         cli_model: Option<&str>,
-    ) -> Result<(String, Option<String>), String> {
+    ) -> crate::ai::error::Result<(String, Option<String>)> {
         let mut warning = None;
         let chosen = if let Some(m) = cli_model {
             m.to_string()
@@ -442,10 +459,10 @@ impl Session {
         // and routes. A bare id (no prefix) stays bare; both dispatchers default it to anthropic.
         if let Some((provider, _)) = chosen.split_once('/') {
             if !crate::ai::model::is_known_provider(provider) {
-                return Err(format!(
+                return Err(crate::ai::Error::Model(format!(
                     "ask: unknown provider '{provider}' (known: {})\n",
                     crate::ai::model::PROVIDERS.join(", ")
-                ));
+                )));
             }
         }
         Ok((chosen, warning))

@@ -1986,14 +1986,16 @@ async fn materialize_mcp_resources(
 /// the placeholder named `name`; bare positional args fill the remaining placeholders left-to-right.
 /// Values are inserted verbatim (MCP servers accept literal path segments). An unfilled placeholder is
 /// an error. Walks the template once, resolving each placeholder as it's encountered.
-fn fill_uri_template(template: &str, args: &[String]) -> Result<String, String> {
+fn fill_uri_template(template: &str, args: &[String]) -> crate::mcp::error::Result<String> {
     // Parse args: `--name value` pairs + positionals.
     let mut named: Vec<(String, String)> = Vec::new();
     let mut positionals: Vec<String> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
         if let Some(key) = a.strip_prefix("--") {
-            let val = it.next().ok_or_else(|| format!("--{key} needs a value"))?;
+            let val = it
+                .next()
+                .ok_or_else(|| crate::mcp::Error::Usage(format!("--{key} needs a value")))?;
             named.push((key.to_string(), val.clone()));
         } else {
             positionals.push(a.clone());
@@ -2020,7 +2022,9 @@ fn fill_uri_template(template: &str, args: &[String]) -> Result<String, String> 
             .find(|(k, _)| k == name)
             .map(|(_, v)| v.clone())
             .or_else(|| pos_iter.next())
-            .ok_or_else(|| format!("missing value for template parameter '{name}'"))?;
+            .ok_or_else(|| {
+                crate::mcp::Error::Usage(format!("missing value for template parameter '{name}'"))
+            })?;
         out.push_str(&value);
         rest = &rest[open + close_rel + 1..];
     }
@@ -2117,10 +2121,13 @@ struct ParsedAgentLine {
 /// before the method (README:823); a `--<flag>` matching a declared constructor param is a ctor flag;
 /// the first bare word is the method (or a reserved subcommand). An explicit `--` separates the method
 /// from its args.
+// One flag-dispatch loop over a single word list; splitting it would mean threading the whole
+// accumulator set (constructor/args/mode/phantom/revision/method) through a helper for no gain.
+#[allow(clippy::too_many_lines)]
 fn parse_agent_line(
     words: &[String],
     pkg: &crate::grease::pkg::AgentPackage,
-) -> Result<ParsedAgentLine, String> {
+) -> crate::golem::error::Result<ParsedAgentLine> {
     use crate::golem::agent::InvokeMode;
     let is_ctor = |k: &str| pkg.constructor_params.iter().any(|p| p == k);
     let mut constructor = Vec::new();
@@ -2147,40 +2154,50 @@ fn parse_agent_line(
                         continue;
                     }
                     "schedule" => {
-                        let val = words
-                            .get(i + 1)
-                            .ok_or("--schedule needs an ISO-8601 time\n")?;
+                        let val = words.get(i + 1).ok_or_else(|| {
+                            crate::golem::Error::Invalid(
+                                "--schedule needs an ISO-8601 time\n".to_string(),
+                            )
+                        })?;
                         mode = InvokeMode::Schedule(val.clone());
                         i += 2;
                         continue;
                     }
                     "phantom" => {
-                        let val = words.get(i + 1).ok_or("--phantom needs a UUID\n")?;
+                        let val = words.get(i + 1).ok_or_else(|| {
+                            crate::golem::Error::Invalid("--phantom needs a UUID\n".to_string())
+                        })?;
                         phantom = Some(val.clone());
                         i += 2;
                         continue;
                     }
                     "revision" => {
-                        let val = words.get(i + 1).ok_or("--revision needs a number\n")?;
+                        let val = words.get(i + 1).ok_or_else(|| {
+                            crate::golem::Error::Invalid("--revision needs a number\n".to_string())
+                        })?;
                         revision = Some(val.clone());
                         i += 2;
                         continue;
                     }
                     _ if is_ctor(key) => {
-                        let val = words
-                            .get(i + 1)
-                            .ok_or_else(|| format!("--{key} needs a value\n"))?;
+                        let val = words.get(i + 1).ok_or_else(|| {
+                            crate::golem::Error::Invalid(format!("--{key} needs a value\n"))
+                        })?;
                         constructor.push((key.to_string(), val.clone()));
                         i += 2;
                         continue;
                     }
-                    _ => return Err(format!("unknown flag --{key} before the method\n")),
+                    _ => {
+                        return Err(crate::golem::Error::Invalid(format!(
+                            "unknown flag --{key} before the method\n"
+                        )))
+                    }
                 }
             }
             // After the method: a method arg.
             let val = words
                 .get(i + 1)
-                .ok_or_else(|| format!("--{key} needs a value\n"))?;
+                .ok_or_else(|| crate::golem::Error::Invalid(format!("--{key} needs a value\n")))?;
             args.push((key.to_string(), val.clone()));
             i += 2;
             continue;
@@ -2203,7 +2220,7 @@ fn parse_agent_line(
         if let Some(key) = w.strip_prefix("--") {
             let val = words
                 .get(i + 1)
-                .ok_or_else(|| format!("--{key} needs a value\n"))?;
+                .ok_or_else(|| crate::golem::Error::Invalid(format!("--{key} needs a value\n")))?;
             args.push((key.to_string(), val.clone()));
             i += 2;
         } else {
@@ -2224,13 +2241,15 @@ fn parse_agent_line(
 fn write_install_marker(
     name: &str,
     marker: &crate::grease::state::InstallMarker,
-) -> Result<(), String> {
-    let marker_toml = toml::to_string_pretty(marker)
-        .map_err(|e| format!("grease install: marker serialize error: {e}\n"))?;
+) -> crate::grease::error::Result<()> {
+    let marker_toml = toml::to_string_pretty(marker).map_err(|e| {
+        crate::grease::Error::Io(format!("grease install: marker serialize error: {e}\n"))
+    })?;
     let etc = crate::grease::config::etc_dir();
     let _ = std::fs::create_dir_all(&etc);
-    std::fs::write(etc.join(format!("{name}.toml")), marker_toml)
-        .map_err(|e| format!("grease install: cannot write marker: {e}\n"))
+    std::fs::write(etc.join(format!("{name}.toml")), marker_toml).map_err(|e| {
+        crate::grease::Error::Io(format!("grease install: cannot write marker: {e}\n"))
+    })
 }
 
 /// `grease info <skill>` text: the skill is not a command, so we describe its envelope + the bundled
@@ -2389,7 +2408,7 @@ fn truncate_tool_output(bytes: &[u8]) -> String {
 fn build_mcp_arguments(
     schema: &serde_json::Value,
     flags: &[(String, Option<String>)],
-) -> Result<serde_json::Value, String> {
+) -> crate::mcp::error::Result<serde_json::Value> {
     use serde_json::Value;
     let props = schema.get("properties").and_then(Value::as_object);
     let mut obj = serde_json::Map::new();
@@ -2403,10 +2422,9 @@ fn build_mcp_arguments(
             (Some("integer" | "number"), Some(v)) => v
                 .parse::<f64>()
                 .map(|n| serde_json::json!(n))
-                .map_err(|_| format!("--{key}: '{v}' is not a number"))?,
-            (Some("array" | "object"), Some(v)) => {
-                serde_json::from_str(v).map_err(|e| format!("--{key}: expected JSON: {e}"))?
-            }
+                .map_err(|_| crate::mcp::Error::Usage(format!("--{key}: '{v}' is not a number")))?,
+            (Some("array" | "object"), Some(v)) => serde_json::from_str(v)
+                .map_err(|e| crate::mcp::Error::Usage(format!("--{key}: expected JSON: {e}")))?,
             (_, Some(v)) => Value::String(v.clone()),
             // A bare flag with no schema type: treat as a present boolean.
             (_, None) => Value::Bool(true),
@@ -2422,10 +2440,10 @@ fn build_mcp_arguments(
             .map(String::from)
             .collect();
         if !missing.is_empty() {
-            return Err(format!(
+            return Err(crate::mcp::Error::Usage(format!(
                 "missing required argument(s): {}",
                 missing.join(", ")
-            ));
+            )));
         }
     }
     Ok(Value::Object(obj))

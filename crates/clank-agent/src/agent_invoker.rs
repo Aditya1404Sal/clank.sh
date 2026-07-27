@@ -135,7 +135,7 @@ impl AgentInvoker for WasmRpcInvoker {
                 // survive across the durable agent's serialized invocations (Golem parks between
                 // invocations), so it can't be re-acquired for a later `kill` — the invocation IS
                 // scheduled, but cancel-after-return isn't supported (documented, honest handle).
-                let secs = parse_epoch_secs(when).map_err(Error::Invalid)?;
+                let secs = parse_epoch_secs(when)?;
                 let dt = golem_rust::wasip2::clocks::wall_clock::Datetime {
                     seconds: secs,
                     nanoseconds: 0,

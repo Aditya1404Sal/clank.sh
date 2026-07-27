@@ -525,11 +525,19 @@ impl Session {
         let payload = crate::grease::state::Payload::Mcp(pkg.clone());
         if let Err(msg) = self.persist_package(name, crate::grease::pkg::PackageKind::Mcp, &payload)
         {
-            return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 1);
+            return LineResult::from_outcome(
+                Vec::new(),
+                msg.to_string().into_bytes(),
+                msg.exit_code(),
+            );
         }
         let marker = integrity.to_marker(crate::grease::pkg::PackageKind::Mcp, registry);
         if let Err(msg) = write_install_marker(name, &marker) {
-            return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 1);
+            return LineResult::from_outcome(
+                Vec::new(),
+                msg.to_string().into_bytes(),
+                msg.exit_code(),
+            );
         }
 
         // Register the server + tools into `McpState` (so `<server> <tool>` dispatch + the mcp bin stub
@@ -604,16 +612,30 @@ impl Session {
         // misconfigured registry).
         let payload = match self.parse_and_check_payload(name, kind, body) {
             Ok(p) => p,
-            Err(msg) => return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 4),
+            Err(msg) => {
+                return LineResult::from_outcome(
+                    Vec::new(),
+                    msg.to_string().into_bytes(),
+                    msg.exit_code(),
+                )
+            }
         };
 
         // Persist the typed payload + write the marker + materialize the kind's on-disk surface.
         if let Err(msg) = self.persist_package(name, kind, &payload) {
-            return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 1);
+            return LineResult::from_outcome(
+                Vec::new(),
+                msg.to_string().into_bytes(),
+                msg.exit_code(),
+            );
         }
         let marker = integrity.to_marker(kind, registry);
         if let Err(msg) = write_install_marker(name, &marker) {
-            return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 1);
+            return LineResult::from_outcome(
+                Vec::new(),
+                msg.to_string().into_bytes(),
+                msg.exit_code(),
+            );
         }
         let installed = crate::grease::state::InstalledPackage { marker, payload };
         // Materialize the kind's on-disk surface (bin stub / skill dir tree) — needs the help text,
@@ -697,47 +719,52 @@ impl Session {
         name: &str,
         kind: crate::grease::pkg::PackageKind,
         body: &[u8],
-    ) -> Result<crate::grease::state::Payload, String> {
+    ) -> crate::grease::error::Result<crate::grease::state::Payload> {
         use crate::grease::pkg::{
             AgentPackage, McpPackage, PackageKind, PromptPackage, ScriptPackage, SkillPackage,
         };
         use crate::grease::state::Payload;
         let (payload, pkg_name) = match kind {
             PackageKind::Prompt => {
-                let p =
-                    PromptPackage::from_json(body).map_err(|e| format!("grease install: {e}\n"))?;
+                let p = PromptPackage::from_json(body).map_err(|e| {
+                    crate::grease::Error::Malformed(format!("grease install: {e}\n"))
+                })?;
                 let n = p.name.clone();
                 (Payload::Prompt(p), n)
             }
             PackageKind::Script => {
-                let s =
-                    ScriptPackage::from_json(body).map_err(|e| format!("grease install: {e}\n"))?;
+                let s = ScriptPackage::from_json(body).map_err(|e| {
+                    crate::grease::Error::Malformed(format!("grease install: {e}\n"))
+                })?;
                 let n = s.name.clone();
                 (Payload::Script(s), n)
             }
             PackageKind::Skill => {
-                let s =
-                    SkillPackage::from_json(body).map_err(|e| format!("grease install: {e}\n"))?;
+                let s = SkillPackage::from_json(body).map_err(|e| {
+                    crate::grease::Error::Malformed(format!("grease install: {e}\n"))
+                })?;
                 let n = s.name.clone();
                 (Payload::Skill(s), n)
             }
             PackageKind::Mcp => {
-                let m =
-                    McpPackage::from_json(body).map_err(|e| format!("grease install: {e}\n"))?;
+                let m = McpPackage::from_json(body).map_err(|e| {
+                    crate::grease::Error::Malformed(format!("grease install: {e}\n"))
+                })?;
                 let n = m.name.clone();
                 (Payload::Mcp(m), n)
             }
             PackageKind::Agent => {
-                let a =
-                    AgentPackage::from_json(body).map_err(|e| format!("grease install: {e}\n"))?;
+                let a = AgentPackage::from_json(body).map_err(|e| {
+                    crate::grease::Error::Malformed(format!("grease install: {e}\n"))
+                })?;
                 let n = a.name.clone();
                 (Payload::Agent(a), n)
             }
         };
         if pkg_name != name {
-            return Err(format!(
+            return Err(crate::grease::Error::Malformed(format!(
                 "grease install: registry returned package '{pkg_name}' for request '{name}'\n"
-            ));
+            )));
         }
         Ok(payload)
     }
@@ -750,11 +777,12 @@ impl Session {
         name: &str,
         kind: crate::grease::pkg::PackageKind,
         payload: &crate::grease::state::Payload,
-    ) -> Result<(), String> {
+    ) -> crate::grease::error::Result<()> {
         use crate::grease::state::Payload;
         let store = crate::grease::config::store_dir().join(name);
-        std::fs::create_dir_all(&store)
-            .map_err(|e| format!("grease install: cannot create store dir: {e}\n"))?;
+        std::fs::create_dir_all(&store).map_err(|e| {
+            crate::grease::Error::Io(format!("grease install: cannot create store dir: {e}\n"))
+        })?;
         let json = match payload {
             Payload::Prompt(p) => p.to_json(),
             Payload::Script(s) => s.to_json(),
@@ -767,13 +795,14 @@ impl Session {
         // and then fails to parse on the next boot — a broken package created by the success path.
         // Refuse instead; the marker is written after this, so nothing half-lands.
         if json.trim().is_empty() {
-            return Err(format!(
+            return Err(crate::grease::Error::Io(format!(
                 "grease install: refusing to write an empty {} payload for '{name}'\n",
                 kind.label()
-            ));
+            )));
         }
-        std::fs::write(store.join(kind.payload_file()), json)
-            .map_err(|e| format!("grease install: cannot write payload: {e}\n"))
+        std::fs::write(store.join(kind.payload_file()), json).map_err(|e| {
+            crate::grease::Error::Io(format!("grease install: cannot write payload: {e}\n"))
+        })
     }
 
     /// Materialize a kind's on-disk surface after registration: a bin stub for command packages

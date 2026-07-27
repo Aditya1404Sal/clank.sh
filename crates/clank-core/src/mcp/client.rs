@@ -247,7 +247,7 @@ type McpResult<T> = crate::mcp::error::Result<T>;
 /// # Errors
 /// Returns `Err` if no event's concatenated `data:` payload parses as a JSON-RPC response object
 /// (one carrying a `result` or `error`).
-pub fn extract_sse_json_rpc(body: &str) -> Result<Value, String> {
+pub fn extract_sse_json_rpc(body: &str) -> crate::mcp::error::Result<Value> {
     for event in body.split("\n\n") {
         let mut data = String::new();
         for line in event.lines() {
@@ -265,14 +265,16 @@ pub fn extract_sse_json_rpc(body: &str) -> Result<Value, String> {
             }
         }
     }
-    Err("server replied with an event stream that did not contain a JSON-RPC response".into())
+    Err(McpError::protocol(
+        "server replied with an event stream that did not contain a JSON-RPC response",
+    ))
 }
 
 /// Parse the JSON-RPC response body — either a plain JSON object or an SSE-wrapped one.
 fn parse_response_body(resp: &HttpResponse) -> McpResult<JsonRpcResponse> {
     let text = String::from_utf8_lossy(&resp.body);
     let value: Value = if resp.is_sse() {
-        extract_sse_json_rpc(&text).map_err(McpError::protocol)?
+        extract_sse_json_rpc(&text)?
     } else {
         serde_json::from_str(&text)
             .map_err(|e| McpError::protocol(format!("bad JSON response: {e}")))?

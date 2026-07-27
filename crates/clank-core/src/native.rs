@@ -582,7 +582,7 @@ async fn run_repl(
     let model = match session.repl_start(args) {
         Ok(m) => m,
         Err(msg) => {
-            write_stdout(msg.as_bytes())?;
+            write_stdout(msg.to_string().as_bytes())?;
             return Ok(());
         }
     };
