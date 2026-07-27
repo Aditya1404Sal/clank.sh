@@ -15,7 +15,7 @@
 //! `Session::eval_line` — the same leading-command-only scope documented in [`crate::authz`]
 //! (compound lines and `eval` already share this limitation).
 
-use std::io::Read;
+use std::io::{Read, Write as _};
 
 use brush_core::builtins;
 use brush_core::commands::ExecutionContext;
@@ -123,6 +123,21 @@ impl builtins::Command for XargsCommand {
         &self,
         context: ExecutionContext<'_, SE>,
     ) -> Result<ExecutionResult, Self::Error> {
+        // An unknown option must be REFUSED, not run. `command` is `trailing_var_arg` +
+        // `allow_hyphen_values` so that `xargs echo -n` passes `-n` through to echo — but that also
+        // let `xargs --bogus` land here as the command to run, and with empty input the
+        // no-run-if-empty default then returned success. A flag clank does not implement silently
+        // became a no-op that reported 0, which for a model driving the shell is indistinguishable
+        // from having worked. A leading hyphen in the COMMAND position can only be an xargs option.
+        if let Some(first) = self.command.first() {
+            if first.starts_with('-') && first != "-" {
+                context
+                    .stderr()
+                    .write_all(format!("xargs: unrecognized option '{first}'\n").as_bytes())?;
+                return Ok(ExecutionResult::new(2));
+            }
+        }
+
         let mut input = String::new();
         let _ = crate::tools::coreutils::tool_stdin(&context).read_to_string(&mut input);
 

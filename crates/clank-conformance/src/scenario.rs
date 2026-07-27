@@ -101,6 +101,14 @@ pub enum ExitExpect {
     Code(u8),
     /// Any exit code is accepted (`exit any`).
     Any,
+    /// The exit code must be non-zero (`exit nonzero`) — the command must FAIL, but which failure
+    /// code it picks is not pinned.
+    ///
+    /// This is the right assertion for the resilience corpus: those scenarios care that a malformed
+    /// invocation is rejected and that the session survives it, not that it chose 1 over 2. `exit
+    /// any` would be satisfied by the command unexpectedly *succeeding*, which is the one outcome
+    /// those scenarios exist to catch.
+    NonZero,
 }
 
 /// A parse failure, pointing at the offending file line. Parse errors surface as failing
@@ -380,10 +388,13 @@ pub fn parse(name: &str, path: &Path, text: &str) -> Result<Scenario, ParseError
                 exit_seen = true;
                 step.expect.exit = match payload.unwrap_or_default().trim() {
                     "any" => ExitExpect::Any,
+                    "nonzero" => ExitExpect::NonZero,
                     num => ExitExpect::Code(num.parse().map_err(|_| {
                         err(
                             n,
-                            format!("`exit` takes a number 0-255 or `any`, got `{num}`"),
+                            format!(
+                                "`exit` takes a number 0-255, `any`, or `nonzero`, got `{num}`"
+                            ),
                         )
                     })?),
                 };
