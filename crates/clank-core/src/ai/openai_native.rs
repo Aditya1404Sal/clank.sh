@@ -77,6 +77,9 @@ fn endpoint(desc: &Descriptor) -> String {
 
 /// Send one turn to an OpenAI-compatible provider and return the neutral response. `api_key` is `None`
 /// for a keyless provider (Ollama); `endpoint_override` lets tests point at a mock server.
+// Eight distinct request inputs (client/descriptor/key/endpoint + the four neutral turn parts, which
+// mirror the `AskProvider::turn` signature). Bundling would only relocate the noise, not remove it.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn turn(
     client: &reqwest::Client,
     desc: &Descriptor,

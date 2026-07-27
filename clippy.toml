@@ -5,3 +5,8 @@
 # lints for this codebase); these knobs scope them out of #[cfg(test)] code only.
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
+
+# Brand / proper-noun identifiers that are not code — keep `doc_markdown` from flagging them when they
+# appear in prose (backticking a brand name in running text reads worse than the lint it silences).
+# `..` EXTENDS clippy's built-in allow-list (OAuth, OpenGL, GraphQL, …) rather than replacing it.
+doc-valid-idents = ["OpenAI", "OpenRouter", "SigV4", "xAI", ".."]

@@ -7,7 +7,14 @@ version = 2
 yanked = "warn"
 # Report every RUSTSEC advisory. Add `ignore = ["RUSTSEC-YYYY-NNNN"]` here only after triage, with a
 # comment justifying why the advisory does not apply.
-ignore = []
+ignore = [
+    # `fxhash` — unmaintained, NO known vulnerability (RUSTSEC-2025-0057). Transitive-only, buried in
+    # the dep tree; no maintained drop-in without a wider swap. Re-triage if a real advisory lands.
+    "RUSTSEC-2025-0057",
+    # `instant` — unmaintained, NO known vulnerability (RUSTSEC-2024-0384). Transitive-only (arrives
+    # via a third-party dep we don't control; `web-time` is the successor). Re-triage on a real vuln.
+    "RUSTSEC-2024-0384",
+]
 
 [licenses]
 version = 2
@@ -25,6 +32,30 @@ allow = [
     "MPL-2.0",
     "CC0-1.0",
 ]
+
+# Narrowly-scoped per-crate exceptions for UNAVOIDABLE transitive deps whose license isn't in the
+# allow-list above. Each is a deliberate, reviewed acceptance (audit follow-up), NOT a blanket allow.
+exceptions = [
+    # `terminfo` is WTFPL (Do-What-The-F*ck-You-Want — maximally permissive); pulled transitively by
+    # the interactive TUI (inquire / reedline).
+    { name = "terminfo", allow = ["WTFPL"] },
+    # Mozilla's CA root bundle under CDLA-Permissive-2.0 (a permissive data license); pulled by
+    # reqwest + rustls for native TLS trust roots.
+    { name = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
+    { name = "webpki-root-certs", allow = ["CDLA-Permissive-2.0"] },
+    # `golem-wasm` is the Golem platform's own crate under BUSL-1.1 (Business Source License —
+    # SOURCE-AVAILABLE, not OSI-open-source). Unavoidable for a Golem component and accepted as a
+    # deliberate platform dependency. Its manifest omits an SPDX field, so the `clarify` below names
+    # the license from its bundled LICENSE file.
+    { name = "golem-wasm", allow = ["BUSL-1.1"] },
+]
+
+# `golem-wasm` ships a LICENSE file but no `license =` field, so cargo-deny can't infer the SPDX id.
+# State it explicitly (BUSL-1.1), keyed to the LICENSE file's content hash.
+[[licenses.clarify]]
+name = "golem-wasm"
+expression = "BUSL-1.1"
+license-files = [{ path = "LICENSE", hash = 0x3b72166b }]
 
 [bans]
 # A shell that vendors a large dependency tree should notice version drift and stray wildcards.

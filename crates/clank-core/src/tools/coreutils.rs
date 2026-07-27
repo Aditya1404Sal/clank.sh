@@ -272,6 +272,14 @@ pub(crate) fn run_uu<SE: ShellExtensions>(
     uucore::error::set_exit_code(0);
     let code = uumain();
 
+    // Restore SIGPIPE to SIG_IGN. A uu tool may flip it to SIG_DFL for GNU broken-pipe semantics and
+    // not put it back; in clank's single-process model that leftover would let a LATER in-process
+    // pipeline (or a later test in the same binary) be killed by a broken pipe instead of getting
+    // EPIPE. Re-asserting here keeps SIGPIPE ignored process-wide across successive uu calls.
+    // SAFETY: as at the pre-call set on line 231 — a plain `libc::signal` FFI over valid constants,
+    // returning the previous handler (or `SIG_ERR`), never exhibiting UB.
+    unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
+
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
     for (saved, real_fd) in [(saved_in, 0), (saved_out, 1), (saved_err, 2)] {

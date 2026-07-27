@@ -30,6 +30,32 @@ jobs:
       - name: Native conformance tier
         run: cargo test -p clank-conformance --test native
 
+  hygiene:
+    # Lint + supply-chain gate (the audit's VERIFY.md S1/S2/S4/S5 suite): clippy on the native crates
+    # AND the wasm guest crates (dual-target lints native clippy never sees), plus cargo-audit
+    # (advisories) and cargo-deny (advisories/licenses/bans/sources). Config lives in clippy.toml and
+    # deny.toml. Do NOT use `--workspace` — the wasm cdylib crates don't link natively (see VERIFY.md).
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny,cargo-audit
+      - name: Clippy — native crates (warnings are errors)
+        run: >-
+          cargo clippy
+          -p clank-core -p clank-cli -p clank-embed -p whttp -p wcurl -p waget
+          -p clank-conformance -p grease-tool
+          --all-targets -- -D warnings
+      - name: Clippy — wasm guest crates (warnings are errors)
+        run: cargo clippy --target wasm32-wasip2 -p clank-agent -p greeter-agent -- -D warnings
+      - name: Supply-chain advisories (cargo-audit)
+        run: cargo audit
+      - name: Licenses / bans / sources / advisories (cargo-deny)
+        run: cargo deny check
+
   golem:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
