@@ -57,14 +57,20 @@ impl HttpResponse {
 #[async_trait::async_trait(?Send)]
 pub trait McpHttp {
     /// Perform one HTTP request. `headers` are name/value pairs to send; `body` is the request body
-    /// (`None` for GET/DELETE). Returns the full response or a transport-error message.
+    /// (`None` for GET/DELETE). Returns the full response, including non-2xx statuses — a status is
+    /// data, not a failure, and the protocol layer decides what it means.
+    ///
+    /// # Errors
+    /// [`crate::mcp::Error::Transport`] when the request could not be completed at all (DNS,
+    /// connect, TLS, timeout, an unreadable body). That is the only kind a transport can diagnose;
+    /// implementations must not invent others.
     async fn request(
         &self,
         method: &str,
         url: &str,
         headers: &[(String, String)],
         body: Option<Vec<u8>>,
-    ) -> Result<HttpResponse, String>;
+    ) -> crate::mcp::error::Result<HttpResponse>;
 }
 
 /// A decorator that logs every outbound request to `http.log` (secret headers redacted) then delegates
@@ -91,7 +97,7 @@ impl McpHttp for LoggingMcpHttp {
         url: &str,
         headers: &[(String, String)],
         body: Option<Vec<u8>>,
-    ) -> Result<HttpResponse, String> {
+    ) -> crate::mcp::error::Result<HttpResponse> {
         let result = self.inner.request(method, url, headers, body).await;
         // Redact secret query-params from the URL before logging (README: secrets redacted from http.log).
         let rec = crate::logging::Record::new("http")
@@ -99,7 +105,7 @@ impl McpHttp for LoggingMcpHttp {
             .field("url", crate::logging::redact_url(url));
         let rec = match &result {
             Ok(resp) => rec.field("status", resp.status.to_string()),
-            Err(e) => rec.field("status", "error").field("error", e),
+            Err(e) => rec.field("status", "error").field("error", e.to_string()),
         };
         rec.emit(crate::logging::LogFile::Http);
         result
@@ -226,37 +232,11 @@ pub struct CallToolResult {
     pub is_error: bool,
 }
 
-/// An MCP client error, carrying the clank exit code the caller should surface.
-#[derive(Clone, Debug)]
-pub struct McpError {
-    /// The human-readable error message.
-    pub message: String,
-    /// The clank exit code the caller should surface.
-    pub exit_code: u8,
-}
+/// The MCP failure type. Defined in [`crate::mcp::error`]; aliased here under its original name so
+/// this module's call sites keep reading `McpError::transport(..)`.
+pub use crate::mcp::Error as McpError;
 
-impl McpError {
-    fn transport(msg: impl Into<String>) -> Self {
-        Self {
-            message: msg.into(),
-            exit_code: 4,
-        }
-    }
-    fn usage(msg: impl Into<String>) -> Self {
-        Self {
-            message: msg.into(),
-            exit_code: 2,
-        }
-    }
-    fn tool(msg: impl Into<String>) -> Self {
-        Self {
-            message: msg.into(),
-            exit_code: 1,
-        }
-    }
-}
-
-type McpResult<T> = Result<T, McpError>;
+type McpResult<T> = crate::mcp::error::Result<T>;
 
 // ---- SSE extraction (pure) ------------------------------------------------------------------------
 
@@ -292,13 +272,13 @@ pub fn extract_sse_json_rpc(body: &str) -> Result<Value, String> {
 fn parse_response_body(resp: &HttpResponse) -> McpResult<JsonRpcResponse> {
     let text = String::from_utf8_lossy(&resp.body);
     let value: Value = if resp.is_sse() {
-        extract_sse_json_rpc(&text).map_err(McpError::transport)?
+        extract_sse_json_rpc(&text).map_err(McpError::protocol)?
     } else {
         serde_json::from_str(&text)
-            .map_err(|e| McpError::transport(format!("bad JSON response: {e}")))?
+            .map_err(|e| McpError::protocol(format!("bad JSON response: {e}")))?
     };
     serde_json::from_value(value)
-        .map_err(|e| McpError::transport(format!("malformed JSON-RPC response: {e}")))
+        .map_err(|e| McpError::protocol(format!("malformed JSON-RPC response: {e}")))
 }
 
 /// Map a JSON-RPC error object to an [`McpError`] with the right exit code.
@@ -391,7 +371,7 @@ impl<'a> McpClient<'a> {
             .field("url", &self.url);
         match &result {
             Ok(_) => rec.field("status", "ok"),
-            Err(e) => rec.field("status", "error").field("error", &e.message),
+            Err(e) => rec.field("status", "error").field("error", e.to_string()),
         }
         .emit(crate::logging::LogFile::Mcp);
         result
@@ -421,7 +401,7 @@ impl<'a> McpClient<'a> {
         }
         parsed
             .result
-            .ok_or_else(|| McpError::transport("response had neither result nor error"))
+            .ok_or_else(|| McpError::protocol("response had neither result nor error"))
     }
 
     /// Send a JSON-RPC notification (no response expected).
@@ -477,7 +457,7 @@ impl<'a> McpClient<'a> {
         }
         let result = parsed
             .result
-            .ok_or_else(|| McpError::transport("initialize had no result"))?;
+            .ok_or_else(|| McpError::protocol("initialize had no result"))?;
 
         let info = InitializeResult {
             protocol_version: result
@@ -547,7 +527,7 @@ impl<'a> McpClient<'a> {
         // package payload and rebuilt on every boot, so the model was permanently told the server
         // had fewer tools than it does, with nothing anywhere saying so. A truncated capability set
         // is not a successful listing.
-        Err(McpError::transport(format!(
+        Err(McpError::protocol(format!(
             "server paginated past {MAX_TOOL_PAGES} pages of tools/list; refusing a partial tool list"
         )))
     }
@@ -899,7 +879,7 @@ mod tests {
             url: &str,
             headers: &[(String, String)],
             body: Option<Vec<u8>>,
-        ) -> Result<HttpResponse, String> {
+        ) -> crate::mcp::error::Result<HttpResponse> {
             self.seen.borrow_mut().push((
                 method.to_string(),
                 url.to_string(),
@@ -909,7 +889,7 @@ mod tests {
             self.responses
                 .borrow_mut()
                 .pop_front()
-                .ok_or_else(|| "no scripted response".to_string())
+                .ok_or_else(|| crate::mcp::Error::transport("no scripted response"))
         }
     }
 
@@ -1023,8 +1003,8 @@ mod tests {
         let http = FakeHttp::new(vec![err]);
         let mut client = McpClient::new(&http, "https://x/mcp", None);
         let e = block(client.call_tool("t", serde_json::json!({}), None)).unwrap_err();
-        assert_eq!(e.exit_code, 1);
-        assert!(e.message.contains("boom"));
+        assert_eq!(e.exit_code(), 1);
+        assert!(e.to_string().contains("boom"));
     }
 
     #[test]
@@ -1036,7 +1016,7 @@ mod tests {
         let http = FakeHttp::new(vec![err]);
         let mut client = McpClient::new(&http, "https://x/mcp", None);
         let e = block(client.list_tools(None)).unwrap_err();
-        assert_eq!(e.exit_code, 2);
+        assert_eq!(e.exit_code(), 2);
     }
 
     #[test]
@@ -1049,8 +1029,8 @@ mod tests {
         let http = FakeHttp::new(vec![resp]);
         let client = McpClient::new(&http, "https://x/mcp", None);
         let e = block(client.close_session("s1")).unwrap_err();
-        assert_eq!(e.exit_code, 1);
-        assert!(e.message.contains("405"));
+        assert_eq!(e.exit_code(), 1);
+        assert!(e.to_string().contains("405"));
     }
 
     #[test]

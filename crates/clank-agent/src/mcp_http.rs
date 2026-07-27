@@ -26,12 +26,12 @@ impl McpHttp for WstdMcpHttp {
         url: &str,
         headers: &[(String, String)],
         body: Option<Vec<u8>>,
-    ) -> Result<HttpResponse, String> {
+    ) -> clank_core::mcp::error::Result<HttpResponse> {
         use wstd::http::{Body, Client, Method, Request};
 
-        let method = method
-            .parse::<Method>()
-            .map_err(|e| format!("bad method '{method}': {e}"))?;
+        let method = method.parse::<Method>().map_err(|e| {
+            clank_core::mcp::Error::transport(format!("bad method '{method}': {e}"))
+        })?;
         let mut builder = Request::builder().method(method).uri(url);
         for (k, v) in headers {
             builder = builder.header(k, v);
@@ -42,7 +42,7 @@ impl McpHttp for WstdMcpHttp {
         };
         let request = builder
             .body(wstd_body)
-            .map_err(|e| format!("bad request: {e}"))?;
+            .map_err(|e| clank_core::mcp::Error::transport(format!("bad request: {e}")))?;
 
         // Bound the exchange. Without this an MCP server that accepts the connection and never
         // answers parks the invocation forever — and Golem serializes invocations per instance, so
@@ -53,7 +53,7 @@ impl McpHttp for WstdMcpHttp {
         let mut response = client
             .send(request)
             .await
-            .map_err(|e| format!("request failed: {e}"))?;
+            .map_err(|e| clank_core::mcp::Error::transport(format!("request failed: {e}")))?;
 
         let status = response.status().as_u16();
         let resp_headers: Vec<(String, String)> = response
@@ -76,16 +76,22 @@ impl McpHttp for WstdMcpHttp {
             .content_length()
             .is_some_and(|len| len > MAX_BODY as u64)
         {
-            return Err(format!("response body exceeded {MAX_BODY} bytes"));
+            return Err(clank_core::mcp::Error::transport(format!(
+                "response body exceeded {MAX_BODY} bytes"
+            )));
         }
         let bytes = response
             .body_mut()
             .contents()
             .await
-            .map_err(|e| format!("reading response failed: {e}"))?
+            .map_err(|e| {
+                clank_core::mcp::Error::transport(format!("reading response failed: {e}"))
+            })?
             .to_vec();
         if bytes.len() > MAX_BODY {
-            return Err(format!("response body exceeded {MAX_BODY} bytes"));
+            return Err(clank_core::mcp::Error::transport(format!(
+                "response body exceeded {MAX_BODY} bytes"
+            )));
         }
 
         Ok(HttpResponse {

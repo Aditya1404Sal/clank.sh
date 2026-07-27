@@ -46,9 +46,9 @@ impl McpHttp for ReqwestMcpHttp {
         url: &str,
         headers: &[(String, String)],
         body: Option<Vec<u8>>,
-    ) -> Result<HttpResponse, String> {
+    ) -> crate::mcp::error::Result<HttpResponse> {
         let method = reqwest::Method::from_bytes(method.as_bytes())
-            .map_err(|e| format!("bad method '{method}': {e}"))?;
+            .map_err(|e| crate::mcp::Error::transport(format!("bad method '{method}': {e}")))?;
 
         let mut builder = self.client.request(method, url);
         for (k, v) in headers {
@@ -61,7 +61,7 @@ impl McpHttp for ReqwestMcpHttp {
         let response = builder
             .send()
             .await
-            .map_err(|e| format!("request failed: {e}"))?;
+            .map_err(|e| crate::mcp::Error::transport(format!("request failed: {e}")))?;
 
         let status = response.status().as_u16();
 
@@ -84,7 +84,7 @@ impl McpHttp for ReqwestMcpHttp {
         let body = response
             .bytes()
             .await
-            .map_err(|e| format!("reading response failed: {e}"))?
+            .map_err(|e| crate::mcp::Error::transport(format!("reading response failed: {e}")))?
             .to_vec();
 
         Ok(HttpResponse {
@@ -179,7 +179,7 @@ mod tests {
     #[tokio::test]
     async fn transport_error_on_unroutable_host() {
         let http = ReqwestMcpHttp::new();
-        // Port 1 on localhost refuses — a connection failure, surfaced as Err(String).
+        // Port 1 on localhost refuses — a connection failure, surfaced as Error::Transport.
         let err = http.request("GET", "http://127.0.0.1:1/", &[], None).await;
         assert!(err.is_err());
     }

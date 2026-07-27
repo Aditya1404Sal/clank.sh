@@ -1477,8 +1477,8 @@ impl Session {
             }
             Err(e) => LineResult::from_outcome(
                 Vec::new(),
-                format!("{} {tool_name}: {}\n", inv.server, e.message).into_bytes(),
-                e.exit_code,
+                format!("{} {tool_name}: {e}\n", inv.server).into_bytes(),
+                e.exit_code(),
             ),
         }
     }

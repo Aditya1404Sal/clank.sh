@@ -400,7 +400,7 @@ impl crate::mcp::client::McpHttp for FakeMcpHttp {
         url: &str,
         _headers: &[(String, String)],
         body: Option<Vec<u8>>,
-    ) -> Result<crate::mcp::client::HttpResponse, String> {
+    ) -> crate::mcp::error::Result<crate::mcp::client::HttpResponse> {
         let method_and_body = format!(
             "{method} {}",
             String::from_utf8_lossy(&body.unwrap_or_default())
@@ -413,7 +413,7 @@ impl crate::mcp::client::McpHttp for FakeMcpHttp {
             .lock()
             .unwrap()
             .pop_front()
-            .ok_or_else(|| "no scripted response".to_string())
+            .ok_or_else(|| crate::mcp::Error::transport("no scripted response"))
     }
 }
 
@@ -451,7 +451,7 @@ impl crate::mcp::client::McpHttp for FakeGreaseHttp {
         url: &str,
         _headers: &[(String, String)],
         _body: Option<Vec<u8>>,
-    ) -> Result<crate::mcp::client::HttpResponse, String> {
+    ) -> crate::mcp::error::Result<crate::mcp::client::HttpResponse> {
         for (pat, resp) in &self.routes {
             if url.contains(pat.as_str()) {
                 return Ok(resp.clone());
@@ -607,7 +607,7 @@ impl crate::mcp::client::McpHttp for FakeMcpArtifactHttp {
         url: &str,
         _headers: &[(String, String)],
         body: Option<Vec<u8>>,
-    ) -> Result<crate::mcp::client::HttpResponse, String> {
+    ) -> crate::mcp::error::Result<crate::mcp::client::HttpResponse> {
         // Grease registry fetches route by URL.
         for (pat, resp) in &self.routes {
             if pat.starts_with('/') && url.contains(pat.as_str()) {

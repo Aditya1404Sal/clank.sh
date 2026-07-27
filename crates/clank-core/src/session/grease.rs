@@ -425,8 +425,8 @@ impl Session {
             Err(e) => {
                 return LineResult::from_outcome(
                     Vec::new(),
-                    format!("grease install: {name}: {}\n", e.message).into_bytes(),
-                    e.exit_code,
+                    format!("grease install: {name}: {e}\n").into_bytes(),
+                    e.exit_code(),
                 )
             }
         };
@@ -441,8 +441,8 @@ impl Session {
                 Err(e) => {
                     return LineResult::from_outcome(
                         Vec::new(),
-                        format!("grease install: {name}: tools/list: {}\n", e.message).into_bytes(),
-                        e.exit_code,
+                        format!("grease install: {name}: tools/list: {e}\n").into_bytes(),
+                        e.exit_code(),
                     )
                 }
             }

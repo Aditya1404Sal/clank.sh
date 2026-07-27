@@ -210,17 +210,17 @@ impl Session {
         let init = match client.initialize().await {
             Ok(i) => i,
             Err(e) => {
-                let msg = format!("mcp: {name}: {}\n", e.message);
-                self.mcp.set_failed(name, config, e.message);
-                return LineResult::from_outcome(Vec::new(), msg.into_bytes(), e.exit_code);
+                let msg = format!("mcp: {name}: {e}\n");
+                self.mcp.set_failed(name, config, e.to_string());
+                return LineResult::from_outcome(Vec::new(), msg.into_bytes(), e.exit_code());
             }
         };
         let tools = match client.list_tools(init.session_id.as_deref()).await {
             Ok(t) => t,
             Err(e) => {
-                let msg = format!("mcp: {name}: {}\n", e.message);
-                self.mcp.set_failed(name, config, e.message);
-                return LineResult::from_outcome(Vec::new(), msg.into_bytes(), e.exit_code);
+                let msg = format!("mcp: {name}: {e}\n");
+                self.mcp.set_failed(name, config, e.to_string());
+                return LineResult::from_outcome(Vec::new(), msg.into_bytes(), e.exit_code());
             }
         };
         let tool_count = tools.len();
@@ -317,8 +317,8 @@ impl Session {
             }
             Err(e) => LineResult::from_outcome(
                 Vec::new(),
-                format!("mcp session open: {}\n", e.message).into_bytes(),
-                e.exit_code,
+                format!("mcp session open: {e}\n").into_bytes(),
+                e.exit_code(),
             ),
         }
     }
@@ -351,8 +351,8 @@ impl Session {
             }
             Err(e) => LineResult::from_outcome(
                 format!("closed session {id} locally\n").into_bytes(),
-                format!("mcp session close: {}\n", e.message).into_bytes(),
-                e.exit_code,
+                format!("mcp session close: {e}\n").into_bytes(),
+                e.exit_code(),
             ),
         }
     }
@@ -433,8 +433,8 @@ impl Session {
             Ok(content) => LineResult::continue_with_stdout(content.into_bytes()),
             Err(e) => LineResult::from_outcome(
                 Vec::new(),
-                format!("cat: {uri}: {}\n", e.message).into_bytes(),
-                e.exit_code,
+                format!("cat: {uri}: {e}\n").into_bytes(),
+                e.exit_code(),
             ),
         }
     }
@@ -555,7 +555,7 @@ impl Session {
                     }
                 }
                 Err(e) => {
-                    let _ = writeln!(out, "[poll {}] error: {}", i + 1, e.message);
+                    let _ = writeln!(out, "[poll {}] error: {e}", i + 1);
                 }
             }
         }
@@ -628,8 +628,8 @@ impl Session {
             Ok(content) => LineResult::continue_with_stdout(content.into_bytes()),
             Err(e) => LineResult::from_outcome(
                 Vec::new(),
-                format!("{cmd}: {uri}: {}\n", e.message).into_bytes(),
-                e.exit_code,
+                format!("{cmd}: {uri}: {e}\n").into_bytes(),
+                e.exit_code(),
             ),
         }
     }

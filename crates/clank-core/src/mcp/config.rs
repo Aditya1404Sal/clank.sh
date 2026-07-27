@@ -128,11 +128,14 @@ pub fn is_valid_name(name: &str) -> bool {
 /// # Errors
 /// Returns `Err` if the config directory can't be created, the config fails to serialize, or writing
 /// the file fails.
-pub fn save(name: &str, config: &McpServerConfig) -> Result<(), String> {
+pub fn save(name: &str, config: &McpServerConfig) -> crate::mcp::error::Result<()> {
     let dir = etc_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    let text = toml::to_string_pretty(config).map_err(|e| format!("serialize error: {e}"))?;
-    std::fs::write(config_path(name), text).map_err(|e| format!("write error: {e}"))
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| crate::mcp::Error::io(format!("cannot create {}: {e}", dir.display())))?;
+    let text = toml::to_string_pretty(config)
+        .map_err(|e| crate::mcp::Error::io(format!("serialize error: {e}")))?;
+    std::fs::write(config_path(name), text)
+        .map_err(|e| crate::mcp::Error::io(format!("write error: {e}")))
 }
 
 /// Remove a server's config file (and, if present, its generated `/usr/lib/mcp/bin` stub).
@@ -140,9 +143,10 @@ pub fn save(name: &str, config: &McpServerConfig) -> Result<(), String> {
 /// # Errors
 /// Returns `Err` if the config file can't be removed (e.g. it does not exist); removing the bin stub
 /// is best-effort and never fails the call.
-pub fn remove(name: &str) -> Result<(), String> {
+pub fn remove(name: &str) -> crate::mcp::error::Result<()> {
     let path = config_path(name);
-    std::fs::remove_file(&path).map_err(|e| format!("cannot remove {}: {e}", path.display()))?;
+    std::fs::remove_file(&path)
+        .map_err(|e| crate::mcp::Error::io(format!("cannot remove {}: {e}", path.display())))?;
     let _ = std::fs::remove_file(bin_dir().join(name));
     Ok(())
 }
@@ -151,13 +155,15 @@ pub fn remove(name: &str) -> Result<(), String> {
 ///
 /// # Errors
 /// Returns `Err` if the file exists but can't be read, or if its contents fail to parse as TOML.
-pub fn load(name: &str) -> Result<Option<McpServerConfig>, String> {
+pub fn load(name: &str) -> crate::mcp::error::Result<Option<McpServerConfig>> {
     match std::fs::read_to_string(config_path(name)) {
         Ok(text) => toml::from_str(&text)
             .map(Some)
-            .map_err(|e| format!("{name}.toml parse error: {e}")),
+            .map_err(|e| crate::mcp::Error::io(format!("{name}.toml parse error: {e}"))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(format!("{name}.toml read error: {e}")),
+        Err(e) => Err(crate::mcp::Error::io(format!(
+            "{name}.toml read error: {e}"
+        ))),
     }
 }
 
@@ -184,13 +190,15 @@ pub fn list_names() -> Vec<String> {
 ///
 /// # Errors
 /// Returns `Err` if the bin directory can't be created or writing the stub file fails.
-pub fn write_bin_stub(name: &str, help: &str) -> Result<(), String> {
+pub fn write_bin_stub(name: &str, help: &str) -> crate::mcp::error::Result<()> {
     let dir = bin_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| crate::mcp::Error::io(format!("cannot create {}: {e}", dir.display())))?;
     let content = format!(
         "# clank MCP command (server: {name}, managed by `mcp`; runs at the session layer)\n{help}"
     );
-    std::fs::write(dir.join(name), content).map_err(|e| format!("write stub error: {e}"))
+    std::fs::write(dir.join(name), content)
+        .map_err(|e| crate::mcp::Error::io(format!("write stub error: {e}")))
 }
 
 #[cfg(test)]
