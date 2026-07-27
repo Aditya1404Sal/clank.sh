@@ -554,6 +554,12 @@ impl Session {
         // Install this session's log sink for the whole line so every logging call site (shell/http/mcp/
         // ops, deep in run_command / McpClient::call / coreutils) routes through it.
         let _log = crate::logging::install(self.log_sink.clone());
+        // Name this line in `ops.log` if it panics. On wasm a panic ABORTS (wasm32-wasip2 is an
+        // abort target), so there is nothing to catch — the hook running before the abort is the
+        // only chance to record where the instance died and what it was running. Redacted the same
+        // way the shell.log events are.
+        crate::runtime::panicreport::install();
+        let _panic_ctx = crate::runtime::panicreport::executing(log_safe_line(line).as_ref());
         if !line.trim().is_empty() {
             crate::logging::Record::new("start")
                 .field("line", log_safe_line(line).as_ref())

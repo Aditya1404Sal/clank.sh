@@ -152,8 +152,14 @@ impl LogFile {
 pub fn append(file: LogFile, line: &str) {
     let masked = crate::runtime::secretenv::mask_values(line);
     ACTIVE.with(|a| {
-        if let Some(sink) = a.borrow().as_ref() {
-            sink.append(file, &masked);
+        // `try_borrow`, not `borrow`: this is reachable from the panic hook, which can fire at any
+        // point — including while `install`/`Drop` holds the mutable borrow. A panicking borrow
+        // there would be a panic inside a panic, which aborts immediately and destroys the very
+        // report we are trying to write. Dropping the line is the strictly better failure.
+        if let Ok(slot) = a.try_borrow() {
+            if let Some(sink) = slot.as_ref() {
+                sink.append(file, &masked);
+            }
         }
     });
 }
@@ -350,6 +356,30 @@ mod tests {
         assert_eq!(g.read(LogFile::Shell), "line one\nline two\n");
         // Different logs are separate files.
         assert!(g.read(LogFile::Http).is_empty());
+    }
+
+    /// A panic is reported to `ops.log` with its location and the command that caused it.
+    ///
+    /// This is the whole point of the panic hook: on wasm32-wasip2 (an ABORT target — verified via
+    /// `--print target-spec-json`) a panic cannot be caught, so the hook running just before the
+    /// abort is the only chance to record why the durable instance died. Exercised natively, where
+    /// unwinding lets `catch_unwind` hold the panic still long enough to inspect the log.
+    #[test]
+    fn a_panic_is_reported_to_ops_log_with_its_command() {
+        let g = LogDirGuard::new("panic-report");
+        crate::runtime::panicreport::install();
+        let _ctx = crate::runtime::panicreport::executing("some-failing-command --flag");
+        let caught = std::panic::catch_unwind(|| panic!("kaboom"));
+        assert!(caught.is_err(), "the panic must still propagate");
+
+        let ops = g.read(LogFile::Ops);
+        assert!(ops.starts_with("panic "), "got {ops:?}");
+        assert!(ops.contains("logging.rs"), "must name the site: {ops:?}");
+        assert!(ops.contains("kaboom"), "must carry the payload: {ops:?}");
+        assert!(
+            ops.contains("some-failing-command --flag"),
+            "must name the command being run: {ops:?}"
+        );
     }
 
     #[test]

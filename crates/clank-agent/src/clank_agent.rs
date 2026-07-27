@@ -69,9 +69,9 @@ impl ClankAgent for ClankAgentImpl {
         if let Err(result) = self.ensure_session().await {
             return result;
         }
-        // `ensure_session` (above) returned Ok, so `session` is Some.
-        #[allow(clippy::unwrap_used)]
-        let session = self.session.as_mut().unwrap();
+        let Some(session) = self.session.as_mut() else {
+            return session_missing();
+        };
         let result = session.eval_line(&cmd).await;
         // Read the cwd AFTER the line runs (so a `cd` is reflected); the eval borrow has ended.
         let cwd = session.cwd().display().to_string();
@@ -82,9 +82,9 @@ impl ClankAgent for ClankAgentImpl {
         if let Err(result) = self.ensure_session().await {
             return result;
         }
-        // `ensure_session` (above) returned Ok, so `session` is Some.
-        #[allow(clippy::unwrap_used)]
-        let session = self.session.as_mut().unwrap();
+        let Some(session) = self.session.as_mut() else {
+            return session_missing();
+        };
         let result = session.answer_prompt(Some(response)).await;
         let cwd = session.cwd().display().to_string();
         eval_result(result, cwd)
@@ -94,9 +94,9 @@ impl ClankAgent for ClankAgentImpl {
         if let Err(result) = self.ensure_session().await {
             return result;
         }
-        // `ensure_session` (above) returned Ok, so `session` is Some.
-        #[allow(clippy::unwrap_used)]
-        let session = self.session.as_mut().unwrap();
+        let Some(session) = self.session.as_mut() else {
+            return session_missing();
+        };
         let result = session.answer_prompt(None).await;
         let cwd = session.cwd().display().to_string();
         eval_result(result, cwd)
@@ -141,6 +141,23 @@ impl ClankAgentImpl {
             }
         }
         Ok(())
+    }
+}
+
+/// The result returned when the session slot is somehow empty after `ensure_session` reported Ok.
+///
+/// That invariant holds today — `ensure_session` sets the slot on its only `Ok` path — and these
+/// call sites used to `unwrap()` on it with a comment saying so. But they sit *inside* the component
+/// exports, where being wrong costs the whole instance rather than one command: wasm32-wasip2 is an
+/// abort target, so the panic would trap the worker with no unwinding and no catch. Degrading to a
+/// clean error is free, so there is no reason to bet the instance on the comment staying true.
+fn session_missing() -> EvalResult {
+    EvalResult {
+        stdout: String::new(),
+        stderr: "clank: internal error: shell session unavailable\n".to_string(),
+        exit_code: 1,
+        pending_prompt: None,
+        cwd: String::new(),
     }
 }
 

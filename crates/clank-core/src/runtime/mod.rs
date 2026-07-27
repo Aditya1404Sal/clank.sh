@@ -7,6 +7,7 @@
 pub mod binfs;
 pub mod dynreg;
 pub mod mcpfs;
+pub mod panicreport;
 pub mod process;
 pub mod procfs;
 pub mod proctable;
