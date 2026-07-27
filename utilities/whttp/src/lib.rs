@@ -40,8 +40,17 @@ pub struct Request {
     pub timeout: Option<Duration>,
 }
 
+/// Default bound on establishing a connection, applied when the caller sets none.
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Default overall request budget, applied when the caller sets none. On wasm this maps to the
+/// first-byte timeout — the closest WASI-HTTP primitive to a total deadline.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_mins(5);
+
 impl Request {
-    /// A plain `GET` with no redirect following and no timeouts — the base every client tweaks.
+    /// A plain `GET` with no redirect following and no explicit timeouts — the base every client
+    /// tweaks. `None` here means "use [`DEFAULT_CONNECT_TIMEOUT`] / [`DEFAULT_TIMEOUT`]", not
+    /// "unbounded"; [`fetch`] resolves them.
     pub fn new(method: Method, url: impl Into<String>) -> Self {
         Request {
             method,
@@ -118,14 +127,23 @@ pub async fn fetch(req: &Request) -> Result<Response, Error> {
     let mut body = req.body.clone();
     let mut redirects = 0u32;
 
+    // Resolve the timeout defaults ONCE, here, so BOTH targets get them. They used to be applied
+    // inside the native `fetch_once` only — which left the wasm path (the durable Golem agent)
+    // unbounded, i.e. the mitigation landed on the target that doesn't have the problem. A hung peer
+    // holds a durable invocation forever, and because Golem serializes invocations per instance it
+    // wedges everything queued behind it. Callers wanting a different bound (wcurl `-m`, waget `-T`)
+    // still override by setting the fields.
+    let connect_timeout = req.connect_timeout.or(Some(DEFAULT_CONNECT_TIMEOUT));
+    let timeout = req.timeout.or(Some(DEFAULT_TIMEOUT));
+
     loop {
         let resp = fetch_once(
             &method,
             &url,
             &req.headers,
             body.clone(),
-            req.connect_timeout,
-            req.timeout,
+            connect_timeout,
+            timeout,
         )
         .await?;
 
@@ -272,12 +290,7 @@ async fn fetch_once(
     // `redirect(none)` is load-bearing: the shared loop above is the single source of redirect
     // behavior across both targets, so reqwest's default auto-follow must be off.
     let mut cb = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
-    // Apply a DEFAULT bound when the caller passed none. An unbounded outbound request is a real
-    // hazard for a long-lived/durable host: a hung peer holds the connection forever, and because a
-    // durable agent serializes invocations, it wedges every request queued behind it (audit P2-4).
-    // Callers that want a different bound (wcurl `-m`, waget `-T`) still override these.
-    let connect_timeout = connect_timeout.or(Some(Duration::from_secs(30)));
-    let timeout = timeout.or(Some(Duration::from_mins(5)));
+    // Defaults are resolved by the caller (`fetch`) so both targets share them.
     if let Some(d) = connect_timeout {
         cb = cb.connect_timeout(d);
     }

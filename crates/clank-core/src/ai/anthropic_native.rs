@@ -38,6 +38,8 @@ impl ReqwestAnthropicProvider {
     #[must_use]
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
+            .connect_timeout(crate::config::net::CONNECT_TIMEOUT)
+            .timeout(crate::config::net::LLM_TIMEOUT)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self {

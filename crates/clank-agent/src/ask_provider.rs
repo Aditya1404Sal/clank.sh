@@ -81,6 +81,16 @@ impl AskProvider for DurableLlmProvider {
             None => (DEFAULT_PROVIDER, model),
         };
 
+        // NOTE: `Config` carries no timeout knob — the durable LLM call goes through the Golem host
+        // binding, so its deadline is the host's to set, not clank's. Every transport clank OWNS
+        // (whttp, the MCP clients, the Golem REST client, the native providers) is bounded by
+        // `clank_core::config::net`; this one path is bounded by the platform instead.
+        //
+        // Deliberately NOT worked around with a guest-side wall-clock budget: reading the clock on
+        // the agent is the replay-nondeterministic host call this codebase avoids on principle (see
+        // `logging::Record`, which omits timestamps for exactly that reason). Trading a durability
+        // bug for a timeout would be a bad swap. What bounds this path is `ASK_MAX_ITERATIONS`
+        // turns times the host's own deadline.
         let config = Config {
             model: bare_model.to_string(),
             temperature: None,

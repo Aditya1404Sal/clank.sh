@@ -29,6 +29,8 @@ const INVOKE_PATH: &str = "/v1/agents/invoke-agent";
 /// Shared builder for a `reqwest` client used by both the invoker and the cluster.
 fn client() -> reqwest::Client {
     reqwest::Client::builder()
+        .connect_timeout(crate::config::net::CONNECT_TIMEOUT)
+        .timeout(crate::config::net::REQUEST_TIMEOUT)
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
 }

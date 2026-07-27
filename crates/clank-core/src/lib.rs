@@ -19,6 +19,7 @@
 pub mod ai;
 pub mod authz;
 pub mod builtins;
+pub mod config;
 pub mod golem;
 pub mod grease;
 pub mod logging;

@@ -44,7 +44,13 @@ impl McpHttp for WstdMcpHttp {
             .body(wstd_body)
             .map_err(|e| format!("bad request: {e}"))?;
 
-        let mut response = Client::new()
+        // Bound the exchange. Without this an MCP server that accepts the connection and never
+        // answers parks the invocation forever — and Golem serializes invocations per instance, so
+        // everything queued behind it is stuck too.
+        let mut client = Client::new();
+        client.set_connect_timeout(clank_core::config::net::CONNECT_TIMEOUT);
+        client.set_first_byte_timeout(clank_core::config::net::REQUEST_TIMEOUT);
+        let mut response = client
             .send(request)
             .await
             .map_err(|e| format!("request failed: {e}"))?;
