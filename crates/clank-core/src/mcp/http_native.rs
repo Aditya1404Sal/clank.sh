@@ -136,7 +136,10 @@ mod tests {
         // lowercased.
         let url = mock_server(200, "Mcp-Session-Id: sess-abc123\r\n", "{}");
         let http = ReqwestMcpHttp::new();
-        let resp = http.request("POST", &url, &[], Some(b"{}".to_vec())).await.unwrap();
+        let resp = http
+            .request("POST", &url, &[], Some(b"{}".to_vec()))
+            .await
+            .unwrap();
         assert_eq!(resp.header("mcp-session-id"), Some("sess-abc123"));
         // The header() helper is case-insensitive, so the original casing resolves too.
         assert_eq!(resp.header("Mcp-Session-Id"), Some("sess-abc123"));
@@ -146,7 +149,10 @@ mod tests {
     async fn collects_content_type_for_sse_detection() {
         let url = mock_server(200, "Content-Type: text/event-stream\r\n", "data: {}\n\n");
         let http = ReqwestMcpHttp::new();
-        let resp = http.request("POST", &url, &[], Some(b"{}".to_vec())).await.unwrap();
+        let resp = http
+            .request("POST", &url, &[], Some(b"{}".to_vec()))
+            .await
+            .unwrap();
         assert_eq!(resp.header("content-type"), Some("text/event-stream"));
     }
 

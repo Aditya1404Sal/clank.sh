@@ -29,15 +29,31 @@ pub(crate) struct ArtifactFlags {
 /// A parsed `grease` command.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum GreaseCommand {
-    RegistryAdd { url: String, key: Option<String> },
+    RegistryAdd {
+        url: String,
+        key: Option<String>,
+    },
     RegistryList,
-    RegistryRemove { url: String },
-    Install { name: String, artifacts: ArtifactFlags },
-    Remove { name: String },
+    RegistryRemove {
+        url: String,
+    },
+    Install {
+        name: String,
+        artifacts: ArtifactFlags,
+    },
+    Remove {
+        name: String,
+    },
     List,
-    Search { query: String },
-    Info { name: String },
-    Update { name: Option<String> },
+    Search {
+        query: String,
+    },
+    Info {
+        name: String,
+    },
+    Update {
+        name: Option<String>,
+    },
 }
 
 /// Recognize a `grease` line. `None` when it isn't one (fall through to Brush); `Some(Err)` when it is
@@ -83,7 +99,14 @@ fn parse(args: &[String]) -> Result<GreaseCommand, String> {
                 }
             }
             let name = name.ok_or("grease install: needs a package name")?;
-            Ok(GreaseCommand::Install { name, artifacts: ArtifactFlags { tools, prompts, resources } })
+            Ok(GreaseCommand::Install {
+                name,
+                artifacts: ArtifactFlags {
+                    tools,
+                    prompts,
+                    resources,
+                },
+            })
         }
         "remove" | "rm" | "uninstall" => {
             let name = args.get(1).ok_or("grease remove: needs a package name")?;
@@ -92,13 +115,17 @@ fn parse(args: &[String]) -> Result<GreaseCommand, String> {
         "list" | "ls" => Ok(GreaseCommand::List),
         "search" => {
             let query = args.get(1).ok_or("grease search: needs a query")?;
-            Ok(GreaseCommand::Search { query: query.clone() })
+            Ok(GreaseCommand::Search {
+                query: query.clone(),
+            })
         }
         "info" => {
             let name = args.get(1).ok_or("grease info: needs a package name")?;
             Ok(GreaseCommand::Info { name: name.clone() })
         }
-        "update" | "upgrade" => Ok(GreaseCommand::Update { name: args.get(1).cloned() }),
+        "update" | "upgrade" => Ok(GreaseCommand::Update {
+            name: args.get(1).cloned(),
+        }),
         other => Err(format!(
             "grease: unknown subcommand '{other}' \
              (try: registry, install, remove, list, search, info, update)"
@@ -117,7 +144,11 @@ fn parse_registry(args: &[String]) -> Result<GreaseCommand, String> {
             let mut it = rest.iter();
             while let Some(a) = it.next() {
                 if a == "--key" {
-                    key = Some(it.next().ok_or("grease registry add: --key needs a value")?.clone());
+                    key = Some(
+                        it.next()
+                            .ok_or("grease registry add: --key needs a value")?
+                            .clone(),
+                    );
                 } else if url.is_none() {
                     url = Some(a.clone());
                 } else {
@@ -190,44 +221,81 @@ mod tests {
     fn classifies_registry_subcommands() {
         assert_eq!(
             c("grease registry add https://reg.example"),
-            GreaseCommand::RegistryAdd { url: "https://reg.example".into(), key: None }
+            GreaseCommand::RegistryAdd {
+                url: "https://reg.example".into(),
+                key: None
+            }
         );
         // `--key` attaches a trusted signing key.
         assert_eq!(
             c("grease registry add https://reg.example --key AAAA"),
-            GreaseCommand::RegistryAdd { url: "https://reg.example".into(), key: Some("AAAA".into()) }
+            GreaseCommand::RegistryAdd {
+                url: "https://reg.example".into(),
+                key: Some("AAAA".into())
+            }
         );
         assert_eq!(c("grease registry list"), GreaseCommand::RegistryList);
         assert_eq!(c("grease registry"), GreaseCommand::RegistryList); // bare = list
         assert_eq!(
             c("grease registry remove https://reg.example"),
-            GreaseCommand::RegistryRemove { url: "https://reg.example".into() }
+            GreaseCommand::RegistryRemove {
+                url: "https://reg.example".into()
+            }
         );
         // `--key` without a value is an error.
-        assert!(classify("grease registry add https://r --key").unwrap().is_err());
+        assert!(classify("grease registry add https://r --key")
+            .unwrap()
+            .is_err());
     }
 
     #[test]
     fn classifies_package_subcommands() {
         assert_eq!(
             c("grease install summarize"),
-            GreaseCommand::Install { name: "summarize".into(), artifacts: ArtifactFlags::default() }
+            GreaseCommand::Install {
+                name: "summarize".into(),
+                artifacts: ArtifactFlags::default()
+            }
         );
         // MCP artifact selectors parse (order-independent, combinable).
         assert_eq!(
             c("grease install github --tools --resources"),
             GreaseCommand::Install {
                 name: "github".into(),
-                artifacts: ArtifactFlags { tools: true, prompts: false, resources: true }
+                artifacts: ArtifactFlags {
+                    tools: true,
+                    prompts: false,
+                    resources: true
+                }
             }
         );
-        assert_eq!(c("grease remove summarize"), GreaseCommand::Remove { name: "summarize".into() });
+        assert_eq!(
+            c("grease remove summarize"),
+            GreaseCommand::Remove {
+                name: "summarize".into()
+            }
+        );
         assert_eq!(c("grease list"), GreaseCommand::List);
         assert_eq!(c("grease"), GreaseCommand::List); // bare grease = list
-        assert_eq!(c("grease search review"), GreaseCommand::Search { query: "review".into() });
-        assert_eq!(c("grease info summarize"), GreaseCommand::Info { name: "summarize".into() });
+        assert_eq!(
+            c("grease search review"),
+            GreaseCommand::Search {
+                query: "review".into()
+            }
+        );
+        assert_eq!(
+            c("grease info summarize"),
+            GreaseCommand::Info {
+                name: "summarize".into()
+            }
+        );
         assert_eq!(c("grease update"), GreaseCommand::Update { name: None });
-        assert_eq!(c("grease update summarize"), GreaseCommand::Update { name: Some("summarize".into()) });
+        assert_eq!(
+            c("grease update summarize"),
+            GreaseCommand::Update {
+                name: Some("summarize".into())
+            }
+        );
     }
 
     #[test]
@@ -253,7 +321,11 @@ mod tests {
         let m = &manifests()[0];
         assert_eq!(m.name, "grease");
         let policy = |sub: &str| {
-            m.subcommands.iter().find(|s| s.name == sub).unwrap().authorization_policy
+            m.subcommands
+                .iter()
+                .find(|s| s.name == sub)
+                .unwrap()
+                .authorization_policy
         };
         assert_eq!(policy("install"), AuthorizationPolicy::Confirm);
         assert_eq!(policy("remove"), AuthorizationPolicy::Confirm);

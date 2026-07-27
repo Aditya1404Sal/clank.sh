@@ -24,18 +24,18 @@ use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 
 use crate::authz::{self, AuthzState, Decision};
-use crate::runtime::process::ProcessKind;
 use crate::builtins::promptuser::{AnswerInput, PendingPrompt, Resolution};
-use crate::runtime::proctable::ProcessTable;
 use crate::registry::CommandRegistry;
+use crate::runtime::process::ProcessKind;
+use crate::runtime::proctable::ProcessTable;
 
 type BoxError = Box<dyn std::error::Error>;
 
-mod prompt;
 mod agent;
-mod mcp;
 mod ask;
 mod grease;
+mod mcp;
+mod prompt;
 
 /// Why the shell is paused awaiting a response — set alongside the [`PendingPrompt`].
 enum PendingKind {
@@ -316,7 +316,9 @@ impl Session {
             let shell = rt.block_on(build_shell())?;
             let mut session = Self {
                 shell,
-                transcript: Arc::new(Mutex::new(Transcript::with_cap(crate::configured_context_cap()))),
+                transcript: Arc::new(Mutex::new(Transcript::with_cap(
+                    crate::configured_context_cap(),
+                ))),
                 registry: crate::registry::build(),
                 proc_table: Arc::new(Mutex::new(ProcessTable::new())),
                 pending: None,
@@ -346,7 +348,9 @@ impl Session {
             let shell = build_shell().await?;
             let mut session = Self {
                 shell,
-                transcript: Arc::new(Mutex::new(Transcript::with_cap(crate::configured_context_cap()))),
+                transcript: Arc::new(Mutex::new(Transcript::with_cap(
+                    crate::configured_context_cap(),
+                ))),
                 registry: crate::registry::build(),
                 proc_table: Arc::new(Mutex::new(ProcessTable::new())),
                 pending: None,
@@ -516,7 +520,13 @@ impl Session {
         self.shell
             .env()
             .get("COLUMNS")
-            .and_then(|(_, var)| var.value().to_cow_str(&self.shell).trim().parse::<usize>().ok())
+            .and_then(|(_, var)| {
+                var.value()
+                    .to_cow_str(&self.shell)
+                    .trim()
+                    .parse::<usize>()
+                    .ok()
+            })
             .filter(|w| *w > 0)
     }
 
@@ -551,8 +561,13 @@ impl Session {
         if line.trim().is_empty() {
             return;
         }
-        let event = if result.pending_prompt.is_some() { "pause" } else { "end" };
-        let mut rec = crate::logging::Record::new(event).field("line", log_safe_line(line).as_ref());
+        let event = if result.pending_prompt.is_some() {
+            "pause"
+        } else {
+            "end"
+        };
+        let mut rec =
+            crate::logging::Record::new(event).field("line", log_safe_line(line).as_ref());
         if result.pending_prompt.is_none() {
             rec = rec.field("exit", result.exit_code.to_string());
         }
@@ -578,7 +593,10 @@ impl Session {
                     .any(|t| matches!(t, crate::builtins::kill::Target::Pid(p) if *p == pp))
             );
             if kills_pending {
-                self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record_command(line);
+                self.transcript
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .record_command(line);
                 return self.answer_prompt(None).await;
             }
             // Re-surface the still-outstanding prompt (NOT a bare stderr, which carries
@@ -619,12 +637,17 @@ impl Session {
         // `run_secret_export` and [`crate::runtime::secretenv`].
         match crate::builtins::secretenv::parse(line) {
             Some(secret) if !secret.value.is_empty() => {
-                let redacted =
-                    line.replace(&secret.value, crate::runtime::secretenv::REDACTED);
-                self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record_command(&redacted);
+                let redacted = line.replace(&secret.value, crate::runtime::secretenv::REDACTED);
+                self.transcript
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .record_command(&redacted);
             }
             _ => {
-                self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record_command(line);
+                self.transcript
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .record_command(line);
             }
         }
 
@@ -651,11 +674,13 @@ impl Session {
                 key: cap_key,
                 dynreg: std::sync::Arc::new(std::sync::Mutex::new(manifests)),
                 mcpfs: std::sync::Arc::new(self.grease.mcp_resource_index()),
-                sysprompt: std::sync::Arc::new(crate::ai::ask::build_system_prompt_with_capabilities(
-                    &self.registry,
-                    &self.mcp,
-                    &self.grease,
-                )),
+                sysprompt: std::sync::Arc::new(
+                    crate::ai::ask::build_system_prompt_with_capabilities(
+                        &self.registry,
+                        &self.mcp,
+                        &self.grease,
+                    ),
+                ),
             });
         }
         // Clone the cached `Arc`s into the per-line thread-local slots (cheap ref-count bumps); the
@@ -682,7 +707,12 @@ impl Session {
                 None
             } else {
                 let kind = classify(line);
-                Some(self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).spawn(kind, argv))
+                Some(
+                    self.proc_table
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .spawn(kind, argv),
+                )
             }
         };
 
@@ -736,7 +766,10 @@ impl Session {
                     // Inspection output — reap the row but do NOT record it back (like `context show`).
                     let result = self.run_context_summarize().await;
                     if let Some(pid) = pid {
-                        self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(pid);
+                        self.proc_table
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .complete(pid);
                     }
                     return result;
                 }
@@ -757,9 +790,18 @@ impl Session {
         }
 
         // `context show` output is intentionally not recorded back into the transcript.
-        if let Some(bytes) = dispatch_context(&mut self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner), line) {
+        if let Some(bytes) = dispatch_context(
+            &mut self
+                .transcript
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            line,
+        ) {
             if let Some(pid) = pid {
-                self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(pid);
+                self.proc_table
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .complete(pid);
             }
             return LineResult::continue_with_stdout(bytes);
         }
@@ -824,7 +866,8 @@ impl Session {
         if crate::ai::ask::classify_repl(line).is_some() {
             let msg = b"ask repl: interactive REPL is a native-terminal feature; on the durable \
                         agent, drive a conversation with repeated `ask` calls (each is one turn)\n";
-            return self.finish_intercepted(pid, LineResult::from_outcome(Vec::new(), msg.to_vec(), 2));
+            return self
+                .finish_intercepted(pid, LineResult::from_outcome(Vec::new(), msg.to_vec(), 2));
         }
 
         // stdin-as-context: `cat x | ask "…"`. The LLM call can't run inside Brush's pipeline (the
@@ -874,8 +917,8 @@ impl Session {
             Decision::Confirm { sudo_grant } => {
                 // More than one gated command ⇒ name them all in the prompt (approving runs the whole
                 // line). A single gated command uses the existing per-command synopsis text.
-                let multi_summary = (gated.len() > 1)
-                    .then(|| authz::gated_commands_summary(&gated));
+                let multi_summary =
+                    (gated.len() > 1).then(|| authz::gated_commands_summary(&gated));
                 return self.surface_auth_confirm(
                     command.as_deref(),
                     effective,
@@ -893,7 +936,10 @@ impl Session {
         // `resolve_auth_confirm`, which passes `false`).
         let blanket = elevated || self.authz.allow_all;
         let result = self.run_command(&effective, pid, blanket).await;
-        self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record_output(&result.terminal_output());
+        self.transcript
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record_output(&result.terminal_output());
         // If recording just evicted old entries to stay under the cap, upgrade the leading count marker
         // into a model-generated summary block (no-op when nothing was dropped or no provider exists).
         self.compact_dropped_span().await;
@@ -1011,7 +1057,10 @@ impl Session {
             }
         };
         if let Some(pid) = pid {
-            self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(pid);
+            self.proc_table
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .complete(pid);
         }
         result
     }
@@ -1034,7 +1083,9 @@ impl Session {
             }
         };
         log_http_tool(name, &pipe.args, head_exit);
-        let mut result = self.execute_with_stdin(&pipe.downstream, &head_stdout).await;
+        let mut result = self
+            .execute_with_stdin(&pipe.downstream, &head_stdout)
+            .await;
         if !head_stderr.is_empty() {
             let mut stderr = head_stderr;
             stderr.extend_from_slice(&result.stderr);
@@ -1052,7 +1103,10 @@ impl Session {
         for (job, _result) in results {
             if let Some(idx) = self.bg_jobs.iter().position(|b| b.job_id == job.id) {
                 let bg = self.bg_jobs.remove(idx);
-                self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(bg.pid);
+                self.proc_table
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .complete(bg.pid);
             }
         }
     }
@@ -1103,10 +1157,10 @@ impl Session {
         for target in &args.targets {
             let job_id = match target {
                 Target::Job(spec) => {
-                    if let Some(id) = self.shell.jobs_mut().resolve_job_spec(spec).map(|j| j.id) { id } else {
-                        stderr.extend_from_slice(
-                            format!("kill: {spec}: no such job\n").as_bytes(),
-                        );
+                    if let Some(id) = self.shell.jobs_mut().resolve_job_spec(spec).map(|j| j.id) {
+                        id
+                    } else {
+                        stderr.extend_from_slice(format!("kill: {spec}: no such job\n").as_bytes());
                         any_missed = true;
                         continue;
                     }
@@ -1127,7 +1181,10 @@ impl Session {
                     // guaranteed — documented.)
                     if let Some(idx) = self.pending_invocations.iter().position(|p| p.pid == *pid) {
                         let inv = self.pending_invocations.remove(idx);
-                        self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(*pid);
+                        self.proc_table
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .complete(*pid);
                         let msg = if inv.cancel_token.is_some() {
                             format!("[{pid}] cancelled (queued/scheduled invocation)\n")
                         } else {
@@ -1139,7 +1196,9 @@ impl Session {
                         stdout.extend_from_slice(msg.as_bytes());
                         continue;
                     }
-                    if let Some(bg) = self.bg_jobs.iter().find(|b| b.pid == *pid) { bg.job_id } else {
+                    if let Some(bg) = self.bg_jobs.iter().find(|b| b.pid == *pid) {
+                        bg.job_id
+                    } else {
                         stderr.extend_from_slice(
                             format!("kill: ({pid}) - No such process\n").as_bytes(),
                         );
@@ -1160,7 +1219,10 @@ impl Session {
             let mapping_idx = self.bg_jobs.iter().position(|b| b.job_id == job_id);
             let killed_pid = mapping_idx.map(|i| self.bg_jobs.remove(i).pid);
             if let Some(killed_pid) = killed_pid {
-                self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(killed_pid);
+                self.proc_table
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .complete(killed_pid);
                 stdout.extend_from_slice(
                     format!("[{job_id}] {killed_pid} Killed\t{}\n", job.command_line).as_bytes(),
                 );
@@ -1173,8 +1235,6 @@ impl Session {
 
         LineResult::from_outcome(stdout, stderr, u8::from(any_missed))
     }
-
-
 
     /// Whether `line`'s leading word is an installed grease prompt. Drives the `run_prompt` dispatch.
     /// Only top-level lines (no operators) count — a prompt makes an LLM call and can't run in Brush's
@@ -1261,7 +1321,6 @@ impl Session {
         self.execute(&filled).await
     }
 
-
     /// Generated help for an installed command-package line ending in `--help` (prompt, script, or
     /// agent). `None` if the line isn't an installed command package or doesn't request help.
     ///
@@ -1299,7 +1358,11 @@ impl Session {
         let inv = match crate::mcp::cmd::parse_tool_invocation(line) {
             Some(Ok(inv)) => inv,
             Some(Err(e)) => {
-                return LineResult::from_outcome(Vec::new(), format!("{}: {e}\n", "mcp").into_bytes(), 2)
+                return LineResult::from_outcome(
+                    Vec::new(),
+                    format!("{}: {e}\n", "mcp").into_bytes(),
+                    2,
+                )
             }
             None => return LineResult::denied(),
         };
@@ -1308,7 +1371,10 @@ impl Session {
             // Bare `<server>` with no tool: show help (help path already handled this in eval_line, but
             // a direct run_command re-entry lands here).
             return LineResult::continue_with_stdout(
-                self.mcp.server_help(&inv.server).unwrap_or_default().into_bytes(),
+                self.mcp
+                    .server_help(&inv.server)
+                    .unwrap_or_default()
+                    .into_bytes(),
             );
         };
 
@@ -1316,7 +1382,11 @@ impl Session {
         let Some(tool) = self.mcp.tool(&inv.server, &tool_name).cloned() else {
             return LineResult::from_outcome(
                 Vec::new(),
-                format!("{}: no tool '{tool_name}' on server '{}'\n", inv.server, inv.server).into_bytes(),
+                format!(
+                    "{}: no tool '{tool_name}' on server '{}'\n",
+                    inv.server, inv.server
+                )
+                .into_bytes(),
                 2,
             );
         };
@@ -1353,10 +1423,11 @@ impl Session {
             );
         };
         // Reuse an explicit --session-id, else an open session for the server, else stateless.
-        let session_id = inv
-            .session_id
-            .clone()
-            .or_else(|| self.mcp.session_for(&inv.server).and_then(|s| s.server_session_id.clone()));
+        let session_id = inv.session_id.clone().or_else(|| {
+            self.mcp
+                .session_for(&inv.server)
+                .and_then(|s| s.server_session_id.clone())
+        });
 
         let Some(http) = self.mcp_http.as_deref() else {
             return LineResult::from_outcome(
@@ -1367,7 +1438,10 @@ impl Session {
         };
         let auth = config.resolve_auth();
         let mut client = crate::mcp::client::McpClient::new(http, &config.url, auth);
-        match client.call_tool(&tool_name, arguments, session_id.as_deref()).await {
+        match client
+            .call_tool(&tool_name, arguments, session_id.as_deref())
+            .await
+        {
             Ok(result) => {
                 let out = if inv.json {
                     result.raw.to_string()
@@ -1392,9 +1466,15 @@ impl Session {
     /// through `run_command`, e.g. an authorization denial).
     fn finish_intercepted(&mut self, pid: Option<u32>, result: LineResult) -> LineResult {
         if let Some(pid) = pid {
-            self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(pid);
+            self.proc_table
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .complete(pid);
         }
-        self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record_output(&result.terminal_output());
+        self.transcript
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record_output(&result.terminal_output());
         result
     }
 
@@ -1410,7 +1490,8 @@ impl Session {
     fn run_secret_export(&mut self, line: &str, pid: Option<u32>) -> LineResult {
         let Some(secret) = crate::builtins::secretenv::parse(line) else {
             // The caller already checked `is_secret_export`; this is unreachable in practice.
-            return self.finish_intercepted(pid, LineResult::from_outcome(Vec::new(), Vec::new(), 0));
+            return self
+                .finish_intercepted(pid, LineResult::from_outcome(Vec::new(), Vec::new(), 0));
         };
 
         // Mark it exported in Brush's variable table so `$NAME` expands in scripts and it's part of
@@ -1419,7 +1500,10 @@ impl Session {
         var.export();
         if let Err(e) = self.shell.env_mut().set_global(&secret.name, var) {
             let msg = format!("export: {e}\n");
-            return self.finish_intercepted(pid, LineResult::from_outcome(Vec::new(), msg.into_bytes(), 1));
+            return self.finish_intercepted(
+                pid,
+                LineResult::from_outcome(Vec::new(), msg.into_bytes(), 1),
+            );
         }
 
         // Make it visible to real subprocesses via the process environment (Full env parity). This is
@@ -1447,7 +1531,6 @@ impl Session {
         self.pending.is_some()
     }
 
-
     /// Whether `line` is syntactically *incomplete* — an unterminated heredoc, quote, or
     /// substitution that needs more input to become a program — as opposed to complete-but-wrong.
     /// This is exactly brush-interactive's `is_valid_input` classification (its reedline validator
@@ -1459,7 +1542,9 @@ impl Session {
     #[must_use]
     pub fn line_is_incomplete(&self, line: &str) -> bool {
         match self.shell.parse_string(line) {
-            Err(brush_parser::ParseError::Tokenizing { ref inner, .. }) if inner.is_incomplete() => {
+            Err(brush_parser::ParseError::Tokenizing { ref inner, .. })
+                if inner.is_incomplete() =>
+            {
                 true
             }
             Err(brush_parser::ParseError::ParsingAtEndOfInput) => true,
@@ -1493,7 +1578,8 @@ impl Session {
             Ok(f) => f,
             Err(e) => return LineResult::stderr(format!("clank: {e}\n")),
         };
-        let (Ok(out_fd), Ok(err_fd)) = (stdout_capture.try_clone(), stderr_capture.try_clone()) else {
+        let (Ok(out_fd), Ok(err_fd)) = (stdout_capture.try_clone(), stderr_capture.try_clone())
+        else {
             return LineResult::stderr(b"clank: failed to set up output capture\n".to_vec());
         };
 
@@ -1577,8 +1663,16 @@ impl Session {
         let result = self.rt.block_on(fut);
         drop(params);
 
-        let stdout = std::mem::take(&mut *stdout_buf.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
-        let stderr = std::mem::take(&mut *stderr_buf.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+        let stdout = std::mem::take(
+            &mut *stdout_buf
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        let stderr = std::mem::take(
+            &mut *stderr_buf
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
         finish(result, stdout, stderr)
     }
 }
@@ -1642,7 +1736,11 @@ struct InstallIntegrity {
 
 impl InstallIntegrity {
     /// Build the on-disk install marker for a given kind + registry.
-    fn to_marker(&self, kind: crate::grease::pkg::PackageKind, registry: &str) -> crate::grease::state::InstallMarker {
+    fn to_marker(
+        &self,
+        kind: crate::grease::pkg::PackageKind,
+        registry: &str,
+    ) -> crate::grease::state::InstallMarker {
         crate::grease::state::InstallMarker {
             kind,
             registry: registry.to_string(),
@@ -1657,8 +1755,15 @@ impl InstallIntegrity {
 
     /// The `sha256 … — verified, signed[, in log]` summary for the install output.
     fn summary(&self) -> String {
-        let status = if self.verified { "verified" } else { "unverified" };
-        let mut s = format!("sha256 {} — {status}", &self.sha256[..self.sha256.len().min(12)]);
+        let status = if self.verified {
+            "verified"
+        } else {
+            "unverified"
+        };
+        let mut s = format!(
+            "sha256 {} — {status}",
+            &self.sha256[..self.sha256.len().min(12)]
+        );
         if self.signature_verified {
             s.push_str(", signed");
         }
@@ -1700,7 +1805,10 @@ struct IndexEntry {
 /// the exit code. curl/wget bypass the `McpHttp` seam (their own `wstd`/`reqwest` fetch), so they're
 /// logged here at the dispatch site rather than by the `LoggingMcpHttp` decorator.
 fn log_http_tool(tool: &str, args: &[String], exit_code: u8) {
-    let url = args.iter().find(|a| !a.starts_with('-')).map_or("", String::as_str);
+    let url = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map_or("", String::as_str);
     crate::logging::Record::new("http")
         .field("tool", tool)
         .field("url", crate::logging::redact_url(url))
@@ -1738,15 +1846,24 @@ async fn fetch_index_entry(
     let entry = v
         .get("packages")
         .and_then(|p| p.as_array())
-        .and_then(|arr| arr.iter().find(|p| p.get("name").and_then(|n| n.as_str()) == Some(name)));
+        .and_then(|arr| {
+            arr.iter()
+                .find(|p| p.get("name").and_then(|n| n.as_str()) == Some(name))
+        });
     let Some(entry) = entry else {
         return IndexEntry::default();
     };
     let s = |k: &str| entry.get(k).and_then(|x| x.as_str()).map(String::from);
     // The optional RFC-6962 transparency-log inclusion proof.
     let log = entry.get("log").and_then(|l| {
-        let leaf_index = l.get("leaf-index").or_else(|| l.get("leaf_index"))?.as_u64()?;
-        let tree_size = l.get("tree-size").or_else(|| l.get("tree_size"))?.as_u64()?;
+        let leaf_index = l
+            .get("leaf-index")
+            .or_else(|| l.get("leaf_index"))?
+            .as_u64()?;
+        let tree_size = l
+            .get("tree-size")
+            .or_else(|| l.get("tree_size"))?
+            .as_u64()?;
         let root = l.get("root")?.as_str()?.to_string();
         let proof = l
             .get("proof")?
@@ -1754,9 +1871,20 @@ async fn fetch_index_entry(
             .iter()
             .filter_map(|h| h.as_str().map(String::from))
             .collect();
-        Some(LogProof { leaf_index, tree_size, root, proof })
+        Some(LogProof {
+            leaf_index,
+            tree_size,
+            root,
+            proof,
+        })
     });
-    IndexEntry { found_in_index: true, sha256: s("sha256"), sig: s("sig"), signer: s("signer"), log }
+    IndexEntry {
+        found_in_index: true,
+        sha256: s("sha256"),
+        sig: s("sig"),
+        signer: s("signer"),
+        log,
+    }
 }
 
 /// Verify a package's RFC-6962 inclusion proof: the log leaf is the payload's hex sha256 string (the
@@ -1887,7 +2015,10 @@ fn mcp_resource_rel_path(uri: &str) -> String {
         },
     };
     // Drop query/fragment.
-    let path = after_scheme.split(['?', '#']).next().unwrap_or(after_scheme);
+    let path = after_scheme
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
     let trimmed = path.trim_start_matches('/');
     if trimmed.is_empty() {
         "resource".to_string()
@@ -1916,8 +2047,9 @@ fn prompt_leading_word(line: &str) -> Option<String> {
 fn parse_pkg_invocation(
     line: &str,
 ) -> Result<(String, Vec<(String, String)>, Option<String>), LineResult> {
-    let words = crate::ai::ask::dequote_words(line)
-        .ok_or_else(|| LineResult::from_outcome(Vec::new(), b"grease: parse error\n".to_vec(), 2))?;
+    let words = crate::ai::ask::dequote_words(line).ok_or_else(|| {
+        LineResult::from_outcome(Vec::new(), b"grease: parse error\n".to_vec(), 2)
+    })?;
     let name = words[0].clone();
     let mut provided: Vec<(String, String)> = Vec::new();
     let mut model_override: Option<String> = None;
@@ -1988,7 +2120,9 @@ fn parse_agent_line(
                         continue;
                     }
                     "schedule" => {
-                        let val = words.get(i + 1).ok_or("--schedule needs an ISO-8601 time\n")?;
+                        let val = words
+                            .get(i + 1)
+                            .ok_or("--schedule needs an ISO-8601 time\n")?;
                         mode = InvokeMode::Schedule(val.clone());
                         i += 2;
                         continue;
@@ -2006,7 +2140,9 @@ fn parse_agent_line(
                         continue;
                     }
                     _ if is_ctor(key) => {
-                        let val = words.get(i + 1).ok_or_else(|| format!("--{key} needs a value\n"))?;
+                        let val = words
+                            .get(i + 1)
+                            .ok_or_else(|| format!("--{key} needs a value\n"))?;
                         constructor.push((key.to_string(), val.clone()));
                         i += 2;
                         continue;
@@ -2015,7 +2151,9 @@ fn parse_agent_line(
                 }
             }
             // After the method: a method arg.
-            let val = words.get(i + 1).ok_or_else(|| format!("--{key} needs a value\n"))?;
+            let val = words
+                .get(i + 1)
+                .ok_or_else(|| format!("--{key} needs a value\n"))?;
             args.push((key.to_string(), val.clone()));
             i += 2;
             continue;
@@ -2036,18 +2174,30 @@ fn parse_agent_line(
             continue;
         }
         if let Some(key) = w.strip_prefix("--") {
-            let val = words.get(i + 1).ok_or_else(|| format!("--{key} needs a value\n"))?;
+            let val = words
+                .get(i + 1)
+                .ok_or_else(|| format!("--{key} needs a value\n"))?;
             args.push((key.to_string(), val.clone()));
             i += 2;
         } else {
             i += 1;
         }
     }
-    Ok(ParsedAgentLine { constructor, method, args, mode, phantom, revision })
+    Ok(ParsedAgentLine {
+        constructor,
+        method,
+        args,
+        mode,
+        phantom,
+        revision,
+    })
 }
 
 /// Persist an install marker to `<etc>/<name>.toml`. Returns a user-facing error string on failure.
-fn write_install_marker(name: &str, marker: &crate::grease::state::InstallMarker) -> Result<(), String> {
+fn write_install_marker(
+    name: &str,
+    marker: &crate::grease::state::InstallMarker,
+) -> Result<(), String> {
     let marker_toml = toml::to_string_pretty(marker)
         .map_err(|e| format!("grease install: marker serialize error: {e}\n"))?;
     let etc = crate::grease::config::etc_dir();
@@ -2227,8 +2377,9 @@ fn build_mcp_arguments(
                 .parse::<f64>()
                 .map(|n| serde_json::json!(n))
                 .map_err(|_| format!("--{key}: '{v}' is not a number"))?,
-            (Some("array" | "object"), Some(v)) => serde_json::from_str(v)
-                .map_err(|e| format!("--{key}: expected JSON: {e}"))?,
+            (Some("array" | "object"), Some(v)) => {
+                serde_json::from_str(v).map_err(|e| format!("--{key}: expected JSON: {e}"))?
+            }
             (_, Some(v)) => Value::String(v.clone()),
             // A bare flag with no schema type: treat as a present boolean.
             (_, None) => Value::Bool(true),
@@ -2244,7 +2395,10 @@ fn build_mcp_arguments(
             .map(String::from)
             .collect();
         if !missing.is_empty() {
-            return Err(format!("missing required argument(s): {}", missing.join(", ")));
+            return Err(format!(
+                "missing required argument(s): {}",
+                missing.join(", ")
+            ));
         }
     }
     Ok(Value::Object(obj))
@@ -2319,9 +2473,15 @@ fn ensure_fs_layout() {
             ("CLANK_GREASE_ETC", crate::grease::config::etc_dir()),
             ("CLANK_GREASE_STORE", crate::grease::config::store_dir()),
             ("CLANK_GREASE_BIN", crate::grease::config::bin_dir()),
-            ("CLANK_GREASE_SCRIPT_BIN", crate::grease::config::script_bin_dir()),
+            (
+                "CLANK_GREASE_SCRIPT_BIN",
+                crate::grease::config::script_bin_dir(),
+            ),
             ("CLANK_GREASE_SKILLS", crate::grease::config::skills_dir()),
-            ("CLANK_GREASE_AGENT_BIN", crate::grease::config::agent_bin_dir()),
+            (
+                "CLANK_GREASE_AGENT_BIN",
+                crate::grease::config::agent_bin_dir(),
+            ),
         ] {
             if std::env::var_os(var).is_some() {
                 let _ = std::fs::create_dir_all(&dir);
@@ -2419,7 +2579,10 @@ impl std::io::Read for BufSink {
 #[cfg(target_arch = "wasm32")]
 impl std::io::Write for BufSink {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).extend_from_slice(data);
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend_from_slice(data);
         Ok(data.len())
     }
     fn flush(&mut self) -> std::io::Result<()> {

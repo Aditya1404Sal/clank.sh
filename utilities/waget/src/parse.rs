@@ -106,7 +106,10 @@ pub(crate) fn parse(args: &[String]) -> Result<Request, ParseError> {
 
     let mut iter = expanded.into_iter();
     while let Some(arg) = iter.next() {
-        let mut next = |flag: &str| iter.next().ok_or_else(|| ParseError::MissingValue(flag.into()));
+        let mut next = |flag: &str| {
+            iter.next()
+                .ok_or_else(|| ParseError::MissingValue(flag.into()))
+        };
         match arg.as_str() {
             "-O" | "--output-document" => {
                 let target = next("-O")?;
@@ -128,7 +131,8 @@ pub(crate) fn parse(args: &[String]) -> Result<Request, ParseError> {
             "--post-file" => {
                 let path = next("--post-file")?;
                 data = Some(
-                    std::fs::read(&path).map_err(|e| ParseError::BadData(format!("cannot read {path}: {e}")))?,
+                    std::fs::read(&path)
+                        .map_err(|e| ParseError::BadData(format!("cannot read {path}: {e}")))?,
                 );
             }
             // Accepted no-ops so common command lines don't error. `--no-check-certificate` does NOT
@@ -148,7 +152,11 @@ pub(crate) fn parse(args: &[String]) -> Result<Request, ParseError> {
         Some(o) => (o, false),
         None => (Output::File(default_filename(&url)), true),
     };
-    let method = if data.is_some() { Method::POST } else { Method::GET };
+    let method = if data.is_some() {
+        Method::POST
+    } else {
+        Method::GET
+    };
 
     Ok(Request {
         url,
@@ -168,11 +176,15 @@ pub(crate) fn parse(args: &[String]) -> Result<Request, ParseError> {
 }
 
 fn parse_secs(value: &str) -> Result<f64, ParseError> {
-    value.parse::<f64>().map_err(|_| ParseError::BadNumber(value.to_string()))
+    value
+        .parse::<f64>()
+        .map_err(|_| ParseError::BadNumber(value.to_string()))
 }
 
 fn parse_count(value: &str) -> Result<u32, ParseError> {
-    value.parse::<u32>().map_err(|_| ParseError::BadNumber(value.to_string()))
+    value
+        .parse::<u32>()
+        .map_err(|_| ParseError::BadNumber(value.to_string()))
 }
 
 /// Split a `--header "Key: Value"` argument into `(key, value)`, trimming whitespace.
@@ -246,13 +258,28 @@ mod tests {
             "https://x",
         ]))
         .unwrap();
-        assert!(r.headers.iter().any(|(k, v)| k == "Accept" && v == "text/plain"));
-        assert!(r.headers.iter().any(|(k, v)| k == "User-Agent" && v == "clank/1"));
+        assert!(r
+            .headers
+            .iter()
+            .any(|(k, v)| k == "Accept" && v == "text/plain"));
+        assert!(r
+            .headers
+            .iter()
+            .any(|(k, v)| k == "User-Agent" && v == "clank/1"));
     }
 
     #[test]
     fn timeout_tries_and_max_redirect() {
-        let r = parse(&argv(&["-T", "3", "-t", "5", "--max-redirect", "2", "https://x"])).unwrap();
+        let r = parse(&argv(&[
+            "-T",
+            "3",
+            "-t",
+            "5",
+            "--max-redirect",
+            "2",
+            "https://x",
+        ]))
+        .unwrap();
         assert_eq!(r.timeout, Some(3.0));
         assert_eq!(r.tries, 5);
         assert_eq!(r.max_redirect, 2);
@@ -273,7 +300,10 @@ mod tests {
         let r = parse(&argv(&["--no-check-certificate", "-nv", "https://x/f"])).unwrap();
         assert_eq!(r.url, "https://x/f");
         assert!(!r.quiet, "-nv must not set quiet (that is -q)");
-        assert!(!r.server_response, "the no-ops must not set server_response (that is -S)");
+        assert!(
+            !r.server_response,
+            "the no-ops must not set server_response (that is -S)"
+        );
     }
 
     #[test]

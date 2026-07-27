@@ -668,11 +668,19 @@ pub fn split_ask_tail(line: &str) -> Option<AskTailPipe> {
         _ => (tail_trimmed, false),
     };
     let args = classify(tail_effective)?; // the tail must itself be an `ask` invocation
-    let upstream = upstream.trim_end().trim_end_matches('|').trim_end().to_string();
+    let upstream = upstream
+        .trim_end()
+        .trim_end_matches('|')
+        .trim_end()
+        .to_string();
     if upstream.is_empty() {
         return None; // `| ask` with no producer — not a real pipeline
     }
-    Some(AskTailPipe { upstream, args, elevated })
+    Some(AskTailPipe {
+        upstream,
+        args,
+        elevated,
+    })
 }
 
 /// The `ask` manifest. `Subprocess` scope (runs isolated, no shell-state access), `Confirm` policy
@@ -716,7 +724,9 @@ mod tests {
     fn arithmetic_expansion_is_allowed_but_nested_substitution_is_not() {
         // `$((…))` is arithmetic (no command runs) — the common case a shell script needs.
         assert!(!contains_command_substitution("i=$((i + 1))"));
-        assert!(!contains_command_substitution("spaces=$((height - i)); stars=$((2 * i - 1))"));
+        assert!(!contains_command_substitution(
+            "spaces=$((height - i)); stars=$((2 * i - 1))"
+        ));
         assert!(!contains_command_substitution(
             "while [ $i -le $height ]; do printf '*'; i=$((i + 1)); done"
         ));
@@ -869,7 +879,10 @@ mod tests {
         let s = c2.find("# Piped input").unwrap();
         assert!(q < s, "stdin block must follow the question");
         // No stdin ⇒ identical to user_content.
-        assert_eq!(user_content_with_stdin("t", "p", None), user_content("t", "p"));
+        assert_eq!(
+            user_content_with_stdin("t", "p", None),
+            user_content("t", "p")
+        );
     }
 
     #[test]

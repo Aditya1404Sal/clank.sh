@@ -116,8 +116,17 @@ mod tests {
     #[test]
     fn errors_are_honest() {
         assert!(classify("kill").unwrap().unwrap_err().contains("usage"));
-        assert!(classify("kill -l").unwrap().unwrap_err().contains("not supported"));
-        assert!(classify("kill abc").unwrap().unwrap_err().contains("invalid pid"));
-        assert!(classify("kill -s").unwrap().unwrap_err().contains("requires an argument"));
+        assert!(classify("kill -l")
+            .unwrap()
+            .unwrap_err()
+            .contains("not supported"));
+        assert!(classify("kill abc")
+            .unwrap()
+            .unwrap_err()
+            .contains("invalid pid"));
+        assert!(classify("kill -s")
+            .unwrap()
+            .unwrap_err()
+            .contains("requires an argument"));
     }
 }

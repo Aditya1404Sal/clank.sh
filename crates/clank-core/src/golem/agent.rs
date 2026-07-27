@@ -53,7 +53,14 @@ impl AgentInvocation {
         method: String,
         args: Vec<(String, String)>,
     ) -> Self {
-        Self { agent_type, constructor, method, args, mode: InvokeMode::Await, phantom: None }
+        Self {
+            agent_type,
+            constructor,
+            method,
+            args,
+            mode: InvokeMode::Await,
+            phantom: None,
+        }
     }
 }
 

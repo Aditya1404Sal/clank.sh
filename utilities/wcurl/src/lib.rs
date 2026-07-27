@@ -57,7 +57,10 @@ pub async fn run(args: &[String]) -> Outcome {
         match &req.data {
             Some(d) => {
                 let sep = if req.url.contains('?') { '&' } else { '?' };
-                (format!("{}{}{}", req.url, sep, String::from_utf8_lossy(d)), None)
+                (
+                    format!("{}{}{}", req.url, sep, String::from_utf8_lossy(d)),
+                    None,
+                )
             }
             None => (req.url.clone(), None),
         }
@@ -99,12 +102,17 @@ fn finish(req: &Request, resp: whttp::Response) -> Outcome {
     // -f/--fail: no body on an HTTP error; exit 22.
     if req.fail && status >= 400 {
         if !req.silent {
-            stderr.extend_from_slice(format!("wcurl: server returned status {status}\n").as_bytes());
+            stderr
+                .extend_from_slice(format!("wcurl: server returned status {status}\n").as_bytes());
         }
         if let Some(fmt) = &req.write_out {
             stdout.extend_from_slice(write_out(fmt, &resp).as_bytes());
         }
-        return Outcome { stdout, stderr, exit_code: 22 };
+        return Outcome {
+            stdout,
+            stderr,
+            exit_code: 22,
+        };
     }
 
     // The payload: optional header block (-i, or -I which is headers-only), then the body unless
@@ -136,7 +144,11 @@ fn finish(req: &Request, resp: whttp::Response) -> Outcome {
         stderr.extend_from_slice(format!("wcurl: server returned status {status}\n").as_bytes());
     }
     let exit_code = if status >= 400 { 4 } else { 0 };
-    Outcome { stdout, stderr, exit_code }
+    Outcome {
+        stdout,
+        stderr,
+        exit_code,
+    }
 }
 
 /// The status line + response headers, as curl prints them under `-i`/`-I` (CRLF, blank line last).
@@ -274,7 +286,10 @@ mod tests {
         let url = mock_server(500, "boom");
         let out = run(&argv(&["-s", &url])).await;
         assert_eq!(out.exit_code, 4);
-        assert!(out.stderr.is_empty(), "-s should suppress the status message");
+        assert!(
+            out.stderr.is_empty(),
+            "-s should suppress the status message"
+        );
     }
 
     #[tokio::test]
@@ -292,7 +307,11 @@ mod tests {
     }
 
     /// A one-shot server that also sends an extra response header (for `-i`/`-w` assertions).
-    fn mock_server_h(status: u16, header: (&'static str, &'static str), body: &'static str) -> String {
+    fn mock_server_h(
+        status: u16,
+        header: (&'static str, &'static str),
+        body: &'static str,
+    ) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         std::thread::spawn(move || {
@@ -340,8 +359,14 @@ mod tests {
         let url = mock_server_h(200, ("X-Custom", "yes"), "the-body");
         let out = run(&argv(&["-i", &url])).await;
         let text = String::from_utf8(out.stdout).unwrap();
-        assert!(text.starts_with("HTTP/1.1 200"), "status line first:\n{text}");
-        assert!(text.to_lowercase().contains("x-custom: yes"), "header shown:\n{text}");
+        assert!(
+            text.starts_with("HTTP/1.1 200"),
+            "status line first:\n{text}"
+        );
+        assert!(
+            text.to_lowercase().contains("x-custom: yes"),
+            "header shown:\n{text}"
+        );
         assert!(text.contains("the-body"), "body follows:\n{text}");
     }
 
@@ -351,7 +376,10 @@ mod tests {
         let out = run(&argv(&["-I", &url])).await;
         let text = String::from_utf8(out.stdout).unwrap();
         assert!(text.to_lowercase().contains("x-custom: yes"));
-        assert!(!text.contains("should-not-appear"), "HEAD has no body:\n{text}");
+        assert!(
+            !text.contains("should-not-appear"),
+            "HEAD has no body:\n{text}"
+        );
     }
 
     #[tokio::test]
@@ -365,7 +393,15 @@ mod tests {
     #[tokio::test]
     async fn write_out_expands_http_code() {
         let url = mock_server(200, "body");
-        let out = run(&argv(&["-s", "-o", "/dev/null", "-w", "%{http_code}\\n", &url])).await;
+        let out = run(&argv(&[
+            "-s",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}\\n",
+            &url,
+        ]))
+        .await;
         assert_eq!(String::from_utf8(out.stdout).unwrap(), "200\n");
     }
 

@@ -1,7 +1,10 @@
 //! `Session` methods for the human-in-the-loop pause machinery: surfacing `prompt-user` and
 //! authorization-confirmation pauses (`P` state), and resolving them via `answer_prompt`.
 
-use super::{Session, LineResult, promptuser, PendingKind, authz, PendingPrompt, Pending, Flow, AnswerInput, Resolution, is_context_summarize};
+use super::{
+    authz, is_context_summarize, promptuser, AnswerInput, Flow, LineResult, Pending, PendingKind,
+    PendingPrompt, Resolution, Session,
+};
 
 impl Session {
     /// Handle a `prompt-user` line: parse it, record the pending prompt (durable state), leave the
@@ -56,21 +59,21 @@ impl Session {
         // per-command authz) BEFORE the human approves — README "discloses capability requests before
         // completing". Only what's knowable pre-fetch is shown; declared args are one `grease info`
         // away after install.
-        let question = if let Some(question) = self.grease_install_disclosure(&gated_command, sudo_grant)
-        {
-            question
-        } else if let Some(summary) = multi_summary {
-            // A compound line with several gated commands: name them all, tier = the strictest.
-            authz::confirm_question_multi(&summary, sudo_grant)
-        } else {
-            let synopsis = self
-                .registry
-                .get(name)
-                .map(|m| m.synopsis.clone())
-                .or_else(|| self.mcp.manifest_for(name).map(|m| m.synopsis))
-                .unwrap_or_else(|| "run this command".to_string());
-            authz::confirm_question(name, &synopsis, sudo_grant)
-        };
+        let question =
+            if let Some(question) = self.grease_install_disclosure(&gated_command, sudo_grant) {
+                question
+            } else if let Some(summary) = multi_summary {
+                // A compound line with several gated commands: name them all, tier = the strictest.
+                authz::confirm_question_multi(&summary, sudo_grant)
+            } else {
+                let synopsis = self
+                    .registry
+                    .get(name)
+                    .map(|m| m.synopsis.clone())
+                    .or_else(|| self.mcp.manifest_for(name).map(|m| m.synopsis))
+                    .unwrap_or_else(|| "run this command".to_string());
+                authz::confirm_question(name, &synopsis, sudo_grant)
+            };
         let prompt = PendingPrompt {
             question,
             choices: Some(authz::confirm_choices(sudo_grant)),
@@ -103,7 +106,11 @@ impl Session {
         } else {
             registries.join(", ")
         };
-        let tail = if sudo_grant { "(y)es, (n)o" } else { "(y)es, (n)o, (a)ll" };
+        let tail = if sudo_grant {
+            "(y)es, (n)o"
+        } else {
+            "(y)es, (n)o, (a)ll"
+        };
         // The disclosure fires before the fetch, so the package's kind isn't known yet — disclose the
         // full capability an install can grant: a prompt runs via ask (outbound LLM); a script runs
         // local shell commands; a skill installs model-facing context + `$PATH` scripts. Each is
@@ -124,11 +131,17 @@ impl Session {
         kind: PendingKind,
     ) -> LineResult {
         if let Some(pid) = pid {
-            self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).pause(pid);
+            self.proc_table
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pause(pid);
         }
         let mut stdout = prompt.question.clone().into_bytes();
         stdout.push(b'\n');
-        self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record_output(&stdout);
+        self.transcript
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .record_output(&stdout);
 
         self.pending = Some(Pending {
             prompt: prompt.clone(),
@@ -203,7 +216,10 @@ impl Session {
 
         // Resolved: resume the row (it will be reaped by the specific path below).
         if let Some(pid) = pending.pid {
-            self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).resume(pid);
+            self.proc_table
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .resume(pid);
         }
 
         match pending.kind {
@@ -240,7 +256,10 @@ impl Session {
     /// the row, and record the transcript (unless `--secret`).
     fn resolve_user_prompt(&mut self, resolution: Resolution, pid: Option<u32>) -> LineResult {
         if let Some(pid) = pid {
-            self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(pid);
+            self.proc_table
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .complete(pid);
         }
         let (stdout, exit_code, secret) = match resolution {
             Resolution::Answered { stdout, secret } => (stdout, 0, secret),
@@ -248,7 +267,10 @@ impl Session {
             Resolution::InvalidChoice { .. } => unreachable!("handled by caller"),
         };
         if !secret {
-            self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record_output(&stdout);
+            self.transcript
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .record_output(&stdout);
         }
         LineResult {
             stdout,
@@ -278,10 +300,16 @@ impl Session {
             // it can't leak into an unrelated later `ask`.
             self.next_ask_stdin = None;
             if let Some(pid) = pid {
-                self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(pid);
+                self.proc_table
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .complete(pid);
             }
             let result = LineResult::denied();
-            self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record_output(&result.terminal_output());
+            self.transcript
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .record_output(&result.terminal_output());
             return result;
         }
 
@@ -298,7 +326,10 @@ impl Session {
         // `context summarize` is inspection output — never recorded back (like `context show`). Every
         // other gated command records normally.
         if !is_context_summarize(command) {
-            self.transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner).record_output(&result.terminal_output());
+            self.transcript
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .record_output(&result.terminal_output());
         }
         result
     }

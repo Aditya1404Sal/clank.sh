@@ -226,7 +226,10 @@ pub fn parse(name: &str, path: &Path, text: &str) -> Result<Scenario, ParseError
         // Header directives — only before the first step.
         if keyword.starts_with('@') {
             if !scenario.steps.is_empty() {
-                return Err(err(n, format!("`{keyword}` must appear before the first step")));
+                return Err(err(
+                    n,
+                    format!("`{keyword}` must appear before the first step"),
+                ));
             }
             match keyword {
                 "@only" => {
@@ -237,7 +240,10 @@ pub fn parse(name: &str, path: &Path, text: &str) -> Result<Scenario, ParseError
                         "native" => BackendKind::Native,
                         "golem" => BackendKind::Golem,
                         other => {
-                            return Err(err(n, format!("`@only` takes `native` or `golem`, got `{other}`")))
+                            return Err(err(
+                                n,
+                                format!("`@only` takes `native` or `golem`, got `{other}`"),
+                            ))
                         }
                     });
                 }
@@ -276,7 +282,11 @@ pub fn parse(name: &str, path: &Path, text: &str) -> Result<Scenario, ParseError
                         "`+` continuation must directly follow `run` (no blank/comment lines or expectations between; a blank content line is a lone `+`)".into(),
                     ));
                 }
-                if let Some(Step { action: Action::Eval(p), .. }) = scenario.steps.last_mut() {
+                if let Some(Step {
+                    action: Action::Eval(p),
+                    ..
+                }) = scenario.steps.last_mut()
+                {
                     p.push('\n');
                     // Bare `+` = a blank line of payload (e.g. an empty line in a heredoc body).
                     p.push_str(payload.unwrap_or_default());
@@ -316,7 +326,10 @@ pub fn parse(name: &str, path: &Path, text: &str) -> Result<Scenario, ParseError
 
         // Everything else is an expectation directive on the current step.
         let step = scenario.steps.last_mut().ok_or_else(|| {
-            err(n, format!("`{keyword}` before any `run`/`answer`/`abort` step"))
+            err(
+                n,
+                format!("`{keyword}` before any `run`/`answer`/`abort` step"),
+            )
         })?;
         payload_open = false;
 
@@ -327,22 +340,37 @@ pub fn parse(name: &str, path: &Path, text: &str) -> Result<Scenario, ParseError
                 let Some(text) = payload else {
                     return Err(err(n, format!("`{keyword}` needs a payload (use `{keyword} ` with a trailing space for an empty line)")));
                 };
-                let stream = if keyword == "out" { &mut step.expect.stdout } else { &mut step.expect.stderr };
-                stream.exact.get_or_insert_with(Vec::new).push(text.to_string());
+                let stream = if keyword == "out" {
+                    &mut step.expect.stdout
+                } else {
+                    &mut step.expect.stderr
+                };
+                stream
+                    .exact
+                    .get_or_insert_with(Vec::new)
+                    .push(text.to_string());
             }
             "out~" | "err~" => {
                 let text = payload.unwrap_or_default();
                 if text.is_empty() {
                     return Err(err(n, format!("`{keyword}` needs a substring")));
                 }
-                let stream = if keyword == "out~" { &mut step.expect.stdout } else { &mut step.expect.stderr };
+                let stream = if keyword == "out~" {
+                    &mut step.expect.stdout
+                } else {
+                    &mut step.expect.stderr
+                };
                 stream.contains.push(text.to_string());
             }
             "out*" | "err*" => {
                 if !payload.unwrap_or_default().trim().is_empty() {
                     return Err(err(n, format!("`{keyword}` takes no payload")));
                 }
-                let stream = if keyword == "out*" { &mut step.expect.stdout } else { &mut step.expect.stderr };
+                let stream = if keyword == "out*" {
+                    &mut step.expect.stdout
+                } else {
+                    &mut step.expect.stderr
+                };
                 stream.any = true;
             }
             "exit" => {
@@ -353,7 +381,10 @@ pub fn parse(name: &str, path: &Path, text: &str) -> Result<Scenario, ParseError
                 step.expect.exit = match payload.unwrap_or_default().trim() {
                     "any" => ExitExpect::Any,
                     num => ExitExpect::Code(num.parse().map_err(|_| {
-                        err(n, format!("`exit` takes a number 0-255 or `any`, got `{num}`"))
+                        err(
+                            n,
+                            format!("`exit` takes a number 0-255 or `any`, got `{num}`"),
+                        )
                     })?),
                 };
             }
@@ -373,9 +404,16 @@ pub fn parse(name: &str, path: &Path, text: &str) -> Result<Scenario, ParseError
                 }
                 // Items are VERBATIM between commas (no trimming) per the payload rule;
                 // a choice containing a comma is inexpressible — documented in README.
-                let list: Vec<String> = payload.unwrap_or_default().split(',').map(str::to_string).collect();
+                let list: Vec<String> = payload
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(str::to_string)
+                    .collect();
                 if list.iter().any(std::string::String::is_empty) {
-                    return Err(err(n, "`choices` takes a non-empty comma-separated list".into()));
+                    return Err(err(
+                        n,
+                        "`choices` takes a non-empty comma-separated list".into(),
+                    ));
                 }
                 step.expect.choices = Some(list);
             }
@@ -441,7 +479,10 @@ mod tests {
         assert_eq!(s.steps[0].expect.stdout.exact, Some(vec!["hi".into()]));
         assert_eq!(s.steps[0].expect.exit, ExitExpect::Code(0));
         assert_eq!(s.steps[1].expect.prompt, Some("Q?".into()));
-        assert_eq!(s.steps[1].expect.choices, Some(vec!["a".into(), "b".into()]));
+        assert_eq!(
+            s.steps[1].expect.choices,
+            Some(vec!["a".into(), "b".into()])
+        );
         assert_eq!(s.steps[2].action, Action::Answer("a".into()));
         assert_eq!(s.steps[3].action, Action::Abort);
         assert_eq!(s.steps[3].expect.exit, ExitExpect::Code(130));
@@ -452,13 +493,19 @@ mod tests {
         // Two spaces after `out` = one-space separator + one leading space of content:
         // significant whitespace (uu wc padding) is expressible.
         let s = parse_ok("run wc -l f\nout       3 f\n");
-        assert_eq!(s.steps[0].expect.stdout.exact, Some(vec!["      3 f".into()]));
+        assert_eq!(
+            s.steps[0].expect.stdout.exact,
+            Some(vec!["      3 f".into()])
+        );
     }
 
     #[test]
     fn continuations_build_multiline_payloads() {
         let s = parse_ok("run cat <<EOF\n+ hello\n+ EOF\nout hello\n");
-        assert_eq!(s.steps[0].action, Action::Eval("cat <<EOF\nhello\nEOF".into()));
+        assert_eq!(
+            s.steps[0].action,
+            Action::Eval("cat <<EOF\nhello\nEOF".into())
+        );
     }
 
     #[test]
@@ -539,10 +586,16 @@ mod tests {
     #[test]
     fn choices_are_verbatim_between_commas() {
         let s = parse_ok("run p\nout* \nprompt~ Q\nchoices yes,no\n");
-        assert_eq!(s.steps[0].expect.choices, Some(vec!["yes".into(), "no".into()]));
+        assert_eq!(
+            s.steps[0].expect.choices,
+            Some(vec!["yes".into(), "no".into()])
+        );
         // No trimming: a space after the comma is part of the item.
         let s = parse_ok("run p\nout* \nprompt~ Q\nchoices a, b\n");
-        assert_eq!(s.steps[0].expect.choices, Some(vec!["a".into(), " b".into()]));
+        assert_eq!(
+            s.steps[0].expect.choices,
+            Some(vec!["a".into(), " b".into()])
+        );
     }
 
     #[test]

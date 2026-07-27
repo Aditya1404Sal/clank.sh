@@ -50,7 +50,8 @@ pub fn log_dir() -> PathBuf {
 #[cfg(test)]
 pub fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// A destination for log lines. Implemented by [`DefaultLogSink`] (native/tests: append directly) and by
@@ -102,7 +103,11 @@ pub fn write_line(file: LogFile, line: &str) {
     let dir = log_dir();
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join(file.filename());
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let _ = f.write_all(line.as_bytes());
         if !line.ends_with('\n') {
             let _ = f.write_all(b"\n");
@@ -166,7 +171,10 @@ impl Record {
     /// A new, empty record tagged with the given event `kind` and no fields yet.
     #[must_use]
     pub fn new(kind: &'static str) -> Self {
-        Self { kind, fields: Vec::new() }
+        Self {
+            kind,
+            fields: Vec::new(),
+        }
     }
 
     /// Add a field. Empty values are skipped (keeps lines tight).
@@ -237,7 +245,9 @@ pub fn bound_tail(buf: &mut String, max_bytes: usize) {
     // If the only newline is the very last byte (start == buf.len()), keep the last line rather than
     // emptying the buffer.
     let start = if start >= buf.len() {
-        buf[..buf.len().saturating_sub(1)].rfind('\n').map_or(0, |i| i + 1)
+        buf[..buf.len().saturating_sub(1)]
+            .rfind('\n')
+            .map_or(0, |i| i + 1)
     } else {
         start
     };
@@ -246,8 +256,17 @@ pub fn bound_tail(buf: &mut String, max_bytes: usize) {
 
 /// Query-parameter names whose values are secrets and must be masked out of a logged URL. Matched
 /// case-insensitively against the part before `=`.
-const SECRET_QUERY_PARAMS: &[&str] =
-    &["token", "access_token", "api_key", "apikey", "key", "secret", "password", "sig", "signature"];
+const SECRET_QUERY_PARAMS: &[&str] = &[
+    "token",
+    "access_token",
+    "api_key",
+    "apikey",
+    "key",
+    "secret",
+    "password",
+    "sig",
+    "signature",
+];
 
 /// Mask secret query-parameter values in a URL before it is logged, e.g.
 /// `https://h/mcp?token=sk-abc&x=1` → `https://h/mcp?token=<redacted>&x=1`. Anything before the `?` is
@@ -261,7 +280,11 @@ pub fn redact_url(url: &str) -> String {
     let masked = query
         .split('&')
         .map(|pair| match pair.split_once('=') {
-            Some((name, _)) if SECRET_QUERY_PARAMS.iter().any(|p| p.eq_ignore_ascii_case(name)) => {
+            Some((name, _))
+                if SECRET_QUERY_PARAMS
+                    .iter()
+                    .any(|p| p.eq_ignore_ascii_case(name)) =>
+            {
                 format!("{name}=<redacted>")
             }
             _ => pair.to_string(),
@@ -290,7 +313,11 @@ mod tests {
             let _ = std::fs::remove_dir_all(&dir);
             std::env::set_var(LOG_DIR_ENV, &dir);
             let sink = install(Arc::new(DefaultLogSink));
-            Self { _lock: lock, _sink: sink, dir }
+            Self {
+                _lock: lock,
+                _sink: sink,
+                dir,
+            }
         }
         fn read(&self, file: LogFile) -> String {
             std::fs::read_to_string(self.dir.join(file.filename())).unwrap_or_default()
@@ -367,8 +394,14 @@ mod tests {
         }
         bound_tail(&mut s, 30);
         assert!(s.len() <= 30, "tail must be under the cap, got {}", s.len());
-        assert!(s.starts_with("line"), "tail starts on a line boundary, got {s:?}");
-        assert!(s.ends_with("line99\n"), "the newest line survives, got {s:?}");
+        assert!(
+            s.starts_with("line"),
+            "tail starts on a line boundary, got {s:?}"
+        );
+        assert!(
+            s.ends_with("line99\n"),
+            "the newest line survives, got {s:?}"
+        );
         // Determinism: bounding an already-bounded buffer is a no-op (replay idempotency).
         let once = s.clone();
         bound_tail(&mut s, 30);
@@ -396,8 +429,10 @@ mod tests {
             "https://h/p?API_KEY=<redacted>&page=2&Signature=<redacted>"
         );
         // No query string / no secret param → unchanged.
-        assert_eq!(redact_url("https://h/repo/README.md"), "https://h/repo/README.md");
+        assert_eq!(
+            redact_url("https://h/repo/README.md"),
+            "https://h/repo/README.md"
+        );
         assert_eq!(redact_url("https://h/p?page=2"), "https://h/p?page=2");
     }
-
 }

@@ -28,7 +28,10 @@ use golem_rust::{SchemaValue, decode_schema_value, encode_schema_value};
 /// never be silently dropped — which would shift every later positional arg and call the remote agent
 /// with the wrong parameters. Only the single whole-tree encode can fail, and that error is propagated.
 fn encode_args(args: &[(String, String)]) -> Result<SchemaValueTree, String> {
-    let fields = args.iter().map(|(_name, value)| SchemaValue::String(value.clone())).collect();
+    let fields = args
+        .iter()
+        .map(|(_name, value)| SchemaValue::String(value.clone()))
+        .collect();
     encode_schema_value(&SchemaValue::Record { fields })
         .map_err(|e| format!("failed to encode agent arguments: {e:?}"))
 }
@@ -43,7 +46,10 @@ fn parse_phantom(phantom: &Option<String>) -> Option<Uuid> {
     }
     let high = u64::from_str_radix(&hex[..16], 16).ok()?;
     let low = u64::from_str_radix(&hex[16..], 16).ok()?;
-    Some(Uuid { high_bits: high, low_bits: low })
+    Some(Uuid {
+        high_bits: high,
+        low_bits: low,
+    })
 }
 
 /// Build the `WasmRpc` client for an invocation (agent type + constructor tree + optional phantom).
@@ -51,7 +57,12 @@ fn parse_phantom(phantom: &Option<String>) -> Option<Uuid> {
 /// the host takes ownership rather than borrowing.
 fn build_client(inv: &AgentInvocation) -> Result<WasmRpc, String> {
     let ctor = encode_args(&inv.constructor)?;
-    Ok(WasmRpc::new(&inv.agent_type, ctor, parse_phantom(&inv.phantom), Vec::new()))
+    Ok(WasmRpc::new(
+        &inv.agent_type,
+        ctor,
+        parse_phantom(&inv.phantom),
+        Vec::new(),
+    ))
 }
 
 /// Render an `invoke-and-await` result to a display string.
@@ -97,7 +108,10 @@ impl AgentInvoker for WasmRpcInvoker {
                 client
                     .invoke(&inv.method, input)
                     .map_err(|e| format!("trigger failed: {e:?}"))?;
-                Ok(InvokeHandle { cancel_token: None, note: "triggered (fire-and-forget)".to_string() })
+                Ok(InvokeHandle {
+                    cancel_token: None,
+                    note: "triggered (fire-and-forget)".to_string(),
+                })
             }
             InvokeMode::Schedule(when) => {
                 // `schedule-cancelable-invocation` needs a `wall-clock/datetime`; we build one from the
@@ -106,9 +120,15 @@ impl AgentInvoker for WasmRpcInvoker {
                 // invocations), so it can't be re-acquired for a later `kill` — the invocation IS
                 // scheduled, but cancel-after-return isn't supported (documented, honest handle).
                 let secs = parse_epoch_secs(when)?;
-                let dt = golem_rust::wasip2::clocks::wall_clock::Datetime { seconds: secs, nanoseconds: 0 };
+                let dt = golem_rust::wasip2::clocks::wall_clock::Datetime {
+                    seconds: secs,
+                    nanoseconds: 0,
+                };
                 let _token = client.schedule_cancelable_invocation(dt, &inv.method, input);
-                Ok(InvokeHandle { cancel_token: None, note: format!("scheduled for {when}") })
+                Ok(InvokeHandle {
+                    cancel_token: None,
+                    note: format!("scheduled for {when}"),
+                })
             }
             InvokeMode::Await => Err("invoke_async called with Await mode".to_string()),
         }
@@ -118,7 +138,10 @@ impl AgentInvoker for WasmRpcInvoker {
         // A scheduled invocation's cancellation-token is a host resource that doesn't survive across
         // the durable agent's serialized invocations, so we can't re-acquire it here to cancel. Honest:
         // cancel-after-return isn't supported on this SDK surface for scheduled invocations.
-        Err("cancel of a scheduled invocation is not supported across invocations on this build".to_string())
+        Err(
+            "cancel of a scheduled invocation is not supported across invocations on this build"
+                .to_string(),
+        )
     }
 }
 
@@ -160,7 +183,10 @@ mod tests {
     }
 
     fn args(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
-        pairs.iter().map(|(n, v)| (n.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(n, v)| (n.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
@@ -206,7 +232,8 @@ mod tests {
     #[test]
     fn render_result_unwraps_a_bare_string() {
         // A `single` output is the bare value, NOT wrapped in a record (only inputs are).
-        let tree = encode_schema_value(&SchemaValue::String("Hello, world".to_string())).expect("encode");
+        let tree =
+            encode_schema_value(&SchemaValue::String("Hello, world".to_string())).expect("encode");
         assert_eq!(render_result(Some(tree)), Ok("Hello, world".to_string()));
     }
 
@@ -215,7 +242,10 @@ mod tests {
         // Honest rather than lossy-silent: a non-string result still shows something.
         let tree = encode_schema_value(&SchemaValue::U64(42)).expect("encode");
         let rendered = render_result(Some(tree)).expect("render");
-        assert!(rendered.contains("42"), "expected the debug form to carry the value, got {rendered:?}");
+        assert!(
+            rendered.contains("42"),
+            "expected the debug form to carry the value, got {rendered:?}"
+        );
     }
 
     #[test]
@@ -229,8 +259,14 @@ mod tests {
     #[test]
     fn parse_phantom_rejects_malformed_and_absent() {
         assert!(parse_phantom(&None).is_none());
-        assert!(parse_phantom(&Some("not-a-uuid".to_string())).is_none(), "too few hex digits");
-        assert!(parse_phantom(&Some("f".repeat(33))).is_none(), "too many hex digits");
+        assert!(
+            parse_phantom(&Some("not-a-uuid".to_string())).is_none(),
+            "too few hex digits"
+        );
+        assert!(
+            parse_phantom(&Some("f".repeat(33))).is_none(),
+            "too many hex digits"
+        );
     }
 
     #[test]
@@ -244,7 +280,13 @@ mod tests {
 
     #[test]
     fn parse_epoch_secs_rejects_garbage_and_pre_epoch() {
-        assert!(parse_epoch_secs("tomorrow").is_err(), "no date/time separator");
-        assert!(parse_epoch_secs("1969-12-31T23:59:59Z").is_err(), "before the epoch");
+        assert!(
+            parse_epoch_secs("tomorrow").is_err(),
+            "no date/time separator"
+        );
+        assert!(
+            parse_epoch_secs("1969-12-31T23:59:59Z").is_err(),
+            "before the epoch"
+        );
     }
 }

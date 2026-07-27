@@ -451,7 +451,11 @@ mod tests {
             let pid = t.spawn(ProcessKind::Builtin, argv(&format!("cmd{i}")));
             t.complete(pid);
         }
-        assert!(t.rows().len() <= MAX_ROWS, "table must stay bounded, got {}", t.rows().len());
+        assert!(
+            t.rows().len() <= MAX_ROWS,
+            "table must stay bounded, got {}",
+            t.rows().len()
+        );
     }
 
     #[test]

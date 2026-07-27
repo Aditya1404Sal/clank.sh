@@ -43,7 +43,9 @@ struct Pkg {
 }
 
 fn main() {
-    let dir = std::env::args().nth(1).expect("usage: grease-fixture <output-dir>");
+    let dir = std::env::args()
+        .nth(1)
+        .expect("usage: grease-fixture <output-dir>");
     let pkgdir = std::path::Path::new(&dir).join("packages");
     std::fs::create_dir_all(&pkgdir).expect("create packages dir");
 
@@ -95,16 +97,15 @@ fn main() {
 
     let mut entries = Vec::new();
     for p in &packages {
-        std::fs::write(pkgdir.join(format!("{}.{}", p.name, p.ext)), &p.body).expect("write package");
+        std::fs::write(pkgdir.join(format!("{}.{}", p.name, p.ext)), &p.body)
+            .expect("write package");
         let body = p.body.as_bytes();
         let sha = clank_core::grease::pkg::sha256_hex(body);
         let sig = b64(&sk.sign(body).to_bytes());
         // Single-leaf transparency log: leaf = the sha256-hex string; root = leaf_hash(leaf); proof = [].
         let log = if p.with_log {
             let root = b64(&leaf_hash(sha.as_bytes()));
-            format!(
-                r#","log":{{"leaf-index":0,"tree-size":1,"root":"{root}","proof":[]}}"#
-            )
+            format!(r#","log":{{"leaf-index":0,"tree-size":1,"root":"{root}","proof":[]}}"#)
         } else {
             String::new()
         };

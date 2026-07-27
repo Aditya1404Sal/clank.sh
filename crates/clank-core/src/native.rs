@@ -107,7 +107,8 @@ async fn run_plain(session: &mut Session) -> Result<(), Box<dyn std::error::Erro
                 let answer = if read_line_raw(&mut line)? == 0 {
                     session.answer_prompt(None).await // EOF → abort
                 } else {
-                    let answer_str = String::from_utf8_lossy(trim_eol(line.as_bytes())).into_owned();
+                    let answer_str =
+                        String::from_utf8_lossy(trim_eol(line.as_bytes())).into_owned();
                     session.answer_prompt(Some(answer_str)).await
                 };
                 write_stdout(&answer.terminal_output())?;
@@ -234,7 +235,8 @@ async fn run_interactive(session: &mut Session) -> Result<(), Box<dyn std::error
                     // EOF → abort the pending prompt.
                     with_thinking_ticker(session.answer_prompt(None), "thinking").await
                 } else {
-                    let answer_str = String::from_utf8_lossy(trim_eol(line.as_bytes())).into_owned();
+                    let answer_str =
+                        String::from_utf8_lossy(trim_eol(line.as_bytes())).into_owned();
                     with_thinking_ticker(session.answer_prompt(Some(answer_str)), "thinking").await
                 };
                 render_output(&answer.stdout, &answer.stderr)?;
@@ -289,8 +291,8 @@ impl CommandHighlighter {
         for word in [
             "echo", "true", "false", "test", "pwd", "let", "eval", "trap", "getopts", "shift",
             "return", "local", "declare", "readonly", "set", "shopt", "if", "then", "else", "elif",
-            "fi", "for", "while", "until", "do", "done", "case", "esac", "in", "function", "select",
-            "time", ":", ".",
+            "fi", "for", "while", "until", "do", "done", "case", "esac", "in", "function",
+            "select", "time", ":", ".",
         ] {
             known.insert(word.to_string());
         }
@@ -325,7 +327,9 @@ impl reedline::Highlighter for CommandHighlighter {
 fn history_path() -> Option<std::path::PathBuf> {
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share")))?;
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share"))
+        })?;
     let dir = base.join("clank");
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir.join("history.txt"))
@@ -371,7 +375,10 @@ fn ticker_thread(rx: &std::sync::mpsc::Receiver<()>, label: &str) {
         shown = true;
         let spin = SPIN[frame % SPIN.len()];
         frame += 1;
-        eprint!("\r\x1b[96m{spin}\x1b[0m {label}… {}s\x1b[K", elapsed.as_secs());
+        eprint!(
+            "\r\x1b[96m{spin}\x1b[0m {label}… {}s\x1b[K",
+            elapsed.as_secs()
+        );
         let _ = std::io::stderr().flush();
     }
     if shown {
@@ -460,7 +467,10 @@ impl reedline::Prompt for StarshipPrompt {
     fn render_prompt_right(&self) -> std::borrow::Cow<'_, str> {
         std::borrow::Cow::Borrowed("")
     }
-    fn render_prompt_indicator(&self, _mode: reedline::PromptEditMode) -> std::borrow::Cow<'_, str> {
+    fn render_prompt_indicator(
+        &self,
+        _mode: reedline::PromptEditMode,
+    ) -> std::borrow::Cow<'_, str> {
         let color = if self.ok {
             nu_ansi_term::Color::Green
         } else {
@@ -480,7 +490,10 @@ impl reedline::Prompt for StarshipPrompt {
             reedline::PromptHistorySearchStatus::Failing
         );
         let prefix = if failing { "failing " } else { "" };
-        std::borrow::Cow::Owned(format!("({prefix}reverse-search: {}) ", history_search.term))
+        std::borrow::Cow::Owned(format!(
+            "({prefix}reverse-search: {}) ",
+            history_search.term
+        ))
     }
 }
 
@@ -494,7 +507,10 @@ impl reedline::Prompt for ContinuationPrompt {
     fn render_prompt_right(&self) -> std::borrow::Cow<'_, str> {
         std::borrow::Cow::Borrowed("")
     }
-    fn render_prompt_indicator(&self, _mode: reedline::PromptEditMode) -> std::borrow::Cow<'_, str> {
+    fn render_prompt_indicator(
+        &self,
+        _mode: reedline::PromptEditMode,
+    ) -> std::borrow::Cow<'_, str> {
         std::borrow::Cow::Owned(nu_ansi_term::Color::DarkGray.paint("· ").to_string())
     }
     fn render_prompt_multiline_indicator(&self) -> std::borrow::Cow<'_, str> {
@@ -625,7 +641,9 @@ async fn run_repl(
 ///   (otherwise native keeps the honest "needs a cluster" error, unchanged).
 fn inject_native_providers(session: &mut Session) {
     session.set_mcp_http(Box::new(crate::mcp::http_native::ReqwestMcpHttp::new()));
-    session.set_ask_provider(Box::new(crate::ai::anthropic_native::ReqwestAnthropicProvider::new()));
+    session.set_ask_provider(Box::new(
+        crate::ai::anthropic_native::ReqwestAnthropicProvider::new(),
+    ));
 
     // Golem cluster + agent invoker: only when an external cluster config is present (README §161-163).
     // Without it, native keeps the honest "needs a cluster" error — Tier C is inert unless configured.

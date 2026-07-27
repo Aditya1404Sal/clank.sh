@@ -54,14 +54,21 @@ pub fn install(secrets: SecretSet) -> InstallGuard {
     if secrets.is_empty() {
         return InstallGuard { previous: None };
     }
-    let mut slot = ACTIVE.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut slot = ACTIVE
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let previous = slot.replace(secrets);
-    InstallGuard { previous: Some(previous) }
+    InstallGuard {
+        previous: Some(previous),
+    }
 }
 
 /// The active secret set, if a line is executing.
 pub fn active() -> Option<SecretSet> {
-    ACTIVE.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    ACTIVE
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
 }
 
 /// Whether `name` is a secret-marked variable in the active set.
@@ -124,7 +131,9 @@ pub struct InstallGuard {
 impl Drop for InstallGuard {
     fn drop(&mut self) {
         if let Some(previous) = self.previous.take() {
-            *ACTIVE.write().unwrap_or_else(std::sync::PoisonError::into_inner) = previous;
+            *ACTIVE
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = previous;
         }
     }
 }
@@ -135,7 +144,9 @@ mod tests {
     use std::sync::MutexGuard;
 
     fn secret_test_lock() -> MutexGuard<'static, ()> {
-        TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn secrets(pairs: &[(&str, &str)]) -> SecretSet {
@@ -173,7 +184,10 @@ mod tests {
         {
             // A secret-free line installs an empty set — it must NOT clear the outer secret.
             let _empty = install(Arc::new(Vec::new()));
-            assert!(is_secret_name("K"), "empty install clobbered the active set");
+            assert!(
+                is_secret_name("K"),
+                "empty install clobbered the active set"
+            );
         }
         assert!(is_secret_name("K"));
     }

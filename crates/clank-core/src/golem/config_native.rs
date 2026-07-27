@@ -52,8 +52,14 @@ pub fn load() -> Option<ClusterConfig> {
     Some(ClusterConfig {
         url,
         token: std::env::var(ENV_TOKEN).ok().filter(|t| !t.is_empty()),
-        app_name: std::env::var(ENV_APP).ok().filter(|a| !a.is_empty()).unwrap_or_else(|| "default".to_string()),
-        env_name: std::env::var(ENV_ENV).ok().filter(|e| !e.is_empty()).unwrap_or_else(|| "local".to_string()),
+        app_name: std::env::var(ENV_APP)
+            .ok()
+            .filter(|a| !a.is_empty())
+            .unwrap_or_else(|| "default".to_string()),
+        env_name: std::env::var(ENV_ENV)
+            .ok()
+            .filter(|e| !e.is_empty())
+            .unwrap_or_else(|| "local".to_string()),
     })
 }
 

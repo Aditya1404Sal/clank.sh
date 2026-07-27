@@ -3,19 +3,30 @@
 
 use std::fmt::Write as _;
 
-use super::{Session, LineResult, skill_info_text, mcp_info_text, IndexEntry, fetch_index_entry, verify_log_inclusion, InstallIntegrity, is_markdown_frontmatter, materialize_mcp_resources, write_install_marker};
+use super::{
+    fetch_index_entry, is_markdown_frontmatter, materialize_mcp_resources, mcp_info_text,
+    skill_info_text, verify_log_inclusion, write_install_marker, IndexEntry, InstallIntegrity,
+    LineResult, Session,
+};
 
 impl Session {
     /// Dispatch a parsed `grease` command.
-    pub(super) async fn run_grease(&mut self, cmd: crate::grease::cmd::GreaseCommand) -> LineResult {
+    pub(super) async fn run_grease(
+        &mut self,
+        cmd: crate::grease::cmd::GreaseCommand,
+    ) -> LineResult {
         use crate::grease::cmd::GreaseCommand;
         match cmd {
-            GreaseCommand::RegistryAdd { url, key } => self.grease_registry_add(&url, key.as_deref()),
+            GreaseCommand::RegistryAdd { url, key } => {
+                self.grease_registry_add(&url, key.as_deref())
+            }
             GreaseCommand::RegistryList => self.grease_registry_list(),
             GreaseCommand::RegistryRemove { url } => self.grease_registry_remove(&url),
             GreaseCommand::List => self.grease_list(),
             GreaseCommand::Info { name } => self.grease_info(&name),
-            GreaseCommand::Install { name, artifacts } => self.grease_install(&name, artifacts).await,
+            GreaseCommand::Install { name, artifacts } => {
+                self.grease_install(&name, artifacts).await
+            }
             GreaseCommand::Remove { name } => self.grease_remove(&name),
             GreaseCommand::Search { query } => self.grease_search(&query).await,
             GreaseCommand::Update { name } => self.grease_update(name.as_deref()).await,
@@ -48,7 +59,9 @@ impl Session {
             return LineResult::continue_with_stdout(help.into_bytes());
         }
         if let Some(sk) = self.grease.skill(name) {
-            return LineResult::continue_with_stdout(skill_info_text(sk, self.columns()).into_bytes());
+            return LineResult::continue_with_stdout(
+                skill_info_text(sk, self.columns()).into_bytes(),
+            );
         }
         if let Some(m) = self.grease.mcp(name) {
             return LineResult::continue_with_stdout(mcp_info_text(m).into_bytes());
@@ -76,7 +89,8 @@ impl Session {
         if !crate::grease::config::is_valid_name(name) {
             return LineResult::from_outcome(
                 Vec::new(),
-                format!("grease install: '{name}' is not a valid kebab-case package name\n").into_bytes(),
+                format!("grease install: '{name}' is not a valid kebab-case package name\n")
+                    .into_bytes(),
                 2,
             );
         }
@@ -92,14 +106,16 @@ impl Session {
         if registries.is_empty() {
             return LineResult::from_outcome(
                 Vec::new(),
-                b"grease install: no registries configured (try `grease registry add <url>`)\n".to_vec(),
+                b"grease install: no registries configured (try `grease registry add <url>`)\n"
+                    .to_vec(),
                 1,
             );
         }
         let Some(http) = self.mcp_http.as_ref() else {
             return LineResult::from_outcome(
                 Vec::new(),
-                b"grease install: no HTTP transport configured (available on the Golem agent)\n".to_vec(),
+                b"grease install: no HTTP transport configured (available on the Golem agent)\n"
+                    .to_vec(),
                 4,
             );
         };
@@ -240,8 +256,10 @@ impl Session {
                     Err(e) => {
                         return LineResult::from_outcome(
                             Vec::new(),
-                            format!("grease install: transparency-log check failed for '{name}': {e}\n")
-                                .into_bytes(),
+                            format!(
+                                "grease install: transparency-log check failed for '{name}': {e}\n"
+                            )
+                            .into_bytes(),
                             4,
                         );
                     }
@@ -282,7 +300,9 @@ impl Session {
         };
 
         if crate::grease::pkg::payload_kind(&body) == Ok(crate::grease::pkg::PackageKind::Mcp) {
-            return self.grease_finish_install_mcp(name, &registry, &body, integrity, artifacts, note).await;
+            return self
+                .grease_finish_install_mcp(name, &registry, &body, integrity, artifacts, note)
+                .await;
         }
 
         self.grease_finish_install(name, &registry, &body, integrity, note)
@@ -308,23 +328,37 @@ impl Session {
         // Parse + name-check the minimal registry payload.
         let mut pkg = match crate::grease::pkg::McpPackage::from_json(body) {
             Ok(p) => p,
-            Err(e) => return LineResult::from_outcome(Vec::new(), format!("grease install: {e}\n").into_bytes(), 4),
+            Err(e) => {
+                return LineResult::from_outcome(
+                    Vec::new(),
+                    format!("grease install: {e}\n").into_bytes(),
+                    4,
+                )
+            }
         };
         if pkg.name != name {
             return LineResult::from_outcome(
                 Vec::new(),
-                format!("grease install: registry returned package '{}' for request '{name}'\n", pkg.name).into_bytes(),
+                format!(
+                    "grease install: registry returned package '{}' for request '{name}'\n",
+                    pkg.name
+                )
+                .into_bytes(),
                 4,
             );
         }
         // The install-line flags select which artifact types to expose (no flags = all three).
-        pkg.artifacts =
-            crate::grease::pkg::McpArtifacts::from_flags(artifacts.tools, artifacts.prompts, artifacts.resources);
+        pkg.artifacts = crate::grease::pkg::McpArtifacts::from_flags(
+            artifacts.tools,
+            artifacts.prompts,
+            artifacts.resources,
+        );
 
         let Some(http) = self.mcp_http.as_deref() else {
             return LineResult::from_outcome(
                 Vec::new(),
-                b"grease install: no HTTP transport configured (available on the Golem agent)\n".to_vec(),
+                b"grease install: no HTTP transport configured (available on the Golem agent)\n"
+                    .to_vec(),
                 4,
             );
         };
@@ -367,7 +401,10 @@ impl Session {
             }
         }
         let prompt_specs = if pkg.artifacts.prompts {
-            client.list_prompts(session.as_deref()).await.unwrap_or_default()
+            client
+                .list_prompts(session.as_deref())
+                .await
+                .unwrap_or_default()
         } else {
             Vec::new()
         };
@@ -400,7 +437,11 @@ impl Session {
             match client.get_prompt(&p.name, args, session.as_deref()).await {
                 Ok(body_text) => installed_prompts.push((p.clone(), body_text)),
                 Err(e) => note.extend_from_slice(
-                    format!("grease: skipping prompt '{}' — fetch failed: {e:?}\n", p.name).as_bytes(),
+                    format!(
+                        "grease: skipping prompt '{}' — fetch failed: {e:?}\n",
+                        p.name
+                    )
+                    .as_bytes(),
                 ),
             }
         }
@@ -410,7 +451,10 @@ impl Session {
         if pkg.artifacts.resources {
             pkg.resources = materialize_mcp_resources(name, &mut client, session.as_deref()).await;
             // Templates: fetch `resources/templates/list` and cache as `<server>-<tname>` executables.
-            let templates = client.list_resource_templates(session.as_deref()).await.unwrap_or_default();
+            let templates = client
+                .list_resource_templates(session.as_deref())
+                .await
+                .unwrap_or_default();
             pkg.templates = templates
                 .iter()
                 .filter_map(|t| {
@@ -432,7 +476,8 @@ impl Session {
 
         // Persist the enriched payload + marker.
         let payload = crate::grease::state::Payload::Mcp(pkg.clone());
-        if let Err(msg) = self.persist_package(name, crate::grease::pkg::PackageKind::Mcp, &payload) {
+        if let Err(msg) = self.persist_package(name, crate::grease::pkg::PackageKind::Mcp, &payload)
+        {
             return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 1);
         }
         let marker = integrity.to_marker(crate::grease::pkg::PackageKind::Mcp, registry);
@@ -444,7 +489,8 @@ impl Session {
         // work), reusing the mcp machinery.
         let tool_count = tool_specs.len();
         if pkg.artifacts.tools {
-            let mcp_tools: Vec<crate::mcp::state::McpTool> = tool_specs.into_iter().map(Into::into).collect();
+            let mcp_tools: Vec<crate::mcp::state::McpTool> =
+                tool_specs.into_iter().map(Into::into).collect();
             self.mcp.set_installed(name, config, mcp_tools);
             if let Some(help) = self.mcp.server_help(name) {
                 let _ = crate::mcp::config::write_bin_stub(name, &help);
@@ -467,7 +513,8 @@ impl Session {
         }
 
         // Register the grease package view.
-        self.grease.set_installed(crate::grease::state::InstalledPackage { marker, payload });
+        self.grease
+            .set_installed(crate::grease::state::InstalledPackage { marker, payload });
 
         note.extend_from_slice(
             format!(
@@ -550,7 +597,12 @@ impl Session {
     /// prompt's declared arguments become the package arguments; `{{arg}}` placeholders in the fetched
     /// body are already resolved server-side for the empty-arg fetch, so v1 stores the fetched body as
     /// a non-parameterized prompt (re-fetch with args is a future refinement).
-    fn install_mcp_prompt(&mut self, spec: &crate::mcp::client::PromptSpec, body: &str, registry: &str) {
+    fn install_mcp_prompt(
+        &mut self,
+        spec: &crate::mcp::client::PromptSpec,
+        body: &str,
+        registry: &str,
+    ) {
         let pkg = crate::grease::pkg::PromptPackage {
             name: spec.name.clone(),
             description: spec.description.clone().unwrap_or_default(),
@@ -560,7 +612,14 @@ impl Session {
         };
         // Persist as a prompt package + marker + bin stub, and register it.
         let payload = crate::grease::state::Payload::Prompt(pkg);
-        if self.persist_package(&spec.name, crate::grease::pkg::PackageKind::Prompt, &payload).is_err() {
+        if self
+            .persist_package(
+                &spec.name,
+                crate::grease::pkg::PackageKind::Prompt,
+                &payload,
+            )
+            .is_err()
+        {
             return;
         }
         let sha = crate::grease::pkg::sha256_hex(body.as_bytes());
@@ -577,7 +636,8 @@ impl Session {
         if write_install_marker(&spec.name, &marker).is_err() {
             return;
         }
-        self.grease.set_installed(crate::grease::state::InstalledPackage { marker, payload });
+        self.grease
+            .set_installed(crate::grease::state::InstalledPackage { marker, payload });
         self.materialize_package(&spec.name, crate::grease::pkg::PackageKind::Prompt);
     }
 
@@ -597,27 +657,32 @@ impl Session {
         use crate::grease::state::Payload;
         let (payload, pkg_name) = match kind {
             PackageKind::Prompt => {
-                let p = PromptPackage::from_json(body).map_err(|e| format!("grease install: {e}\n"))?;
+                let p =
+                    PromptPackage::from_json(body).map_err(|e| format!("grease install: {e}\n"))?;
                 let n = p.name.clone();
                 (Payload::Prompt(p), n)
             }
             PackageKind::Script => {
-                let s = ScriptPackage::from_json(body).map_err(|e| format!("grease install: {e}\n"))?;
+                let s =
+                    ScriptPackage::from_json(body).map_err(|e| format!("grease install: {e}\n"))?;
                 let n = s.name.clone();
                 (Payload::Script(s), n)
             }
             PackageKind::Skill => {
-                let s = SkillPackage::from_json(body).map_err(|e| format!("grease install: {e}\n"))?;
+                let s =
+                    SkillPackage::from_json(body).map_err(|e| format!("grease install: {e}\n"))?;
                 let n = s.name.clone();
                 (Payload::Skill(s), n)
             }
             PackageKind::Mcp => {
-                let m = McpPackage::from_json(body).map_err(|e| format!("grease install: {e}\n"))?;
+                let m =
+                    McpPackage::from_json(body).map_err(|e| format!("grease install: {e}\n"))?;
                 let n = m.name.clone();
                 (Payload::Mcp(m), n)
             }
             PackageKind::Agent => {
-                let a = AgentPackage::from_json(body).map_err(|e| format!("grease install: {e}\n"))?;
+                let a =
+                    AgentPackage::from_json(body).map_err(|e| format!("grease install: {e}\n"))?;
                 let n = a.name.clone();
                 (Payload::Agent(a), n)
             }
@@ -759,7 +824,8 @@ impl Session {
         let Some(http) = self.mcp_http.as_ref() else {
             return LineResult::from_outcome(
                 Vec::new(),
-                b"grease search: no HTTP transport configured (available on the Golem agent)\n".to_vec(),
+                b"grease search: no HTTP transport configured (available on the Golem agent)\n"
+                    .to_vec(),
                 4,
             );
         };
@@ -772,8 +838,12 @@ impl Session {
                         if let Some(arr) = v.get("packages").and_then(|p| p.as_array()) {
                             for pkg in arr {
                                 let name = pkg.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                                let desc = pkg.get("description").and_then(|d| d.as_str()).unwrap_or("");
-                                let kind = pkg.get("kind").and_then(|k| k.as_str()).unwrap_or("prompt");
+                                let desc = pkg
+                                    .get("description")
+                                    .and_then(|d| d.as_str())
+                                    .unwrap_or("");
+                                let kind =
+                                    pkg.get("kind").and_then(|k| k.as_str()).unwrap_or("prompt");
                                 if name.contains(query) || desc.contains(query) {
                                     hits.push(format!("{name}  [{kind}]  {desc}"));
                                 }
@@ -784,7 +854,9 @@ impl Session {
             }
         }
         if hits.is_empty() {
-            return LineResult::continue_with_stdout(format!("no packages match '{query}'\n").into_bytes());
+            return LineResult::continue_with_stdout(
+                format!("no packages match '{query}'\n").into_bytes(),
+            );
         }
         hits.sort();
         hits.dedup();
@@ -802,7 +874,12 @@ impl Session {
                     1,
                 )
             }
-            None => self.grease.packages().iter().map(|p| p.name().to_string()).collect(),
+            None => self
+                .grease
+                .packages()
+                .iter()
+                .map(|p| p.name().to_string())
+                .collect(),
         };
         if targets.is_empty() {
             return LineResult::continue_with_stdout(b"nothing to update\n".to_vec());
@@ -857,10 +934,12 @@ impl Session {
                 };
                 LineResult::continue_with_stdout(msg.into_bytes())
             }
-            Ok(false) => {
-                LineResult::continue_with_stdout(format!("registry {url} already present\n").into_bytes())
+            Ok(false) => LineResult::continue_with_stdout(
+                format!("registry {url} already present\n").into_bytes(),
+            ),
+            Err(e) => {
+                LineResult::from_outcome(Vec::new(), format!("grease: {e}\n").into_bytes(), 1)
             }
-            Err(e) => LineResult::from_outcome(Vec::new(), format!("grease: {e}\n").into_bytes(), 1),
         }
     }
 
@@ -880,14 +959,17 @@ impl Session {
     #[allow(clippy::unused_self)]
     fn grease_registry_remove(&self, url: &str) -> LineResult {
         match crate::grease::config::remove_registry(url) {
-            Ok(true) => LineResult::continue_with_stdout(format!("removed registry {url}\n").into_bytes()),
+            Ok(true) => {
+                LineResult::continue_with_stdout(format!("removed registry {url}\n").into_bytes())
+            }
             Ok(false) => LineResult::from_outcome(
                 Vec::new(),
                 format!("grease: registry {url} was not configured\n").into_bytes(),
                 1,
             ),
-            Err(e) => LineResult::from_outcome(Vec::new(), format!("grease: {e}\n").into_bytes(), 1),
+            Err(e) => {
+                LineResult::from_outcome(Vec::new(), format!("grease: {e}\n").into_bytes(), 1)
+            }
         }
     }
-
 }

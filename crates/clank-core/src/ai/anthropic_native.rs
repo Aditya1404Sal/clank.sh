@@ -69,7 +69,9 @@ fn resolve_api_key() -> Option<String> {
             }
         }
     }
-    std::env::var("ANTHROPIC_API_KEY").ok().filter(|k| !k.is_empty())
+    std::env::var("ANTHROPIC_API_KEY")
+        .ok()
+        .filter(|k| !k.is_empty())
 }
 
 #[async_trait::async_trait(?Send)]
@@ -108,7 +110,9 @@ impl AskProvider for ReqwestAnthropicProvider {
         let status = response.status();
         let text = match response.text().await {
             Ok(t) => t,
-            Err(e) => return AskResponse::error(format!("ask: reading model response failed: {e}\n")),
+            Err(e) => {
+                return AskResponse::error(format!("ask: reading model response failed: {e}\n"))
+            }
         };
 
         if !status.is_success() {
@@ -164,10 +168,17 @@ mod tests {
     async fn turn_end_to_end_phases() {
         // Phase 1: a text reply round-trips through reqwest against a mock server.
         std::env::set_var("ANTHROPIC_API_KEY", "sk-test-dummy");
-        let url = mock_anthropic(r#"{"content":[{"type":"text","text":"pong"}],"stop_reason":"end_turn"}"#);
+        let url = mock_anthropic(
+            r#"{"content":[{"type":"text","text":"pong"}],"stop_reason":"end_turn"}"#,
+        );
         let provider = ReqwestAnthropicProvider::with_endpoint(url);
         let resp = provider
-            .turn(Some("sys"), &[AskTurn::User("ping".into())], &[], "claude-haiku-4-5")
+            .turn(
+                Some("sys"),
+                &[AskTurn::User("ping".into())],
+                &[],
+                "claude-haiku-4-5",
+            )
             .await;
         assert_eq!(resp.text, "pong", "err: {:?}", resp.error);
         assert!(resp.error.is_none());
@@ -197,7 +208,9 @@ mod tests {
         let prev_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", &tmp);
         let provider = ReqwestAnthropicProvider::with_endpoint("http://127.0.0.1:1/v1/messages");
-        let resp = provider.turn(None, &[AskTurn::User("hi".into())], &[], "m").await;
+        let resp = provider
+            .turn(None, &[AskTurn::User("hi".into())], &[], "m")
+            .await;
         match prev_home {
             Some(h) => std::env::set_var("HOME", h),
             None => std::env::remove_var("HOME"),

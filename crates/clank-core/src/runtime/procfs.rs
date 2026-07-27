@@ -239,7 +239,10 @@ mod tests {
         let mut t = ProcessTable::new();
         let pid = t.spawn_bg(
             ProcessKind::AgentInvocation,
-            "greeter greet who=world --trigger".split_whitespace().map(String::from).collect(),
+            "greeter greet who=world --trigger"
+                .split_whitespace()
+                .map(String::from)
+                .collect(),
             crate::runtime::proctable::SHELL_ROOT_PID,
         );
         t.set_agent_meta(
@@ -260,7 +263,10 @@ mod tests {
     fn non_agent_row_status_omits_agent_fields() {
         let (t, pid) = table_with_one("ls /tmp");
         let out = resolve(&format!("/proc/{pid}/status"), &t, &env()).unwrap();
-        assert!(!out.contains("AgentType:"), "non-agent row must not show agent fields:\n{out}");
+        assert!(
+            !out.contains("AgentType:"),
+            "non-agent row must not show agent fields:\n{out}"
+        );
     }
 
     #[test]
@@ -268,7 +274,10 @@ mod tests {
         let mut t = ProcessTable::new();
         let pid = t.spawn(
             ProcessKind::Builtin,
-            "prompt-user q".split_whitespace().map(String::from).collect(),
+            "prompt-user q"
+                .split_whitespace()
+                .map(String::from)
+                .collect(),
         );
         t.pause(pid);
         let out = resolve(&format!("/proc/{pid}/status"), &t, &env()).unwrap();
@@ -300,8 +309,14 @@ mod tests {
         // The live prompt: the fixed preamble plus the rendered command surface. `ask` itself is a
         // Subprocess command with a [confirm] marker; `shell` is the one tool.
         assert!(out.contains("You are clank"), "got: {out}");
-        assert!(out.contains("`shell`"), "should describe the shell tool, got: {out}");
-        assert!(out.contains("ask —"), "should list ask in the surface, got: {out}");
+        assert!(
+            out.contains("`shell`"),
+            "should describe the shell tool, got: {out}"
+        );
+        assert!(
+            out.contains("ask —"),
+            "should list ask in the surface, got: {out}"
+        );
         assert!(out.contains("[confirm]"), "ask is confirm-tier, got: {out}");
     }
 

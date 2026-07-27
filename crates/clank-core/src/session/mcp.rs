@@ -3,7 +3,7 @@
 
 use std::fmt::Write as _;
 
-use super::{Session, LineResult, prompt_leading_word, fill_uri_template};
+use super::{fill_uri_template, prompt_leading_word, LineResult, Session};
 
 impl Session {
     /// Dispatch a parsed `mcp` management command. HTTP-performing subcommands (`add`, `reload`,
@@ -103,9 +103,13 @@ impl Session {
         match crate::mcp::config::remove(name) {
             Ok(()) => {
                 self.mcp.remove(name);
-                LineResult::continue_with_stdout(format!("removed MCP server '{name}'\n").into_bytes())
+                LineResult::continue_with_stdout(
+                    format!("removed MCP server '{name}'\n").into_bytes(),
+                )
             }
-            Err(e) => LineResult::from_outcome(Vec::new(), format!("mcp remove: {e}\n").into_bytes(), 1),
+            Err(e) => {
+                LineResult::from_outcome(Vec::new(), format!("mcp remove: {e}\n").into_bytes(), 1)
+            }
         }
     }
 
@@ -121,7 +125,8 @@ impl Session {
         if !crate::mcp::config::is_valid_name(name) {
             return LineResult::from_outcome(
                 Vec::new(),
-                format!("mcp add: invalid server name '{name}' (use kebab-case: [a-z0-9-])\n").into_bytes(),
+                format!("mcp add: invalid server name '{name}' (use kebab-case: [a-z0-9-])\n")
+                    .into_bytes(),
                 2,
             );
         }
@@ -187,7 +192,8 @@ impl Session {
         mut config: crate::mcp::config::McpServerConfig,
     ) -> LineResult {
         let Some(http) = self.mcp_http.as_deref() else {
-            self.mcp.set_failed(name, config, "no HTTP transport".into());
+            self.mcp
+                .set_failed(name, config, "no HTTP transport".into());
             return LineResult::from_outcome(
                 Vec::new(),
                 b"mcp: no HTTP transport configured (available on the Golem agent)\n".to_vec(),
@@ -213,7 +219,8 @@ impl Session {
             }
         };
         let tool_count = tools.len();
-        let mcp_tools: Vec<crate::mcp::state::McpTool> = tools.into_iter().map(Into::into).collect();
+        let mcp_tools: Vec<crate::mcp::state::McpTool> =
+            tools.into_iter().map(Into::into).collect();
         // Cache the fetched tool list in the server's config, so a NEW process reconstructs this
         // server without network (`Session::reconstruct_mcp_from_configs`). Whole-file re-save —
         // idempotent, replay-safe on the durable agent.
@@ -334,7 +341,9 @@ impl Session {
         let auth = config.resolve_auth();
         let client = crate::mcp::client::McpClient::new(http, &config.url, auth);
         match client.close_session(&server_sid).await {
-            Ok(()) => LineResult::continue_with_stdout(format!("closed session {id}\n").into_bytes()),
+            Ok(()) => {
+                LineResult::continue_with_stdout(format!("closed session {id}\n").into_bytes())
+            }
             Err(e) => LineResult::from_outcome(
                 format!("closed session {id} locally\n").into_bytes(),
                 format!("mcp session close: {}\n", e.message).into_bytes(),
@@ -389,24 +398,39 @@ impl Session {
     /// stored config for the endpoint + auth.
     pub(super) async fn run_mcp_resource_read(&mut self, server: &str, uri: &str) -> LineResult {
         let Some(m) = self.grease.mcp(server) else {
-            return LineResult::from_outcome(Vec::new(), b"cat: mcp resource: server not installed\n".to_vec(), 1);
+            return LineResult::from_outcome(
+                Vec::new(),
+                b"cat: mcp resource: server not installed\n".to_vec(),
+                1,
+            );
         };
         let url = m.url.clone();
         let auth_env = m.auth_env.clone();
         let Some(http) = self.mcp_http.as_deref() else {
             return LineResult::from_outcome(
                 Vec::new(),
-                b"cat: mcp resource: no HTTP transport configured (available on the Golem agent)\n".to_vec(),
+                b"cat: mcp resource: no HTTP transport configured (available on the Golem agent)\n"
+                    .to_vec(),
                 4,
             );
         };
-        let config = crate::mcp::config::McpServerConfig { url: url.clone(), enabled: true, auth_env, auth_header: None, tools: Vec::new() };
+        let config = crate::mcp::config::McpServerConfig {
+            url: url.clone(),
+            enabled: true,
+            auth_env,
+            auth_header: None,
+            tools: Vec::new(),
+        };
         let auth = config.resolve_auth();
         let mut client = crate::mcp::client::McpClient::new(http, &url, auth);
         let session = client.initialize().await.ok().and_then(|i| i.session_id);
         match client.read_resource(uri, session.as_deref()).await {
             Ok(content) => LineResult::continue_with_stdout(content.into_bytes()),
-            Err(e) => LineResult::from_outcome(Vec::new(), format!("cat: {uri}: {}\n", e.message).into_bytes(), e.exit_code),
+            Err(e) => LineResult::from_outcome(
+                Vec::new(),
+                format!("cat: {uri}: {}\n", e.message).into_bytes(),
+                e.exit_code,
+            ),
         }
     }
 
@@ -425,7 +449,8 @@ impl Session {
         let Some((server, sub)) = rel.split_once('/') else {
             return LineResult::from_outcome(
                 Vec::new(),
-                format!("mcp resource info: '{path}' names a server, not a resource\n").into_bytes(),
+                format!("mcp resource info: '{path}' names a server, not a resource\n")
+                    .into_bytes(),
                 2,
             );
         };
@@ -437,7 +462,11 @@ impl Session {
             );
         };
         let mut out = format!("uri: {}\n", res.uri);
-        let _ = writeln!(out, "kind: {}", if res.is_static { "static" } else { "dynamic" });
+        let _ = writeln!(
+            out,
+            "kind: {}",
+            if res.is_static { "static" } else { "dynamic" }
+        );
         if !res.description.is_empty() {
             let _ = writeln!(out, "description: {}", res.description);
         }
@@ -486,11 +515,18 @@ impl Session {
         let Some(http) = self.mcp_http.as_deref() else {
             return LineResult::from_outcome(
                 Vec::new(),
-                b"mcp watch: no HTTP transport configured (available on the Golem agent)\n".to_vec(),
+                b"mcp watch: no HTTP transport configured (available on the Golem agent)\n"
+                    .to_vec(),
                 4,
             );
         };
-        let config = crate::mcp::config::McpServerConfig { url: url.clone(), enabled: true, auth_env, auth_header: None, tools: Vec::new() };
+        let config = crate::mcp::config::McpServerConfig {
+            url: url.clone(),
+            enabled: true,
+            auth_env,
+            auth_header: None,
+            tools: Vec::new(),
+        };
         let auth = config.resolve_auth();
         let mut client = crate::mcp::client::McpClient::new(http, &url, auth);
         let session = client.initialize().await.ok().and_then(|i| i.session_id);
@@ -537,10 +573,18 @@ impl Session {
     /// name. The read awaits under the reactor (top-level only).
     pub(super) async fn run_mcp_template(&mut self, line: &str) -> LineResult {
         let Some(words) = crate::ai::ask::dequote_words(line) else {
-            return LineResult::from_outcome(Vec::new(), b"mcp template: parse error\n".to_vec(), 2);
+            return LineResult::from_outcome(
+                Vec::new(),
+                b"mcp template: parse error\n".to_vec(),
+                2,
+            );
         };
         // Strip a leading sudo (the gate already resolved authz).
-        let rest = if words.first().map(String::as_str) == Some("sudo") { &words[1..] } else { &words[..] };
+        let rest = if words.first().map(String::as_str) == Some("sudo") {
+            &words[1..]
+        } else {
+            &words[..]
+        };
         let cmd = rest[0].clone();
         let Some((url, auth_env, template)) = self.grease.mcp_template(&cmd) else {
             return LineResult::denied(); // is_mcp_template_line gated it
@@ -549,22 +593,39 @@ impl Session {
         // positionals fill the remaining `{…}` slots left-to-right.
         let uri = match fill_uri_template(&template, &rest[1..]) {
             Ok(u) => u,
-            Err(e) => return LineResult::from_outcome(Vec::new(), format!("{cmd}: {e}\n").into_bytes(), 2),
+            Err(e) => {
+                return LineResult::from_outcome(
+                    Vec::new(),
+                    format!("{cmd}: {e}\n").into_bytes(),
+                    2,
+                )
+            }
         };
         let Some(http) = self.mcp_http.as_deref() else {
             return LineResult::from_outcome(
                 Vec::new(),
-                format!("{cmd}: no HTTP transport configured (available on the Golem agent)\n").into_bytes(),
+                format!("{cmd}: no HTTP transport configured (available on the Golem agent)\n")
+                    .into_bytes(),
                 4,
             );
         };
-        let config = crate::mcp::config::McpServerConfig { url: url.clone(), enabled: true, auth_env, auth_header: None, tools: Vec::new() };
+        let config = crate::mcp::config::McpServerConfig {
+            url: url.clone(),
+            enabled: true,
+            auth_env,
+            auth_header: None,
+            tools: Vec::new(),
+        };
         let auth = config.resolve_auth();
         let mut client = crate::mcp::client::McpClient::new(http, &url, auth);
         let session = client.initialize().await.ok().and_then(|i| i.session_id);
         match client.read_resource(&uri, session.as_deref()).await {
             Ok(content) => LineResult::continue_with_stdout(content.into_bytes()),
-            Err(e) => LineResult::from_outcome(Vec::new(), format!("{cmd}: {uri}: {}\n", e.message).into_bytes(), e.exit_code),
+            Err(e) => LineResult::from_outcome(
+                Vec::new(),
+                format!("{cmd}: {uri}: {}\n", e.message).into_bytes(),
+                e.exit_code,
+            ),
         }
     }
 }

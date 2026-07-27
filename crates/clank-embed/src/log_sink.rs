@@ -30,7 +30,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use clank_core::logging::{bound_tail, log_dir, LogFile, LogSink};
+use clank_core::logging::{LogFile, LogSink, bound_tail, log_dir};
 
 /// Per-log in-memory buffer cap. The whole-file-rewrite approach costs one full write per line, so an
 /// unbounded buffer would grow without limit and make each write O(total-log-size). Keeping only a
@@ -49,7 +49,9 @@ pub(crate) struct DurableLogSink {
 
 impl DurableLogSink {
     pub(crate) fn new() -> Self {
-        Self { buffers: RefCell::new(HashMap::new()) }
+        Self {
+            buffers: RefCell::new(HashMap::new()),
+        }
     }
 }
 

@@ -18,8 +18,8 @@
 //! rather than sending an unauthenticated request.
 
 use clank_core::ai::anthropic_wire::{
-    build_request, parse_error, parse_response_body, serialize_request, ANTHROPIC_VERSION,
-    MESSAGES_URL,
+    ANTHROPIC_VERSION, MESSAGES_URL, build_request, parse_error, parse_response_body,
+    serialize_request,
 };
 use clank_core::ai::ask::{AskProvider, AskResponse, AskTool, AskTurn};
 
@@ -92,9 +92,12 @@ async fn send(api_key: &str, body: Vec<u8>) -> Result<(u16, String), String> {
         .get("content-length")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.trim().parse::<usize>().ok())
-        && len > MAX_BODY {
-            return Err(format!("response Content-Length {len} exceeds {MAX_BODY} bytes"));
-        }
+        && len > MAX_BODY
+    {
+        return Err(format!(
+            "response Content-Length {len} exceeds {MAX_BODY} bytes"
+        ));
+    }
     let bytes = response
         .body_mut()
         .contents()

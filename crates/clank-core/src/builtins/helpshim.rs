@@ -31,7 +31,10 @@ impl<T: SimpleCommand> SimpleCommand for WithHelp<T> {
 
     // similar_names: `args`/`argv` are the conventional arg-iterator / arg-vector pair.
     #[allow(clippy::similar_names)]
-    fn execute<SE, I, S>(context: ExecutionContext<'_, SE>, args: I) -> Result<ExecutionResult, Error>
+    fn execute<SE, I, S>(
+        context: ExecutionContext<'_, SE>,
+        args: I,
+    ) -> Result<ExecutionResult, Error>
     where
         SE: ShellExtensions,
         I: Iterator<Item = S>,
@@ -106,9 +109,12 @@ mod tests {
     // get_content passes through unchanged, since ExecutionContext cannot be constructed here.
     #[test]
     fn get_content_passes_through() {
-        let help =
-            WithHelp::<Probe>::get_content("probe", ContentType::DetailedHelp, &ContentOptions::default())
-                .unwrap();
+        let help = WithHelp::<Probe>::get_content(
+            "probe",
+            ContentType::DetailedHelp,
+            &ContentOptions::default(),
+        )
+        .unwrap();
         assert_eq!(help, "probe - detailed probe help");
     }
 }

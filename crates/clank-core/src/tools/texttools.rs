@@ -35,10 +35,13 @@ macro_rules! text_builtin {
                 match content_type {
                     ContentType::ShortDescription => Ok(format!("{name} - {}\n", $ty::SYNOPSIS)),
                     ContentType::ShortUsage => Ok(format!("{name}: {name} [args...]\n")),
-                    ContentType::DetailedHelp => {
-                        Ok(format!("{name} - {}\n\n(clank text/data builtin)\n", $ty::SYNOPSIS))
+                    ContentType::DetailedHelp => Ok(format!(
+                        "{name} - {}\n\n(clank text/data builtin)\n",
+                        $ty::SYNOPSIS
+                    )),
+                    ContentType::ManPage => {
+                        brush_core::error::unimp("man page not yet implemented")
                     }
-                    ContentType::ManPage => brush_core::error::unimp("man page not yet implemented"),
                 }
             }
 
@@ -56,15 +59,16 @@ macro_rules! text_builtin {
                 // Write through Brush's stdout/stderr sinks (captured on wasm), not io::stdout().
                 // `stdin` is Brush's assigned input `OpenFile` — the upstream pipe stage's output when
                 // this command is on the right-hand side of a `|` — so tools can read piped input.
-                let code = crate::tools::coreutils::run_tool(&context, move |stdin, out, err| {
-                    match $run(&argv, stdin, out, err) {
+                let code =
+                    crate::tools::coreutils::run_tool(&context, move |stdin, out, err| match $run(
+                        &argv, stdin, out, err,
+                    ) {
                         Ok(code) => code,
                         Err(e) => {
                             let _ = writeln!(err, "{}: {e}", $name);
                             1
                         }
-                    }
-                });
+                    });
                 Ok(ExecutionResult::new(code.clamp(0, 255) as u8))
             }
         }
@@ -73,8 +77,18 @@ macro_rules! text_builtin {
 
 text_builtin!(Jq, "jq", "filter and transform JSON", run_jq);
 text_builtin!(Grep, "grep", "search files for a pattern", run_grep);
-text_builtin!(Sed, "sed", "stream editor (s///, d, p, q; line/regex addresses)", run_sed);
-text_builtin!(Awk, "awk", "pattern scanning and text processing", crate::tools::awk::run_awk);
+text_builtin!(
+    Sed,
+    "sed",
+    "stream editor (s///, d, p, q; line/regex addresses)",
+    run_sed
+);
+text_builtin!(
+    Awk,
+    "awk",
+    "pattern scanning and text processing",
+    crate::tools::awk::run_awk
+);
 text_builtin!(Diff, "diff", "compare files line by line", run_diff);
 text_builtin!(Patch, "patch", "apply a diff to a file", run_patch);
 text_builtin!(File, "file", "identify file type", run_file);
@@ -254,9 +268,7 @@ fn parse_grep_args(args: &[String]) -> ToolResult<GrepOpts> {
         } else if arg == "--" {
             no_more_flags = true;
         } else if arg == "-e" || arg == "--regexp" {
-            let p = iter
-                .next()
-                .ok_or("option requires an argument -- 'e'")?;
+            let p = iter.next().ok_or("option requires an argument -- 'e'")?;
             o.patterns.push(p.clone());
         } else if let Some(long) = arg.strip_prefix("--") {
             match long {
@@ -339,7 +351,12 @@ fn read_named_input(file: &str, environ: &[(String, String)]) -> Result<Vec<u8>,
     } else if crate::runtime::procfs::is_proc_path(file) {
         crate::runtime::proctable::active()
             .and_then(|t| {
-                crate::runtime::procfs::resolve(file, &t.lock().unwrap_or_else(std::sync::PoisonError::into_inner), environ).ok()
+                crate::runtime::procfs::resolve(
+                    file,
+                    &t.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+                    environ,
+                )
+                .ok()
             })
             .map(String::into_bytes)
             .ok_or_else(|| format!("{file}: No such file or directory"))
@@ -497,9 +514,7 @@ fn run_grep(
         }
     }
 
-    Ok(if failed {
-        2
-    } else { i32::from(!matched) })
+    Ok(if failed { 2 } else { i32::from(!matched) })
 }
 
 #[allow(clippy::similar_names)] // scripts/script, files/file are conventional
@@ -522,7 +537,9 @@ fn run_sed(
                 scripts.push(s.clone());
             }
             "-i" | "--in-place" => {
-                return Err("-i (in-place) is not supported; redirect to a new file instead".into());
+                return Err(
+                    "-i (in-place) is not supported; redirect to a new file instead".into(),
+                );
             }
             f if f.starts_with('-') && f.len() > 1 => {
                 return Err(format!("unknown option '{f}'").into());
@@ -661,10 +678,9 @@ mod sed {
                 'p' => Action::Print,
                 'q' => Action::Quit,
                 other => {
-                    return Err(format!(
-                        "unsupported command '{other}' (supported: s, d, p, q)"
+                    return Err(
+                        format!("unsupported command '{other}' (supported: s, d, p, q)").into(),
                     )
-                    .into())
                 }
             };
             commands.push(Command {
@@ -793,7 +809,9 @@ mod sed {
                 // Group 0 (the whole match) is always present for a `Captures` from `captures_iter`.
                 // `get(0)` is the whole match, always present for a successful match.
                 #[allow(clippy::expect_used)]
-                let m = caps.get(0).expect("capture group 0 is always present in a match");
+                let m = caps
+                    .get(0)
+                    .expect("capture group 0 is always present in a match");
                 out.push_str(&text[last..m.start()]);
                 let mut expanded = String::new();
                 caps.expand(replacement, &mut expanded);
@@ -930,7 +948,9 @@ fn run_file(
             writeln!(out, "{file}: directory")?;
             continue;
         }
-        if let Some(kind) = infer::get_from_path(path)? { writeln!(out, "{file}: {} ({})", kind.mime_type(), kind.extension())? } else {
+        if let Some(kind) = infer::get_from_path(path)? {
+            writeln!(out, "{file}: {} ({})", kind.mime_type(), kind.extension())?;
+        } else {
             let bytes = std::fs::read(path)?;
             if std::str::from_utf8(&bytes).is_ok() {
                 writeln!(out, "{file}: text/plain")?;

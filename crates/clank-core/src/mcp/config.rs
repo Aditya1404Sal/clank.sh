@@ -76,7 +76,10 @@ impl McpServerConfig {
     pub fn resolve_auth(&self) -> Option<crate::mcp::client::McpAuth> {
         let var = self.auth_env.as_ref()?;
         let value = std::env::var(var).ok()?;
-        let header = self.auth_header.clone().unwrap_or_else(|| "Authorization".to_string());
+        let header = self
+            .auth_header
+            .clone()
+            .unwrap_or_else(|| "Authorization".to_string());
         let value = if header.eq_ignore_ascii_case("Authorization") {
             format!("Bearer {value}")
         } else {
@@ -115,7 +118,9 @@ pub fn is_valid_name(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with('-')
         && !name.ends_with('-')
-        && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 /// Write a server config (creating `/etc/mcp/` as needed).
@@ -200,7 +205,9 @@ mod tests {
 
     /// Point the config/bin dirs at fresh temp dirs for the duration of `f`.
     fn with_temp_dirs<F: FnOnce(&str)>(f: F) {
-        let _guard = super::TEST_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = super::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let n = unique();
         let base = std::env::temp_dir().join(format!("clank_mcpcfg_{}_{n}", std::process::id()));
         let etc = base.join("etc");

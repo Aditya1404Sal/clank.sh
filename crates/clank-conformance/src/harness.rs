@@ -62,12 +62,18 @@ fn build_trials(kind: BackendKind, golem_enabled: bool) -> Vec<Trial> {
 
     let mut trials = Vec::with_capacity(paths.len());
     for path in paths {
-        let stem = path
-            .file_stem().map_or_else(|| path.display().to_string(), |s| s.to_string_lossy().into_owned());
+        let stem = path.file_stem().map_or_else(
+            || path.display().to_string(),
+            |s| s.to_string_lossy().into_owned(),
+        );
 
         // The stem becomes the golem agent id and is interpolated into the injected
         // `mkdir -p` step — enforce the safe charset at the source.
-        if stem.is_empty() || !stem.chars().all(|c| matches!(c, 'a'..='z' | '0'..='9' | '-')) {
+        if stem.is_empty()
+            || !stem
+                .chars()
+                .all(|c| matches!(c, 'a'..='z' | '0'..='9' | '-'))
+        {
             let msg = format!(
                 "scenario file name `{stem}` must be non-empty [a-z0-9-] (it becomes the agent id and sandbox path)"
             );
@@ -99,11 +105,18 @@ fn build_trials(kind: BackendKind, golem_enabled: bool) -> Vec<Trial> {
         let not_runnable: Option<String> = if kind == BackendKind::Golem && !golem_enabled {
             Some("golem tier disabled — run scripts/conformance-golem.sh (or set CLANK_CONFORMANCE_GOLEM=1 against a running server)".into())
         } else if let Some(only) = scenario.only.filter(|&only| only != kind) {
-            Some(format!("scenario is @only {} — not runnable on the {} tier", only.label(), kind.label()))
+            Some(format!(
+                "scenario is @only {} — not runnable on the {} tier",
+                only.label(),
+                kind.label()
+            ))
         } else if !scenario.requires.is_empty() {
             // Tier-gated scenarios (`@requires network|llm|grease|mcp`) stay visible-but-
             // ignored until those tiers are wired into the harness.
-            Some(format!("requires tier(s) {:?} — not wired into the harness yet", scenario.requires))
+            Some(format!(
+                "requires tier(s) {:?} — not wired into the harness yet",
+                scenario.requires
+            ))
         } else {
             None
         };
@@ -131,7 +144,9 @@ fn run_scenario(kind: BackendKind, scenario: Scenario) -> Result<(), Failed> {
     };
 
     let mut backend: Box<dyn ShellBackend> = match kind {
-        BackendKind::Native => Box::new(NativeBackend::new(&scenario.name).map_err(|e| infra(0, e))?),
+        BackendKind::Native => {
+            Box::new(NativeBackend::new(&scenario.name).map_err(|e| infra(0, e))?)
+        }
         BackendKind::Golem => Box::new(GolemBackend::new(&scenario.name).map_err(|e| infra(0, e))?),
     };
 
@@ -144,9 +159,9 @@ fn run_scenario(kind: BackendKind, scenario: Scenario) -> Result<(), Failed> {
         .map_err(|e| format!("{}: teardown failed: {e:#}", scenario.path.display()));
 
     match (steps_result, teardown) {
-        (Err(step_failure), Err(teardown_failure)) => {
-            Err(Failed::from(format!("{step_failure}\n\n(additionally: {teardown_failure})")))
-        }
+        (Err(step_failure), Err(teardown_failure)) => Err(Failed::from(format!(
+            "{step_failure}\n\n(additionally: {teardown_failure})"
+        ))),
         (Err(step_failure), Ok(())) => Err(Failed::from(step_failure)),
         (Ok(()), Err(teardown_failure)) => Err(Failed::from(teardown_failure)),
         (Ok(()), Ok(())) => Ok(()),
@@ -155,7 +170,11 @@ fn run_scenario(kind: BackendKind, scenario: Scenario) -> Result<(), Failed> {
 
 /// Execute the injected sandbox step plus every scenario step; returns the rendered
 /// failure text on the first mismatch or infrastructure error.
-fn run_steps(kind: BackendKind, scenario: &Scenario, backend: &mut dyn ShellBackend) -> Result<(), String> {
+fn run_steps(
+    kind: BackendKind,
+    scenario: &Scenario,
+    backend: &mut dyn ShellBackend,
+) -> Result<(), String> {
     let infra = |line: usize, e: anyhow::Error| {
         format!(
             "{}:{line}: infrastructure failure (not an assertion mismatch): {e:#}",
@@ -191,7 +210,13 @@ fn run_steps(kind: BackendKind, scenario: &Scenario, backend: &mut dyn ShellBack
 
         let mismatches = matcher::check(&resolved.expect, &outcome);
         if !mismatches.is_empty() {
-            return Err(matcher::render_failure(&scenario.path, index, &resolved, &outcome, &mismatches));
+            return Err(matcher::render_failure(
+                &scenario.path,
+                index,
+                &resolved,
+                &outcome,
+                &mismatches,
+            ));
         }
     }
     Ok(())

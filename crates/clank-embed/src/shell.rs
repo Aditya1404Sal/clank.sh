@@ -22,7 +22,8 @@ pub struct EmbeddedShell {
     session: Option<Session>,
     /// Deferred provider/setup hook, applied once when the Session is first built. `FnOnce` with no
     /// `Send` bound: the provider seams are `?Send` and the wasm agent is single-threaded.
-    #[allow(clippy::type_complexity)] // the boxed FnOnce setup hook is inherent, and documented above
+    #[allow(clippy::type_complexity)]
+    // the boxed FnOnce setup hook is inherent, and documented above
     setup: Option<Box<dyn FnOnce(&mut Session)>>,
 }
 
@@ -31,7 +32,10 @@ impl EmbeddedShell {
     /// commands degrade to honest errors. NOTE: on Golem prefer [`Self::with_durable_log_sink`] —
     /// the default log sink appends, which duplicates `/var/log` lines under oplog replay.
     pub fn new() -> Self {
-        Self { session: None, setup: None }
+        Self {
+            session: None,
+            setup: None,
+        }
     }
 
     /// A shell with a deferred setup hook: `setup` runs against the `Session` when it is first
@@ -45,7 +49,10 @@ impl EmbeddedShell {
     /// })
     /// ```
     pub fn with_setup(setup: impl FnOnce(&mut Session) + 'static) -> Self {
-        Self { session: None, setup: Some(Box::new(setup)) }
+        Self {
+            session: None,
+            setup: Some(Box::new(setup)),
+        }
     }
 
     /// The minimal *correct* Golem embed: a bare shell plus the replay-safe `/var/log` sink (an
@@ -175,35 +182,44 @@ mod tests {
 
     #[test]
     fn mapper_moves_streams_and_maps_the_prompt() {
-        let mapped = eval_result(LineResult {
-            stdout: b"out\n".to_vec(),
-            stderr: b"err\n".to_vec(),
-            exit_code: 3,
-            flow: Flow::Continue,
-            pending_prompt: Some(clank_core::builtins::promptuser::PendingPrompt {
-                question: "Which?".to_string(),
-                choices: Some(vec!["a".to_string(), "b".to_string()]),
-                secret: false,
-            }),
-        }, "/work".to_string());
+        let mapped = eval_result(
+            LineResult {
+                stdout: b"out\n".to_vec(),
+                stderr: b"err\n".to_vec(),
+                exit_code: 3,
+                flow: Flow::Continue,
+                pending_prompt: Some(clank_core::builtins::promptuser::PendingPrompt {
+                    question: "Which?".to_string(),
+                    choices: Some(vec!["a".to_string(), "b".to_string()]),
+                    secret: false,
+                }),
+            },
+            "/work".to_string(),
+        );
         assert_eq!(mapped.stdout, "out\n");
         assert_eq!(mapped.stderr, "err\n");
         assert_eq!(mapped.exit_code, 3);
         assert_eq!(mapped.cwd, "/work");
         let p = mapped.pending_prompt.expect("prompt mapped");
         assert_eq!(p.question, "Which?");
-        assert_eq!(p.choices.as_deref(), Some(&["a".to_string(), "b".to_string()][..]));
+        assert_eq!(
+            p.choices.as_deref(),
+            Some(&["a".to_string(), "b".to_string()][..])
+        );
     }
 
     #[test]
     fn mapper_is_lossy_on_invalid_utf8_rather_than_panicking() {
-        let mapped = eval_result(LineResult {
-            stdout: vec![0xff, 0xfe, b'x'],
-            stderr: Vec::new(),
-            exit_code: 0,
-            flow: Flow::Continue,
-            pending_prompt: None,
-        }, String::new());
+        let mapped = eval_result(
+            LineResult {
+                stdout: vec![0xff, 0xfe, b'x'],
+                stderr: Vec::new(),
+                exit_code: 0,
+                flow: Flow::Continue,
+                pending_prompt: None,
+            },
+            String::new(),
+        );
         // The replacement character marks the bad bytes; the valid tail survives.
         assert!(mapped.stdout.contains('\u{FFFD}'));
         assert!(mapped.stdout.ends_with('x'));
@@ -215,7 +231,11 @@ mod tests {
             let mut shell = EmbeddedShell::new();
             let result = shell.eval("echo embedded-hello").await;
             assert_eq!(result.exit_code, 0, "stderr: {}", result.stderr);
-            assert!(result.stdout.contains("embedded-hello"), "stdout: {}", result.stdout);
+            assert!(
+                result.stdout.contains("embedded-hello"),
+                "stdout: {}",
+                result.stdout
+            );
             assert!(result.pending_prompt.is_none());
         });
     }
@@ -223,8 +243,8 @@ mod tests {
     #[test]
     fn setup_hook_runs_once_on_first_eval() {
         on_rt(async {
-            use std::rc::Rc;
             use std::cell::Cell;
+            use std::rc::Rc;
             let ran = Rc::new(Cell::new(0));
             let seen = ran.clone();
             let mut shell = EmbeddedShell::with_setup(move |_s| seen.set(seen.get() + 1));
@@ -241,14 +261,19 @@ mod tests {
         on_rt(async {
             let mut shell = EmbeddedShell::new();
 
-            let surfaced = shell.eval(r#"prompt-user "Which env?" --choices dev,prod"#).await;
+            let surfaced = shell
+                .eval(r#"prompt-user "Which env?" --choices dev,prod"#)
+                .await;
             assert_eq!(surfaced.exit_code, 0, "stderr: {}", surfaced.stderr);
             let p = surfaced.pending_prompt.expect("question surfaced");
             assert_eq!(p.question, "Which env?");
             assert_eq!(p.choices.as_deref().map(|c| c.len()), Some(2));
 
             let aborted = shell.answer(None).await;
-            assert_eq!(aborted.exit_code, 130, "abort follows the Ctrl-C convention");
+            assert_eq!(
+                aborted.exit_code, 130,
+                "abort follows the Ctrl-C convention"
+            );
 
             let surfaced = shell.eval(r#"prompt-user "Again?""#).await;
             assert!(surfaced.pending_prompt.is_some());

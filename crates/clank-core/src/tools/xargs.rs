@@ -124,8 +124,7 @@ impl builtins::Command for XargsCommand {
         context: ExecutionContext<'_, SE>,
     ) -> Result<ExecutionResult, Self::Error> {
         let mut input = String::new();
-        let _ = crate::tools::coreutils::tool_stdin(&context)
-            .read_to_string(&mut input);
+        let _ = crate::tools::coreutils::tool_stdin(&context).read_to_string(&mut input);
 
         // -I tokenizes by lines (GNU: each replacement is a whole input line), so
         // `find | xargs -I {} cmd {}` survives filenames with spaces. An explicit -d wins.
@@ -195,10 +194,7 @@ mod tests {
     #[test]
     fn tokenize_whitespace_and_custom_delims() {
         assert_eq!(tokenize("a b\nc\t d", None), vec!["a", "b", "c", "d"]);
-        assert_eq!(
-            tokenize("a b\nc d\n", Some('\n')),
-            vec!["a b", "c d"]
-        );
+        assert_eq!(tokenize("a b\nc d\n", Some('\n')), vec!["a b", "c d"]);
         assert_eq!(tokenize("a:b::c", Some(':')), vec!["a", "b", "c"]);
         assert!(tokenize("   \n ", None).is_empty());
     }

@@ -257,7 +257,9 @@ mod tests {
 
     #[test]
     fn resolve_answer_produces_stdout_and_carries_secret() {
-        let pending = parse(r#"prompt-user "q?" --secret"#).unwrap().into_pending(None);
+        let pending = parse(r#"prompt-user "q?" --secret"#)
+            .unwrap()
+            .into_pending(None);
         match resolve(&pending, AnswerInput::Response("prod".to_string())) {
             Resolution::Answered { stdout, secret } => {
                 assert_eq!(stdout, b"prod\n");
@@ -275,7 +277,9 @@ mod tests {
 
     #[test]
     fn resolve_rejects_answer_outside_choices() {
-        let pending = parse(r#"prompt-user "Approve?" --confirm"#).unwrap().into_pending(None);
+        let pending = parse(r#"prompt-user "Approve?" --confirm"#)
+            .unwrap()
+            .into_pending(None);
         match resolve(&pending, AnswerInput::Response("maybe".to_string())) {
             Resolution::InvalidChoice { message } => assert!(message.contains("yes/no")),
             other => panic!("expected InvalidChoice, got {other:?}"),
@@ -284,7 +288,9 @@ mod tests {
 
     #[test]
     fn resolve_accepts_a_valid_choice() {
-        let pending = parse(r#"prompt-user "Approve?" --confirm"#).unwrap().into_pending(None);
+        let pending = parse(r#"prompt-user "Approve?" --confirm"#)
+            .unwrap()
+            .into_pending(None);
         match resolve(&pending, AnswerInput::Response("yes".to_string())) {
             Resolution::Answered { stdout, .. } => assert_eq!(stdout, b"yes\n"),
             other => panic!("expected Answered, got {other:?}"),
@@ -296,8 +302,15 @@ mod tests {
         // The authz confirm offers `(y)es, (n)o, (a)ll`; single letters must resolve to the full
         // canonical word (so the gate's `yes`/`all` check downstream still matches). Same `resolve`
         // path a `confirm_choices()` gate uses, exercised here via an explicit three-way choice set.
-        let pending = parse(r#"prompt-user "Approve?" --choices yes,no,all"#).unwrap().into_pending(None);
-        for (input, want) in [("y", "yes\n"), ("n", "no\n"), ("a", "all\n"), ("YES", "yes\n")] {
+        let pending = parse(r#"prompt-user "Approve?" --choices yes,no,all"#)
+            .unwrap()
+            .into_pending(None);
+        for (input, want) in [
+            ("y", "yes\n"),
+            ("n", "no\n"),
+            ("a", "all\n"),
+            ("YES", "yes\n"),
+        ] {
             match resolve(&pending, AnswerInput::Response(input.to_string())) {
                 Resolution::Answered { stdout, .. } => {
                     assert_eq!(stdout, want.as_bytes(), "input {input:?}");
@@ -310,7 +323,9 @@ mod tests {
     #[test]
     fn resolve_prefers_exact_match_over_ambiguous_prefix() {
         // An exact answer must win even when it is also a prefix of another choice.
-        let pending = parse(r#"prompt-user "n?" --choices 1,10,100"#).unwrap().into_pending(None);
+        let pending = parse(r#"prompt-user "n?" --choices 1,10,100"#)
+            .unwrap()
+            .into_pending(None);
         match resolve(&pending, AnswerInput::Response("1".to_string())) {
             Resolution::Answered { stdout, .. } => assert_eq!(stdout, b"1\n"),
             other => panic!("expected Answered, got {other:?}"),
@@ -319,7 +334,9 @@ mod tests {
 
     #[test]
     fn resolve_rejects_ambiguous_prefix() {
-        let pending = parse(r#"prompt-user "?" --choices yes,yesterday"#).unwrap().into_pending(None);
+        let pending = parse(r#"prompt-user "?" --choices yes,yesterday"#)
+            .unwrap()
+            .into_pending(None);
         assert!(matches!(
             resolve(&pending, AnswerInput::Response("y".to_string())),
             Resolution::InvalidChoice { .. }
@@ -344,10 +361,9 @@ mod tests {
 
     #[test]
     fn parses_choices() {
-        let args = parse(
-            r#"prompt-user "Which environment?" --choices staging,production,development"#,
-        )
-        .unwrap();
+        let args =
+            parse(r#"prompt-user "Which environment?" --choices staging,production,development"#)
+                .unwrap();
         assert_eq!(
             args.choices,
             Some(vec![
@@ -375,7 +391,10 @@ mod tests {
 
     #[test]
     fn missing_question_is_an_error() {
-        assert_eq!(parse("prompt-user --confirm"), Err(ParseError::MissingQuestion));
+        assert_eq!(
+            parse("prompt-user --confirm"),
+            Err(ParseError::MissingQuestion)
+        );
     }
 
     #[test]

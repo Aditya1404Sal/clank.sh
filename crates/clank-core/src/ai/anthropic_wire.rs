@@ -9,7 +9,7 @@
 
 use serde_json::{json, Value};
 
-use crate::ai::ask::{AskResponse, AskToolCall, AskTool, AskTurn};
+use crate::ai::ask::{AskResponse, AskTool, AskToolCall, AskTurn};
 
 /// The Anthropic Messages API endpoint.
 pub const MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -124,7 +124,8 @@ pub fn parse_response(v: &Value) -> AskResponse {
                         // Re-serialize the parsed input object back to a JSON string (the neutral
                         // type carries arguments as a string).
                         arguments_json: block
-                            .get("input").map_or_else(|| "{}".to_string(), std::string::ToString::to_string),
+                            .get("input")
+                            .map_or_else(|| "{}".to_string(), std::string::ToString::to_string),
                     });
                 }
                 _ => {}

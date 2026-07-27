@@ -26,7 +26,11 @@ pub struct McpTool {
 
 impl From<ToolSpec> for McpTool {
     fn from(t: ToolSpec) -> Self {
-        Self { name: t.name, description: t.description, input_schema: t.input_schema }
+        Self {
+            name: t.name,
+            description: t.description,
+            input_schema: t.input_schema,
+        }
     }
 }
 
@@ -286,7 +290,10 @@ fn schema_to_params(schema: &Value) -> Vec<ParamSpec> {
                 Some("boolean") => ParamType::Flag,
                 Some("string") => match spec.get("enum").and_then(Value::as_array) {
                     Some(vals) => ParamType::Enum(
-                        vals.iter().filter_map(Value::as_str).map(String::from).collect(),
+                        vals.iter()
+                            .filter_map(Value::as_str)
+                            .map(String::from)
+                            .collect(),
                     ),
                     None => ParamType::String,
                 },
@@ -310,7 +317,11 @@ mod tests {
     use crate::mcp::config::McpServerConfig;
 
     fn tool(name: &str, schema: Value) -> McpTool {
-        McpTool { name: name.into(), description: Some(format!("does {name}")), input_schema: schema }
+        McpTool {
+            name: name.into(),
+            description: Some(format!("does {name}")),
+            input_schema: schema,
+        }
     }
 
     #[test]
@@ -319,11 +330,14 @@ mod tests {
         state.set_installed(
             "demo",
             McpServerConfig::new("https://x/mcp"),
-            vec![tool("search", serde_json::json!({
-                "type":"object",
-                "properties":{"query":{"type":"string"},"limit":{"type":"integer"}},
-                "required":["query"]
-            }))],
+            vec![tool(
+                "search",
+                serde_json::json!({
+                    "type":"object",
+                    "properties":{"query":{"type":"string"},"limit":{"type":"integer"}},
+                    "required":["query"]
+                }),
+            )],
         );
         assert!(state.is_server("demo"));
         let m = state.manifest_for("demo").unwrap();
@@ -345,7 +359,10 @@ mod tests {
         state.set_failed("bad", McpServerConfig::new("https://x/mcp"), "boom".into());
         assert!(!state.is_server("bad"));
         assert!(state.manifest_for("bad").is_none());
-        assert_eq!(state.get("bad").unwrap().last_error.as_deref(), Some("boom"));
+        assert_eq!(
+            state.get("bad").unwrap().last_error.as_deref(),
+            Some("boom")
+        );
     }
 
     #[test]
@@ -370,7 +387,11 @@ mod tests {
             capabilities: Value::Null,
         };
         state.open_session("a", &init);
-        assert_eq!(state.version(), v2, "opening a session must NOT bump the version");
+        assert_eq!(
+            state.version(),
+            v2,
+            "opening a session must NOT bump the version"
+        );
         state.remove("a");
         assert_ne!(state.version(), v2, "remove must bump the version");
     }

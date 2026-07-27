@@ -103,7 +103,11 @@ fn args_to_param_specs(args: &[PackageArg]) -> Vec<ParamSpec> {
 /// provided falls back to its `default`; a required arg with neither is an error (exit-2 usage).
 /// Unknown placeholders in the body are left as-is (honest, not silently dropped). Shared by prompt
 /// and script. Returns the filled text.
-fn fill_body(body: &str, args: &[PackageArg], provided: &[(String, String)]) -> Result<String, String> {
+fn fill_body(
+    body: &str,
+    args: &[PackageArg],
+    provided: &[(String, String)],
+) -> Result<String, String> {
     let mut out = body.to_string();
     for arg in args {
         let value = provided
@@ -131,7 +135,9 @@ fn fill_body(body: &str, args: &[PackageArg], provided: &[(String, String)]) -> 
 /// single leading newline) is the body. Returns `None` when there is no opening/closing fence.
 fn split_frontmatter(text: &str) -> Option<(&str, &str)> {
     // Tolerate a leading BOM/whitespace-free `---` on the very first line only.
-    let rest = text.strip_prefix("---\n").or_else(|| text.strip_prefix("---\r\n"))?;
+    let rest = text
+        .strip_prefix("---\n")
+        .or_else(|| text.strip_prefix("---\r\n"))?;
     // Find the closing fence: a line that is exactly `---`.
     let mut idx = 0;
     for line in rest.split_inclusive('\n') {
@@ -156,7 +162,9 @@ fn split_key_value(line: &str) -> Option<(String, String)> {
 /// Strip one layer of matching single or double quotes from a scalar value.
 fn unquote(s: &str) -> &str {
     let bytes = s.as_bytes();
-    if bytes.len() >= 2 && (s.starts_with('"') && s.ends_with('"') || s.starts_with('\'') && s.ends_with('\'')) {
+    if bytes.len() >= 2
+        && (s.starts_with('"') && s.ends_with('"') || s.starts_with('\'') && s.ends_with('\''))
+    {
         &s[1..s.len() - 1]
     } else {
         s
@@ -221,7 +229,8 @@ impl PromptPackage {
     /// Returns `Err` if `bytes` isn't UTF-8, has no leading `---` frontmatter, contains a malformed
     /// frontmatter line, or is missing the required `name` (or an argument's `name`).
     pub fn from_markdown(bytes: &[u8]) -> Result<Self, String> {
-        let text = std::str::from_utf8(bytes).map_err(|_| "prompt .md is not valid UTF-8".to_string())?;
+        let text =
+            std::str::from_utf8(bytes).map_err(|_| "prompt .md is not valid UTF-8".to_string())?;
         let (frontmatter, body) = split_frontmatter(text)
             .ok_or_else(|| "prompt .md: missing leading `---` frontmatter block".to_string())?;
 
@@ -246,8 +255,9 @@ impl PromptPackage {
                     arguments.push(arg);
                 }
                 in_arguments = false;
-                let (key, value) = split_key_value(line)
-                    .ok_or_else(|| format!("prompt .md frontmatter: expected `key: value`, got `{line}`"))?;
+                let (key, value) = split_key_value(line).ok_or_else(|| {
+                    format!("prompt .md frontmatter: expected `key: value`, got `{line}`")
+                })?;
                 match key.as_str() {
                     "name" => name = Some(value),
                     "description" => description = value,
@@ -259,7 +269,9 @@ impl PromptPackage {
             }
 
             if !in_arguments {
-                return Err(format!("prompt .md frontmatter: unexpected indented line `{line}`"));
+                return Err(format!(
+                    "prompt .md frontmatter: unexpected indented line `{line}`"
+                ));
             }
 
             let stripped = line.trim_start();
@@ -277,18 +289,20 @@ impl PromptPackage {
                 // `- name: file` puts the first key on the same line as the dash.
                 let rest = rest.trim();
                 if !rest.is_empty() {
-                    let (key, value) = split_key_value(rest)
-                        .ok_or_else(|| format!("prompt .md frontmatter: bad argument line `{line}`"))?;
+                    let (key, value) = split_key_value(rest).ok_or_else(|| {
+                        format!("prompt .md frontmatter: bad argument line `{line}`")
+                    })?;
                     apply_arg_field(&mut arg, &key, value)?;
                 }
                 current = Some(arg);
             } else {
                 // A continuation key of the current argument item.
-                let arg = current
-                    .as_mut()
-                    .ok_or_else(|| format!("prompt .md frontmatter: argument field before any `-`: `{line}`"))?;
-                let (key, value) = split_key_value(stripped)
-                    .ok_or_else(|| format!("prompt .md frontmatter: bad argument field `{line}`"))?;
+                let arg = current.as_mut().ok_or_else(|| {
+                    format!("prompt .md frontmatter: argument field before any `-`: `{line}`")
+                })?;
+                let (key, value) = split_key_value(stripped).ok_or_else(|| {
+                    format!("prompt .md frontmatter: bad argument field `{line}`")
+                })?;
                 apply_arg_field(arg, &key, value)?;
             }
         }
@@ -296,7 +310,8 @@ impl PromptPackage {
             arguments.push(arg);
         }
 
-        let name = name.ok_or_else(|| "prompt .md frontmatter: missing required `name`".to_string())?;
+        let name =
+            name.ok_or_else(|| "prompt .md frontmatter: missing required `name`".to_string())?;
         for arg in &arguments {
             if arg.name.is_empty() {
                 return Err("prompt .md frontmatter: an argument is missing its `name`".to_string());
@@ -460,7 +475,11 @@ fn yes() -> bool {
 impl Default for McpArtifacts {
     /// No selectors ⇒ all three (README: bare `grease install <server>` installs everything).
     fn default() -> Self {
-        Self { tools: true, prompts: true, resources: true }
+        Self {
+            tools: true,
+            prompts: true,
+            resources: true,
+        }
     }
 }
 
@@ -471,7 +490,11 @@ impl McpArtifacts {
         if !tools && !prompts && !resources {
             Self::default()
         } else {
-            Self { tools, prompts, resources }
+            Self {
+                tools,
+                prompts,
+                resources,
+            }
         }
     }
 }
@@ -697,8 +720,8 @@ pub fn verify_signature(body: &[u8], sig_b64: &str, key_b64: &str) -> Result<(),
         .as_slice()
         .try_into()
         .map_err(|_| format!("public key must be 32 bytes, got {}", key_bytes.len()))?;
-    let key =
-        VerifyingKey::from_bytes(&key_arr).map_err(|e| format!("invalid ed25519 public key: {e}"))?;
+    let key = VerifyingKey::from_bytes(&key_arr)
+        .map_err(|e| format!("invalid ed25519 public key: {e}"))?;
 
     let sig_bytes = base64::engine::general_purpose::STANDARD
         .decode(sig_b64.trim())
@@ -709,7 +732,8 @@ pub fn verify_signature(body: &[u8], sig_b64: &str, key_b64: &str) -> Result<(),
         .map_err(|_| format!("signature must be 64 bytes, got {}", sig_bytes.len()))?;
     let sig = Signature::from_bytes(&sig_arr);
 
-    key.verify_strict(body, &sig).map_err(|_| "signature does not verify".to_string())
+    key.verify_strict(body, &sig)
+        .map_err(|_| "signature does not verify".to_string())
 }
 
 /// Validate that `key_b64` decodes to a well-formed 32-byte ed25519 public key (so `grease registry
@@ -768,10 +792,15 @@ pub fn verify_inclusion_proof(
     proof: &[Vec<u8>],
 ) -> Result<(), String> {
     if leaf_index >= tree_size {
-        return Err(format!("leaf index {leaf_index} out of range for tree size {tree_size}"));
+        return Err(format!(
+            "leaf index {leaf_index} out of range for tree size {tree_size}"
+        ));
     }
     if root_hash.len() != 32 {
-        return Err(format!("root hash must be 32 bytes, got {}", root_hash.len()));
+        return Err(format!(
+            "root hash must be 32 bytes, got {}",
+            root_hash.len()
+        ));
     }
     // The canonical RFC-6962 §2.1.1 inclusion-proof walk (Trillian's `VerifyInclusion` shape):
     // fold the leaf hash up the tree, consuming one sibling per proof step. `fn` = index within the
@@ -840,7 +869,8 @@ mod tests {
 
     #[test]
     fn non_parameterized_body_is_verbatim() {
-        let p = pkg(r#"{"name":"tldr","description":"summarize","body":"Summarize the transcript."}"#);
+        let p =
+            pkg(r#"{"name":"tldr","description":"summarize","body":"Summarize the transcript."}"#);
         assert!(p.arguments.is_empty());
         assert_eq!(p.fill(&[]).unwrap(), "Summarize the transcript.");
         assert_eq!(p.model, None);
@@ -857,7 +887,12 @@ mod tests {
         );
         assert_eq!(p.model.as_deref(), Some("anthropic/claude-sonnet-5"));
         // Both provided.
-        let filled = p.fill(&[("file".into(), "a.md".into()), ("length".into(), "short".into())]).unwrap();
+        let filled = p
+            .fill(&[
+                ("file".into(), "a.md".into()),
+                ("length".into(), "short".into()),
+            ])
+            .unwrap();
         assert_eq!(filled, "Summarize a.md at short length.");
         // length falls back to its default.
         let filled = p.fill(&[("file".into(), "b.md".into())]).unwrap();
@@ -950,10 +985,8 @@ mod tests {
 
     #[test]
     fn param_specs_map_arguments() {
-        let p = pkg(
-            r#"{"name":"x","body":"{{a}}","arguments":[
-                {"name":"a","required":true},{"name":"b","required":false,"default":"z"}]}"#,
-        );
+        let p = pkg(r#"{"name":"x","body":"{{a}}","arguments":[
+                {"name":"a","required":true},{"name":"b","required":false,"default":"z"}]}"#);
         let specs = p.param_specs();
         assert_eq!(specs.len(), 2);
         let a = specs.iter().find(|s| s.name == "a").unwrap();
@@ -976,7 +1009,10 @@ mod tests {
             sha256_hex(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
-        assert_eq!(sha256_hex(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 
     // RFC 8032 ed25519 test vector 2: message is the single byte 0x72.
@@ -1048,7 +1084,9 @@ mod tests {
         // Cover balanced (4) and unbalanced (5, 7) trees — the unbalanced cases exercise the
         // split-point / ascend logic.
         for size in [1usize, 2, 3, 4, 5, 7, 8] {
-            let leaves: Vec<Vec<u8>> = (0..size).map(|i| format!("leaf-{i}").into_bytes()).collect();
+            let leaves: Vec<Vec<u8>> = (0..size)
+                .map(|i| format!("leaf-{i}").into_bytes())
+                .collect();
             let root = ref_root(&leaves);
             for (i, leaf) in leaves.iter().enumerate() {
                 let proof = ref_proof(&leaves, i);
@@ -1085,7 +1123,10 @@ mod tests {
 
     #[test]
     fn payload_kind_defaults_to_prompt_and_reads_declared() {
-        assert_eq!(payload_kind(br#"{"name":"x","body":"hi"}"#).unwrap(), PackageKind::Prompt);
+        assert_eq!(
+            payload_kind(br#"{"name":"x","body":"hi"}"#).unwrap(),
+            PackageKind::Prompt
+        );
         assert_eq!(
             payload_kind(br#"{"kind":"prompt","name":"x","body":"hi"}"#).unwrap(),
             PackageKind::Prompt
@@ -1109,8 +1150,14 @@ mod tests {
                  "body":"echo hello {{who}}"}"#,
         )
         .unwrap();
-        assert_eq!(s.fill(&[("who".into(), "world".into())]).unwrap(), "echo hello world");
-        assert!(s.fill(&[]).unwrap_err().contains("missing required argument --who"));
+        assert_eq!(
+            s.fill(&[("who".into(), "world".into())]).unwrap(),
+            "echo hello world"
+        );
+        assert!(s
+            .fill(&[])
+            .unwrap_err()
+            .contains("missing required argument --who"));
         assert_eq!(s.param_specs().len(), 1);
         let back = ScriptPackage::from_json(s.to_json().as_bytes()).unwrap();
         assert_eq!(s, back);
@@ -1125,7 +1172,10 @@ mod tests {
                  "scripts":[{"name":"lint-all","body":"echo linting"}]}"##,
         )
         .unwrap();
-        assert_eq!(sk.intended_use.as_deref(), Some("when the user asks for a review"));
+        assert_eq!(
+            sk.intended_use.as_deref(),
+            Some("when the user asks for a review")
+        );
         assert_eq!(sk.documents.len(), 1);
         assert_eq!(sk.documents[0].path, "SKILL.md");
         assert_eq!(sk.scripts.len(), 1);
