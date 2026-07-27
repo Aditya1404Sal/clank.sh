@@ -66,6 +66,18 @@ impl McpHttp for WstdMcpHttp {
                 )
             })
             .collect();
+        // Reject on the advertised length BEFORE reading. The post-read check below used to be the
+        // only one, which meant `MAX_BODY` bounded the value we returned but not peak allocation —
+        // a hostile or misconfigured server could OOM the durable worker before the cap was ever
+        // consulted. (Residual: wstd's `contents()` is all-or-nothing, so a chunked response with no
+        // Content-Length is still buffered first; the post-read check is what catches that case.)
+        if response
+            .body()
+            .content_length()
+            .is_some_and(|len| len > MAX_BODY as u64)
+        {
+            return Err(format!("response body exceeded {MAX_BODY} bytes"));
+        }
         let bytes = response
             .body_mut()
             .contents()

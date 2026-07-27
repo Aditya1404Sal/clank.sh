@@ -33,6 +33,10 @@ pub struct Request {
     pub follow_redirects: bool,
     /// Cap on redirects when following, to bound a redirect loop.
     pub max_redirects: u32,
+    /// Cap on the response body clank will buffer, in bytes. The whole body is held in memory, so
+    /// this bounds peak allocation — which on the wasm agent (fixed linear memory) is the difference
+    /// between an error and a trap.
+    pub max_body: usize,
     /// Time budget for establishing the connection.
     pub connect_timeout: Option<Duration>,
     /// Overall time budget for the request (maps to reqwest's total timeout; on wasm, the
@@ -47,6 +51,10 @@ pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// first-byte timeout — the closest WASI-HTTP primitive to a total deadline.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_mins(5);
 
+/// Default cap on a buffered response body. Generous for API responses and ordinary downloads,
+/// while still bounding peak memory on an agent with fixed linear memory that never restarts.
+pub const DEFAULT_MAX_BODY: usize = 64 * 1024 * 1024;
+
 impl Request {
     /// A plain `GET` with no redirect following and no explicit timeouts — the base every client
     /// tweaks. `None` here means "use [`DEFAULT_CONNECT_TIMEOUT`] / [`DEFAULT_TIMEOUT`]", not
@@ -59,6 +67,7 @@ impl Request {
             body: None,
             follow_redirects: false,
             max_redirects: 50,
+            max_body: DEFAULT_MAX_BODY,
             connect_timeout: None,
             timeout: None,
         }
@@ -99,6 +108,10 @@ pub enum Error {
     TooManyRedirects(u32),
     /// A `Location` header could not be resolved against the current URL.
     BadRedirect(String),
+    /// The response body exceeded `max_body`. Carries the cap, not the actual size — on the
+    /// streaming path the read is abandoned as soon as the cap is crossed, so the true size is
+    /// unknown (which is the point).
+    BodyTooLarge(usize),
 }
 
 impl std::fmt::Display for Error {
@@ -107,6 +120,7 @@ impl std::fmt::Display for Error {
             Error::Transport(m) => write!(f, "{m}"),
             Error::TooManyRedirects(n) => write!(f, "too many redirects (exceeded {n})"),
             Error::BadRedirect(loc) => write!(f, "could not resolve redirect to {loc}"),
+            Error::BodyTooLarge(cap) => write!(f, "response body exceeded {cap} bytes"),
         }
     }
 }
@@ -144,6 +158,7 @@ pub async fn fetch(req: &Request) -> Result<Response, Error> {
             body.clone(),
             connect_timeout,
             timeout,
+            req.max_body,
         )
         .await?;
 
@@ -227,6 +242,7 @@ async fn fetch_once(
     body: Option<Vec<u8>>,
     connect_timeout: Option<Duration>,
     timeout: Option<Duration>,
+    max_body: usize,
 ) -> Result<Response, Error> {
     use wstd::http::{Body, Client, Request as WstdRequest};
 
@@ -263,12 +279,27 @@ async fn fetch_once(
     let bytes = if is_bodyless(method, status) {
         Vec::new()
     } else {
-        response
+        // Reject on the advertised length BEFORE reading, so an honest oversized response never gets
+        // allocated at all.
+        if let Some(len) = response.body().content_length() {
+            if len > max_body as u64 {
+                return Err(Error::BodyTooLarge(max_body));
+            }
+        }
+        // Residual, stated plainly: wstd's `contents()` is all-or-nothing (there is no incremental
+        // read on `Body` short of going through `http_body`), so a CHUNKED response that advertises
+        // no Content-Length is still buffered before this check can fire. The native path below does
+        // bound this properly by streaming. Closing the gap here means depending on `http-body-util`
+        // and pinning it to wstd's `http_body` version — deliberately not done in a reliability fix.
+        let collected = response
             .body_mut()
             .contents()
             .await
-            .map_err(|e| Error::Transport(format!("reading response failed: {e}")))?
-            .to_vec()
+            .map_err(|e| Error::Transport(format!("reading response failed: {e}")))?;
+        if collected.len() > max_body {
+            return Err(Error::BodyTooLarge(max_body));
+        }
+        collected.to_vec()
     };
     Ok(Response {
         status,
@@ -286,6 +317,7 @@ async fn fetch_once(
     body: Option<Vec<u8>>,
     connect_timeout: Option<Duration>,
     timeout: Option<Duration>,
+    max_body: usize,
 ) -> Result<Response, Error> {
     // `redirect(none)` is load-bearing: the shared loop above is the single source of redirect
     // behavior across both targets, so reqwest's default auto-follow must be off.
@@ -308,7 +340,7 @@ async fn fetch_once(
     if let Some(bytes) = body {
         builder = builder.body(bytes);
     }
-    let response = builder
+    let mut response = builder
         .send()
         .await
         .map_err(|e| Error::Transport(format!("request failed: {e}")))?;
@@ -319,11 +351,27 @@ async fn fetch_once(
     let bytes = if is_bodyless(method, status) {
         Vec::new()
     } else {
-        response
-            .bytes()
+        // Reject on the advertised length first, then STREAM with a running bound so a server that
+        // lies about (or omits) Content-Length still cannot make us allocate past the cap. This is
+        // the property `.bytes()` could not give: it reads to EOF, so a post-hoc length check
+        // happens only after the memory is already committed.
+        if let Some(len) = response.content_length() {
+            if len > max_body as u64 {
+                return Err(Error::BodyTooLarge(max_body));
+            }
+        }
+        let mut buf: Vec<u8> = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
             .await
             .map_err(|e| Error::Transport(format!("reading response failed: {e}")))?
-            .to_vec()
+        {
+            if buf.len() + chunk.len() > max_body {
+                return Err(Error::BodyTooLarge(max_body));
+            }
+            buf.extend_from_slice(&chunk);
+        }
+        buf
     };
     Ok(Response {
         status,
@@ -508,6 +556,46 @@ mod transport_tests {
             }
         });
         base
+    }
+
+    /// A server that OMITS `Content-Length` and streams until it is cut off — the shape that defeats
+    /// a pre-check, so only a running bound during the read can stop it.
+    fn lengthless_server(total: usize) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n");
+                let chunk = vec![b'x'; 64 * 1024];
+                let mut sent = 0usize;
+                while sent < total && stream.write_all(&chunk).is_ok() {
+                    sent += chunk.len();
+                }
+                let _ = stream.flush();
+            }
+        });
+        base
+    }
+
+    #[tokio::test]
+    async fn an_advertised_oversize_body_is_refused_before_it_is_read() {
+        let base = scripted_server(vec![reply(200, &[], &"x".repeat(4096))]);
+        let mut req = Request::new(Method::GET, base);
+        req.max_body = 100;
+        assert_eq!(fetch(&req).await.unwrap_err(), Error::BodyTooLarge(100));
+    }
+
+    #[tokio::test]
+    async fn a_body_without_content_length_is_still_bounded_while_reading() {
+        // Regression: the read used to be `.bytes()` (to EOF), so a peer that advertises no length
+        // could commit unbounded memory before any check ran. The cap must hold during the read.
+        let cap = 256 * 1024;
+        let base = lengthless_server(8 * 1024 * 1024);
+        let mut req = Request::new(Method::GET, base);
+        req.max_body = cap;
+        assert_eq!(fetch(&req).await.unwrap_err(), Error::BodyTooLarge(cap));
     }
 
     fn reply(status: u16, headers: &[(&str, &str)], body: &str) -> Reply {
