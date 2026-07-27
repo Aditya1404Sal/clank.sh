@@ -666,7 +666,16 @@ fn list_lines(children: &[String], columns: Option<usize>) -> String {
 fn shell_columns<SE: ShellExtensions>(context: &ExecutionContext<'_, SE>) -> Option<usize> {
     let (_, var) = context.shell.env().get("COLUMNS")?;
     let value = var.value().to_cow_str(context.shell);
-    value.trim().parse::<usize>().ok().filter(|w| *w > 0)
+    // Reject an implausible width, not just a zero one. `format_columns` divides the width by the
+    // column stride and then iterates `0..cols`, so `COLUMNS=18446744073709551615` yielded a column
+    // count near `usize::MAX` — an effectively infinite layout loop (and an overflowing `c * rows`
+    // under debug assertions). Treating it as unset falls back to the 80-column default, which is
+    // the same thing an unparseable value already does. `render_ask_boxes` clamps for the same reason.
+    value
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|w| *w > 0 && *w <= crate::config::limits::MAX_COLUMNS)
 }
 
 /// Whether an `ls` argument already picks a layout/colour/width, so clank must not inject its

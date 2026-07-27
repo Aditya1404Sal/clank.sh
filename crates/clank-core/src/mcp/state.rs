@@ -145,7 +145,16 @@ impl McpState {
     // ---- sessions ----
 
     /// Open (record) a new session from an `initialize` result. Returns the local id (`s1`, `s2`, …).
+    ///
+    /// Bounded at [`crate::config::limits::MAX_MCP_SESSIONS`], dropping the oldest — the same
+    /// drop-oldest shape the process table and the pending-invocation table already use. This table
+    /// previously had no cap and nothing reaping it, so a loop of `mcp session open` grew a
+    /// never-restarting durable instance's memory without limit. The counter keeps advancing, so
+    /// local ids stay unique and deterministic across a replay.
     pub fn open_session(&mut self, server: &str, init: &InitializeResult) -> String {
+        while self.sessions.len() >= crate::config::limits::MAX_MCP_SESSIONS {
+            self.sessions.remove(0);
+        }
         self.next_session += 1;
         let local_id = format!("s{}", self.next_session);
         self.sessions.push(McpSession {
@@ -322,6 +331,29 @@ mod tests {
             description: Some(format!("does {name}")),
             input_schema: schema,
         }
+    }
+
+    #[test]
+    fn the_session_table_is_bounded_and_drops_oldest() {
+        // Regression: this table had no cap and nothing reaped it, so a loop of `mcp session open`
+        // grew a never-restarting durable instance's memory without limit.
+        let cap = crate::config::limits::MAX_MCP_SESSIONS;
+        let mut state = McpState::default();
+        let init = InitializeResult {
+            session_id: None,
+            protocol_version: "2025-03-26".into(),
+            server_name: "demo".into(),
+            server_version: "1".into(),
+            capabilities: serde_json::Value::Null,
+        };
+        for _ in 0..(cap + 10) {
+            state.open_session("demo", &init);
+        }
+        assert_eq!(state.sessions().len(), cap, "table must stay at the cap");
+        // Oldest dropped, newest retained, and ids stay unique (the counter never rewinds — which is
+        // what keeps them deterministic across an oplog replay).
+        assert_eq!(state.sessions()[cap - 1].local_id, format!("s{}", cap + 10));
+        assert!(state.session("s1").is_none(), "oldest must be evicted");
     }
 
     #[test]

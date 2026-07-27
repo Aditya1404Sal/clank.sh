@@ -5038,6 +5038,33 @@ fn ls_bin_lists_all_commands() {
     });
 }
 
+/// An absurd `COLUMNS` must not hang the column layout.
+///
+/// Regression: `shell_columns` parsed the value as an unbounded `usize`, and `format_columns`
+/// divides the width by the column stride then iterates `0..cols` — so a huge width produced a
+/// column count near `usize::MAX` and an effectively infinite loop. `set_columns` takes a `u16`, but
+/// `agent shell` clients set the width by sending a literal `export COLUMNS=<w>` line, so the value
+/// reaching the shell is arbitrary text. Out-of-range now reads as unset (the 80-column fallback),
+/// which is what an unparseable value already did. Without the fix this test hangs rather than fails.
+#[test]
+fn an_absurd_columns_value_cannot_hang_the_column_layout() {
+    on_rt(async {
+        let mut session = Session::new().await.unwrap();
+        let r = session
+            .eval_line("export COLUMNS=18446744073709551615")
+            .await;
+        assert_eq!(
+            r.exit_code,
+            0,
+            "stderr: {}",
+            String::from_utf8_lossy(&r.stderr)
+        );
+        let (out, _) = session.run_line("ls /bin").await;
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("curl"), "got: {out}");
+    });
+}
+
 /// `cat /bin/<name>` prints the command's help text — the virtual file is `cat`-able like a
 /// `/proc` file. Covers an intercepted command (`curl`, invisible to Brush's own resolution).
 #[test]

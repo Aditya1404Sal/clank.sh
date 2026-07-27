@@ -31,3 +31,35 @@ pub mod net {
     /// an agent that cannot be restarted.
     pub const LLM_TIMEOUT: Duration = Duration::from_mins(5);
 }
+
+/// Bounds on the work a single command can be made to do.
+///
+/// These exist because the shell is driven by a model, not only by a person. A malformed format
+/// string or a pathologically nested expression is a routine LLM emission, and on the agent the
+/// failure mode for "allocate 10 GB" or "recurse until the stack ends" is a trap, not an error
+/// message — so each of these turns an unbounded operation into a refusal.
+pub mod limits {
+    /// Largest field width or precision an `awk` `printf` conversion will honour.
+    ///
+    /// `awk 'BEGIN{printf "%9999999999d", 1}'` parsed its width as a bare `usize` and then built a
+    /// pad string that long. 64 KiB is far past any legitimate column layout.
+    pub const MAX_PRINTF_WIDTH: usize = 64 * 1024;
+
+    /// Maximum expression-nesting depth the `awk` parser accepts.
+    ///
+    /// The recursive-descent cycle `parse_expr → … → parse_primary → parse_expr` had no depth
+    /// limit, so deeply parenthesised input overflowed the stack — an abort, which unlike a panic
+    /// cannot even be caught.
+    pub const MAX_AWK_PARSE_DEPTH: usize = 200;
+
+    /// Largest terminal width honoured from `$COLUMNS` when laying out multi-column output.
+    ///
+    /// The value was parsed as an unbounded `usize`, so `COLUMNS=18446744073709551615` produced a
+    /// column count near `usize::MAX` and an effectively infinite layout loop.
+    pub const MAX_COLUMNS: usize = 1000;
+
+    /// Cap on concurrently-open MCP sessions retained by a session.
+    ///
+    /// The table had no bound and nothing reaped it, on an instance that never restarts.
+    pub const MAX_MCP_SESSIONS: usize = 64;
+}
