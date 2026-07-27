@@ -16,7 +16,16 @@ impl Session {
         cmd: crate::grease::cmd::GreaseCommand,
     ) -> LineResult {
         use crate::grease::cmd::GreaseCommand;
-        match cmd {
+        // The audited operation, for the ops.log record below. `None` for read-only subcommands.
+        let audited = match &cmd {
+            GreaseCommand::Install { name, .. } => Some(("install", name.clone())),
+            GreaseCommand::Remove { name } => Some(("remove", name.clone())),
+            GreaseCommand::Update { name } => {
+                Some(("update", name.clone().unwrap_or_else(|| "*".to_string())))
+            }
+            _ => None,
+        };
+        let result = match cmd {
             GreaseCommand::RegistryAdd { url, key } => {
                 self.grease_registry_add(&url, key.as_deref())
             }
@@ -30,7 +39,28 @@ impl Session {
             GreaseCommand::Remove { name } => self.grease_remove(&name),
             GreaseCommand::Search { query } => self.grease_search(&query).await,
             GreaseCommand::Update { name } => self.grease_update(name.as_deref()).await,
+        };
+        // Audit the supply-chain operations. Nothing in the whole install pipeline used to reach any
+        // log — a sha256 mismatch, a bad signature, a failed inclusion proof, all wrote to the
+        // terminal and vanished. Only the registry's HTTP fetches showed up (in http.log), so a
+        // rejected package left no evidence anyone could find afterwards. On the agent the terminal
+        // output is gone the moment the invocation returns, which makes this the only record.
+        if let Some((op, name)) = audited {
+            let outcome = if result.exit_code == 0 {
+                "ok".to_string()
+            } else {
+                format!("failed:{}", result.exit_code)
+            };
+            let mut record = crate::logging::Record::new("grease")
+                .field("op", op)
+                .field("package", &name)
+                .field("outcome", &outcome);
+            if result.exit_code != 0 {
+                record = record.field("detail", String::from_utf8_lossy(&result.stderr).trim());
+            }
+            record.emit(crate::logging::LogFile::Ops);
         }
+        result
     }
 
     /// `grease list`: installed packages (all kinds), each tagged with its kind.

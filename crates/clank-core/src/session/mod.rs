@@ -582,8 +582,13 @@ impl Session {
         } else {
             "end"
         };
-        let mut rec =
-            crate::logging::Record::new(event).field("line", log_safe_line(line).as_ref());
+        // Carry the shell's PID on every terminal event. `logging`'s module doc advertises
+        // "PID/PPID-addressable audit events", but the ordinary start/end pair carried only `line`
+        // — so two interleaved lines could not be told apart in the log, which is precisely when a
+        // reader needs to. Only the answer_prompt path stamped a pid.
+        let mut rec = crate::logging::Record::new(event)
+            .field("pid", crate::runtime::proctable::SHELL_ROOT_PID.to_string())
+            .field("line", log_safe_line(line).as_ref());
         if result.pending_prompt.is_none() {
             rec = rec.field("exit", result.exit_code.to_string());
         }

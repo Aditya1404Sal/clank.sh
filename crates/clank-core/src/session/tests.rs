@@ -3209,7 +3209,12 @@ fn shell_log_records_start_and_end() {
         session.eval_line("false").await;
         let log = cap.read(crate::logging::LogFile::Shell);
         assert!(log.contains(r#"start line="echo hi""#), "got:\n{log}");
-        assert!(log.contains(r#"end line="echo hi" exit=0"#), "got:\n{log}");
+        // Terminal events carry the shell pid, so interleaved lines can be told apart — the
+        // "PID/PPID-addressable audit events" the logging module doc advertises.
+        assert!(
+            log.contains(r#"end pid=1 line="echo hi" exit=0"#),
+            "got:\n{log}"
+        );
         assert!(
             log.contains("exit=1"),
             "the failing command's exit code is logged, got:\n{log}"
@@ -4265,6 +4270,30 @@ fn ask_malformed_tool_args_error_and_continue() {
             tr.outcome.unwrap_err().contains("malformed"),
             "expected a malformed-args error"
         );
+    });
+}
+
+/// A rejected install leaves evidence in ops.log.
+///
+/// Regression: nothing in the install pipeline reached any log. A sha256 mismatch, a bad signature
+/// or a failed inclusion proof wrote to the terminal and vanished — and on the agent the terminal
+/// output is gone the moment the invocation returns, so a supply-chain rejection left no trace
+/// anyone could find afterwards. Only the registry's HTTP fetches showed up, in http.log.
+#[test]
+fn a_failed_grease_install_is_audited_to_ops_log() {
+    on_rt(async {
+        let _dirs = set_grease_dirs();
+        let cap = LogCapture::new("grease-audit");
+        let mut session = Session::new().await.unwrap();
+        // No registries configured → the install fails before any fetch.
+        let r = session.eval_line("sudo grease install nope").await;
+        assert_ne!(r.exit_code, 0);
+
+        let log = cap.read(crate::logging::LogFile::Ops);
+        assert!(log.contains("grease"), "got:\n{log}");
+        assert!(log.contains("op=install"), "got:\n{log}");
+        assert!(log.contains("package=nope"), "got:\n{log}");
+        assert!(log.contains("outcome=failed"), "got:\n{log}");
     });
 }
 

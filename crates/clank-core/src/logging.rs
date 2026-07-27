@@ -113,7 +113,30 @@ pub fn write_line(file: LogFile, line: &str) {
             let _ = f.write_all(b"\n");
         }
     }
+    rotate_if_oversized(&path);
 }
+
+/// Keep an appended log file bounded by rewriting it to its last [`MAX_LOG_BYTES`] whole lines.
+///
+/// The agent's sink is bounded (it rebuilds a capped in-memory tail and rewrites the whole file);
+/// the append path had no counterpart, so a long-lived native session grew `shell.log` forever. Only
+/// runs once the file is meaningfully over the cap, so the rewrite is rare rather than per-line.
+fn rotate_if_oversized(path: &std::path::Path) {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
+    if meta.len() <= (MAX_LOG_BYTES as u64) * 2 {
+        return;
+    }
+    if let Ok(mut contents) = std::fs::read_to_string(path) {
+        bound_tail(&mut contents, MAX_LOG_BYTES);
+        let _ = std::fs::write(path, contents);
+    }
+}
+
+/// Cap on a single log file. Shared by the append path's rotation and the agent's rolling tail, so
+/// the two targets bound the same way.
+pub const MAX_LOG_BYTES: usize = 256 * 1024;
 
 /// The four log files. Each maps to a fixed filename under [`log_dir`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

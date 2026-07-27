@@ -37,7 +37,10 @@ use clank_core::logging::{LogFile, LogSink, bound_tail, log_dir};
 /// bounded tail bounds both memory and per-write I/O; because the cap is applied deterministically, oplog
 /// replay reproduces the same tail, so the write stays idempotent. `/var/log` is a rolling recent view,
 /// not a permanent archive (the full history lives in the Golem oplog).
-const MAX_LOG_BYTES: usize = 256 * 1024;
+///
+/// Shared with the native append path's rotation, so both targets bound the same way by construction
+/// rather than by two constants that happen to match.
+use clank_core::logging::MAX_LOG_BYTES;
 
 /// A replay-safe log sink: buffers each log file's recent lines in memory (bounded, rolling) and rewrites
 /// the whole file on every append via idempotent `std::fs::write`.
