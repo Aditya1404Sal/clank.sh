@@ -14,6 +14,12 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// Failures in this module are filesystem or serialization work on the grease store and registry
+/// state, so they all carry [`crate::grease::Error::Io`].
+fn io_err(msg: impl Into<String>) -> crate::grease::Error {
+    crate::grease::Error::Io(msg.into())
+}
+
 /// Default config directory (`registries.toml` + one `<name>.toml` per installed package).
 pub const DEFAULT_ETC: &str = "/etc/grease";
 /// Default payload store (`<store>/<name>/<kind>.json`), the source of truth for derived executables.
@@ -127,20 +133,23 @@ pub fn is_valid_name(name: &str) -> bool {
 ///
 /// # Errors
 /// Returns `Err` if `registries.toml` exists but can't be read, or fails to parse as TOML.
-pub fn load_registries() -> Result<Registries, String> {
+pub fn load_registries() -> crate::grease::error::Result<Registries> {
     match std::fs::read_to_string(registries_path()) {
-        Ok(text) => toml::from_str(&text).map_err(|e| format!("registries.toml parse error: {e}")),
+        Ok(text) => {
+            toml::from_str(&text).map_err(|e| io_err(format!("registries.toml parse error: {e}")))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Registries::default()),
-        Err(e) => Err(format!("registries.toml read error: {e}")),
+        Err(e) => Err(io_err(format!("registries.toml read error: {e}"))),
     }
 }
 
 /// Persist the registry list (creating `/etc/grease/` as needed).
-fn save_registries(regs: &Registries) -> Result<(), String> {
+fn save_registries(regs: &Registries) -> crate::grease::error::Result<()> {
     let dir = etc_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    let text = toml::to_string_pretty(regs).map_err(|e| format!("serialize error: {e}"))?;
-    std::fs::write(registries_path(), text).map_err(|e| format!("write error: {e}"))
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| io_err(format!("cannot create {}: {e}", dir.display())))?;
+    let text = toml::to_string_pretty(regs).map_err(|e| io_err(format!("serialize error: {e}")))?;
+    std::fs::write(registries_path(), text).map_err(|e| io_err(format!("write error: {e}")))
 }
 
 /// Add a registry URL with an optional trusted signing key (base64 ed25519 public key). Idempotent on
@@ -149,7 +158,7 @@ fn save_registries(regs: &Registries) -> Result<(), String> {
 ///
 /// # Errors
 /// Returns `Err` if the existing list can't be loaded, or the updated list can't be persisted.
-pub fn add_registry(url: &str, key: Option<&str>) -> Result<bool, String> {
+pub fn add_registry(url: &str, key: Option<&str>) -> crate::grease::error::Result<bool> {
     let mut regs = load_registries()?;
     if let Some(existing) = regs.registry.iter_mut().find(|r| r.url == url) {
         // Known URL: update the key if one was supplied and it differs; otherwise a no-op.
@@ -184,7 +193,7 @@ pub fn registry_key(url: &str) -> Option<String> {
 ///
 /// # Errors
 /// Returns `Err` if the existing list can't be loaded, or the updated list can't be persisted.
-pub fn remove_registry(url: &str) -> Result<bool, String> {
+pub fn remove_registry(url: &str) -> crate::grease::error::Result<bool> {
     let mut regs = load_registries()?;
     let before = regs.registry.len();
     regs.registry.retain(|r| r.url != url);
@@ -210,12 +219,18 @@ pub fn list_registries() -> Vec<String> {
 ///
 /// # Errors
 /// Returns `Err` if `dir` can't be created or the stub file can't be written.
-pub fn write_bin_stub(dir: &Path, name: &str, help: &str, label: &str) -> Result<(), String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+pub fn write_bin_stub(
+    dir: &Path,
+    name: &str,
+    help: &str,
+    label: &str,
+) -> crate::grease::error::Result<()> {
+    std::fs::create_dir_all(dir)
+        .map_err(|e| io_err(format!("cannot create {}: {e}", dir.display())))?;
     let content = format!(
         "# clank {label} (package: {name}, managed by `grease`; runs at the session layer)\n{help}"
     );
-    std::fs::write(dir.join(name), content).map_err(|e| format!("write stub error: {e}"))
+    std::fs::write(dir.join(name), content).map_err(|e| io_err(format!("write stub error: {e}")))
 }
 
 /// Materialize a skill's on-disk surface under `<skills>/<name>/`: write each reference document
@@ -227,9 +242,12 @@ pub fn write_bin_stub(dir: &Path, name: &str, help: &str, label: &str) -> Result
 /// # Errors
 /// Returns `Err` if the skill's root directory can't be created; document/script writes past that
 /// point are best-effort and don't fail the call.
-pub fn materialize_skill(sk: &crate::grease::pkg::SkillPackage) -> Result<(), String> {
+pub fn materialize_skill(
+    sk: &crate::grease::pkg::SkillPackage,
+) -> crate::grease::error::Result<()> {
     let root = skills_dir().join(&sk.name);
-    std::fs::create_dir_all(&root).map_err(|e| format!("cannot create {}: {e}", root.display()))?;
+    std::fs::create_dir_all(&root)
+        .map_err(|e| io_err(format!("cannot create {}: {e}", root.display())))?;
     for doc in &sk.documents {
         let Some(dest) = safe_join(&root, &doc.path) else {
             continue; // path escapes the skill dir — skip

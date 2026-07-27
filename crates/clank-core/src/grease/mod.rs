@@ -3,5 +3,8 @@
 
 pub(crate) mod cmd;
 pub mod config;
+pub mod error;
 pub mod pkg;
 pub mod state;
+
+pub use error::Error;

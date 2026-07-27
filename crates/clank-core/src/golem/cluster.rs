@@ -13,6 +13,11 @@
 
 use brush_parser::{tokenize_str, unquote_str, Token};
 
+/// A malformed `golem` command line — the caller's to fix, so [`crate::golem::Error::Invalid`].
+fn invalid(msg: impl Into<String>) -> crate::golem::Error {
+    crate::golem::Error::Invalid(msg.into())
+}
+
 /// A parsed `golem` command.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum GolemCommand {
@@ -45,7 +50,7 @@ pub(crate) enum GolemCommand {
 
 /// Recognize a `golem` line. `None` when it isn't one (fall through to Brush); `Some(Err)` when it is
 /// but doesn't parse. Operator-bearing lines fall through so the nested-context stub handles them.
-pub(crate) fn classify(line: &str) -> Option<Result<GolemCommand, String>> {
+pub(crate) fn classify(line: &str) -> Option<crate::golem::error::Result<GolemCommand>> {
     let tokens = tokenize_str(line).ok()?;
     if tokens.iter().any(|t| matches!(t, Token::Operator(_, _))) {
         return None;
@@ -64,13 +69,13 @@ pub(crate) fn classify(line: &str) -> Option<Result<GolemCommand, String>> {
     Some(parse(&words[1..]))
 }
 
-fn parse(args: &[String]) -> Result<GolemCommand, String> {
+fn parse(args: &[String]) -> crate::golem::error::Result<GolemCommand> {
     match args.first().map(String::as_str) {
         Some("agent") => parse_agent(&args[1..]),
         Some("connect") => {
             let identity = args
                 .get(1)
-                .ok_or("golem connect: needs an agent identity")?;
+                .ok_or_else(|| invalid("golem connect: needs an agent identity"))?;
             Ok(GolemCommand::Connect {
                 identity: identity.clone(),
             })
@@ -78,24 +83,28 @@ fn parse(args: &[String]) -> Result<GolemCommand, String> {
         Some("oplog") => Ok(GolemCommand::Oplog),
         Some("rollback") => Ok(GolemCommand::Rollback),
         Some("fork") => Ok(GolemCommand::Fork),
-        Some(other) => Err(format!(
+        Some(other) => Err(invalid(format!(
             "golem: unknown subcommand '{other}' (try: agent, connect, oplog, rollback, fork)"
-        )),
-        None => Err(
+        ))),
+        None => Err(invalid(
             "golem: needs a subcommand (try: agent, connect, oplog, rollback, fork)".to_string(),
-        ),
+        )),
     }
 }
 
-fn parse_agent(args: &[String]) -> Result<GolemCommand, String> {
+fn parse_agent(args: &[String]) -> crate::golem::error::Result<GolemCommand> {
     match args.first().map(String::as_str) {
         Some("list") => Ok(GolemCommand::AgentList),
         Some("interrupt") => {
-            let pid = args.get(1).ok_or("golem agent interrupt: needs a <pid>")?;
+            let pid = args
+                .get(1)
+                .ok_or_else(|| invalid("golem agent interrupt: needs a <pid>"))?;
             Ok(GolemCommand::AgentInterrupt { pid: pid.clone() })
         }
         Some("resume") => {
-            let pid = args.get(1).ok_or("golem agent resume: needs a <pid>")?;
+            let pid = args
+                .get(1)
+                .ok_or_else(|| invalid("golem agent resume: needs a <pid>"))?;
             Ok(GolemCommand::AgentResume { pid: pid.clone() })
         }
         Some("oplog") => {
@@ -110,11 +119,11 @@ fn parse_agent(args: &[String]) -> Result<GolemCommand, String> {
             let (agent_type, ctor, _count) = parse_type_ctor_count(&args[1..])?;
             Ok(GolemCommand::AgentStatus { agent_type, ctor })
         }
-        Some(other) => Err(format!(
+        Some(other) => Err(invalid(format!(
             "golem agent: unknown subcommand '{other}' \
              (try: list, new, oplog, status, interrupt, resume)"
-        )),
-        None => Err("golem agent: needs a subcommand".to_string()),
+        ))),
+        None => Err(invalid("golem agent: needs a subcommand".to_string())),
     }
 }
 
@@ -122,7 +131,7 @@ fn parse_agent(args: &[String]) -> Result<GolemCommand, String> {
 #[allow(clippy::type_complexity)]
 fn parse_type_ctor_count(
     args: &[String],
-) -> Result<(String, Vec<(String, String)>, Option<u32>), String> {
+) -> crate::golem::error::Result<(String, Vec<(String, String)>, Option<u32>)> {
     let mut agent_type = None;
     let mut ctor = Vec::new();
     let mut count = None;
@@ -130,24 +139,30 @@ fn parse_type_ctor_count(
     while let Some(a) = it.next() {
         match a.as_str() {
             "--type" => {
-                agent_type = Some(it.next().ok_or("--type needs a value")?.clone());
+                agent_type = Some(
+                    it.next()
+                        .ok_or_else(|| invalid("--type needs a value"))?
+                        .clone(),
+                );
             }
             "-n" => {
-                let v = it.next().ok_or("-n needs a value")?;
+                let v = it.next().ok_or_else(|| invalid("-n needs a value"))?;
                 count = Some(
                     v.parse::<u32>()
-                        .map_err(|_| format!("bad -n value '{v}'"))?,
+                        .map_err(|_| invalid(format!("bad -n value '{v}'")))?,
                 );
             }
             flag if flag.starts_with("--") => {
                 let key = &flag[2..];
-                let val = it.next().ok_or_else(|| format!("--{key} needs a value"))?;
+                let val = it
+                    .next()
+                    .ok_or_else(|| invalid(format!("--{key} needs a value")))?;
                 ctor.push((key.to_string(), val.clone()));
             }
-            other => return Err(format!("unexpected argument '{other}'")),
+            other => return Err(invalid(format!("unexpected argument '{other}'"))),
         }
     }
-    let agent_type = agent_type.ok_or("needs --type <agent-type>")?;
+    let agent_type = agent_type.ok_or_else(|| invalid("needs --type <agent-type>"))?;
     Ok((agent_type, ctor, count))
 }
 

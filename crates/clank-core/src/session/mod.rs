@@ -1912,18 +1912,23 @@ async fn fetch_index_entry(
 /// Verify a package's RFC-6962 inclusion proof: the log leaf is the payload's hex sha256 string (the
 /// content-address), so the proof witnesses that this exact content was logged. Decodes the base64
 /// root + proof nodes and delegates to [`crate::grease::pkg::verify_inclusion_proof`].
-fn verify_log_inclusion(payload_sha256_hex: &str, log: &LogProof) -> Result<(), String> {
+fn verify_log_inclusion(
+    payload_sha256_hex: &str,
+    log: &LogProof,
+) -> crate::grease::error::Result<()> {
     use base64::Engine;
     let root = base64::engine::general_purpose::STANDARD
         .decode(log.root.trim())
-        .map_err(|e| format!("invalid log root (base64): {e}"))?;
-    let proof: Result<Vec<Vec<u8>>, String> = log
+        .map_err(|e| crate::grease::Error::LogProof(format!("invalid log root (base64): {e}")))?;
+    let proof: crate::grease::error::Result<Vec<Vec<u8>>> = log
         .proof
         .iter()
         .map(|h| {
             base64::engine::general_purpose::STANDARD
                 .decode(h.trim())
-                .map_err(|e| format!("invalid proof node (base64): {e}"))
+                .map_err(|e| {
+                    crate::grease::Error::LogProof(format!("invalid proof node (base64): {e}"))
+                })
         })
         .collect();
     let proof = proof?;

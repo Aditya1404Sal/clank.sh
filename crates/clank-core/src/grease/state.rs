@@ -712,7 +712,7 @@ fn load_one(name: &str) -> Result<InstalledPackage, String> {
     // every healthy install. Detecting on-disk tampering would need a second, separately recorded
     // digest of the persisted file; until then, corruption is caught by the parse below, which
     // rejects anything that no longer deserializes.
-    let bad = |e: String| {
+    let bad = |e: crate::grease::Error| {
         format!(
             "payload is not a valid {} package: {e}",
             marker.kind.label()

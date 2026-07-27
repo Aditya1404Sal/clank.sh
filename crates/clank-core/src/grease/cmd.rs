@@ -17,6 +17,13 @@
 
 use brush_parser::{tokenize_str, unquote_str, Token};
 
+/// Every failure in this module is the caller mistyping a command line, so they all carry
+/// [`crate::grease::Error::Usage`]. The parser states WHAT is wrong; the variant states what KIND of
+/// wrong it is, which is what decides the exit code (2) at the boundary.
+fn usage(msg: impl Into<String>) -> crate::grease::Error {
+    crate::grease::Error::Usage(msg.into())
+}
+
 /// The `--tools/--prompts/--resources` selectors on `grease install` (MCP artifact types). All false
 /// means "not specified" — the installer treats that as all three (README: bare install = everything).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -58,7 +65,7 @@ pub(crate) enum GreaseCommand {
 
 /// Recognize a `grease` line. `None` when it isn't one (fall through to Brush); `Some(Err)` when it is
 /// but doesn't parse. Lines with shell operators fall through so the nested-context stub handles them.
-pub(crate) fn classify(line: &str) -> Option<Result<GreaseCommand, String>> {
+pub(crate) fn classify(line: &str) -> Option<crate::grease::error::Result<GreaseCommand>> {
     let tokens = tokenize_str(line).ok()?;
     if tokens.iter().any(|t| matches!(t, Token::Operator(_, _))) {
         return None;
@@ -76,7 +83,7 @@ pub(crate) fn classify(line: &str) -> Option<Result<GreaseCommand, String>> {
     Some(parse(&words[1..]))
 }
 
-fn parse(args: &[String]) -> Result<GreaseCommand, String> {
+fn parse(args: &[String]) -> crate::grease::error::Result<GreaseCommand> {
     let sub = args.first().map_or("list", String::as_str);
     match sub {
         "registry" => parse_registry(&args[1..]),
@@ -92,13 +99,13 @@ fn parse(args: &[String]) -> Result<GreaseCommand, String> {
                     "--prompts" => prompts = true,
                     "--resources" => resources = true,
                     other if other.starts_with("--") => {
-                        return Err(format!("grease install: unknown flag '{other}'"))
+                        return Err(usage(format!("grease install: unknown flag '{other}'")))
                     }
                     _ if name.is_none() => name = Some(a.clone()),
-                    _ => return Err(format!("grease install: unexpected argument '{a}'")),
+                    _ => return Err(usage(format!("grease install: unexpected argument '{a}'"))),
                 }
             }
-            let name = name.ok_or("grease install: needs a package name")?;
+            let name = name.ok_or_else(|| usage("grease install: needs a package name"))?;
             Ok(GreaseCommand::Install {
                 name,
                 artifacts: ArtifactFlags {
@@ -109,31 +116,37 @@ fn parse(args: &[String]) -> Result<GreaseCommand, String> {
             })
         }
         "remove" | "rm" | "uninstall" => {
-            let name = args.get(1).ok_or("grease remove: needs a package name")?;
+            let name = args
+                .get(1)
+                .ok_or_else(|| usage("grease remove: needs a package name"))?;
             Ok(GreaseCommand::Remove { name: name.clone() })
         }
         "list" | "ls" => Ok(GreaseCommand::List),
         "search" => {
-            let query = args.get(1).ok_or("grease search: needs a query")?;
+            let query = args
+                .get(1)
+                .ok_or_else(|| usage("grease search: needs a query"))?;
             Ok(GreaseCommand::Search {
                 query: query.clone(),
             })
         }
         "info" => {
-            let name = args.get(1).ok_or("grease info: needs a package name")?;
+            let name = args
+                .get(1)
+                .ok_or_else(|| usage("grease info: needs a package name"))?;
             Ok(GreaseCommand::Info { name: name.clone() })
         }
         "update" | "upgrade" => Ok(GreaseCommand::Update {
             name: args.get(1).cloned(),
         }),
-        other => Err(format!(
+        other => Err(usage(format!(
             "grease: unknown subcommand '{other}' \
              (try: registry, install, remove, list, search, info, update)"
-        )),
+        ))),
     }
 }
 
-fn parse_registry(args: &[String]) -> Result<GreaseCommand, String> {
+fn parse_registry(args: &[String]) -> crate::grease::error::Result<GreaseCommand> {
     match args.first().map(String::as_str) {
         Some("list") | None => Ok(GreaseCommand::RegistryList),
         Some("add") => {
@@ -146,25 +159,29 @@ fn parse_registry(args: &[String]) -> Result<GreaseCommand, String> {
                 if a == "--key" {
                     key = Some(
                         it.next()
-                            .ok_or("grease registry add: --key needs a value")?
+                            .ok_or_else(|| usage("grease registry add: --key needs a value"))?
                             .clone(),
                     );
                 } else if url.is_none() {
                     url = Some(a.clone());
                 } else {
-                    return Err(format!("grease registry add: unexpected argument '{a}'"));
+                    return Err(usage(format!(
+                        "grease registry add: unexpected argument '{a}'"
+                    )));
                 }
             }
-            let url = url.ok_or("grease registry add: needs a <url>")?;
+            let url = url.ok_or_else(|| usage("grease registry add: needs a <url>"))?;
             Ok(GreaseCommand::RegistryAdd { url, key })
         }
         Some("remove" | "rm") => {
-            let url = args.get(1).ok_or("grease registry remove: needs a <url>")?;
+            let url = args
+                .get(1)
+                .ok_or_else(|| usage("grease registry remove: needs a <url>"))?;
             Ok(GreaseCommand::RegistryRemove { url: url.clone() })
         }
-        Some(other) => Err(format!(
+        Some(other) => Err(usage(format!(
             "grease registry: unknown subcommand '{other}' (try: add, list, remove)"
-        )),
+        ))),
     }
 }
 
