@@ -75,6 +75,10 @@ serde_json = "1"
 # (toml_edit/winnow, no OS deps) and compile on wasm32-wasip2.
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+# Structured subsystem errors (golem/grease/mcp/ai). Derive-only, no runtime and no OS deps, so it
+# compiles unchanged for wasm32-wasip2. Lets a failure carry its KIND — retryable transport vs remote
+# fault vs malformed request — instead of collapsing to a String the caller can only print.
+thiserror = "2"
 # Timestamp rendering for `stat` (already in the tree via brush-core; compiles on wasm32-wasip2).
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Arg parsing for clank builtins written in Brush's `Command` form (xargs) — the same clap the

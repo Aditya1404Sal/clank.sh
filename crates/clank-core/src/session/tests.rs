@@ -1020,14 +1020,17 @@ struct FakeAgentInvoker {
 }
 #[async_trait::async_trait(?Send)]
 impl crate::golem::agent::AgentInvoker for FakeAgentInvoker {
-    async fn invoke(&self, inv: &crate::golem::agent::AgentInvocation) -> Result<String, String> {
+    async fn invoke(
+        &self,
+        inv: &crate::golem::agent::AgentInvocation,
+    ) -> crate::golem::error::Result<String> {
         *self.seen.lock().unwrap() = Some(inv.clone());
         Ok(self.reply.clone())
     }
     async fn invoke_async(
         &self,
         inv: &crate::golem::agent::AgentInvocation,
-    ) -> Result<crate::golem::agent::InvokeHandle, String> {
+    ) -> crate::golem::error::Result<crate::golem::agent::InvokeHandle> {
         *self.seen.lock().unwrap() = Some(inv.clone());
         let (token, note) = match &inv.mode {
             crate::golem::agent::InvokeMode::Trigger => (None, "triggered".to_string()),
@@ -1047,25 +1050,33 @@ impl crate::golem::agent::AgentInvoker for FakeAgentInvoker {
 struct FakeGolemCluster;
 #[async_trait::async_trait(?Send)]
 impl crate::golem::cluster::GolemCluster for FakeGolemCluster {
-    async fn agent_list(&self) -> Result<String, String> {
+    async fn agent_list(&self) -> crate::golem::error::Result<String> {
         Ok("agent-1\nagent-2".to_string())
     }
-    async fn agent_oplog(&self, t: &str, _c: &[(String, String)]) -> Result<String, String> {
+    async fn agent_oplog(
+        &self,
+        t: &str,
+        _c: &[(String, String)],
+    ) -> crate::golem::error::Result<String> {
         Ok(format!("oplog for {t}"))
     }
-    async fn agent_status(&self, t: &str, _c: &[(String, String)]) -> Result<String, String> {
+    async fn agent_status(
+        &self,
+        t: &str,
+        _c: &[(String, String)],
+    ) -> crate::golem::error::Result<String> {
         Ok(format!("status for {t}"))
     }
-    async fn connect(&self, id: &str) -> Result<String, String> {
+    async fn connect(&self, id: &str) -> crate::golem::error::Result<String> {
         Ok(format!("connected to {id}"))
     }
-    async fn self_oplog(&self) -> Result<String, String> {
+    async fn self_oplog(&self) -> crate::golem::error::Result<String> {
         Ok("self oplog".to_string())
     }
-    async fn rollback(&self) -> Result<String, String> {
+    async fn rollback(&self) -> crate::golem::error::Result<String> {
         Ok("rolled back".to_string())
     }
-    async fn fork(&self) -> Result<String, String> {
+    async fn fork(&self) -> crate::golem::error::Result<String> {
         Ok("forked".to_string())
     }
 }

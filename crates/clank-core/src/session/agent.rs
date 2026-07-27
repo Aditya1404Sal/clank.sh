@@ -199,9 +199,15 @@ impl Session {
                     }
                     LineResult::continue_with_stdout(out)
                 }
-                Err(e) => {
-                    LineResult::from_outcome(Vec::new(), format!("{name}: {e}\n").into_bytes(), 1)
-                }
+                // Exit code comes from the failure KIND now, not a flat 1: a malformed request is
+                // the caller's to fix (2), an unreachable cluster or a remote fault is not (4). A
+                // driver reading only the exit code can finally tell "I called it wrong" from "the
+                // other side is broken".
+                Err(e) => LineResult::from_outcome(
+                    Vec::new(),
+                    format!("{name}: {e}\n").into_bytes(),
+                    e.exit_code(),
+                ),
             },
             crate::golem::agent::InvokeMode::Trigger
             | crate::golem::agent::InvokeMode::Schedule(_) => {
@@ -222,7 +228,7 @@ impl Session {
                     Err(e) => LineResult::from_outcome(
                         Vec::new(),
                         format!("{name}: {e}\n").into_bytes(),
-                        1,
+                        e.exit_code(),
                     ),
                 }
             }
@@ -310,14 +316,16 @@ impl Session {
         let result = match sub {
             "oplog" => cluster.agent_oplog(&pkg.agent_type, &ctor).await,
             "status" => cluster.agent_status(&pkg.agent_type, &ctor).await,
-            _ => Err("unknown reserved subcommand".to_string()),
+            _ => Err(crate::golem::Error::Invalid(
+                "unknown reserved subcommand".to_string(),
+            )),
         };
         match result {
             Ok(text) => LineResult::continue_with_stdout(text.into_bytes()),
             Err(e) => LineResult::from_outcome(
                 Vec::new(),
                 format!("{name}: {sub}: {e}\n").into_bytes(),
-                1,
+                e.exit_code(),
             ),
         }
     }

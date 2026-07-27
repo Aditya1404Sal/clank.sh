@@ -7,6 +7,9 @@
 
 pub mod agent;
 pub mod cluster;
+pub mod error;
+
+pub use error::Error;
 // The native+cluster path: an external cluster-config reader ([`config_native`]) and REST-backed
 // `AgentInvoker`/`GolemCluster` impls ([`rest_native`]) that talk to a Golem cluster over its HTTP
 // API. cfg-gated so `reqwest` never reaches the wasm build; inert unless a cluster config is present.

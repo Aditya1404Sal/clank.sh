@@ -185,30 +185,54 @@ pub(crate) fn manifests() -> Vec<crate::manifest::Manifest> {
 
 /// The injected Golem cluster interface (durable `golem:api` bindings on the agent; a fake in tests).
 /// `?Send` (wasip2 single-threaded), `dyn`-compatible.
+/// Every method returns [`crate::golem::Error`], so a caller can tell an unreachable cluster (worth
+/// retrying) from a rejected credential, a remote fault, or an operation this build does not
+/// implement — and derive the exit code from that rather than hard-coding one.
 #[async_trait::async_trait(?Send)]
 pub trait GolemCluster {
     /// List running agents (rendered text).
-    async fn agent_list(&self) -> Result<String, String>;
+    ///
+    /// # Errors
+    /// See [`crate::golem::Error`].
+    async fn agent_list(&self) -> crate::golem::error::Result<String>;
     /// An agent's oplog (most-recent `count` entries; `None` = a default).
+    ///
+    /// # Errors
+    /// See [`crate::golem::Error`].
     async fn agent_oplog(
         &self,
         agent_type: &str,
         ctor: &[(String, String)],
-    ) -> Result<String, String>;
+    ) -> crate::golem::error::Result<String>;
     /// An agent's status/metadata.
+    ///
+    /// # Errors
+    /// See [`crate::golem::Error`].
     async fn agent_status(
         &self,
         agent_type: &str,
         ctor: &[(String, String)],
-    ) -> Result<String, String>;
+    ) -> crate::golem::error::Result<String>;
     /// Inspect a running agent by identity.
-    async fn connect(&self, identity: &str) -> Result<String, String>;
+    ///
+    /// # Errors
+    /// See [`crate::golem::Error`].
+    async fn connect(&self, identity: &str) -> crate::golem::error::Result<String>;
     /// The shell instance's own oplog.
-    async fn self_oplog(&self) -> Result<String, String>;
+    ///
+    /// # Errors
+    /// See [`crate::golem::Error`].
+    async fn self_oplog(&self) -> crate::golem::error::Result<String>;
     /// Rewind the shell instance state.
-    async fn rollback(&self) -> Result<String, String>;
+    ///
+    /// # Errors
+    /// See [`crate::golem::Error`].
+    async fn rollback(&self) -> crate::golem::error::Result<String>;
     /// Fork the current shell instance.
-    async fn fork(&self) -> Result<String, String>;
+    ///
+    /// # Errors
+    /// See [`crate::golem::Error`].
+    async fn fork(&self) -> crate::golem::error::Result<String>;
 }
 
 #[cfg(test)]

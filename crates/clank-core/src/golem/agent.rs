@@ -79,20 +79,36 @@ pub struct InvokeHandle {
 /// `Box<dyn AgentInvoker>`.
 #[async_trait::async_trait(?Send)]
 pub trait AgentInvoker {
-    /// Invoke `inv` in await mode and return the rendered result string, or an error message.
-    async fn invoke(&self, inv: &AgentInvocation) -> Result<String, String>;
+    /// Invoke `inv` in await mode and return the rendered result string.
+    ///
+    /// # Errors
+    /// See [`crate::golem::Error`] — the variant distinguishes an unreachable cluster (retryable)
+    /// from a remote fault, a rejected credential, and a malformed request.
+    async fn invoke(&self, inv: &AgentInvocation) -> crate::golem::error::Result<String>;
 
     /// Invoke `inv` in trigger or schedule mode (fire-and-forget / deferred). Returns an
     /// [`InvokeHandle`] carrying a cancel token (for `kill`) + a note. Default: not supported.
-    async fn invoke_async(&self, _inv: &AgentInvocation) -> Result<InvokeHandle, String> {
-        Err("this invoker does not support trigger/schedule mode".to_string())
+    ///
+    /// # Errors
+    /// [`crate::golem::Error::Unsupported`] by default; see [`crate::golem::Error`] otherwise.
+    async fn invoke_async(
+        &self,
+        _inv: &AgentInvocation,
+    ) -> crate::golem::error::Result<InvokeHandle> {
+        Err(crate::golem::Error::Unsupported(
+            "this invoker does not support trigger/schedule mode".to_string(),
+        ))
     }
 
     /// Cancel a previously-triggered/scheduled invocation by its token (README:850). Returns `Ok(true)`
-    /// if the cancel took effect, `Ok(false)` if it was already in-progress/completed (a no-op), or an
-    /// error. Default: not supported.
-    async fn cancel(&self, _token: &str) -> Result<bool, String> {
-        Err("this invoker does not support cancel".to_string())
+    /// if the cancel took effect, `Ok(false)` if it was already in-progress/completed (a no-op).
+    ///
+    /// # Errors
+    /// [`crate::golem::Error::Unsupported`] by default; see [`crate::golem::Error`] otherwise.
+    async fn cancel(&self, _token: &str) -> crate::golem::error::Result<bool> {
+        Err(crate::golem::Error::Unsupported(
+            "this invoker does not support cancel".to_string(),
+        ))
     }
 }
 

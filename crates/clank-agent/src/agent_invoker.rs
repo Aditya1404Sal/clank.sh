@@ -14,6 +14,7 @@
 //! The invocation is **await mode**: `invoke-and-await` blocks (under the Golem reactor) until the
 //! remote agent returns, and the result `DataValue` is rendered to text.
 
+use clank_core::golem::Error;
 use clank_core::golem::agent::{
     AgentInvocation, AgentInvoker, InvokeHandle, InvokeMode, parse_epoch_secs,
 };
@@ -27,13 +28,14 @@ use golem_rust::golem_agentic::golem::agent::host::WasmRpc;
 /// it — which changed the tuple's ARITY after `order_agent_params` had already validated it, and a
 /// wrong-arity wRPC call is a fatal host trap that wedges the durable instance (see the note in
 /// `clank_core::session::agent`). Losing an argument is never the better outcome.
-fn encode_args(args: &[(String, String)]) -> Result<DataValue, String> {
+fn encode_args(args: &[(String, String)]) -> Result<DataValue, Error> {
     let mut elements = Vec::with_capacity(args.len());
     for (name, value) in args {
+        // `Invalid`: the request never left, and the caller can fix it.
         let encoded = value
             .clone()
             .to_element_value()
-            .map_err(|e| format!("cannot encode argument '{name}': {e:?}"))?;
+            .map_err(|e| Error::Invalid(format!("cannot encode argument '{name}': {e:?}")))?;
         elements.push(encoded);
     }
     Ok(DataValue::Tuple(elements))
@@ -61,7 +63,7 @@ fn parse_phantom(
 }
 
 /// Build the `WasmRpc` client for an invocation (agent type + constructor tuple + optional phantom).
-fn build_client(inv: &AgentInvocation) -> Result<WasmRpc, String> {
+fn build_client(inv: &AgentInvocation) -> Result<WasmRpc, Error> {
     let ctor = encode_args(&inv.constructor)?;
     Ok(WasmRpc::new(
         &inv.agent_type,
@@ -91,18 +93,28 @@ pub(crate) struct WasmRpcInvoker;
 
 #[async_trait::async_trait(?Send)]
 impl AgentInvoker for WasmRpcInvoker {
-    async fn invoke(&self, inv: &AgentInvocation) -> Result<String, String> {
+    async fn invoke(&self, inv: &AgentInvocation) -> clank_core::golem::error::Result<String> {
         // Build the RPC client for the target agent type (the runtime upserts: finds-or-creates the
         // agent — README:803), then await the method result.
         let client = build_client(inv)?;
         let input = encode_args(&inv.args)?;
         match client.invoke_and_await(&inv.method, &input) {
             Ok(result) => Ok(render_result(result)),
-            Err(e) => Err(format!("agent invocation failed: {e:?}")),
+            // Classified as `Remote`: the call reached the host binding and the host reported a
+            // failure. It is NOT split further into unreachable-vs-trap because the SDK's error is a
+            // generated bindings type that exposes no kind — only a Debug rendering. Saying `Remote`
+            // and meaning it beats inventing a distinction we cannot actually observe. What the
+            // enum DOES buy here is separating this from the failures clank owns: a bad arity or an
+            // unencodable argument is now `Invalid` (exit 2), and the honest stubs are `Unsupported`
+            // (exit 2), where previously all three arrived as one exit-1 string.
+            Err(e) => Err(Error::Remote(format!("{e:?}"))),
         }
     }
 
-    async fn invoke_async(&self, inv: &AgentInvocation) -> Result<InvokeHandle, String> {
+    async fn invoke_async(
+        &self,
+        inv: &AgentInvocation,
+    ) -> clank_core::golem::error::Result<InvokeHandle> {
         let client = build_client(inv)?;
         let input = encode_args(&inv.args)?;
         match &inv.mode {
@@ -111,7 +123,7 @@ impl AgentInvoker for WasmRpcInvoker {
                 // could be cancelled via async-invoke-and-await's future, but plain trigger has none).
                 client
                     .invoke(&inv.method, &input)
-                    .map_err(|e| format!("trigger failed: {e:?}"))?;
+                    .map_err(|e| Error::Remote(format!("trigger failed: {e:?}")))?;
                 Ok(InvokeHandle {
                     cancel_token: None,
                     note: "triggered (fire-and-forget)".to_string(),
@@ -123,7 +135,7 @@ impl AgentInvoker for WasmRpcInvoker {
                 // survive across the durable agent's serialized invocations (Golem parks between
                 // invocations), so it can't be re-acquired for a later `kill` — the invocation IS
                 // scheduled, but cancel-after-return isn't supported (documented, honest handle).
-                let secs = parse_epoch_secs(when)?;
+                let secs = parse_epoch_secs(when).map_err(Error::Invalid)?;
                 let dt = golem_rust::wasip2::clocks::wall_clock::Datetime {
                     seconds: secs,
                     nanoseconds: 0,
@@ -134,18 +146,20 @@ impl AgentInvoker for WasmRpcInvoker {
                     note: format!("scheduled for {when}"),
                 })
             }
-            InvokeMode::Await => Err("invoke_async called with Await mode".to_string()),
+            InvokeMode::Await => Err(Error::Invalid(
+                "invoke_async called with Await mode".to_string(),
+            )),
         }
     }
 
-    async fn cancel(&self, _token: &str) -> Result<bool, String> {
+    async fn cancel(&self, _token: &str) -> clank_core::golem::error::Result<bool> {
         // A scheduled invocation's cancellation-token is a host resource that doesn't survive across
         // the durable agent's serialized invocations, so we can't re-acquire it here to cancel. Honest:
         // cancel-after-return isn't supported on this SDK surface for scheduled invocations.
-        Err(
+        Err(Error::Unsupported(
             "cancel of a scheduled invocation is not supported across invocations on this build"
                 .to_string(),
-        )
+        ))
     }
 }
 
