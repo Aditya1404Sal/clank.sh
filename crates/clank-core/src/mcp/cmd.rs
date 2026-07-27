@@ -94,7 +94,9 @@ fn parse(args: &[String]) -> Result<McpCommand, String> {
         }),
         "tools" => {
             let server = args.get(1).ok_or("mcp tools: needs a server name")?;
-            Ok(McpCommand::Tools { server: server.clone() })
+            Ok(McpCommand::Tools {
+                server: server.clone(),
+            })
         }
         "session" => parse_session(&args[1..]),
         "watch" => {
@@ -105,10 +107,14 @@ fn parse(args: &[String]) -> Result<McpCommand, String> {
             // `mcp resource info <path>`.
             match args.get(1).map(String::as_str) {
                 Some("info") => {
-                    let path = args.get(2).ok_or("mcp resource info: needs a /mnt/mcp path")?;
+                    let path = args
+                        .get(2)
+                        .ok_or("mcp resource info: needs a /mnt/mcp path")?;
                     Ok(McpCommand::ResourceInfo { path: path.clone() })
                 }
-                Some(other) => Err(format!("mcp resource: unknown subcommand '{other}' (try: info)")),
+                Some(other) => Err(format!(
+                    "mcp resource: unknown subcommand '{other}' (try: info)"
+                )),
                 None => Err("mcp resource: needs a subcommand (try: info)".to_string()),
             }
         }
@@ -142,11 +148,13 @@ fn parse_add(args: &[String]) -> Result<McpCommand, String> {
         .first()
         .ok_or("mcp add: needs <name> <url>")?
         .clone();
-    let url = positional
-        .get(1)
-        .ok_or("mcp add: needs a <url>")?
-        .clone();
-    Ok(McpCommand::Add { name, url, auth_env, auth_header })
+    let url = positional.get(1).ok_or("mcp add: needs a <url>")?.clone();
+    Ok(McpCommand::Add {
+        name,
+        url,
+        auth_env,
+        auth_header,
+    })
 }
 
 fn parse_session(args: &[String]) -> Result<McpCommand, String> {
@@ -154,7 +162,9 @@ fn parse_session(args: &[String]) -> Result<McpCommand, String> {
         Some("list") | None => Ok(McpCommand::SessionList),
         Some("open") => {
             let server = args.get(1).ok_or("mcp session open: needs a server name")?;
-            Ok(McpCommand::SessionOpen { server: server.clone() })
+            Ok(McpCommand::SessionOpen {
+                server: server.clone(),
+            })
         }
         Some("close") => {
             let id = args.get(1).ok_or("mcp session close: needs a session id")?;
@@ -333,13 +343,30 @@ mod tests {
                 auth_header: None
             }
         );
-        assert_eq!(c("mcp remove github"), McpCommand::Remove { name: "github".into() });
+        assert_eq!(
+            c("mcp remove github"),
+            McpCommand::Remove {
+                name: "github".into()
+            }
+        );
         assert_eq!(c("mcp reload"), McpCommand::Reload { name: None });
-        assert_eq!(c("mcp tools github"), McpCommand::Tools { server: "github".into() });
-        assert_eq!(c("mcp watch github://repo/issues"), McpCommand::Watch { uri: "github://repo/issues".into() });
+        assert_eq!(
+            c("mcp tools github"),
+            McpCommand::Tools {
+                server: "github".into()
+            }
+        );
+        assert_eq!(
+            c("mcp watch github://repo/issues"),
+            McpCommand::Watch {
+                uri: "github://repo/issues".into()
+            }
+        );
         assert_eq!(
             c("mcp resource info /mnt/mcp/x/y"),
-            McpCommand::ResourceInfo { path: "/mnt/mcp/x/y".into() }
+            McpCommand::ResourceInfo {
+                path: "/mnt/mcp/x/y".into()
+            }
         );
         // `mcp watch` without a uri errors.
         assert!(classify("mcp watch").unwrap().is_err());
@@ -362,9 +389,20 @@ mod tests {
     fn session_subcommands() {
         assert_eq!(c("mcp session list"), McpCommand::SessionList);
         assert_eq!(c("mcp session"), McpCommand::SessionList);
-        assert_eq!(c("mcp session open gh"), McpCommand::SessionOpen { server: "gh".into() });
-        assert_eq!(c("mcp session close s1"), McpCommand::SessionClose { id: "s1".into() });
-        assert_eq!(c("mcp session info s1"), McpCommand::SessionInfo { id: "s1".into() });
+        assert_eq!(
+            c("mcp session open gh"),
+            McpCommand::SessionOpen {
+                server: "gh".into()
+            }
+        );
+        assert_eq!(
+            c("mcp session close s1"),
+            McpCommand::SessionClose { id: "s1".into() }
+        );
+        assert_eq!(
+            c("mcp session info s1"),
+            McpCommand::SessionInfo { id: "s1".into() }
+        );
     }
 
     #[test]
@@ -383,13 +421,18 @@ mod tests {
 
     #[test]
     fn tool_invocation_parses_tool_and_flags() {
-        let inv = parse_tool_invocation("github search --query rust --limit 5").unwrap().unwrap();
+        let inv = parse_tool_invocation("github search --query rust --limit 5")
+            .unwrap()
+            .unwrap();
         assert_eq!(inv.server, "github");
         assert_eq!(inv.tool.as_deref(), Some("search"));
-        assert_eq!(inv.flags, vec![
-            ("query".into(), Some("rust".into())),
-            ("limit".into(), Some("5".into())),
-        ]);
+        assert_eq!(
+            inv.flags,
+            vec![
+                ("query".into(), Some("rust".into())),
+                ("limit".into(), Some("5".into())),
+            ]
+        );
     }
 
     #[test]

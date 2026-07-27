@@ -43,6 +43,8 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny,cargo-audit
+      - name: Formatting (rustfmt.toml)
+        run: cargo fmt --check
       - name: Clippy — native crates (warnings are errors)
         run: >-
           cargo clippy

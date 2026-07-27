@@ -101,8 +101,7 @@ fn parse_find_args(args: &[String]) -> Result<FindOpts, String> {
             "-maxdepth" => {
                 seen_predicate = true;
                 let n = value_of(arg)?;
-                opts.maxdepth =
-                    Some(n.parse().map_err(|_| format!("invalid -maxdepth '{n}'"))?);
+                opts.maxdepth = Some(n.parse().map_err(|_| format!("invalid -maxdepth '{n}'"))?);
             }
             "-mindepth" => {
                 seen_predicate = true;
@@ -128,7 +127,10 @@ fn parse_find_args(args: &[String]) -> Result<FindOpts, String> {
 }
 
 fn basename(path: &str) -> &str {
-    path.trim_end_matches('/').rsplit('/').next().unwrap_or(path)
+    path.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(path)
 }
 
 impl FindOpts {
@@ -198,7 +200,8 @@ fn walk_virtual(root: &str, opts: &FindOpts, out: &mut dyn Write) -> bool {
     };
     let Some(children) = children else {
         // Not a listable virtual dir; a resolvable leaf (e.g. /bin/curl) is served as a file.
-        let resolves = crate::runtime::binfs::is_bin_path(root) && crate::runtime::binfs::resolve(root).is_ok();
+        let resolves = crate::runtime::binfs::is_bin_path(root)
+            && crate::runtime::binfs::resolve(root).is_ok();
         if resolves && opts.mindepth == 0 && opts.matches(root, false) {
             let _ = writeln!(out, "{root}");
         }
@@ -240,7 +243,10 @@ impl SimpleCommand for Find {
         }
     }
 
-    fn execute<SE, I, S>(context: ExecutionContext<'_, SE>, args: I) -> Result<ExecutionResult, Error>
+    fn execute<SE, I, S>(
+        context: ExecutionContext<'_, SE>,
+        args: I,
+    ) -> Result<ExecutionResult, Error>
     where
         SE: ShellExtensions,
         I: Iterator<Item = S>,
@@ -258,7 +264,9 @@ impl SimpleCommand for Find {
         let mut out = context.stdout();
         let mut errs = Vec::new();
         for root in &opts.paths {
-            if crate::runtime::binfs::is_bin_path(root) || crate::runtime::procfs::is_proc_path(root) {
+            if crate::runtime::binfs::is_bin_path(root)
+                || crate::runtime::procfs::is_proc_path(root)
+            {
                 if !walk_virtual(root, &opts, &mut out) {
                     errs.push(format!("'{root}': No such file or directory"));
                 }

@@ -68,7 +68,10 @@ fn endpoint(desc: &Descriptor) -> String {
         let base = std::env::var("GOLEM_OLLAMA_BASE_URL")
             .ok()
             .filter(|s| !s.is_empty())
-            .map_or_else(|| "http://localhost:11434".to_string(), |s| s.trim_end_matches('/').to_string());
+            .map_or_else(
+                || "http://localhost:11434".to_string(),
+                |s| s.trim_end_matches('/').to_string(),
+            );
         format!("{base}/v1/chat/completions")
     } else {
         format!("{}/chat/completions", desc.base_url)
@@ -129,7 +132,12 @@ pub(crate) async fn turn(
 }
 
 /// Build the Chat Completions request body from the neutral turn inputs.
-fn build_request(system: Option<&str>, history: &[AskTurn], tools: &[AskTool], model: &str) -> Value {
+fn build_request(
+    system: Option<&str>,
+    history: &[AskTurn],
+    tools: &[AskTool],
+    model: &str,
+) -> Value {
     let mut messages: Vec<Value> = Vec::new();
     if let Some(sys) = system {
         messages.push(json!({ "role": "system", "content": sys }));
@@ -152,8 +160,8 @@ fn build_request(system: Option<&str>, history: &[AskTurn], tools: &[AskTool], m
 /// `AskTool` → an OpenAI `function` tool. `parameters` must be a JSON object; a schema string that
 /// doesn't parse falls back to a permissive empty object.
 fn tool_to_json(tool: &AskTool) -> Value {
-    let schema: Value =
-        serde_json::from_str(&tool.parameters_schema).unwrap_or_else(|_| json!({ "type": "object" }));
+    let schema: Value = serde_json::from_str(&tool.parameters_schema)
+        .unwrap_or_else(|_| json!({ "type": "object" }));
     json!({
         "type": "function",
         "function": {
@@ -173,7 +181,11 @@ fn push_messages(turn: &AskTurn, messages: &mut Vec<Value>) {
         AskTurn::Assistant { text, tool_calls } => {
             let mut msg = json!({ "role": "assistant" });
             // OpenAI wants `content: null` when the assistant only made tool calls.
-            msg["content"] = if text.is_empty() { Value::Null } else { json!(text) };
+            msg["content"] = if text.is_empty() {
+                Value::Null
+            } else {
+                json!(text)
+            };
             if !tool_calls.is_empty() {
                 msg["tool_calls"] = json!(tool_calls
                     .iter()
@@ -214,7 +226,10 @@ fn parse_response(v: &Value) -> AskResponse {
         for call in calls {
             tool_calls.push(AskToolCall {
                 id: call["id"].as_str().unwrap_or_default().to_string(),
-                name: call["function"]["name"].as_str().unwrap_or_default().to_string(),
+                name: call["function"]["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
                 // Already a JSON string in the OpenAI wire; keep it as-is (the neutral invariant).
                 arguments_json: call["function"]["arguments"]
                     .as_str()
@@ -245,7 +260,12 @@ mod tests {
             description: "run".into(),
             parameters_schema: r#"{"type":"object","properties":{"cmd":{"type":"string"}}}"#.into(),
         }];
-        let body = build_request(Some("be terse"), &[AskTurn::User("hi".into())], &tools, "gpt-4o");
+        let body = build_request(
+            Some("be terse"),
+            &[AskTurn::User("hi".into())],
+            &tools,
+            "gpt-4o",
+        );
         assert_eq!(body["model"], "gpt-4o");
         assert_eq!(body["messages"][0]["role"], "system");
         assert_eq!(body["messages"][1]["role"], "user");
@@ -253,7 +273,10 @@ mod tests {
         // Tool is an OpenAI `function` with a PARSED parameters object.
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["function"]["name"], "shell");
-        assert_eq!(body["tools"][0]["function"]["parameters"]["properties"]["cmd"]["type"], "string");
+        assert_eq!(
+            body["tools"][0]["function"]["parameters"]["properties"]["cmd"]["type"],
+            "string"
+        );
         assert_eq!(body["tool_choice"], "auto");
     }
 
@@ -277,12 +300,18 @@ mod tests {
         let body = build_request(None, &history, &[], "gpt-4o");
         let assistant = &body["messages"][0];
         assert_eq!(assistant["role"], "assistant");
-        assert!(assistant["content"].is_null(), "tool-only assistant content is null");
+        assert!(
+            assistant["content"].is_null(),
+            "tool-only assistant content is null"
+        );
         assert_eq!(assistant["tool_calls"][0]["id"], "call_1");
         assert_eq!(assistant["tool_calls"][0]["type"], "function");
         assert_eq!(assistant["tool_calls"][0]["function"]["name"], "shell");
         // arguments stay a JSON string.
-        assert_eq!(assistant["tool_calls"][0]["function"]["arguments"], r#"{"cmd":"ls"}"#);
+        assert_eq!(
+            assistant["tool_calls"][0]["function"]["arguments"],
+            r#"{"cmd":"ls"}"#
+        );
         // Tool result is its OWN role:tool message linked by tool_call_id.
         let tool = &body["messages"][1];
         assert_eq!(tool["role"], "tool");
@@ -330,8 +359,14 @@ mod tests {
     fn ollama_endpoint_honors_the_base_url_env() {
         // Deterministic default when the env is unset (serialize via the process env is out of scope
         // here; just check the fixed-base providers).
-        assert_eq!(endpoint(&OPENAI), "https://api.openai.com/v1/chat/completions");
+        assert_eq!(
+            endpoint(&OPENAI),
+            "https://api.openai.com/v1/chat/completions"
+        );
         assert_eq!(endpoint(&GROK), "https://api.x.ai/v1/chat/completions");
-        assert_eq!(endpoint(&OPENROUTER), "https://openrouter.ai/api/v1/chat/completions");
+        assert_eq!(
+            endpoint(&OPENROUTER),
+            "https://openrouter.ai/api/v1/chat/completions"
+        );
     }
 }

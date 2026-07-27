@@ -47,14 +47,22 @@ impl GolemCluster for GolemApiCluster {
         ))
     }
 
-    async fn agent_oplog(&self, agent_type: &str, _ctor: &[(String, String)]) -> Result<String, String> {
+    async fn agent_oplog(
+        &self,
+        agent_type: &str,
+        _ctor: &[(String, String)],
+    ) -> Result<String, String> {
         Err(format!(
             "agent oplog for '{agent_type}' needs the agent's constructor schema to build its \
              agent-id (not wired in v1); use `golem oplog` for this instance's own oplog"
         ))
     }
 
-    async fn agent_status(&self, agent_type: &str, _ctor: &[(String, String)]) -> Result<String, String> {
+    async fn agent_status(
+        &self,
+        agent_type: &str,
+        _ctor: &[(String, String)],
+    ) -> Result<String, String> {
         Err(format!(
             "agent status for '{agent_type}' needs the agent's constructor schema to build its \
              agent-id (not wired in v1); use `golem agent status` on this instance via `golem oplog`"

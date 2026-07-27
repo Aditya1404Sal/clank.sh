@@ -202,10 +202,16 @@ mod tests {
         let w = |s: &str| s.split_whitespace().map(String::from).collect::<Vec<_>>();
         // The built-in prompt-user rule.
         let rules = vec!["--secret".to_string()];
-        assert!(flags_trigger_redaction(&rules, &w("prompt-user \"q\" --secret")));
+        assert!(flags_trigger_redaction(
+            &rules,
+            &w("prompt-user \"q\" --secret")
+        ));
         assert!(!flags_trigger_redaction(&rules, &w("prompt-user \"q\"")));
         // Empty rules never redact — even if the line carries a --secret-looking flag.
-        assert!(!flags_trigger_redaction(&[], &w("prompt-user \"q\" --secret")));
+        assert!(!flags_trigger_redaction(
+            &[],
+            &w("prompt-user \"q\" --secret")
+        ));
         // The manifest is authoritative: a different declared rule drives a different trigger flag.
         let custom = vec!["--password".to_string()];
         assert!(flags_trigger_redaction(&custom, &w("login --password")));

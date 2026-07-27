@@ -12,9 +12,9 @@ pub mod ask;
 // API (shared by openai/grok/openrouter/ollama); `llm_native` is the provider-routing dispatcher.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod anthropic_native;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod openai_native;
+pub mod config;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod llm_native;
-pub mod config;
 pub(crate) mod model;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod openai_native;

@@ -70,10 +70,14 @@ fn uu_consumer_does_not_overcount_by_stealing_queued_lines() {
     // to steal from the shared buffer.
     let out = repl("printf 'a\\nb\\nc\\n' | wc -l\necho SURVIVED\nexit\n");
     assert!(
-        out.lines().any(|l| l.trim_start_matches("clank$ ").trim() == "3"),
+        out.lines()
+            .any(|l| l.trim_start_matches("clank$ ").trim() == "3"),
         "uu consumer over-counted by stealing queued REPL lines; stdout: {out:?}"
     );
-    assert!(out.contains("SURVIVED"), "next command also lost; stdout: {out:?}");
+    assert!(
+        out.contains("SURVIVED"),
+        "next command also lost; stdout: {out:?}"
+    );
 }
 
 #[test]
@@ -89,7 +93,8 @@ fn uu_consumer_with_file_redirect_reads_the_file_and_keeps_the_next_command() {
         "the command after a `< file` uu redirect was swallowed; stdout: {out:?}"
     );
     assert!(
-        out.lines().any(|l| l.trim_start_matches("clank$ ").trim() == "3"),
+        out.lines()
+            .any(|l| l.trim_start_matches("clank$ ").trim() == "3"),
         "`wc -l < file` did not read the 3-line file (fell through to stdin?); stdout: {out:?}"
     );
     let _ = std::fs::remove_file(&tmp);

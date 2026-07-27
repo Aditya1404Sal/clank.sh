@@ -32,7 +32,9 @@ fn encode_args(args: &[(String, String)]) -> DataValue {
 /// Best-effort: on a malformed UUID we return `None` (the canonical, non-phantom instance).
 // signature mirrors the caller's `phantom: Option<String>` field, borrowed as `&inv.phantom`
 #[allow(clippy::ref_option)]
-fn parse_phantom(phantom: &Option<String>) -> Option<golem_rust::golem_wasm::golem_core_1_5_x::types::Uuid> {
+fn parse_phantom(
+    phantom: &Option<String>,
+) -> Option<golem_rust::golem_wasm::golem_core_1_5_x::types::Uuid> {
     use golem_rust::golem_wasm::golem_core_1_5_x::types::Uuid;
     let s = phantom.as_ref()?;
     let hex: String = s.chars().filter(char::is_ascii_hexdigit).collect();
@@ -41,7 +43,10 @@ fn parse_phantom(phantom: &Option<String>) -> Option<golem_rust::golem_wasm::gol
     }
     let high = u64::from_str_radix(&hex[..16], 16).ok()?;
     let low = u64::from_str_radix(&hex[16..], 16).ok()?;
-    Some(Uuid { high_bits: high, low_bits: low })
+    Some(Uuid {
+        high_bits: high,
+        low_bits: low,
+    })
 }
 
 /// Build the `WasmRpc` client for an invocation (agent type + constructor tuple + optional phantom).
@@ -91,7 +96,10 @@ impl AgentInvoker for WasmRpcInvoker {
                 client
                     .invoke(&inv.method, &input)
                     .map_err(|e| format!("trigger failed: {e:?}"))?;
-                Ok(InvokeHandle { cancel_token: None, note: "triggered (fire-and-forget)".to_string() })
+                Ok(InvokeHandle {
+                    cancel_token: None,
+                    note: "triggered (fire-and-forget)".to_string(),
+                })
             }
             InvokeMode::Schedule(when) => {
                 // `schedule-cancelable-invocation` needs a `wall-clock/datetime`; we build one from the
@@ -100,9 +108,15 @@ impl AgentInvoker for WasmRpcInvoker {
                 // invocations), so it can't be re-acquired for a later `kill` — the invocation IS
                 // scheduled, but cancel-after-return isn't supported (documented, honest handle).
                 let secs = parse_epoch_secs(when)?;
-                let dt = golem_rust::wasip2::clocks::wall_clock::Datetime { seconds: secs, nanoseconds: 0 };
+                let dt = golem_rust::wasip2::clocks::wall_clock::Datetime {
+                    seconds: secs,
+                    nanoseconds: 0,
+                };
                 let _token = client.schedule_cancelable_invocation(dt, &inv.method, &input);
-                Ok(InvokeHandle { cancel_token: None, note: format!("scheduled for {when}") })
+                Ok(InvokeHandle {
+                    cancel_token: None,
+                    note: format!("scheduled for {when}"),
+                })
             }
             InvokeMode::Await => Err("invoke_async called with Await mode".to_string()),
         }
@@ -112,7 +126,10 @@ impl AgentInvoker for WasmRpcInvoker {
         // A scheduled invocation's cancellation-token is a host resource that doesn't survive across
         // the durable agent's serialized invocations, so we can't re-acquire it here to cancel. Honest:
         // cancel-after-return isn't supported on this SDK surface for scheduled invocations.
-        Err("cancel of a scheduled invocation is not supported across invocations on this build".to_string())
+        Err(
+            "cancel of a scheduled invocation is not supported across invocations on this build"
+                .to_string(),
+        )
     }
 }
 

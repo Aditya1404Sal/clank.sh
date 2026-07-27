@@ -164,7 +164,11 @@ fn is_bodyless(method: &Method, status: u16) -> bool {
 /// The method and body for the next hop, following curl/browser convention: a `303` (and a `POST`
 /// under `301`/`302`) becomes a bodyless `GET`; `307`/`308` (and non-`POST` `301`/`302`) preserve
 /// the method and body.
-fn redirect_method(method: &Method, status: u16, body: Option<Vec<u8>>) -> (Method, Option<Vec<u8>>) {
+fn redirect_method(
+    method: &Method,
+    status: u16,
+    body: Option<Vec<u8>>,
+) -> (Method, Option<Vec<u8>>) {
     match status {
         303 => (Method::GET, None),
         301 | 302 if *method == Method::POST => (Method::GET, None),
@@ -328,7 +332,11 @@ fn collect_headers(map: &http::HeaderMap) -> Vec<(String, String)> {
     // anyway, and a stable order also makes `-I`/`-i` output reproducible for tests and demos.)
     let mut headers: Vec<(String, String)> = map
         .iter()
-        .filter_map(|(k, v)| v.to_str().ok().map(|v| (k.as_str().to_string(), v.to_string())))
+        .filter_map(|(k, v)| {
+            v.to_str()
+                .ok()
+                .map(|v| (k.as_str().to_string(), v.to_string()))
+        })
         .collect();
     headers.sort();
     headers
@@ -492,7 +500,10 @@ mod transport_tests {
     fn reply(status: u16, headers: &[(&str, &str)], body: &str) -> Reply {
         (
             status,
-            headers.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
             body.to_string(),
         )
     }
@@ -502,7 +513,10 @@ mod transport_tests {
         let base = scripted_server(vec![reply(302, &[("Location", "${BASE}/next")], "go")]);
         let resp = fetch(&Request::new(Method::GET, base)).await.unwrap();
         assert_eq!(resp.status, 302);
-        assert_eq!(resp.header("location").map(|l| l.ends_with("/next")), Some(true));
+        assert_eq!(
+            resp.header("location").map(|l| l.ends_with("/next")),
+            Some(true)
+        );
     }
 
     #[tokio::test]
@@ -517,7 +531,11 @@ mod transport_tests {
         let resp = fetch(&req).await.unwrap();
         assert_eq!(resp.status, 200);
         assert_eq!(String::from_utf8(resp.body).unwrap(), "arrived");
-        assert!(resp.final_url.ends_with("/b"), "final_url tracks the last hop: {}", resp.final_url);
+        assert!(
+            resp.final_url.ends_with("/b"),
+            "final_url tracks the last hop: {}",
+            resp.final_url
+        );
     }
 
     #[tokio::test]
@@ -541,10 +559,18 @@ mod transport_tests {
     async fn head_returns_headers_but_no_body() {
         // The mock still puts bytes on the wire; a HEAD must not read them (returns empty body),
         // which is both correct and avoids half-consuming the connection.
-        let base = scripted_server(vec![reply(200, &[("X-Custom", "yes")], "should-not-be-read")]);
+        let base = scripted_server(vec![reply(
+            200,
+            &[("X-Custom", "yes")],
+            "should-not-be-read",
+        )]);
         let resp = fetch(&Request::new(Method::HEAD, base)).await.unwrap();
         assert_eq!(resp.status, 200);
         assert_eq!(resp.header("x-custom"), Some("yes"));
-        assert!(resp.body.is_empty(), "HEAD body must be empty, got {:?}", resp.body);
+        assert!(
+            resp.body.is_empty(),
+            "HEAD body must be empty, got {:?}",
+            resp.body
+        );
     }
 }

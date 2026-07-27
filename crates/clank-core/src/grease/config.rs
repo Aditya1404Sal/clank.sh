@@ -85,7 +85,9 @@ pub fn script_bin_dir() -> PathBuf {
 /// The skills directory (`/usr/share/skills`), honoring `$CLANK_GREASE_SKILLS`.
 #[must_use]
 pub fn skills_dir() -> PathBuf {
-    PathBuf::from(std::env::var("CLANK_GREASE_SKILLS").unwrap_or_else(|_| DEFAULT_SKILLS.to_string()))
+    PathBuf::from(
+        std::env::var("CLANK_GREASE_SKILLS").unwrap_or_else(|_| DEFAULT_SKILLS.to_string()),
+    )
 }
 
 /// The MCP resource mount root (`/mnt/mcp`), honoring `$CLANK_GREASE_MCP_MOUNT`.
@@ -116,7 +118,9 @@ pub fn is_valid_name(name: &str) -> bool {
     !name.is_empty()
         && !name.starts_with('-')
         && !name.ends_with('-')
-        && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 /// Load the registry list. `Ok(default)` (empty) if the file doesn't exist.
@@ -157,7 +161,10 @@ pub fn add_registry(url: &str, key: Option<&str>) -> Result<bool, String> {
         }
         return Ok(false);
     }
-    regs.registry.push(RegistryEntry { url: url.to_string(), key: key.map(std::string::ToString::to_string) });
+    regs.registry.push(RegistryEntry {
+        url: url.to_string(),
+        key: key.map(std::string::ToString::to_string),
+    });
     save_registries(&regs)?;
     Ok(true)
 }
@@ -165,7 +172,12 @@ pub fn add_registry(url: &str, key: Option<&str>) -> Result<bool, String> {
 /// The trusted signing key (base64 ed25519 public key) configured for `url`, if any.
 #[must_use]
 pub fn registry_key(url: &str) -> Option<String> {
-    load_registries().ok()?.registry.into_iter().find(|r| r.url == url).and_then(|r| r.key)
+    load_registries()
+        .ok()?
+        .registry
+        .into_iter()
+        .find(|r| r.url == url)
+        .and_then(|r| r.key)
 }
 
 /// Remove a registry URL. Returns whether it was present.
@@ -248,7 +260,10 @@ fn safe_join(root: &Path, rel: &str) -> Option<PathBuf> {
     if rel_path.is_absolute() {
         return None;
     }
-    if rel_path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+    if rel_path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
         return None;
     }
     Some(root.join(rel_path))
@@ -273,7 +288,9 @@ mod tests {
 
     /// Point the grease dirs at fresh temp dirs for the duration of `f`.
     pub(crate) fn with_temp_dirs<F: FnOnce()>(f: F) {
-        let _guard = super::TEST_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = super::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let n = unique();
         let base = std::env::temp_dir().join(format!("clank_grease_{}_{n}", std::process::id()));
         for sub in ["etc", "store", "bin", "script-bin", "skills"] {
@@ -313,11 +330,17 @@ mod tests {
             assert!(add_registry("https://other.example", None).unwrap());
             assert_eq!(
                 list_registries(),
-                vec!["https://reg.example".to_string(), "https://other.example".to_string()]
+                vec![
+                    "https://reg.example".to_string(),
+                    "https://other.example".to_string()
+                ]
             );
             // Re-adding a known URL WITH a key updates it (returns changed=true); the key is readable.
             assert!(add_registry("https://reg.example", Some("KEYDATA")).unwrap());
-            assert_eq!(registry_key("https://reg.example").as_deref(), Some("KEYDATA"));
+            assert_eq!(
+                registry_key("https://reg.example").as_deref(),
+                Some("KEYDATA")
+            );
             assert_eq!(registry_key("https://other.example"), None);
             assert!(remove_registry("https://reg.example").unwrap());
             assert!(!remove_registry("https://reg.example").unwrap()); // already gone
@@ -328,7 +351,13 @@ mod tests {
     #[test]
     fn write_bin_stub_creates_readable_file() {
         with_temp_dirs(|| {
-            write_bin_stub(&bin_dir(), "summarize", "usage: summarize [--file F]\n", "prompt").unwrap();
+            write_bin_stub(
+                &bin_dir(),
+                "summarize",
+                "usage: summarize [--file F]\n",
+                "prompt",
+            )
+            .unwrap();
             let content = std::fs::read_to_string(bin_dir().join("summarize")).unwrap();
             assert!(content.contains("managed by `grease`"));
             assert!(content.contains("clank prompt"));
@@ -356,19 +385,43 @@ mod tests {
                 description: "d".into(),
                 intended_use: None,
                 documents: vec![
-                    SkillDocument { path: "SKILL.md".into(), content: "# how".into() },
-                    SkillDocument { path: "reference/api.md".into(), content: "api".into() },
+                    SkillDocument {
+                        path: "SKILL.md".into(),
+                        content: "# how".into(),
+                    },
+                    SkillDocument {
+                        path: "reference/api.md".into(),
+                        content: "api".into(),
+                    },
                     // Escaping paths are skipped.
-                    SkillDocument { path: "../escape.md".into(), content: "nope".into() },
-                    SkillDocument { path: "/abs.md".into(), content: "nope".into() },
+                    SkillDocument {
+                        path: "../escape.md".into(),
+                        content: "nope".into(),
+                    },
+                    SkillDocument {
+                        path: "/abs.md".into(),
+                        content: "nope".into(),
+                    },
                 ],
-                scripts: vec![SkillScript { name: "lint-all".into(), body: "echo lint".into() }],
+                scripts: vec![SkillScript {
+                    name: "lint-all".into(),
+                    body: "echo lint".into(),
+                }],
             };
             materialize_skill(&sk).unwrap();
             let root = skills_dir().join("code-review");
-            assert_eq!(std::fs::read_to_string(root.join("SKILL.md")).unwrap(), "# how");
-            assert_eq!(std::fs::read_to_string(root.join("reference/api.md")).unwrap(), "api");
-            assert_eq!(std::fs::read_to_string(root.join("bin/lint-all")).unwrap(), "echo lint");
+            assert_eq!(
+                std::fs::read_to_string(root.join("SKILL.md")).unwrap(),
+                "# how"
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.join("reference/api.md")).unwrap(),
+                "api"
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.join("bin/lint-all")).unwrap(),
+                "echo lint"
+            );
             // The escaping (`..`) doc was skipped — not written into the skills dir's parent.
             assert!(!skills_dir().join("escape.md").exists());
             // The absolute-path doc was skipped too — only the two confined docs and the bin script

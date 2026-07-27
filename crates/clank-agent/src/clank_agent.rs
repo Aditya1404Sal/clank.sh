@@ -101,7 +101,6 @@ impl ClankAgent for ClankAgentImpl {
         let cwd = session.cwd().display().to_string();
         eval_result(result, cwd)
     }
-
 }
 
 impl ClankAgentImpl {

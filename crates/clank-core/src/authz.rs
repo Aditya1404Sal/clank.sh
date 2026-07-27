@@ -105,7 +105,10 @@ pub fn decide(policy: AuthorizationPolicy, elevated: bool, allow_all: bool) -> D
 /// one, that subcommand's policy wins (so `mcp list` is `Allow` while `mcp add` is `Confirm`). This
 /// keeps a coarse top-level policy from over-gating read-only subcommands.
 #[must_use]
-pub fn resolve(registry: &CommandRegistry, line: &str) -> (AuthorizationPolicy, bool, Option<String>) {
+pub fn resolve(
+    registry: &CommandRegistry,
+    line: &str,
+) -> (AuthorizationPolicy, bool, Option<String>) {
     let words = command_words(line);
     let elevated = words.first().is_some_and(|w| w == "sudo");
     let rest = if elevated { &words[1..] } else { &words[..] };
@@ -265,8 +268,14 @@ mod tests {
 
     #[test]
     fn leading_command_extracts_first_word() {
-        assert_eq!(leading_command("rm -rf /tmp/x"), (Some("rm".to_string()), false));
-        assert_eq!(leading_command("echo hi"), (Some("echo".to_string()), false));
+        assert_eq!(
+            leading_command("rm -rf /tmp/x"),
+            (Some("rm".to_string()), false)
+        );
+        assert_eq!(
+            leading_command("echo hi"),
+            (Some("echo".to_string()), false)
+        );
     }
 
     #[test]
@@ -282,13 +291,22 @@ mod tests {
     #[test]
     fn leading_command_is_quote_aware() {
         // A quoted first word is dequoted.
-        assert_eq!(leading_command(r#""rm" x"#), (Some("rm".to_string()), false));
+        assert_eq!(
+            leading_command(r#""rm" x"#),
+            (Some("rm".to_string()), false)
+        );
     }
 
     #[test]
     fn allow_policy_always_allows() {
-        assert_eq!(decide(AuthorizationPolicy::Allow, false, false), Decision::Allow);
-        assert_eq!(decide(AuthorizationPolicy::Allow, true, true), Decision::Allow);
+        assert_eq!(
+            decide(AuthorizationPolicy::Allow, false, false),
+            Decision::Allow
+        );
+        assert_eq!(
+            decide(AuthorizationPolicy::Allow, true, true),
+            Decision::Allow
+        );
     }
 
     #[test]
@@ -297,13 +315,22 @@ mod tests {
             decide(AuthorizationPolicy::Confirm, false, false),
             Decision::Confirm { sudo_grant: false }
         );
-        assert_eq!(decide(AuthorizationPolicy::Confirm, true, false), Decision::Allow);
-        assert_eq!(decide(AuthorizationPolicy::Confirm, false, true), Decision::Allow);
+        assert_eq!(
+            decide(AuthorizationPolicy::Confirm, true, false),
+            Decision::Allow
+        );
+        assert_eq!(
+            decide(AuthorizationPolicy::Confirm, false, true),
+            Decision::Allow
+        );
     }
 
     #[test]
     fn sudo_only_needs_elevation_not_all() {
-        assert_eq!(decide(AuthorizationPolicy::SudoOnly, true, false), Decision::Allow);
+        assert_eq!(
+            decide(AuthorizationPolicy::SudoOnly, true, false),
+            Decision::Allow
+        );
         // "all" from a prior confirm does NOT satisfy sudo-only.
         assert_eq!(
             decide(AuthorizationPolicy::SudoOnly, false, true),
@@ -319,7 +346,10 @@ mod tests {
 
     #[test]
     fn split_segments_splits_on_control_operators() {
-        assert_eq!(split_segments("echo hi && rm -rf /x"), vec!["echo hi", "rm -rf /x"]);
+        assert_eq!(
+            split_segments("echo hi && rm -rf /x"),
+            vec!["echo hi", "rm -rf /x"]
+        );
         assert_eq!(split_segments("a | b | c"), vec!["a", "b", "c"]);
         assert_eq!(split_segments("a ; b ; c"), vec!["a", "b", "c"]);
         assert_eq!(split_segments("a || b"), vec!["a", "b"]);
@@ -370,12 +400,16 @@ mod tests {
 
     #[test]
     fn decision_rank_orders_by_strictness() {
-        assert!(decision_rank(Decision::Allow) < decision_rank(Decision::Confirm { sudo_grant: false }));
+        assert!(
+            decision_rank(Decision::Allow) < decision_rank(Decision::Confirm { sudo_grant: false })
+        );
         assert!(
             decision_rank(Decision::Confirm { sudo_grant: false })
                 < decision_rank(Decision::Confirm { sudo_grant: true })
         );
-        assert!(decision_rank(Decision::Confirm { sudo_grant: true }) < decision_rank(Decision::Deny));
+        assert!(
+            decision_rank(Decision::Confirm { sudo_grant: true }) < decision_rank(Decision::Deny)
+        );
     }
 
     #[test]
@@ -384,6 +418,9 @@ mod tests {
             ("rm".to_string(), AuthorizationPolicy::SudoOnly),
             ("curl".to_string(), AuthorizationPolicy::Confirm),
         ];
-        assert_eq!(gated_commands_summary(&gated), "rm [sudo-only], curl [confirm]");
+        assert_eq!(
+            gated_commands_summary(&gated),
+            "rm [sudo-only], curl [confirm]"
+        );
     }
 }

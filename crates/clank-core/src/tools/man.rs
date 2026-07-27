@@ -57,7 +57,10 @@ impl SimpleCommand for Man {
         }
     }
 
-    fn execute<SE, I, S>(context: ExecutionContext<'_, SE>, args: I) -> Result<ExecutionResult, Error>
+    fn execute<SE, I, S>(
+        context: ExecutionContext<'_, SE>,
+        args: I,
+    ) -> Result<ExecutionResult, Error>
     where
         SE: ShellExtensions,
         I: Iterator<Item = S>,
@@ -70,13 +73,12 @@ impl SimpleCommand for Man {
             .collect();
 
         // `man 1 grep` — swallow a leading all-digits section operand when a name follows.
-        let names: Vec<&String> = if operands.len() > 1
-            && operands[0].chars().all(|c| c.is_ascii_digit())
-        {
-            operands.iter().skip(1).collect()
-        } else {
-            operands.iter().collect()
-        };
+        let names: Vec<&String> =
+            if operands.len() > 1 && operands[0].chars().all(|c| c.is_ascii_digit()) {
+                operands.iter().skip(1).collect()
+            } else {
+                operands.iter().collect()
+            };
 
         if names.is_empty() {
             let _ = writeln!(context.stderr(), "What manual page do you want?");
@@ -92,7 +94,9 @@ impl SimpleCommand for Man {
                 // A dynamically-installed command (an MCP server) — resolved via the per-line slot.
                 let _ = write!(out, "{}", render_manifest_page(&m));
             } else if let Some(reg) = context.shell.builtins().get(name.as_str()) {
-                if let Ok(content) = (reg.content_func)(name, ContentType::DetailedHelp, &ContentOptions::default()) {
+                if let Ok(content) =
+                    (reg.content_func)(name, ContentType::DetailedHelp, &ContentOptions::default())
+                {
                     let _ = write!(out, "{content}");
                     if !content.ends_with('\n') {
                         let _ = writeln!(out);

@@ -72,7 +72,13 @@ fn resolve(path: &str, follow: bool) -> Result<StatInfo, String> {
         }
         let environ = crate::runtime::procfs::current_environ();
         let content = crate::runtime::proctable::active()
-            .map(|t| crate::runtime::procfs::resolve(path, &t.lock().unwrap_or_else(std::sync::PoisonError::into_inner), &environ))
+            .map(|t| {
+                crate::runtime::procfs::resolve(
+                    path,
+                    &t.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+                    &environ,
+                )
+            })
             .and_then(Result::ok)
             .ok_or_else(not_found)?;
         return Ok(StatInfo::virtual_file(path, content.len() as u64));
@@ -83,12 +89,16 @@ fn resolve(path: &str, follow: bool) -> Result<StatInfo, String> {
     if crate::runtime::mcpfs::is_mcp_path(path) {
         if let Some(index) = crate::runtime::mcpfs::active() {
             match crate::runtime::mcpfs::classify(path, &index) {
-                crate::runtime::mcpfs::McpPathKind::Directory(_) => return Ok(StatInfo::virtual_dir(path)),
-                crate::runtime::mcpfs::McpPathKind::Dynamic { .. } | crate::runtime::mcpfs::McpPathKind::Template => {
+                crate::runtime::mcpfs::McpPathKind::Directory(_) => {
+                    return Ok(StatInfo::virtual_dir(path))
+                }
+                crate::runtime::mcpfs::McpPathKind::Dynamic { .. }
+                | crate::runtime::mcpfs::McpPathKind::Template => {
                     return Ok(StatInfo::virtual_file(path, 0));
                 }
                 // Static → a real file on disk; fall through. NotFound → fall through (→ "No such file").
-                crate::runtime::mcpfs::McpPathKind::Static | crate::runtime::mcpfs::McpPathKind::NotFound => {}
+                crate::runtime::mcpfs::McpPathKind::Static
+                | crate::runtime::mcpfs::McpPathKind::NotFound => {}
             }
         }
     }
@@ -235,7 +245,10 @@ impl SimpleCommand for Stat {
     }
 
     #[allow(clippy::similar_names)] // argv/arg are conventional
-    fn execute<SE, I, S>(context: ExecutionContext<'_, SE>, args: I) -> Result<ExecutionResult, Error>
+    fn execute<SE, I, S>(
+        context: ExecutionContext<'_, SE>,
+        args: I,
+    ) -> Result<ExecutionResult, Error>
     where
         SE: ShellExtensions,
         I: Iterator<Item = S>,

@@ -16,14 +16,18 @@ fn check_stream(label: &str, expect: &StreamExpect, got: &str, mismatches: &mut 
     if let Some(lines) = &expect.exact {
         let want = format!("{}\n", lines.join("\n"));
         if got != want {
-            mismatches.push(format!("{label} mismatch\n  expected (exact): {want:?}\n  got:              {got:?}"));
+            mismatches.push(format!(
+                "{label} mismatch\n  expected (exact): {want:?}\n  got:              {got:?}"
+            ));
         }
     } else if expect.contains.is_empty() && !got.is_empty() {
         mismatches.push(format!("{label} expected empty\n  got: {got:?}"));
     }
     for needle in &expect.contains {
         if !got.contains(needle) {
-            mismatches.push(format!("{label} missing substring {needle:?}\n  got: {got:?}"));
+            mismatches.push(format!(
+                "{label} missing substring {needle:?}\n  got: {got:?}"
+            ));
         }
     }
 }
@@ -38,7 +42,10 @@ pub fn check(expect: &Expect, outcome: &Outcome) -> Vec<String> {
 
     if let ExitExpect::Code(want) = expect.exit {
         if outcome.exit_code != want {
-            mismatches.push(format!("exit code: expected {want}, got {}", outcome.exit_code));
+            mismatches.push(format!(
+                "exit code: expected {want}, got {}",
+                outcome.exit_code
+            ));
         }
     }
 
@@ -50,7 +57,9 @@ pub fn check(expect: &Expect, outcome: &Outcome) -> Vec<String> {
             ));
         }
         (Some(want), None) => {
-            mismatches.push(format!("expected a pending prompt containing {want:?}, got none"));
+            mismatches.push(format!(
+                "expected a pending prompt containing {want:?}, got none"
+            ));
         }
         (Some(want), Some(p)) if !p.question.contains(want.as_str()) => {
             mismatches.push(format!(
@@ -63,9 +72,14 @@ pub fn check(expect: &Expect, outcome: &Outcome) -> Vec<String> {
 
     if let Some(want) = &expect.choices {
         match &outcome.pending {
-            None => mismatches.push(format!("expected pending prompt choices {want:?}, but no prompt is pending")),
+            None => mismatches.push(format!(
+                "expected pending prompt choices {want:?}, but no prompt is pending"
+            )),
             Some(p) if p.choices.as_ref() != Some(want) => {
-                mismatches.push(format!("pending prompt choices: expected {want:?}, got {:?}", p.choices));
+                mismatches.push(format!(
+                    "pending prompt choices: expected {want:?}, got {:?}",
+                    p.choices
+                ));
             }
             _ => {}
         }
@@ -76,7 +90,13 @@ pub fn check(expect: &Expect, outcome: &Outcome) -> Vec<String> {
 
 /// Render a failed step as the trial's failure message.
 #[must_use]
-pub fn render_failure(scenario_path: &std::path::Path, step_index: usize, step: &Step, outcome: &Outcome, mismatches: &[String]) -> String {
+pub fn render_failure(
+    scenario_path: &std::path::Path,
+    step_index: usize,
+    step: &Step,
+    outcome: &Outcome,
+    mismatches: &[String],
+) -> String {
     let action = match &step.action {
         Action::Eval(p) => format!("run {p}"),
         Action::Answer(t) => format!("answer {t}"),
@@ -84,7 +104,12 @@ pub fn render_failure(scenario_path: &std::path::Path, step_index: usize, step: 
     };
     let mut out = String::new();
     let _ = writeln!(out, "{}:{}", scenario_path.display(), step.line);
-    let _ = writeln!(out, "step {}: {}", step_index + 1, action.replace('\n', "\n        + "));
+    let _ = writeln!(
+        out,
+        "step {}: {}",
+        step_index + 1,
+        action.replace('\n', "\n        + ")
+    );
     for m in mismatches {
         let _ = writeln!(out, "{m}");
     }
@@ -110,11 +135,18 @@ mod tests {
     use std::path::Path;
 
     fn outcome(stdout: &str, stderr: &str, exit_code: u8, pending: Option<PendingView>) -> Outcome {
-        Outcome { stdout: stdout.into(), stderr: stderr.into(), exit_code, pending }
+        Outcome {
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+            exit_code,
+            pending,
+        }
     }
 
     fn expect_of(text: &str) -> Expect {
-        parse("t", Path::new("t.clank"), text).unwrap().steps[0].expect.clone()
+        parse("t", Path::new("t.clank"), text).unwrap().steps[0]
+            .expect
+            .clone()
     }
 
     #[test]
@@ -132,7 +164,15 @@ mod tests {
         assert!(check(&e, &outcome("", "", 0, None)).is_empty());
         let m = check(
             &e,
-            &outcome("x\n", "boom\n", 3, Some(PendingView { question: "Q?".into(), choices: None })),
+            &outcome(
+                "x\n",
+                "boom\n",
+                3,
+                Some(PendingView {
+                    question: "Q?".into(),
+                    choices: None,
+                }),
+            ),
         );
         // stdout non-empty, stderr non-empty, exit != 0, unexpected prompt: all four reported.
         assert_eq!(m.len(), 4, "{m:?}");

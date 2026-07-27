@@ -19,9 +19,16 @@ pub(crate) enum GolemCommand {
     /// `golem agent list` — list running agents.
     AgentList,
     /// `golem agent oplog --type <t> [ctor flags] [-n <count>]` — an agent's oplog.
-    AgentOplog { agent_type: String, ctor: Vec<(String, String)>, count: Option<u32> },
+    AgentOplog {
+        agent_type: String,
+        ctor: Vec<(String, String)>,
+        count: Option<u32>,
+    },
     /// `golem agent status --type <t> [ctor flags]` — an agent's status/metadata.
-    AgentStatus { agent_type: String, ctor: Vec<(String, String)> },
+    AgentStatus {
+        agent_type: String,
+        ctor: Vec<(String, String)>,
+    },
     /// `golem agent interrupt <pid>` — honest-stubbed (no host primitive).
     AgentInterrupt { pid: String },
     /// `golem agent resume <pid>` — honest-stubbed (no host primitive).
@@ -61,8 +68,12 @@ fn parse(args: &[String]) -> Result<GolemCommand, String> {
     match args.first().map(String::as_str) {
         Some("agent") => parse_agent(&args[1..]),
         Some("connect") => {
-            let identity = args.get(1).ok_or("golem connect: needs an agent identity")?;
-            Ok(GolemCommand::Connect { identity: identity.clone() })
+            let identity = args
+                .get(1)
+                .ok_or("golem connect: needs an agent identity")?;
+            Ok(GolemCommand::Connect {
+                identity: identity.clone(),
+            })
         }
         Some("oplog") => Ok(GolemCommand::Oplog),
         Some("rollback") => Ok(GolemCommand::Rollback),
@@ -70,7 +81,9 @@ fn parse(args: &[String]) -> Result<GolemCommand, String> {
         Some(other) => Err(format!(
             "golem: unknown subcommand '{other}' (try: agent, connect, oplog, rollback, fork)"
         )),
-        None => Err("golem: needs a subcommand (try: agent, connect, oplog, rollback, fork)".to_string()),
+        None => Err(
+            "golem: needs a subcommand (try: agent, connect, oplog, rollback, fork)".to_string(),
+        ),
     }
 }
 
@@ -87,7 +100,11 @@ fn parse_agent(args: &[String]) -> Result<GolemCommand, String> {
         }
         Some("oplog") => {
             let (agent_type, ctor, count) = parse_type_ctor_count(&args[1..])?;
-            Ok(GolemCommand::AgentOplog { agent_type, ctor, count })
+            Ok(GolemCommand::AgentOplog {
+                agent_type,
+                ctor,
+                count,
+            })
         }
         Some("status") => {
             let (agent_type, ctor, _count) = parse_type_ctor_count(&args[1..])?;
@@ -117,7 +134,10 @@ fn parse_type_ctor_count(
             }
             "-n" => {
                 let v = it.next().ok_or("-n needs a value")?;
-                count = Some(v.parse::<u32>().map_err(|_| format!("bad -n value '{v}'"))?);
+                count = Some(
+                    v.parse::<u32>()
+                        .map_err(|_| format!("bad -n value '{v}'"))?,
+                );
             }
             flag if flag.starts_with("--") => {
                 let key = &flag[2..];
@@ -135,9 +155,8 @@ fn parse_type_ctor_count(
 /// status/connect) is `Allow`; state-changing ops (rollback/fork/interrupt/resume) are `Confirm`.
 pub(crate) fn manifests() -> Vec<crate::manifest::Manifest> {
     use crate::manifest::{AuthorizationPolicy, ExecutionScope, Manifest};
-    let allow = |name: &str, syn: &str| {
-        Manifest::builtin(name, syn).with_scope(ExecutionScope::Subprocess)
-    };
+    let allow =
+        |name: &str, syn: &str| Manifest::builtin(name, syn).with_scope(ExecutionScope::Subprocess);
     let confirm = |name: &str, syn: &str| {
         Manifest::builtin(name, syn)
             .with_scope(ExecutionScope::Subprocess)
@@ -171,9 +190,17 @@ pub trait GolemCluster {
     /// List running agents (rendered text).
     async fn agent_list(&self) -> Result<String, String>;
     /// An agent's oplog (most-recent `count` entries; `None` = a default).
-    async fn agent_oplog(&self, agent_type: &str, ctor: &[(String, String)]) -> Result<String, String>;
+    async fn agent_oplog(
+        &self,
+        agent_type: &str,
+        ctor: &[(String, String)],
+    ) -> Result<String, String>;
     /// An agent's status/metadata.
-    async fn agent_status(&self, agent_type: &str, ctor: &[(String, String)]) -> Result<String, String>;
+    async fn agent_status(
+        &self,
+        agent_type: &str,
+        ctor: &[(String, String)],
+    ) -> Result<String, String>;
     /// Inspect a running agent by identity.
     async fn connect(&self, identity: &str) -> Result<String, String>;
     /// The shell instance's own oplog.
@@ -200,7 +227,9 @@ mod tests {
         assert_eq!(c("golem rollback"), GolemCommand::Rollback);
         assert_eq!(
             c("golem connect shopping-cart:jd"),
-            GolemCommand::Connect { identity: "shopping-cart:jd".into() }
+            GolemCommand::Connect {
+                identity: "shopping-cart:jd".into()
+            }
         );
         assert_eq!(
             c("golem agent interrupt 42"),

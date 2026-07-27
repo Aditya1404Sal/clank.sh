@@ -43,15 +43,19 @@ impl NativeBackend {
 
         let env_snapshot: HashMap<OsString, OsString> = std::env::vars_os().collect();
 
-        let tmp = std::env::temp_dir().join(format!("clank-conf-{scenario}-{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("clank-conf-{scenario}-{}", std::process::id()));
         // A PID can recur and a failing prior run may have leaked its sandbox — start
         // from a clean slate so stale files can't change this scenario's outcome.
         match std::fs::remove_dir_all(&tmp) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e).with_context(|| format!("pre-cleaning sandbox {}", tmp.display())),
+            Err(e) => {
+                return Err(e).with_context(|| format!("pre-cleaning sandbox {}", tmp.display()))
+            }
         }
-        std::fs::create_dir_all(&tmp).with_context(|| format!("creating sandbox {}", tmp.display()))?;
+        std::fs::create_dir_all(&tmp)
+            .with_context(|| format!("creating sandbox {}", tmp.display()))?;
         let tmp_str = tmp
             .to_str()
             .with_context(|| format!("sandbox path is not UTF-8: {}", tmp.display()))?
@@ -66,7 +70,14 @@ impl NativeBackend {
             .block_on(Session::new())
             .map_err(|e| anyhow::anyhow!("Session::new failed: {e}"))?;
 
-        Ok(Self { session, rt, tmp, tmp_str, env_snapshot, _guard: guard })
+        Ok(Self {
+            session,
+            rt,
+            tmp,
+            tmp_str,
+            env_snapshot,
+            _guard: guard,
+        })
     }
 
     fn to_outcome(result: clank_core::session::LineResult) -> Outcome {
@@ -74,19 +85,26 @@ impl NativeBackend {
             stdout: String::from_utf8_lossy(&result.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&result.stderr).into_owned(),
             exit_code: result.exit_code,
-            pending: result.pending_prompt.map(|p| PendingView { question: p.question, choices: p.choices }),
+            pending: result.pending_prompt.map(|p| PendingView {
+                question: p.question,
+                choices: p.choices,
+            }),
         }
     }
 }
 
 impl ShellBackend for NativeBackend {
     fn eval(&mut self, line: &str) -> anyhow::Result<Outcome> {
-        Ok(Self::to_outcome(self.rt.block_on(self.session.eval_line(line))))
+        Ok(Self::to_outcome(
+            self.rt.block_on(self.session.eval_line(line)),
+        ))
     }
 
     fn answer(&mut self, response: Option<&str>) -> anyhow::Result<Outcome> {
         let response = response.map(str::to_string);
-        Ok(Self::to_outcome(self.rt.block_on(self.session.answer_prompt(response))))
+        Ok(Self::to_outcome(
+            self.rt.block_on(self.session.answer_prompt(response)),
+        ))
     }
 
     fn tmp(&self) -> &str {
@@ -94,7 +112,14 @@ impl ShellBackend for NativeBackend {
     }
 
     fn finish(self: Box<Self>) -> anyhow::Result<()> {
-        let Self { session, rt, tmp, tmp_str: _, env_snapshot, _guard } = *self;
+        let Self {
+            session,
+            rt,
+            tmp,
+            tmp_str: _,
+            env_snapshot,
+            _guard,
+        } = *self;
         drop(session);
         drop(rt);
 

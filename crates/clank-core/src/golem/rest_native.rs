@@ -97,12 +97,20 @@ impl NativeHttpAgentInvoker {
     #[must_use]
     pub fn new(cfg: ClusterConfig) -> Self {
         let endpoint = format!("{}{INVOKE_PATH}", cfg.url);
-        Self { client: client(), cfg, endpoint }
+        Self {
+            client: client(),
+            cfg,
+            endpoint,
+        }
     }
 
     #[cfg(test)]
     fn with_endpoint(cfg: ClusterConfig, endpoint: impl Into<String>) -> Self {
-        Self { client: client(), cfg, endpoint: endpoint.into() }
+        Self {
+            client: client(),
+            cfg,
+            endpoint: endpoint.into(),
+        }
     }
 
     /// POST the invocation and return the parsed result JSON (or an error string).
@@ -133,10 +141,17 @@ impl NativeHttpAgentInvoker {
                     v.get("error")
                         .and_then(|e| e.as_str())
                         .map(str::to_string)
-                        .or_else(|| v.get("message").and_then(|m| m.as_str()).map(str::to_string))
+                        .or_else(|| {
+                            v.get("message")
+                                .and_then(|m| m.as_str())
+                                .map(str::to_string)
+                        })
                 })
                 .unwrap_or_else(|| text.chars().take(300).collect());
-            return Err(format!("agent invocation failed: HTTP {} — {detail}", status.as_u16()));
+            return Err(format!(
+                "agent invocation failed: HTTP {} — {detail}",
+                status.as_u16()
+            ));
         }
         serde_json::from_str::<Value>(&text)
             .map_err(|e| format!("malformed agent invocation response: {e}"))
@@ -191,7 +206,10 @@ impl NativeHttpGolemCluster {
     /// Build a native REST-backed Golem cluster from `cfg`.
     #[must_use]
     pub fn new(cfg: ClusterConfig) -> Self {
-        Self { client: client(), cfg }
+        Self {
+            client: client(),
+            cfg,
+        }
     }
 }
 
@@ -208,16 +226,26 @@ fn needs_schema(op: &str, agent_type: &str) -> String {
 #[async_trait::async_trait(?Send)]
 impl GolemCluster for NativeHttpGolemCluster {
     async fn agent_list(&self) -> Result<String, String> {
-        Err("golem agent list: full enumeration over REST needs a component filter (not wired in \
+        Err(
+            "golem agent list: full enumeration over REST needs a component filter (not wired in \
              v1); invoke agent executables directly instead"
-            .to_string())
+                .to_string(),
+        )
     }
 
-    async fn agent_oplog(&self, agent_type: &str, _ctor: &[(String, String)]) -> Result<String, String> {
+    async fn agent_oplog(
+        &self,
+        agent_type: &str,
+        _ctor: &[(String, String)],
+    ) -> Result<String, String> {
         Err(needs_schema("agent oplog", agent_type))
     }
 
-    async fn agent_status(&self, agent_type: &str, _ctor: &[(String, String)]) -> Result<String, String> {
+    async fn agent_status(
+        &self,
+        agent_type: &str,
+        _ctor: &[(String, String)],
+    ) -> Result<String, String> {
         Err(needs_schema("agent status", agent_type))
     }
 
@@ -228,21 +256,27 @@ impl GolemCluster for NativeHttpGolemCluster {
     }
 
     async fn self_oplog(&self) -> Result<String, String> {
-        Err("golem oplog: the shell instance's own oplog is an in-instance operation with no \
+        Err(
+            "golem oplog: the shell instance's own oplog is an in-instance operation with no \
              native+cluster equivalent (available inside Golem)"
-            .to_string())
+                .to_string(),
+        )
     }
 
     async fn rollback(&self) -> Result<String, String> {
-        Err("golem rollback: rewinding the shell instance is a Golem-only operation (available \
+        Err(
+            "golem rollback: rewinding the shell instance is a Golem-only operation (available \
              inside Golem, not native+cluster)"
-            .to_string())
+                .to_string(),
+        )
     }
 
     async fn fork(&self) -> Result<String, String> {
-        Err("golem fork: forking the shell instance is a Golem-only operation (available inside \
+        Err(
+            "golem fork: forking the shell instance is a Golem-only operation (available inside \
              Golem, not native+cluster)"
-            .to_string())
+                .to_string(),
+        )
     }
 }
 
@@ -369,8 +403,16 @@ mod tests {
     #[tokio::test]
     async fn cluster_read_ops_are_honest_stubs() {
         let cluster = NativeHttpGolemCluster::new(test_cfg());
-        assert!(cluster.agent_oplog("A", &[]).await.unwrap_err().contains("schema"));
-        assert!(cluster.agent_status("A", &[]).await.unwrap_err().contains("schema"));
+        assert!(cluster
+            .agent_oplog("A", &[])
+            .await
+            .unwrap_err()
+            .contains("schema"));
+        assert!(cluster
+            .agent_status("A", &[])
+            .await
+            .unwrap_err()
+            .contains("schema"));
         assert!(cluster.rollback().await.unwrap_err().contains("Golem-only"));
         assert!(cluster.fork().await.unwrap_err().contains("Golem-only"));
     }

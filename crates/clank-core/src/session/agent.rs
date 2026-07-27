@@ -1,7 +1,9 @@
 //! `Session` methods for Golem agent invocation (`<agent> [flags] <method>`) and the `golem`
 //! cluster command. Invocation parsing (`parse_agent_line`) + types live in `super` (mod.rs).
 
-use super::{Session, prompt_leading_word, LineResult, parse_agent_line, ParsedAgentLine, PendingInvocation};
+use super::{
+    parse_agent_line, prompt_leading_word, LineResult, ParsedAgentLine, PendingInvocation, Session,
+};
 
 /// The most fire-and-forget (`--trigger`/`--schedule`) invocations tracked at once. Beyond this the
 /// oldest is presumed complete and reaped — see [`Session::spawn_agent_invocation_row`].
@@ -29,7 +31,11 @@ impl Session {
             return LineResult::from_outcome(Vec::new(), b"agent: parse error\n".to_vec(), 2);
         };
         // Strip a leading sudo (gate already resolved).
-        let rest = if words.first().map(String::as_str) == Some("sudo") { &words[1..] } else { &words[..] };
+        let rest = if words.first().map(String::as_str) == Some("sudo") {
+            &words[1..]
+        } else {
+            &words[..]
+        };
         let name = rest[0].clone();
         let Some(pkg) = self.grease.agent(&name).cloned() else {
             return LineResult::denied(); // is_agent_line gated it
@@ -66,13 +72,20 @@ impl Session {
             "oplog" | "status" if pkg.ephemeral => {
                 return LineResult::from_outcome(
                     Vec::new(),
-                    format!("{name}: '{}' is not available for an ephemeral agent type\n", parsed.method)
-                        .into_bytes(),
+                    format!(
+                        "{name}: '{}' is not available for an ephemeral agent type\n",
+                        parsed.method
+                    )
+                    .into_bytes(),
                     2,
                 );
             }
             "oplog" => return self.run_agent_reserved(&name, &pkg, &parsed, "oplog").await,
-            "status" => return self.run_agent_reserved(&name, &pkg, &parsed, "status").await,
+            "status" => {
+                return self
+                    .run_agent_reserved(&name, &pkg, &parsed, "status")
+                    .await
+            }
             "stream" | "repl" => {
                 // Long-lived/interactive — the durable agent serializes invocations and can't park on a
                 // stream/REPL loop (same constraint as `ask repl`). Honest pointer.
@@ -100,7 +113,11 @@ impl Session {
         let Some(method) = pkg.method(&parsed.method) else {
             return LineResult::from_outcome(
                 Vec::new(),
-                format!("{name}: unknown method '{}' (try `{name} --help`)\n", parsed.method).into_bytes(),
+                format!(
+                    "{name}: unknown method '{}' (try `{name} --help`)\n",
+                    parsed.method
+                )
+                .into_bytes(),
                 2,
             );
         };
@@ -121,8 +138,10 @@ impl Session {
         let args = match order_agent_params(&parsed.args, &method.params) {
             Ok(v) => v,
             Err(e) => {
-                let msg =
-                    format!("{name}: {e} for method '{}' (try `{name} --help`)\n", parsed.method);
+                let msg = format!(
+                    "{name}: {e} for method '{}' (try `{name} --help`)\n",
+                    parsed.method
+                );
                 return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 2);
             }
         };
@@ -180,21 +199,31 @@ impl Session {
                     }
                     LineResult::continue_with_stdout(out)
                 }
-                Err(e) => LineResult::from_outcome(Vec::new(), format!("{name}: {e}\n").into_bytes(), 1),
+                Err(e) => {
+                    LineResult::from_outcome(Vec::new(), format!("{name}: {e}\n").into_bytes(), 1)
+                }
             },
-            crate::golem::agent::InvokeMode::Trigger | crate::golem::agent::InvokeMode::Schedule(_) => {
+            crate::golem::agent::InvokeMode::Trigger
+            | crate::golem::agent::InvokeMode::Schedule(_) => {
                 // Fire-and-forget / deferred: returns a handle (+ a PID row for `ps`/`kill`).
                 match invoker.invoke_async(&inv).await {
                     Ok(handle) => {
                         // Spawn an S-state proc row for the pending invocation (README: all modes return
                         // a PID); retain the cancel token so `kill <pid>` can cancel it.
-                        let pid =
-                            self.spawn_agent_invocation_row(line, &inv, handle.cancel_token.clone());
+                        let pid = self.spawn_agent_invocation_row(
+                            line,
+                            &inv,
+                            handle.cancel_token.clone(),
+                        );
                         LineResult::continue_with_stdout(
                             format!("[{pid}] {name}: {}\n", handle.note).into_bytes(),
                         )
                     }
-                    Err(e) => LineResult::from_outcome(Vec::new(), format!("{name}: {e}\n").into_bytes(), 1),
+                    Err(e) => LineResult::from_outcome(
+                        Vec::new(),
+                        format!("{name}: {e}\n").into_bytes(),
+                        1,
+                    ),
                 }
             }
         }
@@ -203,11 +232,18 @@ impl Session {
     /// Dispatch a `golem` cluster command through the injected [`crate::golem::cluster::GolemCluster`] seam.
     /// `interrupt`/`resume` are honest-stubbed (no host primitive); everything else needs a configured
     /// cluster (honest error otherwise).
-    pub(super) async fn run_golem(&mut self, cmd: crate::golem::cluster::GolemCommand) -> LineResult {
+    pub(super) async fn run_golem(
+        &mut self,
+        cmd: crate::golem::cluster::GolemCommand,
+    ) -> LineResult {
         use crate::golem::cluster::GolemCommand as G;
         // interrupt/resume have no golem-rust host func — report honestly regardless of cluster.
         if let G::AgentInterrupt { pid } | G::AgentResume { pid } = &cmd {
-            let verb = if matches!(cmd, G::AgentInterrupt { .. }) { "interrupt" } else { "resume" };
+            let verb = if matches!(cmd, G::AgentInterrupt { .. }) {
+                "interrupt"
+            } else {
+                "resume"
+            };
             return LineResult::from_outcome(
                 Vec::new(),
                 format!(
@@ -221,13 +257,16 @@ impl Session {
         let Some(cluster) = self.golem_cluster.as_deref() else {
             return LineResult::from_outcome(
                 Vec::new(),
-                b"golem: requires a configured Golem cluster (unavailable on this target)\n".to_vec(),
+                b"golem: requires a configured Golem cluster (unavailable on this target)\n"
+                    .to_vec(),
                 4,
             );
         };
         let result = match cmd {
             G::AgentList => cluster.agent_list().await,
-            G::AgentOplog { agent_type, ctor, .. } => cluster.agent_oplog(&agent_type, &ctor).await,
+            G::AgentOplog {
+                agent_type, ctor, ..
+            } => cluster.agent_oplog(&agent_type, &ctor).await,
             G::AgentStatus { agent_type, ctor } => cluster.agent_status(&agent_type, &ctor).await,
             G::Connect { identity } => cluster.connect(&identity).await,
             G::Oplog => cluster.self_oplog().await,
@@ -275,7 +314,11 @@ impl Session {
         };
         match result {
             Ok(text) => LineResult::continue_with_stdout(text.into_bytes()),
-            Err(e) => LineResult::from_outcome(Vec::new(), format!("{name}: {sub}: {e}\n").into_bytes(), 1),
+            Err(e) => LineResult::from_outcome(
+                Vec::new(),
+                format!("{name}: {sub}: {e}\n").into_bytes(),
+                1,
+            ),
         }
     }
 
@@ -300,7 +343,10 @@ impl Session {
             agent_params,
             phantom_uuid: inv.phantom.clone(),
         };
-        let mut table = self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut table = self
+            .proc_table
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let pid = table.spawn_bg(
             crate::runtime::process::ProcessKind::AgentInvocation,
             argv,
@@ -308,7 +354,8 @@ impl Session {
         );
         table.set_agent_meta(pid, meta);
         drop(table);
-        self.pending_invocations.push(PendingInvocation { pid, cancel_token });
+        self.pending_invocations
+            .push(PendingInvocation { pid, cancel_token });
         // Bound the fire-and-forget tracking. A `--trigger`/`--schedule` invocation has no
         // remote-completion signal, so without this its `S` row and `pending_invocations` entry would
         // linger forever — unbounded growth in a long-lived durable agent. When the tracked set
@@ -318,7 +365,10 @@ impl Session {
         // reports "already dispatched", which is the honest answer for a fire-and-forget call.
         while self.pending_invocations.len() > MAX_PENDING_INVOCATIONS {
             let old = self.pending_invocations.remove(0);
-            self.proc_table.lock().unwrap_or_else(std::sync::PoisonError::into_inner).complete(old.pid);
+            self.proc_table
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .complete(old.pid);
         }
         pid
     }
@@ -333,7 +383,10 @@ fn order_agent_params(
     provided: &[(String, String)],
     declared: &[String],
 ) -> Result<Vec<(String, String)>, String> {
-    if let Some((flag, _)) = provided.iter().find(|(n, _)| !declared.iter().any(|d| d == n)) {
+    if let Some((flag, _)) = provided
+        .iter()
+        .find(|(n, _)| !declared.iter().any(|d| d == n))
+    {
         return Err(format!("unexpected flag --{flag}"));
     }
     let mut ordered = Vec::with_capacity(declared.len());
@@ -351,7 +404,9 @@ mod agent_param_tests {
     use super::order_agent_params;
 
     fn pairs(kv: &[(&str, &str)]) -> Vec<(String, String)> {
-        kv.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        kv.iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
     fn names(n: &[&str]) -> Vec<String> {
         n.iter().map(|s| s.to_string()).collect()
@@ -359,7 +414,8 @@ mod agent_param_tests {
 
     #[test]
     fn reorders_into_declared_order() {
-        let out = order_agent_params(&pairs(&[("b", "2"), ("a", "1")]), &names(&["a", "b"])).unwrap();
+        let out =
+            order_agent_params(&pairs(&[("b", "2"), ("a", "1")]), &names(&["a", "b"])).unwrap();
         assert_eq!(out, pairs(&[("a", "1"), ("b", "2")]));
     }
 

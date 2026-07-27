@@ -45,12 +45,32 @@ use crate::manifest::{AuthorizationPolicy, ExecutionScope, Manifest};
 ///   they dispatch through Brush unchanged (the manifest is metadata only). This completes the
 ///   "special-builtin / parent-shell + shell-internal classification" that `build()` had deferred.
 pub const MANUAL_MANIFESTS: &[&str] = &[
-    "prompt-user", "type", "command", "curl", "wget", "context", "ask", "kill", "mcp", "grease",
+    "prompt-user",
+    "type",
+    "command",
+    "curl",
+    "wget",
+    "context",
+    "ask",
+    "kill",
+    "mcp",
+    "grease",
     "golem",
     // Brush-native BashMode builtins — parent-shell (POSIX special builtins):
-    "cd", "export", "exec", "exit", "unset", "source",
+    "cd",
+    "export",
+    "exec",
+    "exit",
+    "unset",
+    "source",
     // Brush-native BashMode builtins — shell-internal:
-    "alias", "jobs", "fg", "bg", "history", "read", "wait",
+    "alias",
+    "jobs",
+    "fg",
+    "bg",
+    "history",
+    "read",
+    "wait",
 ];
 
 /// Hand-authored manifests for commands not backed by a clank `SimpleCommand` registration (see
@@ -211,7 +231,10 @@ impl CommandRegistry {
     /// programming error (the same name can't resolve to two manifests).
     fn insert(&mut self, manifest: Manifest) {
         let name = manifest.name.clone();
-        assert!(self.by_name.insert(name.clone(), manifest).is_none(), "duplicate manifest for command '{name}' in the clank registry");
+        assert!(
+            self.by_name.insert(name.clone(), manifest).is_none(),
+            "duplicate manifest for command '{name}' in the clank registry"
+        );
     }
 }
 
@@ -314,7 +337,11 @@ mod tests {
             // MANUAL_MANIFESTS covers commands with a manifest but no `.builtins()` registration
             // (see its doc comment for why each entry is legitimate) — union them into the
             // expected set rather than requiring a `SimpleCommand` for every manifest.
-            .chain(MANUAL_MANIFESTS.iter().map(std::string::ToString::to_string))
+            .chain(
+                MANUAL_MANIFESTS
+                    .iter()
+                    .map(std::string::ToString::to_string),
+            )
             .collect();
 
         let registry = build();

@@ -28,9 +28,9 @@ impl SimpleCommand for Context {
         _options: &ContentOptions,
     ) -> Result<String, Error> {
         match content_type {
-            ContentType::ShortDescription => {
-                Ok(format!("{name} - manage the session transcript (show/clear/trim/summarize)\n"))
-            }
+            ContentType::ShortDescription => Ok(format!(
+                "{name} - manage the session transcript (show/clear/trim/summarize)\n"
+            )),
             ContentType::ShortUsage => {
                 Ok(format!("{name}: {name} [show|clear|trim <n>|summarize]\n"))
             }
@@ -48,7 +48,10 @@ impl SimpleCommand for Context {
 
     // similar_names: `args`/`argv` are the conventional arg-iterator / arg-vector pair.
     #[allow(clippy::similar_names)]
-    fn execute<SE, I, S>(context: ExecutionContext<'_, SE>, args: I) -> Result<ExecutionResult, Error>
+    fn execute<SE, I, S>(
+        context: ExecutionContext<'_, SE>,
+        args: I,
+    ) -> Result<ExecutionResult, Error>
     where
         SE: ShellExtensions,
         I: Iterator<Item = S>,
@@ -63,7 +66,9 @@ impl SimpleCommand for Context {
             return Ok(ExecutionResult::new(1));
         };
         let out = crate::apply_context(
-            &mut transcript.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+            &mut transcript
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
             argv.iter().map(String::as_str),
         );
         let _ = context.stdout().write_all(&out);

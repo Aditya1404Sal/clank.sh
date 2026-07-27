@@ -68,7 +68,10 @@ impl std::fmt::Debug for ProviderSection {
 /// The `ask.toml` path under a given home directory: `<home>/.config/ask/ask.toml`.
 #[must_use]
 pub fn config_path(home: &str) -> PathBuf {
-    PathBuf::from(home).join(".config").join("ask").join("ask.toml")
+    PathBuf::from(home)
+        .join(".config")
+        .join("ask")
+        .join("ask.toml")
 }
 
 /// Load `ask.toml` from `home`. `Ok(None)` if the file doesn't exist (use the built-in default);
@@ -103,7 +106,8 @@ pub fn save_default_model(home: &str, model: &str) -> Result<(), String> {
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("ask.toml: cannot create {}: {e}", dir.display()))?;
     }
-    let text = toml::to_string_pretty(&config).map_err(|e| format!("ask.toml serialize error: {e}"))?;
+    let text =
+        toml::to_string_pretty(&config).map_err(|e| format!("ask.toml serialize error: {e}"))?;
     std::fs::write(&path, text).map_err(|e| format!("ask.toml write error: {e}"))
 }
 
@@ -148,7 +152,8 @@ pub fn save_provider_key(home: &str, provider: &str, key: &str) -> Result<(), St
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("ask.toml: cannot create {}: {e}", dir.display()))?;
     }
-    let text = toml::to_string_pretty(&config).map_err(|e| format!("ask.toml serialize error: {e}"))?;
+    let text =
+        toml::to_string_pretty(&config).map_err(|e| format!("ask.toml serialize error: {e}"))?;
     std::fs::write(&path, text).map_err(|e| format!("ask.toml write error: {e}"))
 }
 
@@ -183,7 +188,8 @@ pub fn remove_provider_key(home: &str, provider: &str) -> Result<bool, String> {
         std::fs::create_dir_all(dir)
             .map_err(|e| format!("ask.toml: cannot create {}: {e}", dir.display()))?;
     }
-    let text = toml::to_string_pretty(&config).map_err(|e| format!("ask.toml serialize error: {e}"))?;
+    let text =
+        toml::to_string_pretty(&config).map_err(|e| format!("ask.toml serialize error: {e}"))?;
     std::fs::write(&path, text).map_err(|e| format!("ask.toml write error: {e}"))?;
     Ok(true)
 }
@@ -249,8 +255,14 @@ mod tests {
         assert!(remove_provider_key(h, "anthropic").unwrap());
         let cfg = load(h).unwrap().unwrap();
         // Default model untouched; the section survives (its key-env doc remains); only the key is gone.
-        assert_eq!(cfg.ask.default_model.as_deref(), Some("anthropic/claude-opus-4-8"));
-        let section = cfg.providers.get("anthropic").expect("section kept for its key-env");
+        assert_eq!(
+            cfg.ask.default_model.as_deref(),
+            Some("anthropic/claude-opus-4-8")
+        );
+        let section = cfg
+            .providers
+            .get("anthropic")
+            .expect("section kept for its key-env");
         assert_eq!(section.key_env.as_deref(), Some("ANTHROPIC_API_KEY"));
         assert_eq!(section.key, None);
     }
@@ -271,7 +283,9 @@ mod tests {
         let cfg = load(h).unwrap().unwrap();
         assert_eq!(cfg.ask.default_model.as_deref(), Some("claude-opus-4-8"));
         assert_eq!(
-            cfg.providers.get("anthropic").and_then(|p| p.key_env.as_deref()),
+            cfg.providers
+                .get("anthropic")
+                .and_then(|p| p.key_env.as_deref()),
             Some("ANTHROPIC_API_KEY")
         );
     }
@@ -307,7 +321,10 @@ mod tests {
         let h = home.to_str().unwrap();
         assert_eq!(provider_key(h, "anthropic"), None);
         save_provider_key(h, "anthropic", "sk-native-key-123").unwrap();
-        assert_eq!(provider_key(h, "anthropic").as_deref(), Some("sk-native-key-123"));
+        assert_eq!(
+            provider_key(h, "anthropic").as_deref(),
+            Some("sk-native-key-123")
+        );
         // A different provider is unaffected.
         assert_eq!(provider_key(h, "openai"), None);
     }

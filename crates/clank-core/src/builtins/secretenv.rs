@@ -95,7 +95,13 @@ pub fn redact_export_line(line: &str) -> Option<String> {
 /// Note: `grease registry add … --key <PUBKEY>` carries a *public* key, so redacting it here is a
 /// harmless false positive — we deliberately over-redact a public value rather than risk leaking a
 /// private one, since `--key` is overloaded across commands.
-const SECRET_FLAGS: &[&str] = &["--key", "--token", "--password", "--api-key", "--auth-token"];
+const SECRET_FLAGS: &[&str] = &[
+    "--key",
+    "--token",
+    "--password",
+    "--api-key",
+    "--auth-token",
+];
 
 /// Redact the argument of any credential-bearing flag (see [`SECRET_FLAGS`]) in `line`, covering both
 /// `--key VALUE` and `--key=VALUE`. Byte-exact via the tokenizer's source spans (like

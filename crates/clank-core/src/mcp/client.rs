@@ -237,13 +237,22 @@ pub struct McpError {
 
 impl McpError {
     fn transport(msg: impl Into<String>) -> Self {
-        Self { message: msg.into(), exit_code: 4 }
+        Self {
+            message: msg.into(),
+            exit_code: 4,
+        }
     }
     fn usage(msg: impl Into<String>) -> Self {
-        Self { message: msg.into(), exit_code: 2 }
+        Self {
+            message: msg.into(),
+            exit_code: 2,
+        }
     }
     fn tool(msg: impl Into<String>) -> Self {
-        Self { message: msg.into(), exit_code: 1 }
+        Self {
+            message: msg.into(),
+            exit_code: 1,
+        }
     }
 }
 
@@ -285,7 +294,8 @@ fn parse_response_body(resp: &HttpResponse) -> McpResult<JsonRpcResponse> {
     let value: Value = if resp.is_sse() {
         extract_sse_json_rpc(&text).map_err(McpError::transport)?
     } else {
-        serde_json::from_str(&text).map_err(|e| McpError::transport(format!("bad JSON response: {e}")))?
+        serde_json::from_str(&text)
+            .map_err(|e| McpError::transport(format!("bad JSON response: {e}")))?
     };
     serde_json::from_value(value)
         .map_err(|e| McpError::transport(format!("malformed JSON-RPC response: {e}")))
@@ -324,7 +334,12 @@ pub struct McpClient<'a> {
 impl<'a> McpClient<'a> {
     /// Create a client bound to `url`, driving requests through `http` with optional `auth`.
     pub fn new(http: &'a dyn McpHttp, url: impl Into<String>, auth: Option<McpAuth>) -> Self {
-        Self { http, url: url.into(), auth, next_id: 1 }
+        Self {
+            http,
+            url: url.into(),
+            auth,
+            next_id: 1,
+        }
     }
 
     fn id(&mut self) -> u64 {
@@ -338,7 +353,10 @@ impl<'a> McpClient<'a> {
     fn headers(&self, session_id: Option<&str>) -> Vec<(String, String)> {
         let mut h = vec![
             ("Content-Type".into(), "application/json".into()),
-            ("Accept".into(), "application/json, text/event-stream".into()),
+            (
+                "Accept".into(),
+                "application/json, text/event-stream".into(),
+            ),
             ("MCP-Protocol-Version".into(), PROTOCOL_VERSION.into()),
         ];
         if let Some(auth) = &self.auth {
@@ -352,9 +370,19 @@ impl<'a> McpClient<'a> {
 
     /// POST a JSON-RPC request and return its parsed response value (result), erroring on transport,
     /// HTTP status, or a JSON-RPC error object.
-    async fn call(&mut self, method: &str, params: Option<Value>, session_id: Option<&str>) -> McpResult<Value> {
+    async fn call(
+        &mut self,
+        method: &str,
+        params: Option<Value>,
+        session_id: Option<&str>,
+    ) -> McpResult<Value> {
         let id = self.id();
-        let req = JsonRpcRequest { jsonrpc: "2.0", id, method, params };
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0",
+            id,
+            method,
+            params,
+        };
         let body = serde_json::to_vec(&req).map_err(|e| McpError::usage(format!("encode: {e}")))?;
         let result = self.send_call(method, session_id, body).await;
         // mcp.log: every JSON-RPC method + its outcome (the single funnel all MCP ops pass through).
@@ -370,14 +398,22 @@ impl<'a> McpClient<'a> {
     }
 
     /// The transport half of [`call`](Self::call), split out so `call` can log the outcome around it.
-    async fn send_call(&mut self, _method: &str, session_id: Option<&str>, body: Vec<u8>) -> McpResult<Value> {
+    async fn send_call(
+        &mut self,
+        _method: &str,
+        session_id: Option<&str>,
+        body: Vec<u8>,
+    ) -> McpResult<Value> {
         let resp = self
             .http
             .request("POST", &self.url, &self.headers(session_id), Some(body))
             .await
             .map_err(|e| McpError::transport(format!("request failed: {e}")))?;
         if resp.status >= 400 {
-            return Err(McpError::transport(format!("server returned status {}", resp.status)));
+            return Err(McpError::transport(format!(
+                "server returned status {}",
+                resp.status
+            )));
         }
         let parsed = parse_response_body(&resp)?;
         if let Some(err) = parsed.error {
@@ -390,8 +426,13 @@ impl<'a> McpClient<'a> {
 
     /// Send a JSON-RPC notification (no response expected).
     async fn notify(&self, method: &str, session_id: Option<&str>) -> McpResult<()> {
-        let notif = JsonRpcNotification { jsonrpc: "2.0", method, params: None };
-        let body = serde_json::to_vec(&notif).map_err(|e| McpError::usage(format!("encode: {e}")))?;
+        let notif = JsonRpcNotification {
+            jsonrpc: "2.0",
+            method,
+            params: None,
+        };
+        let body =
+            serde_json::to_vec(&notif).map_err(|e| McpError::usage(format!("encode: {e}")))?;
         self.http
             .request("POST", &self.url, &self.headers(session_id), Some(body))
             .await
@@ -411,7 +452,12 @@ impl<'a> McpClient<'a> {
             "clientInfo": { "name": "clank.sh", "version": env!("CARGO_PKG_VERSION") },
         });
         let id = self.id();
-        let req = JsonRpcRequest { jsonrpc: "2.0", id, method: "initialize", params: Some(params) };
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0",
+            id,
+            method: "initialize",
+            params: Some(params),
+        };
         let body = serde_json::to_vec(&req).map_err(|e| McpError::usage(format!("encode: {e}")))?;
         let resp = self
             .http
@@ -419,7 +465,10 @@ impl<'a> McpClient<'a> {
             .await
             .map_err(|e| McpError::transport(format!("request failed: {e}")))?;
         if resp.status >= 400 {
-            return Err(McpError::transport(format!("server returned status {}", resp.status)));
+            return Err(McpError::transport(format!(
+                "server returned status {}",
+                resp.status
+            )));
         }
         let session_id = resp.header("mcp-session-id").map(String::from);
         let parsed = parse_response_body(&resp)?;
@@ -453,7 +502,9 @@ impl<'a> McpClient<'a> {
         };
 
         // Best-effort initialized notification (non-fatal if it fails).
-        let _ = self.notify("notifications/initialized", session_id.as_deref()).await;
+        let _ = self
+            .notify("notifications/initialized", session_id.as_deref())
+            .await;
         Ok(info)
     }
 
@@ -470,11 +521,19 @@ impl<'a> McpClient<'a> {
             let result = self.call("tools/list", params, session_id).await?;
             if let Some(arr) = result.get("tools").and_then(Value::as_array) {
                 for t in arr {
-                    let Some(name) = t.get("name").and_then(Value::as_str) else { continue };
+                    let Some(name) = t.get("name").and_then(Value::as_str) else {
+                        continue;
+                    };
                     tools.push(ToolSpec {
                         name: name.to_string(),
-                        description: t.get("description").and_then(Value::as_str).map(String::from),
-                        input_schema: t.get("inputSchema").cloned().unwrap_or(serde_json::json!({})),
+                        description: t
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .map(String::from),
+                        input_schema: t
+                            .get("inputSchema")
+                            .cloned()
+                            .unwrap_or(serde_json::json!({})),
                     });
                 }
             }
@@ -501,7 +560,10 @@ impl<'a> McpClient<'a> {
     ) -> McpResult<CallToolResult> {
         let params = serde_json::json!({ "name": name, "arguments": arguments });
         let result = self.call("tools/call", Some(params), session_id).await?;
-        let is_error = result.get("isError").and_then(Value::as_bool).unwrap_or(false);
+        let is_error = result
+            .get("isError")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let text = render_content(result.get("content"));
         if is_error {
             return Err(McpError::tool(if text.is_empty() {
@@ -510,7 +572,11 @@ impl<'a> McpClient<'a> {
                 text
             }));
         }
-        Ok(CallToolResult { text, raw: result, is_error })
+        Ok(CallToolResult {
+            text,
+            raw: result,
+            is_error,
+        })
     }
 
     /// `prompts/list` — the server's advertised prompts (name + description + declared arguments).
@@ -528,7 +594,9 @@ impl<'a> McpClient<'a> {
             let result = self.call("prompts/list", params, session_id).await?;
             if let Some(arr) = result.get("prompts").and_then(Value::as_array) {
                 for p in arr {
-                    let Some(name) = p.get("name").and_then(Value::as_str) else { continue };
+                    let Some(name) = p.get("name").and_then(Value::as_str) else {
+                        continue;
+                    };
                     let arguments = p
                         .get("arguments")
                         .and_then(Value::as_array)
@@ -541,7 +609,8 @@ impl<'a> McpClient<'a> {
                                         .and_then(Value::as_str)
                                         .unwrap_or("")
                                         .to_string();
-                                    let req = a.get("required").and_then(Value::as_bool).unwrap_or(false);
+                                    let req =
+                                        a.get("required").and_then(Value::as_bool).unwrap_or(false);
                                     Some((n, d, req))
                                 })
                                 .collect()
@@ -549,7 +618,10 @@ impl<'a> McpClient<'a> {
                         .unwrap_or_default();
                     prompts.push(PromptSpec {
                         name: name.to_string(),
-                        description: p.get("description").and_then(Value::as_str).map(String::from),
+                        description: p
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .map(String::from),
                         arguments,
                     });
                 }
@@ -605,7 +677,10 @@ impl<'a> McpClient<'a> {
     /// # Errors
     /// Returns `Err` on transport/protocol failure or a JSON-RPC error (e.g. method-not-found from a
     /// server lacking the resources capability).
-    pub async fn list_resources(&mut self, session_id: Option<&str>) -> McpResult<Vec<ResourceSpec>> {
+    pub async fn list_resources(
+        &mut self,
+        session_id: Option<&str>,
+    ) -> McpResult<Vec<ResourceSpec>> {
         let mut resources = Vec::new();
         let mut cursor: Option<String> = None;
         for _ in 0..MAX_TOOL_PAGES {
@@ -613,7 +688,9 @@ impl<'a> McpClient<'a> {
             let result = self.call("resources/list", params, session_id).await?;
             if let Some(arr) = result.get("resources").and_then(Value::as_array) {
                 for r in arr {
-                    let Some(uri) = r.get("uri").and_then(Value::as_str) else { continue };
+                    let Some(uri) = r.get("uri").and_then(Value::as_str) else {
+                        continue;
+                    };
                     let ann = r.get("annotations");
                     let audience = ann
                         .and_then(|a| a.get("audience"))
@@ -627,7 +704,10 @@ impl<'a> McpClient<'a> {
                     resources.push(ResourceSpec {
                         uri: uri.to_string(),
                         name: r.get("name").and_then(Value::as_str).map(String::from),
-                        description: r.get("description").and_then(Value::as_str).map(String::from),
+                        description: r
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .map(String::from),
                         mime_type: r.get("mimeType").and_then(Value::as_str).map(String::from),
                         size: r.get("size").and_then(Value::as_u64),
                         last_modified: ann
@@ -660,7 +740,9 @@ impl<'a> McpClient<'a> {
         let mut cursor: Option<String> = None;
         for _ in 0..MAX_TOOL_PAGES {
             let params = cursor.as_ref().map(|c| serde_json::json!({ "cursor": c }));
-            let result = self.call("resources/templates/list", params, session_id).await?;
+            let result = self
+                .call("resources/templates/list", params, session_id)
+                .await?;
             if let Some(arr) = result.get("resourceTemplates").and_then(Value::as_array) {
                 for t in arr {
                     let Some(uri_template) = t.get("uriTemplate").and_then(Value::as_str) else {
@@ -669,7 +751,10 @@ impl<'a> McpClient<'a> {
                     templates.push(ResourceTemplateSpec {
                         uri_template: uri_template.to_string(),
                         name: t.get("name").and_then(Value::as_str).map(String::from),
-                        description: t.get("description").and_then(Value::as_str).map(String::from),
+                        description: t
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .map(String::from),
                         mime_type: t.get("mimeType").and_then(Value::as_str).map(String::from),
                     });
                 }
@@ -688,9 +773,14 @@ impl<'a> McpClient<'a> {
     /// # Errors
     /// Returns `Err` on transport/protocol failure or if the server does not support
     /// `resources/subscribe`.
-    pub async fn subscribe_resource(&mut self, uri: &str, session_id: Option<&str>) -> McpResult<()> {
+    pub async fn subscribe_resource(
+        &mut self,
+        uri: &str,
+        session_id: Option<&str>,
+    ) -> McpResult<()> {
         let params = serde_json::json!({ "uri": uri });
-        self.call("resources/subscribe", Some(params), session_id).await?;
+        self.call("resources/subscribe", Some(params), session_id)
+            .await?;
         Ok(())
     }
 
@@ -700,9 +790,15 @@ impl<'a> McpClient<'a> {
     ///
     /// # Errors
     /// Returns `Err` on transport/protocol failure or a JSON-RPC error from the server.
-    pub async fn read_resource(&mut self, uri: &str, session_id: Option<&str>) -> McpResult<String> {
+    pub async fn read_resource(
+        &mut self,
+        uri: &str,
+        session_id: Option<&str>,
+    ) -> McpResult<String> {
         let params = serde_json::json!({ "uri": uri });
-        let result = self.call("resources/read", Some(params), session_id).await?;
+        let result = self
+            .call("resources/read", Some(params), session_id)
+            .await?;
         let mut out = String::new();
         if let Some(items) = result.get("contents").and_then(Value::as_array) {
             for item in items {
@@ -738,7 +834,9 @@ impl<'a> McpClient<'a> {
         match resp.status {
             200..=299 => Ok(()),
             405 => Err(McpError::tool("server refused session close (HTTP 405)")),
-            s => Err(McpError::transport(format!("server returned status {s} on close"))),
+            s => Err(McpError::transport(format!(
+                "server returned status {s} on close"
+            ))),
         }
     }
 }
@@ -834,7 +932,10 @@ mod tests {
             fn clone(_: *const ()) -> RawWaker {
                 noop_raw()
             }
-            RawWaker::new(std::ptr::null(), &RawWakerVTable::new(clone, no_op, no_op, no_op))
+            RawWaker::new(
+                std::ptr::null(),
+                &RawWakerVTable::new(clone, no_op, no_op, no_op),
+            )
         }
         let waker = unsafe { Waker::from_raw(noop_raw()) };
         let mut cx = Context::from_waker(&waker);
@@ -860,7 +961,8 @@ mod tests {
                 }
             }),
         );
-        init.headers.push(("mcp-session-id".into(), "sess-abc".into()));
+        init.headers
+            .push(("mcp-session-id".into(), "sess-abc".into()));
         // initialized notification response (ignored).
         let notif = json_response(202, serde_json::json!({}));
         let http = FakeHttp::new(vec![init, notif]);
@@ -932,7 +1034,11 @@ mod tests {
 
     #[test]
     fn close_405_is_a_refusal() {
-        let resp = HttpResponse { status: 405, headers: vec![], body: vec![] };
+        let resp = HttpResponse {
+            status: 405,
+            headers: vec![],
+            body: vec![],
+        };
         let http = FakeHttp::new(vec![resp]);
         let client = McpClient::new(&http, "https://x/mcp", None);
         let e = block(client.close_session("s1")).unwrap_err();
@@ -942,7 +1048,8 @@ mod tests {
 
     #[test]
     fn sse_response_body_is_parsed() {
-        let body = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[]}}\n\n";
+        let body =
+            "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[]}}\n\n";
         let resp = HttpResponse {
             status: 200,
             headers: vec![("content-type".into(), "text/event-stream".into())],
@@ -974,11 +1081,16 @@ mod tests {
         };
         let notif = json_response(202, serde_json::json!({}));
         let http = FakeHttp::new(vec![init, notif]);
-        let auth = McpAuth { header: "Authorization".into(), value: "Bearer tok".into() };
+        let auth = McpAuth {
+            header: "Authorization".into(),
+            value: "Bearer tok".into(),
+        };
         let mut client = McpClient::new(&http, "https://x/mcp", Some(auth));
         block(client.initialize()).unwrap();
         let seen = http.seen.borrow();
         let (_m, _u, headers, _b) = &seen[0];
-        assert!(headers.iter().any(|(k, v)| k == "Authorization" && v == "Bearer tok"));
+        assert!(headers
+            .iter()
+            .any(|(k, v)| k == "Authorization" && v == "Bearer tok"));
     }
 }

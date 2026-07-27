@@ -39,9 +39,13 @@ impl GolemBackend {
         // two distinct scenarios onto ONE durable agent (silent state sharing), so
         // reject instead of mangling. The harness enforces this at discovery too.
         if scenario.is_empty()
-            || !scenario.chars().all(|c| matches!(c, 'a'..='z' | '0'..='9' | '-'))
+            || !scenario
+                .chars()
+                .all(|c| matches!(c, 'a'..='z' | '0'..='9' | '-'))
         {
-            bail!("scenario name `{scenario}` must be non-empty [a-z0-9-] (it becomes the agent id)");
+            bail!(
+                "scenario name `{scenario}` must be non-empty [a-z0-9-] (it becomes the agent id)"
+            );
         }
         let agent_id = format!("ClankAgent(\"conf-{scenario}-{}\")", std::process::id());
 
@@ -90,7 +94,9 @@ impl GolemBackend {
                 .stderr(Stdio::piped())
                 .kill_on_drop(true)
                 .spawn()
-                .with_context(|| format!("spawning `{}` — is the golem CLI on PATH?", self.golem_bin))?;
+                .with_context(|| {
+                    format!("spawning `{}` — is the golem CLI on PATH?", self.golem_bin)
+                })?;
             match tokio::time::timeout(self.timeout, child.wait_with_output()).await {
                 Ok(result) => result.context("collecting golem CLI output"),
                 Err(_) => bail!(
@@ -115,8 +121,12 @@ impl GolemBackend {
                 stdout
             );
         }
-        decode_invoke(&stdout)
-            .with_context(|| format!("decoding `{method}` result for {}\n--- CLI stderr ---\n{stderr}", self.agent_id))
+        decode_invoke(&stdout).with_context(|| {
+            format!(
+                "decoding `{method}` result for {}\n--- CLI stderr ---\n{stderr}",
+                self.agent_id
+            )
+        })
     }
 }
 
@@ -257,7 +267,9 @@ fn decode_eval_value(value: &serde_json::Value) -> anyhow::Result<Outcome> {
         stderr: str_field(1),
         exit_code: u8::try_from(exit_code)
             .with_context(|| format!("exit_code {exit_code} out of u8 range"))?,
-        pending: fields.get(3).and_then(|f| decode_pending_positional(&f["value"])),
+        pending: fields
+            .get(3)
+            .and_then(|f| decode_pending_positional(&f["value"])),
     })
 }
 
@@ -268,9 +280,11 @@ fn decode_pending_named(p: &serde_json::Value) -> Option<PendingView> {
     }
     Some(PendingView {
         question: p["question"].as_str().unwrap_or_default().to_string(),
-        choices: p["choices"]
-            .as_array()
-            .map(|a| a.iter().filter_map(|c| c.as_str().map(str::to_string)).collect()),
+        choices: p["choices"].as_array().map(|a| {
+            a.iter()
+                .filter_map(|c| c.as_str().map(str::to_string))
+                .collect()
+        }),
     })
 }
 
@@ -342,14 +356,20 @@ mod tests {
         let o = decode_invoke(cli).unwrap();
         let p = o.pending.expect("pending");
         assert_eq!(p.question, "Deploy?");
-        assert_eq!(p.choices.as_deref(), Some(&["staging".to_string(), "production".to_string()][..]));
+        assert_eq!(
+            p.choices.as_deref(),
+            Some(&["staging".to_string(), "production".to_string()][..])
+        );
     }
 
     #[test]
     fn missing_result_document_is_a_loud_error() {
         // No result key at all → a loud infrastructure error, never a silently-empty Outcome.
         let err = decode_invoke(r#"{"nope":123}"#).unwrap_err();
-        assert!(err.to_string().contains("no `result_json`/`resultJson`"), "{err}");
+        assert!(
+            err.to_string().contains("no `result_json`/`resultJson`"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -358,7 +378,10 @@ mod tests {
         // dev-CLI rename once silently emptied every reader, and that must never recur.
         let err = decode_invoke(r#"{"resultJson":{"value":[]}}"#).unwrap_err();
         // The specific cause is a `with_context` layer, so check the full chain (`{:#}`).
-        assert!(format!("{err:#}").contains("unrecognized golem CLI output shape"), "{err:#}");
+        assert!(
+            format!("{err:#}").contains("unrecognized golem CLI output shape"),
+            "{err:#}"
+        );
     }
 
     #[test]
@@ -391,7 +414,10 @@ mod tests {
         let o = decode_invoke(cli).unwrap();
         let p = o.pending.expect("pending");
         assert_eq!(p.question, "Deploy?");
-        assert_eq!(p.choices.as_deref(), Some(&["staging".to_string(), "production".to_string()][..]));
+        assert_eq!(
+            p.choices.as_deref(),
+            Some(&["staging".to_string(), "production".to_string()][..])
+        );
     }
 
     #[test]

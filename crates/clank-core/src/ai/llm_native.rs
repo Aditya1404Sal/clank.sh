@@ -55,8 +55,17 @@ impl NativeLlmProvider {
                 desc.provider, desc.key_env, desc.provider
             ));
         }
-        openai_native::turn(&self.client, desc, key.as_deref(), None, system, history, tools, model)
-            .await
+        openai_native::turn(
+            &self.client,
+            desc,
+            key.as_deref(),
+            None,
+            system,
+            history,
+            tools,
+            model,
+        )
+        .await
     }
 }
 
@@ -82,17 +91,27 @@ impl AskProvider for NativeLlmProvider {
         };
         match provider {
             "anthropic" => self.anthropic.turn(system, history, tools, bare).await,
-            "openai" => self.openai_family(&OPENAI, system, history, tools, bare).await,
-            "grok" => self.openai_family(&GROK, system, history, tools, bare).await,
-            "openrouter" => self.openai_family(&OPENROUTER, system, history, tools, bare).await,
-            "ollama" => self.openai_family(&OLLAMA, system, history, tools, bare).await,
+            "openai" => {
+                self.openai_family(&OPENAI, system, history, tools, bare)
+                    .await
+            }
+            "grok" => {
+                self.openai_family(&GROK, system, history, tools, bare)
+                    .await
+            }
+            "openrouter" => {
+                self.openai_family(&OPENROUTER, system, history, tools, bare)
+                    .await
+            }
+            "ollama" => {
+                self.openai_family(&OLLAMA, system, history, tools, bare)
+                    .await
+            }
             "bedrock" => AskResponse::error(
                 "ask: provider 'bedrock' requires the Golem agent (AWS SigV4 signing isn't \
                  available in native ask); use the agent, which reaches Bedrock via golem-ai-llm\n",
             ),
-            other => AskResponse::error(format!(
-                "ask: unknown model provider '{other}'\n"
-            )),
+            other => AskResponse::error(format!("ask: unknown model provider '{other}'\n")),
         }
     }
 }
@@ -124,10 +143,18 @@ mod tests {
     async fn bedrock_is_an_honest_native_error() {
         let p = NativeLlmProvider::new();
         let resp = p
-            .turn(None, &[AskTurn::User("hi".into())], &[], "bedrock/anthropic.claude-3")
+            .turn(
+                None,
+                &[AskTurn::User("hi".into())],
+                &[],
+                "bedrock/anthropic.claude-3",
+            )
             .await;
         let err = resp.error.expect("bedrock must error on native");
-        assert!(err.contains("bedrock") && err.contains("agent"), "got: {err}");
+        assert!(
+            err.contains("bedrock") && err.contains("agent"),
+            "got: {err}"
+        );
     }
 
     #[tokio::test]

@@ -116,7 +116,10 @@ mod tests {
             Err(BinError::NotFound("/bin/nope".into()))
         );
         // Nested path under a name is not served.
-        assert!(matches!(resolve("/bin/curl/extra"), Err(BinError::NotFound(_))));
+        assert!(matches!(
+            resolve("/bin/curl/extra"),
+            Err(BinError::NotFound(_))
+        ));
     }
 
     #[test]

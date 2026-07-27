@@ -97,7 +97,12 @@ impl Registry {
                 .unwrap_or_default(),
             Err(_) => Vec::new(),
         };
-        Ok(Self { dir: dir.to_path_buf(), key, signer: signer.to_string(), entries })
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            key,
+            signer: signer.to_string(),
+            entries,
+        })
     }
 
     /// The base64 public key to hand to `grease registry add --key`.
@@ -119,8 +124,11 @@ impl Registry {
         if name.is_empty() || name.contains('/') || name.contains("..") {
             bail!("invalid package name {name:?}");
         }
-        std::fs::write(self.dir.join("packages").join(format!("{name}.{ext}")), payload)
-            .context("write payload")?;
+        std::fs::write(
+            self.dir.join("packages").join(format!("{name}.{ext}")),
+            payload,
+        )
+        .context("write payload")?;
 
         let sha = sha256_hex(payload);
         let sig = b64(&self.key.sign(payload).to_bytes());
@@ -137,7 +145,8 @@ impl Registry {
             "log": { "leaf-index": 0, "tree-size": 1, "root": root, "proof": [] },
         });
 
-        self.entries.retain(|e| e.get("name").and_then(Value::as_str) != Some(name));
+        self.entries
+            .retain(|e| e.get("name").and_then(Value::as_str) != Some(name));
         self.entries.push(entry);
         self.save_index()
     }
@@ -158,7 +167,9 @@ fn load_or_create_key(dir: &Path) -> Result<SigningKey> {
     let seed_path = dir.join(".signing-seed");
     if let Ok(text) = std::fs::read_to_string(&seed_path) {
         let bytes = b64_decode(&text)?;
-        let seed: [u8; 32] = bytes.try_into().map_err(|_| anyhow!("stored seed is not 32 bytes"))?;
+        let seed: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| anyhow!("stored seed is not 32 bytes"))?;
         return Ok(SigningKey::from_bytes(&seed));
     }
     let mut seed = [0u8; 32];
@@ -199,7 +210,11 @@ fn handle_conn(mut stream: TcpStream, dir: &Path) -> std::io::Result<()> {
     reader.read_line(&mut request_line)?;
     // "GET /path HTTP/1.1"
     let path = request_line.split_whitespace().nth(1).unwrap_or("/");
-    let rel = path.split('?').next().unwrap_or("/").trim_start_matches('/');
+    let rel = path
+        .split('?')
+        .next()
+        .unwrap_or("/")
+        .trim_start_matches('/');
 
     // Path-traversal guard: only serve plain names under the registry dir.
     let body = if rel.is_empty() || rel.contains("..") || rel.starts_with('/') {
@@ -249,7 +264,12 @@ fn collect_args() -> Result<Vec<PackageArg>> {
         let description = text("  arg description")?;
         let required = confirm("  required?")?;
         let default = opt(text("  default value (blank = none)")?);
-        args.push(PackageArg { name, description, required, default });
+        args.push(PackageArg {
+            name,
+            description,
+            required,
+            default,
+        });
     }
     Ok(args)
 }
@@ -270,15 +290,24 @@ fn body_from_file_or_editor(kind_label: &str) -> Result<String> {
 }
 
 fn author_prompt(reg: &mut Registry) -> Result<()> {
-    let src = Select::new("prompt source", vec!["inline", "from a .md file (YAML frontmatter)"])
-        .prompt()?;
+    let src = Select::new(
+        "prompt source",
+        vec!["inline", "from a .md file (YAML frontmatter)"],
+    )
+    .prompt()?;
     if src == "inline" {
         let name = text("name")?;
         let description = text("description")?;
         let model = opt(text("model (blank = default)")?);
         let arguments = collect_args()?;
         let body = Editor::new("prompt body").prompt()?;
-        let pkg = PromptPackage { name: name.clone(), description: description.clone(), model, arguments, body };
+        let pkg = PromptPackage {
+            name: name.clone(),
+            description: description.clone(),
+            model,
+            arguments,
+            body,
+        };
         let payload = payload_with_kind(&pkg, "prompt")?;
         reg.write_package("prompt", &name, &description, &payload, "json")?;
         announce(reg, &name);
@@ -301,7 +330,11 @@ fn author_prompt(reg: &mut Registry) -> Result<()> {
             "  parsed '{}' — {n} argument{}{}",
             parsed.name,
             if n == 1 { "" } else { "s" },
-            parsed.model.as_deref().map(|m| format!(", model {m}")).unwrap_or_default(),
+            parsed
+                .model
+                .as_deref()
+                .map(|m| format!(", model {m}"))
+                .unwrap_or_default(),
         );
         // The payload is the RAW .md bytes — integrity is verified over exactly these.
         reg.write_package("prompt", &parsed.name, &description, &bytes, "md")?;
@@ -315,7 +348,12 @@ fn author_script(reg: &mut Registry) -> Result<()> {
     let description = text("description")?;
     let body = body_from_file_or_editor("script")?;
     let arguments = collect_args()?;
-    let pkg = ScriptPackage { name: name.clone(), description: description.clone(), arguments, body };
+    let pkg = ScriptPackage {
+        name: name.clone(),
+        description: description.clone(),
+        arguments,
+        body,
+    };
     let payload = payload_with_kind(&pkg, "script")?;
     reg.write_package("script", &name, &description, &payload, "json")?;
     announce(reg, &name);
@@ -325,7 +363,9 @@ fn author_script(reg: &mut Registry) -> Result<()> {
 fn author_skill(reg: &mut Registry) -> Result<()> {
     let name = text("name")?;
     let description = text("description")?;
-    let intended_use = opt(text("intended use (when the model should consult this skill)")?);
+    let intended_use = opt(text(
+        "intended use (when the model should consult this skill)",
+    )?);
 
     let mut documents = Vec::new();
     while confirm("add a document?")? {
@@ -364,7 +404,11 @@ fn author_agent(reg: &mut Registry) -> Result<()> {
         let mname = text("  method name")?;
         let mdesc = text("  method description")?;
         let params = split_csv(&text("  method params (comma-separated names)")?);
-        methods.push(AgentMethod { name: mname, description: mdesc, params });
+        methods.push(AgentMethod {
+            name: mname,
+            description: mdesc,
+            params,
+        });
     }
     let ephemeral = confirm("ephemeral (stateless) agent?")?;
 
@@ -404,7 +448,10 @@ fn author_mcp(reg: &mut Registry) -> Result<()> {
 }
 
 fn split_csv(s: &str) -> Vec<String> {
-    s.split(',').map(|w| w.trim().to_string()).filter(|w| !w.is_empty()).collect()
+    s.split(',')
+        .map(|w| w.trim().to_string())
+        .filter(|w| !w.is_empty())
+        .collect()
 }
 
 fn list(reg: &Registry) {
@@ -437,8 +484,13 @@ fn main() -> Result<()> {
         .get(1)
         .filter(|a| !a.starts_with('-'))
         .map(PathBuf::from)
-        .ok_or_else(|| anyhow!("usage: grease-populate <registry-dir> [--port <n>] [--signer <name>]"))?;
-    let port = flag_value(&args, "--port").map(|s| s.parse()).transpose()?.unwrap_or(8823u16);
+        .ok_or_else(|| {
+            anyhow!("usage: grease-populate <registry-dir> [--port <n>] [--signer <name>]")
+        })?;
+    let port = flag_value(&args, "--port")
+        .map(|s| s.parse())
+        .transpose()?
+        .unwrap_or(8823u16);
     let signer = flag_value(&args, "--signer").unwrap_or_else(|| "grease-populate".to_string());
 
     let mut reg = Registry::open(&dir, &signer)?;
@@ -456,8 +508,7 @@ fn main() -> Result<()> {
             "add to the registry:",
             vec!["prompt", "script", "skill", "agent", "mcp", "list", "quit"],
         )
-        .prompt()
-        else {
+        .prompt() else {
             // Esc / Ctrl-C at the menu = quit cleanly.
             break;
         };
@@ -483,7 +534,10 @@ fn main() -> Result<()> {
 }
 
 fn flag_value(args: &[String], flag: &str) -> Option<String> {
-    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned()
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -551,12 +605,14 @@ mod tests {
             body: "Say hello.".into(),
         };
         let payload = payload_with_kind(&p, "prompt").unwrap();
-        reg.write_package("prompt", "hello", "a signed prompt", &payload, "json").unwrap();
+        reg.write_package("prompt", "hello", "a signed prompt", &payload, "json")
+            .unwrap();
         assert_authored_ok(&reg, "hello", "json", &payload);
 
         // prompt (.md frontmatter, raw bytes)
         let md = b"---\nname: greeting\ndescription: hi\n---\nSay hi to {{who}}.\n";
-        reg.write_package("prompt", "greeting", "hi", md, "md").unwrap();
+        reg.write_package("prompt", "greeting", "hi", md, "md")
+            .unwrap();
         assert_authored_ok(&reg, "greeting", "md", md);
 
         // script
@@ -572,7 +628,8 @@ mod tests {
             body: "echo {{label}}: $(cat /etc/hostname)".into(),
         };
         let payload = payload_with_kind(&s, "script").unwrap();
-        reg.write_package("script", "hostinfo", "print hostname", &payload, "json").unwrap();
+        reg.write_package("script", "hostinfo", "print hostname", &payload, "json")
+            .unwrap();
         assert_authored_ok(&reg, "hostinfo", "json", &payload);
 
         // skill
@@ -590,7 +647,8 @@ mod tests {
             }],
         };
         let payload = payload_with_kind(&sk, "skill").unwrap();
-        reg.write_package("skill", "reviewing", "how to review", &payload, "json").unwrap();
+        reg.write_package("skill", "reviewing", "how to review", &payload, "json")
+            .unwrap();
         assert_authored_ok(&reg, "reviewing", "json", &payload);
 
         // agent
@@ -607,13 +665,15 @@ mod tests {
             ephemeral: false,
         };
         let payload = payload_with_kind(&a, "agent").unwrap();
-        reg.write_package("agent", "greeter", "a greeter", &payload, "json").unwrap();
+        reg.write_package("agent", "greeter", "a greeter", &payload, "json")
+            .unwrap();
         assert_authored_ok(&reg, "greeter", "json", &payload);
 
         // mcp (minimal payload built as a Value)
         let mcp = json!({"kind":"mcp","name":"deepwiki","description":"docs","url":"https://mcp.example/mcp"});
         let payload = serde_json::to_vec_pretty(&mcp).unwrap();
-        reg.write_package("mcp", "deepwiki", "docs", &payload, "json").unwrap();
+        reg.write_package("mcp", "deepwiki", "docs", &payload, "json")
+            .unwrap();
         assert_authored_ok(&reg, "deepwiki", "json", &payload);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -632,7 +692,8 @@ mod tests {
                 body: "one".into(),
             };
             let payload = payload_with_kind(&p, "prompt").unwrap();
-            reg.write_package("prompt", "hello", "v1", &payload, "json").unwrap();
+            reg.write_package("prompt", "hello", "v1", &payload, "json")
+                .unwrap();
         }
         // Reopen: existing entry is loaded; re-authoring the same name replaces (not duplicates) it.
         let mut reg = Registry::open(&dir, "s").unwrap();
@@ -645,7 +706,8 @@ mod tests {
             body: "two".into(),
         };
         let payload = payload_with_kind(&p, "prompt").unwrap();
-        reg.write_package("prompt", "hello", "v2", &payload, "json").unwrap();
+        reg.write_package("prompt", "hello", "v2", &payload, "json")
+            .unwrap();
         assert_eq!(reg.entries.len(), 1, "same name must upsert, not duplicate");
         assert_authored_ok(&reg, "hello", "json", &payload);
         let _ = std::fs::remove_dir_all(&dir);
@@ -665,7 +727,8 @@ mod tests {
             body: "hi".into(),
         };
         let payload = payload_with_kind(&p, "prompt").unwrap();
-        reg.write_package("prompt", "hello", "d", &payload, "json").unwrap();
+        reg.write_package("prompt", "hello", "d", &payload, "json")
+            .unwrap();
 
         let port = serve(dir.clone(), 0).unwrap();
 
@@ -690,8 +753,11 @@ mod tests {
     fn http_get(port: u16, path: &str) -> (String, Vec<u8>) {
         use std::io::{Read, Write};
         let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        s.write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").as_bytes())
-            .unwrap();
+        s.write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .unwrap();
         let mut buf = Vec::new();
         s.read_to_end(&mut buf).unwrap();
         // Split headers/body on the blank line.

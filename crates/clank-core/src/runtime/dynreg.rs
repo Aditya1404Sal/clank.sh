@@ -32,9 +32,13 @@ pub fn install(manifests: Arc<Mutex<Vec<Manifest>>>) -> InstallGuard {
 #[must_use]
 pub fn lookup(name: &str) -> Option<Manifest> {
     ACTIVE.with(|slot| {
-        slot.borrow()
-            .as_ref()
-            .and_then(|arc| arc.lock().unwrap_or_else(std::sync::PoisonError::into_inner).iter().find(|m| m.name == name).cloned())
+        slot.borrow().as_ref().and_then(|arc| {
+            arc.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .find(|m| m.name == name)
+                .cloned()
+        })
     })
 }
 

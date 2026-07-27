@@ -188,7 +188,9 @@ fn lex(src: &str) -> AwkResult<Vec<Tok>> {
                         break;
                     }
                 }
-                toks.push(Tok::Num(num.parse().map_err(|_| format!("bad number '{num}'"))?));
+                toks.push(Tok::Num(
+                    num.parse().map_err(|_| format!("bad number '{num}'"))?,
+                ));
             }
             c if c.is_ascii_alphabetic() || c == '_' => {
                 let mut id = String::new();
@@ -540,7 +542,15 @@ impl Parser {
     /// included — they bind as binary operators in `parse_additive`.
     fn starts_operand(&self) -> bool {
         match self.peek() {
-            Some(Tok::Num(_) | Tok::Str(_) | Tok::Dollar | Tok::LParen | Tok::Not | Tok::Incr | Tok::Decr) => true,
+            Some(
+                Tok::Num(_)
+                | Tok::Str(_)
+                | Tok::Dollar
+                | Tok::LParen
+                | Tok::Not
+                | Tok::Incr
+                | Tok::Decr,
+            ) => true,
             Some(Tok::Ident(id)) => !UNSUPPORTED_KEYWORDS.contains(&id.as_str()),
             _ => false,
         }
@@ -590,7 +600,11 @@ impl Parser {
                 self.parse_unary()
             }
             Some(Tok::Incr | Tok::Decr) => {
-                let delta = if self.peek() == Some(&Tok::Incr) { 1.0 } else { -1.0 };
+                let delta = if self.peek() == Some(&Tok::Incr) {
+                    1.0
+                } else {
+                    -1.0
+                };
                 self.pos += 1;
                 match self.next() {
                     Some(Tok::Ident(name)) => Ok(Expr::IncrDecr {
@@ -824,7 +838,11 @@ impl Env {
     }
 }
 
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)] // field index is guarded >= 0; char counts are small
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)] // field index is guarded >= 0; char counts are small
 fn eval(expr: &Expr, env: &mut Env) -> AwkResult<Value> {
     Ok(match expr {
         Expr::Num(n) => Value::Num(*n),
@@ -871,9 +889,7 @@ fn eval(expr: &Expr, env: &mut Env) -> AwkResult<Value> {
             // Numeric comparison when both sides look numeric; else string comparison.
             let numeric = match (&l, &r) {
                 (Value::Num(_), Value::Num(_)) => true,
-                (Value::Num(_), Value::Str(s)) | (Value::Str(s), Value::Num(_)) => {
-                    looks_numeric(s)
-                }
+                (Value::Num(_), Value::Str(s)) | (Value::Str(s), Value::Num(_)) => looks_numeric(s),
                 (Value::Str(a), Value::Str(b)) => looks_numeric(a) && looks_numeric(b),
             };
             let ord = if numeric {
@@ -1027,7 +1043,12 @@ fn format_printf(format: &str, values: &[Value]) -> AwkResult<String> {
                     'g' => fmt_num(value.num()),
                     'x' => format!("{:x}", value.num() as i64),
                     'o' => format!("{:o}", value.num() as i64),
-                    'c' => value.string().chars().next().map(String::from).unwrap_or_default(),
+                    'c' => value
+                        .string()
+                        .chars()
+                        .next()
+                        .map(String::from)
+                        .unwrap_or_default(),
                     's' => {
                         let s = value.string();
                         match prec {
@@ -1127,9 +1148,7 @@ pub(crate) fn run_awk(
     }
 
     // GNU behavior: a program with only BEGIN rules never reads input.
-    let wants_input = rules
-        .iter()
-        .any(|r| !matches!(r.pattern, Pattern::Begin));
+    let wants_input = rules.iter().any(|r| !matches!(r.pattern, Pattern::Begin));
     if wants_input {
         let mut text = String::new();
         if files.is_empty() {
@@ -1221,7 +1240,10 @@ mod tests {
         assert_eq!(awk(&["{s += $1} END {print s}"], "1\n2\n3\n"), "6\n");
         assert_eq!(awk(&["/x/ {n++} END {print n}"], "x\ny\nx\n"), "2\n");
         assert_eq!(
-            awk(&["BEGIN {print \"start\"} {print} END {print \"done\"}"], "m\n"),
+            awk(
+                &["BEGIN {print \"start\"} {print} END {print \"done\"}"],
+                "m\n"
+            ),
             "start\nm\ndone\n"
         );
         // BEGIN-only programs read no input.
@@ -1232,18 +1254,30 @@ mod tests {
     fn expressions_concat_arith_vars() {
         assert_eq!(awk(&["{print $2, $1}"], "a b\n"), "b a\n");
         assert_eq!(awk(&["{print $1 \"-\" $2}"], "a b\n"), "a-b\n");
-        assert_eq!(awk(&["BEGIN {print 7 % 3, 2 * 3, 10 / 4}"], ""), "1 6 2.5\n");
+        assert_eq!(
+            awk(&["BEGIN {print 7 % 3, 2 * 3, 10 / 4}"], ""),
+            "1 6 2.5\n"
+        );
         assert_eq!(awk(&["-v", "x=5", "BEGIN {print x + 1}"], ""), "6\n");
         assert_eq!(awk(&["BEGIN {OFS=\"|\"; print 1, 2}"], ""), "1|2\n");
         assert_eq!(awk(&["{print length($1), length}"], "abc de\n"), "3 6\n");
-        assert_eq!(awk(&["BEGIN {n = 1; n += 2; print n++; print n}"], ""), "3\n4\n");
+        assert_eq!(
+            awk(&["BEGIN {n = 1; n += 2; print n++; print n}"], ""),
+            "3\n4\n"
+        );
     }
 
     #[test]
     fn printf_subset() {
-        assert_eq!(awk(&["BEGIN {printf \"%d-%s\\n\", 42, \"x\"}"], ""), "42-x\n");
+        assert_eq!(
+            awk(&["BEGIN {printf \"%d-%s\\n\", 42, \"x\"}"], ""),
+            "42-x\n"
+        );
         assert_eq!(awk(&["BEGIN {printf \"%5d|\\n\", 42}"], ""), "   42|\n");
-        assert_eq!(awk(&["BEGIN {printf \"%-5s|\\n\", \"ab\"}"], ""), "ab   |\n");
+        assert_eq!(
+            awk(&["BEGIN {printf \"%-5s|\\n\", \"ab\"}"], ""),
+            "ab   |\n"
+        );
         assert_eq!(awk(&["BEGIN {printf \"%.2f\\n\", 3.14159}"], ""), "3.14\n");
         assert_eq!(awk(&["BEGIN {printf \"%05d\\n\", 42}"], ""), "00042\n");
     }

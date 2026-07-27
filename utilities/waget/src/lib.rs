@@ -94,7 +94,8 @@ fn finish(req: &Request, resp: whttp::Response) -> Outcome {
 
     if status >= 400 {
         if !req.quiet {
-            stderr.extend_from_slice(format!("waget: server returned status {status}\n").as_bytes());
+            stderr
+                .extend_from_slice(format!("waget: server returned status {status}\n").as_bytes());
         }
         return Outcome {
             stdout: Vec::new(),
@@ -148,7 +149,9 @@ fn content_disposition_filename(resp: &whttp::Response) -> Option<String> {
     let cd = resp.header("content-disposition")?;
     for part in cd.split(';') {
         let p = part.trim();
-        if p.get(..9).is_some_and(|h| h.eq_ignore_ascii_case("filename=")) {
+        if p.get(..9)
+            .is_some_and(|h| h.eq_ignore_ascii_case("filename="))
+        {
             let name = p[9..].trim().trim_matches('"');
             let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
             if !base.is_empty() {
@@ -217,7 +220,12 @@ mod tests {
         // Run from a temp cwd so the file lands somewhere cleanable.
         let dir = std::env::temp_dir().join(format!("waget_cwd_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let out = run(&argv(&["-O", dir.join("report.txt").to_str().unwrap(), &full])).await;
+        let out = run(&argv(&[
+            "-O",
+            dir.join("report.txt").to_str().unwrap(),
+            &full,
+        ]))
+        .await;
         assert_eq!(out.exit_code, 0);
         assert_eq!(
             std::fs::read_to_string(dir.join("report.txt")).unwrap(),
@@ -249,7 +257,11 @@ mod tests {
     }
 
     /// A one-shot server that adds a custom header (for `-S` / `--content-disposition`).
-    fn mock_server_h(status: u16, header: (&'static str, &'static str), body: &'static str) -> String {
+    fn mock_server_h(
+        status: u16,
+        header: (&'static str, &'static str),
+        body: &'static str,
+    ) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         std::thread::spawn(move || {

@@ -175,9 +175,9 @@ impl Transcript {
     pub fn record_output(&mut self, output: &[u8]) {
         if let Some(Entry::Command { output: buf, .. }) = self.entries.last_mut() {
             match std::str::from_utf8(output) {
-                Ok(text) => buf.extend_from_slice(
-                    crate::runtime::secretenv::mask_values(text).as_bytes(),
-                ),
+                Ok(text) => {
+                    buf.extend_from_slice(crate::runtime::secretenv::mask_values(text).as_bytes());
+                }
                 Err(_) => buf.extend_from_slice(output),
             }
         }
@@ -706,7 +706,9 @@ mod tests {
         t.discard_dropped_span();
         assert!(t.pending_summary().is_none(), "text discarded");
         assert!(
-            String::from_utf8(t.render()).unwrap().contains("earlier entries dropped"),
+            String::from_utf8(t.render())
+                .unwrap()
+                .contains("earlier entries dropped"),
             "the count marker survives"
         );
     }
@@ -762,7 +764,10 @@ mod tests {
         record(&mut t, "dddd", b"dddd");
         record(&mut t, "eeee", b"eeee");
         let pending = t.pending_summary();
-        assert!(pending.is_some(), "a fresh eviction re-opens the pending span");
+        assert!(
+            pending.is_some(),
+            "a fresh eviction re-opens the pending span"
+        );
         let rendered = String::from_utf8(t.render()).unwrap();
         // Back to the bare count marker until the Session re-summarizes.
         assert!(rendered.contains("earlier entries dropped"));
@@ -814,7 +819,10 @@ mod tests {
         let dropped = t.trim(10);
         assert_eq!(dropped, 2);
         let rendered = String::from_utf8(t.render()).unwrap();
-        assert!(rendered.contains("clank$ cmd2"), "the current entry must survive");
+        assert!(
+            rendered.contains("clank$ cmd2"),
+            "the current entry must survive"
+        );
         assert!(rendered.starts_with("[2 earlier entries dropped]\n"));
     }
 
@@ -823,7 +831,9 @@ mod tests {
         let mut t = Transcript::with_cap(10_000);
         record(&mut t, "only", b"out");
         assert_eq!(t.trim(0), 0);
-        assert!(String::from_utf8(t.render()).unwrap().contains("clank$ only"));
+        assert!(String::from_utf8(t.render())
+            .unwrap()
+            .contains("clank$ only"));
         let mut empty = Transcript::new();
         assert_eq!(empty.trim(5), 0);
         assert!(empty.render().is_empty());
@@ -837,10 +847,22 @@ mod tests {
         for i in 0..5 {
             record(&mut t, &format!("cmd{i}"), b"xxxx"); // forces eviction → a marker exists
         }
-        assert_eq!(String::from_utf8(t.render()).unwrap().matches("dropped").count(), 1);
+        assert_eq!(
+            String::from_utf8(t.render())
+                .unwrap()
+                .matches("dropped")
+                .count(),
+            1
+        );
         t.trim(1);
         // Still exactly one marker line.
-        assert_eq!(String::from_utf8(t.render()).unwrap().matches("dropped").count(), 1);
+        assert_eq!(
+            String::from_utf8(t.render())
+                .unwrap()
+                .matches("dropped")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -850,15 +872,23 @@ mod tests {
             record(&mut t, &format!("cmd{i}"), b"out");
         }
         // `context trim 2` → empty output, window mutated.
-        assert!(dispatch_context(&mut t, "context trim 2").unwrap().is_empty());
-        assert!(!String::from_utf8(t.render()).unwrap().contains("clank$ cmd0"));
+        assert!(dispatch_context(&mut t, "context trim 2")
+            .unwrap()
+            .is_empty());
+        assert!(!String::from_utf8(t.render())
+            .unwrap()
+            .contains("clank$ cmd0"));
         // Missing / non-numeric args error honestly.
-        assert!(String::from_utf8(dispatch_context(&mut t, "context trim").unwrap())
-            .unwrap()
-            .contains("expects a count"));
-        assert!(String::from_utf8(dispatch_context(&mut t, "context trim nope").unwrap())
-            .unwrap()
-            .contains("not a number"));
+        assert!(
+            String::from_utf8(dispatch_context(&mut t, "context trim").unwrap())
+                .unwrap()
+                .contains("expects a count")
+        );
+        assert!(
+            String::from_utf8(dispatch_context(&mut t, "context trim nope").unwrap())
+                .unwrap()
+                .contains("not a number")
+        );
     }
 
     #[test]

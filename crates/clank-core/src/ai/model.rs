@@ -26,7 +26,8 @@ pub(crate) struct Model;
 
 impl Model {
     pub(crate) const NAME: &'static str = "model";
-    pub(crate) const SYNOPSIS: &'static str = "list and configure model providers and the default model";
+    pub(crate) const SYNOPSIS: &'static str =
+        "list and configure model providers and the default model";
 }
 
 /// The default provider when a model id carries no `provider/` prefix.
@@ -36,8 +37,14 @@ const PROVIDER: &str = "anthropic";
 /// golem-ai-llm); natively, anthropic + the OpenAI-compatible family (`openai`/`grok`/`openrouter`/
 /// `ollama`) work and `bedrock` is agent-only. Keys come from each provider's env var (or, on native,
 /// `model add <provider> --key`).
-pub(crate) const PROVIDERS: &[&str] =
-    &["anthropic", "openai", "ollama", "grok", "openrouter", "bedrock"];
+pub(crate) const PROVIDERS: &[&str] = &[
+    "anthropic",
+    "openai",
+    "ollama",
+    "grok",
+    "openrouter",
+    "bedrock",
+];
 
 /// Whether `provider` is one clank knows how to route to.
 pub(crate) fn is_known_provider(provider: &str) -> bool {
@@ -90,7 +97,10 @@ impl SimpleCommand for Model {
         }
     }
 
-    fn execute<SE, I, S>(context: ExecutionContext<'_, SE>, args: I) -> Result<ExecutionResult, Error>
+    fn execute<SE, I, S>(
+        context: ExecutionContext<'_, SE>,
+        args: I,
+    ) -> Result<ExecutionResult, Error>
     where
         SE: ShellExtensions,
         I: Iterator<Item = S>,
@@ -101,7 +111,8 @@ impl SimpleCommand for Model {
         let home = context
             .shell
             .env()
-            .get_str("HOME", context.shell).map_or_else(|| "/home/user".to_string(), std::borrow::Cow::into_owned);
+            .get_str("HOME", context.shell)
+            .map_or_else(|| "/home/user".to_string(), std::borrow::Cow::into_owned);
 
         let (stdout, stderr, code) = run(&home, &argv);
         if !stdout.is_empty() {
@@ -126,7 +137,9 @@ fn run(home: &str, argv: &[String]) -> (String, String, u8) {
         "remove" => remove(home, argv.get(1).map(String::as_str)),
         other => (
             String::new(),
-            format!("model: unknown subcommand '{other}' (try: list, default, info, add, remove)\n"),
+            format!(
+                "model: unknown subcommand '{other}' (try: list, default, info, add, remove)\n"
+            ),
             2,
         ),
     }
@@ -151,7 +164,11 @@ fn list(home: &str) -> (String, String, u8) {
     let default_id = canonicalize(&default);
     let mut out = String::new();
     for id in CATALOG {
-        let marker = if canonicalize(id) == default_id { "* " } else { "  " };
+        let marker = if canonicalize(id) == default_id {
+            "* "
+        } else {
+            "  "
+        };
         let _ = writeln!(out, "{marker}{id}");
     }
     let _ = write!(out, "\ndefault: {default} (from {source})\n");
@@ -188,7 +205,15 @@ fn info(home: &str, id: Option<&str>) -> (String, String, u8) {
     let mut out = String::new();
     let _ = writeln!(out, "id:        {target}");
     let _ = writeln!(out, "provider:  {provider}");
-    let _ = writeln!(out, "in catalog: {}", if in_catalog { "yes" } else { "no (passed through)" });
+    let _ = writeln!(
+        out,
+        "in catalog: {}",
+        if in_catalog {
+            "yes"
+        } else {
+            "no (passed through)"
+        }
+    );
     let _ = writeln!(out, "default:   {}", if is_default { "yes" } else { "no" });
     (out, warn.unwrap_or_default(), 0)
 }
@@ -370,7 +395,10 @@ mod tests {
         let (out, _err, code) = run(&home, &args(&["list"]));
         assert_eq!(code, 0);
         // Fresh home: the built-in default (haiku) is marked with *.
-        assert!(out.contains("* anthropic/claude-haiku-4-5-20251001"), "got: {out}");
+        assert!(
+            out.contains("* anthropic/claude-haiku-4-5-20251001"),
+            "got: {out}"
+        );
         assert!(out.contains("(from built-in)"), "got: {out}");
     }
 
@@ -381,8 +409,14 @@ mod tests {
         assert_eq!(code, 0, "err path: {out}");
         assert!(out.contains("claude-sonnet-4-5"));
         let (list_out, _, _) = run(&home, &args(&["list"]));
-        assert!(list_out.contains("* anthropic/claude-sonnet-4-5"), "got: {list_out}");
-        assert!(list_out.contains("from ~/.config/ask/ask.toml"), "got: {list_out}");
+        assert!(
+            list_out.contains("* anthropic/claude-sonnet-4-5"),
+            "got: {list_out}"
+        );
+        assert!(
+            list_out.contains("from ~/.config/ask/ask.toml"),
+            "got: {list_out}"
+        );
     }
 
     #[test]
@@ -426,11 +460,17 @@ mod tests {
     #[test]
     fn add_with_key_stores_it_in_ask_toml() {
         let home = temp_home();
-        let (out, err, code) = run(&home, &args(&["add", "anthropic", "--key", "sk-secret-value"]));
+        let (out, err, code) = run(
+            &home,
+            &args(&["add", "anthropic", "--key", "sk-secret-value"]),
+        );
         assert_eq!(code, 0, "native add --key should succeed; err: {err}");
         assert!(out.contains("ask.toml"), "got: {out}");
         // The key value must never be echoed on any channel.
-        assert!(!out.contains("sk-secret-value") && !err.contains("sk-secret-value"), "key leaked");
+        assert!(
+            !out.contains("sk-secret-value") && !err.contains("sk-secret-value"),
+            "key leaked"
+        );
         // It round-trips through the config layer.
         assert_eq!(
             crate::ai::config::provider_key(&home, "anthropic").as_deref(),
@@ -445,7 +485,10 @@ mod tests {
         assert_eq!(code, 1);
         assert!(out.is_empty());
         // Directs the user to --key or the env var; never stores anything.
-        assert!(err.contains("--key") || err.contains("ANTHROPIC_API_KEY"), "got: {err}");
+        assert!(
+            err.contains("--key") || err.contains("ANTHROPIC_API_KEY"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -454,8 +497,14 @@ mod tests {
         // A known non-anthropic provider stores its key natively (per-provider ask.toml entry).
         let (out, err, code) = run(&home, &args(&["add", "openai", "--key", "sk-openai"]));
         assert_eq!(code, 0, "err: {err}");
-        assert!(out.contains("openai") && out.contains("ask.toml"), "got: {out}");
-        assert!(!out.contains("sk-openai") && !err.contains("sk-openai"), "key leaked");
+        assert!(
+            out.contains("openai") && out.contains("ask.toml"),
+            "got: {out}"
+        );
+        assert!(
+            !out.contains("sk-openai") && !err.contains("sk-openai"),
+            "key leaked"
+        );
         assert_eq!(
             crate::ai::config::provider_key(&home, "openai").as_deref(),
             Some("sk-openai")

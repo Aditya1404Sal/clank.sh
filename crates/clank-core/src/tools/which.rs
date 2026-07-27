@@ -46,7 +46,10 @@ impl SimpleCommand for Which {
         }
     }
 
-    fn execute<SE, I, S>(context: ExecutionContext<'_, SE>, args: I) -> Result<ExecutionResult, Error>
+    fn execute<SE, I, S>(
+        context: ExecutionContext<'_, SE>,
+        args: I,
+    ) -> Result<ExecutionResult, Error>
     where
         SE: ShellExtensions,
         I: Iterator<Item = S>,
@@ -113,7 +116,5 @@ pub(crate) fn builtins<SE: ShellExtensions>() -> Vec<(String, Registration<SE>)>
 /// The `which` manifest. `shell-internal` scope (README classifies `which` with `type`), `Allow`.
 pub(crate) fn manifests() -> Vec<Manifest> {
     use crate::manifest::ExecutionScope;
-    vec![
-        Manifest::builtin(Which::NAME, Which::SYNOPSIS).with_scope(ExecutionScope::ShellInternal)
-    ]
+    vec![Manifest::builtin(Which::NAME, Which::SYNOPSIS).with_scope(ExecutionScope::ShellInternal)]
 }

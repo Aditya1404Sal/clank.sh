@@ -37,7 +37,9 @@ fn cd_is_honored_by_builtins_not_just_pwd() {
     // entering ShellCwd with a different working_dir mid-window yanks it. Serialize against the
     // known heavy contenders (the curl-pipeline tests, whose grep stages hold cwd windows while a
     // mock server round-trips).
-    let _cwd = CWD_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _cwd = CWD_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     on_rt(async {
         let dir = std::env::temp_dir().join(format!("clank_cd_{}", std::process::id()));
         let sub = dir.join("sub");
@@ -61,25 +63,53 @@ fn cd_is_honored_by_builtins_not_just_pwd() {
 
         // `cat` (uu_* -> run_uu) must read sub's file, not the parent's decoy of the same name.
         let cat = String::from_utf8(session.eval_line("cat only-in-sub.txt").await.stdout).unwrap();
-        assert!(cat.contains("CONTENT-IN-SUB"), "cat read nothing useful: {cat:?}");
-        assert!(!cat.contains("DECOY-IN-PARENT"), "cat resolved against the parent: {cat:?}");
+        assert!(
+            cat.contains("CONTENT-IN-SUB"),
+            "cat read nothing useful: {cat:?}"
+        );
+        assert!(
+            !cat.contains("DECOY-IN-PARENT"),
+            "cat resolved against the parent: {cat:?}"
+        );
 
         // `ls` must list sub, so the parent-only file must not appear.
         let ls = String::from_utf8(session.eval_line("ls").await.stdout).unwrap();
-        assert!(ls.contains("only-in-sub.txt"), "ls missed sub's file: {ls:?}");
-        assert!(!ls.contains("only-in-parent.txt"), "ls listed the parent: {ls:?}");
+        assert!(
+            ls.contains("only-in-sub.txt"),
+            "ls missed sub's file: {ls:?}"
+        );
+        assert!(
+            !ls.contains("only-in-parent.txt"),
+            "ls listed the parent: {ls:?}"
+        );
 
         // A relative write must land in sub (a filesystem assertion — immune to stdout entirely).
         session.eval_line("touch made-here.txt").await;
-        assert!(sub.join("made-here.txt").exists(), "touch wrote outside sub");
-        assert!(!dir.join("made-here.txt").exists(), "touch wrote to the parent");
+        assert!(
+            sub.join("made-here.txt").exists(),
+            "touch wrote outside sub"
+        );
+        assert!(
+            !dir.join("made-here.txt").exists(),
+            "touch wrote to the parent"
+        );
 
         // `grep` (hand-rolled -> run_tool, the OTHER dispatch path) resolves operands the same way.
-        let grep =
-            String::from_utf8(session.eval_line("grep CONTENT only-in-sub.txt").await.stdout)
-                .unwrap();
-        assert!(grep.contains("CONTENT-IN-SUB"), "grep read nothing useful: {grep:?}");
-        assert!(!grep.contains("DECOY-IN-PARENT"), "grep resolved against the parent: {grep:?}");
+        let grep = String::from_utf8(
+            session
+                .eval_line("grep CONTENT only-in-sub.txt")
+                .await
+                .stdout,
+        )
+        .unwrap();
+        assert!(
+            grep.contains("CONTENT-IN-SUB"),
+            "grep read nothing useful: {grep:?}"
+        );
+        assert!(
+            !grep.contains("DECOY-IN-PARENT"),
+            "grep resolved against the parent: {grep:?}"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     });
@@ -115,13 +145,19 @@ fn eval_line_reports_streams_and_exit_status() {
 fn uu_exit_code_does_not_stick_across_invocations() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
-        let missing = std::env::temp_dir().join(format!("clank_sticky_missing_{}", std::process::id()));
-        let created = std::env::temp_dir().join(format!("clank_sticky_created_{}", std::process::id()));
+        let missing =
+            std::env::temp_dir().join(format!("clank_sticky_missing_{}", std::process::id()));
+        let created =
+            std::env::temp_dir().join(format!("clank_sticky_created_{}", std::process::id()));
 
-        let result = session.eval_line(&format!("ls {}", missing.display())).await;
+        let result = session
+            .eval_line(&format!("ls {}", missing.display()))
+            .await;
         assert_ne!(result.exit_code, 0, "ls of a missing path must fail");
 
-        let result = session.eval_line(&format!("touch {}", created.display())).await;
+        let result = session
+            .eval_line(&format!("touch {}", created.display()))
+            .await;
         assert!(created.exists(), "touch must actually create the file");
         assert_eq!(
             result.exit_code, 0,
@@ -267,10 +303,7 @@ struct FakeProvider {
 impl FakeProvider {
     /// A provider that replies once with `reply` text and records what it saw.
     fn reply(reply: &str, seen: std::sync::Arc<Mutex<Vec<SeenTurn>>>) -> Self {
-        Self::scripted(
-            vec![crate::ai::ask::AskResponse::text(reply)],
-            seen,
-        )
+        Self::scripted(vec![crate::ai::ask::AskResponse::text(reply)], seen)
     }
 
     /// A provider driven by an explicit script of per-turn responses.
@@ -368,9 +401,14 @@ impl crate::mcp::client::McpHttp for FakeMcpHttp {
         _headers: &[(String, String)],
         body: Option<Vec<u8>>,
     ) -> Result<crate::mcp::client::HttpResponse, String> {
-        let method_and_body =
-            format!("{method} {}", String::from_utf8_lossy(&body.unwrap_or_default()));
-        self.seen.lock().unwrap().push((url.to_string(), method_and_body));
+        let method_and_body = format!(
+            "{method} {}",
+            String::from_utf8_lossy(&body.unwrap_or_default())
+        );
+        self.seen
+            .lock()
+            .unwrap()
+            .push((url.to_string(), method_and_body));
         self.responses
             .lock()
             .unwrap()
@@ -397,7 +435,12 @@ struct FakeGreaseHttp {
 }
 impl FakeGreaseHttp {
     fn new(routes: Vec<(&str, crate::mcp::client::HttpResponse)>) -> Self {
-        Self { routes: routes.into_iter().map(|(u, r)| (u.to_string(), r)).collect() }
+        Self {
+            routes: routes
+                .into_iter()
+                .map(|(u, r)| (u.to_string(), r))
+                .collect(),
+        }
     }
 }
 #[async_trait::async_trait(?Send)]
@@ -414,7 +457,11 @@ impl crate::mcp::client::McpHttp for FakeGreaseHttp {
                 return Ok(resp.clone());
             }
         }
-        Ok(crate::mcp::client::HttpResponse { status: 404, headers: vec![], body: Vec::new() })
+        Ok(crate::mcp::client::HttpResponse {
+            status: 404,
+            headers: vec![],
+            body: Vec::new(),
+        })
     }
 }
 
@@ -457,11 +504,21 @@ impl Drop for GreaseDirsGuard {
 // `static COUNTER` sits with the per-call sequence number it backs, after the lock acquisition.
 #[allow(clippy::items_after_statements)]
 fn set_grease_dirs() -> GreaseDirsGuard {
-    let lock = crate::grease::config::TEST_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let lock = crate::grease::config::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let base = std::env::temp_dir().join(format!("clank_grease_sess_{}_{n}", std::process::id()));
-    for sub in ["etc", "store", "bin", "script-bin", "skills", "mnt-mcp", "agent-bin"] {
+    for sub in [
+        "etc",
+        "store",
+        "bin",
+        "script-bin",
+        "skills",
+        "mnt-mcp",
+        "agent-bin",
+    ] {
         std::fs::create_dir_all(base.join(sub)).unwrap();
     }
     std::env::set_var("CLANK_GREASE_ETC", base.join("etc"));
@@ -490,7 +547,9 @@ impl Drop for McpDirsGuard {
 // `static COUNTER` sits with the per-call sequence number it backs, after the lock acquisition.
 #[allow(clippy::items_after_statements)]
 fn set_mcp_dirs() -> McpDirsGuard {
-    let lock = crate::mcp::config::TEST_ENV_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let lock = crate::mcp::config::TEST_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let base = std::env::temp_dir().join(format!("clank_mcp_sess_{}_{n}", std::process::id()));
@@ -532,7 +591,12 @@ struct FakeMcpArtifactHttp {
 }
 impl FakeMcpArtifactHttp {
     fn new(routes: Vec<(&str, crate::mcp::client::HttpResponse)>) -> Self {
-        Self { routes: routes.into_iter().map(|(u, r)| (u.to_string(), r)).collect() }
+        Self {
+            routes: routes
+                .into_iter()
+                .map(|(u, r)| (u.to_string(), r))
+                .collect(),
+        }
     }
 }
 #[async_trait::async_trait(?Send)]
@@ -557,7 +621,11 @@ impl crate::mcp::client::McpHttp for FakeMcpArtifactHttp {
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or(serde_json::json!({}));
         let m = v.get("method").and_then(|x| x.as_str()).unwrap_or("");
         if m == "resources/read" {
-            if let Some(uri) = v.get("params").and_then(|p| p.get("uri")).and_then(|u| u.as_str()) {
+            if let Some(uri) = v
+                .get("params")
+                .and_then(|p| p.get("uri"))
+                .and_then(|u| u.as_str())
+            {
                 let keyed = format!("resources/read:{uri}");
                 for (pat, resp) in &self.routes {
                     if *pat == keyed {
@@ -572,7 +640,9 @@ impl crate::mcp::client::McpHttp for FakeMcpArtifactHttp {
             }
         }
         // Unmapped MCP method → an empty-result success (notifications, etc.).
-        Ok(mcp_json(serde_json::json!({"jsonrpc":"2.0","id":1,"result":{}})))
+        Ok(mcp_json(
+            serde_json::json!({"jsonrpc":"2.0","id":1,"result":{}}),
+        ))
     }
 }
 
@@ -620,13 +690,26 @@ fn grease_install_an_mcp_server_registers_tools_prompts_resources() {
             ("resources/list", res_list),
             ("resources/read", res_read),
         ])));
-        session.run_line("grease registry add https://reg.example").await;
+        session
+            .run_line("grease registry add https://reg.example")
+            .await;
 
         let inst = session.eval_line("sudo grease install demo").await;
-        assert_eq!(inst.exit_code, 0, "install stderr: {}", String::from_utf8_lossy(&inst.stderr));
+        assert_eq!(
+            inst.exit_code,
+            0,
+            "install stderr: {}",
+            String::from_utf8_lossy(&inst.stderr)
+        );
         let out = String::from_utf8(inst.stdout).unwrap();
-        assert!(out.contains("installed demo [mcp]"), "install output: {out}");
-        assert!(out.contains("1 tools") && out.contains("1 prompts"), "counts: {out}");
+        assert!(
+            out.contains("installed demo [mcp]"),
+            "install output: {out}"
+        );
+        assert!(
+            out.contains("1 tools") && out.contains("1 prompts"),
+            "counts: {out}"
+        );
 
         // The server is registered in McpState: `<server> <tool>` is a recognized tool line.
         assert!(session.is_mcp_tool_line("demo echo --text hi"));
@@ -644,12 +727,21 @@ fn grease_install_an_mcp_server_registers_tools_prompts_resources() {
 
         // `grease info demo` describes the server + its artifacts.
         let info = String::from_utf8(session.eval_line("grease info demo").await.stdout).unwrap();
-        assert!(info.contains("[mcp]") && info.contains("https://mcp.demo/x"), "info: {info}");
-        assert!(info.contains("echo") && info.contains("summarize-diff"), "info lists artifacts: {info}");
+        assert!(
+            info.contains("[mcp]") && info.contains("https://mcp.demo/x"),
+            "info: {info}"
+        );
+        assert!(
+            info.contains("echo") && info.contains("summarize-diff"),
+            "info lists artifacts: {info}"
+        );
 
         // A FRESH Session rebuilds the tool surface from the cached payload (no live fetch).
         let session2 = Session::new().await.unwrap();
-        assert!(session2.is_mcp_tool_line("demo echo --text hi"), "boot reconstruction failed");
+        assert!(
+            session2.is_mcp_tool_line("demo echo --text hi"),
+            "boot reconstruction failed"
+        );
 
         // Remove deregisters from McpState + deletes the resource mount.
         let rm = session.eval_line("sudo grease remove demo").await;
@@ -679,14 +771,20 @@ fn mcp_resources_virtual_fs_static_and_dynamic() {
             "jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26",
             "serverInfo":{"name":"srv","version":"1"},"capabilities":{"resources":{}}}}));
         init.headers.push(("mcp-session-id".into(), "s-1".into()));
-        let res_list = mcp_json(serde_json::json!({"jsonrpc":"2.0","id":2,"result":{"resources":[
+        let res_list = mcp_json(
+            serde_json::json!({"jsonrpc":"2.0","id":2,"result":{"resources":[
             {"uri":"file:///docs/guide.md","name":"guide"},
-            {"uri":"live://metrics/cpu","name":"cpu"}]}}));
+            {"uri":"live://metrics/cpu","name":"cpu"}]}}),
+        );
         // Static resource: install read succeeds → materialized as a real file.
         let static_read = mcp_json(serde_json::json!({"jsonrpc":"2.0","id":3,"result":{
             "contents":[{"uri":"file:///docs/guide.md","text":"static guide body"}]}}));
         // Dynamic resource: install read FAILS (500) → recorded dynamic; a later live read succeeds.
-        let dyn_read_fail = crate::mcp::client::HttpResponse { status: 500, headers: vec![], body: Vec::new() };
+        let dyn_read_fail = crate::mcp::client::HttpResponse {
+            status: 500,
+            headers: vec![],
+            body: Vec::new(),
+        };
         let dyn_read_ok = mcp_json(serde_json::json!({"jsonrpc":"2.0","id":9,"result":{
             "contents":[{"uri":"live://metrics/cpu","text":"cpu: 42%"}]}}));
 
@@ -699,14 +797,26 @@ fn mcp_resources_virtual_fs_static_and_dynamic() {
             ("resources/read:file:///docs/guide.md", static_read),
             ("resources/read:live://metrics/cpu", dyn_read_fail),
         ])));
-        session.run_line("grease registry add https://reg.example").await;
+        session
+            .run_line("grease registry add https://reg.example")
+            .await;
 
-        let inst = session.eval_line("sudo grease install srv --resources").await;
-        assert_eq!(inst.exit_code, 0, "install stderr: {}", String::from_utf8_lossy(&inst.stderr));
+        let inst = session
+            .eval_line("sudo grease install srv --resources")
+            .await;
+        assert_eq!(
+            inst.exit_code,
+            0,
+            "install stderr: {}",
+            String::from_utf8_lossy(&inst.stderr)
+        );
 
         // The static resource is a real file.
         let static_path = crate::grease::config::mcp_mount_dir().join("srv/docs/guide.md");
-        assert_eq!(std::fs::read_to_string(&static_path).unwrap(), "static guide body");
+        assert_eq!(
+            std::fs::read_to_string(&static_path).unwrap(),
+            "static guide body"
+        );
 
         // `ls /mnt/mcp/srv/` lists both the static dir (docs) and the dynamic dir (metrics).
         let ls = String::from_utf8(session.eval_line("ls /mnt/mcp/srv").await.stdout).unwrap();
@@ -722,13 +832,23 @@ fn mcp_resources_virtual_fs_static_and_dynamic() {
         ])));
         // Top-level `cat` of the dynamic resource fetches it live.
         let cat = session.eval_line("cat /mnt/mcp/srv/metrics/cpu").await;
-        assert_eq!(cat.exit_code, 0, "dynamic cat stderr: {}", String::from_utf8_lossy(&cat.stderr));
+        assert_eq!(
+            cat.exit_code,
+            0,
+            "dynamic cat stderr: {}",
+            String::from_utf8_lossy(&cat.stderr)
+        );
         assert_eq!(String::from_utf8(cat.stdout).unwrap(), "cpu: 42%");
 
         // The same read inside `$()` does NOT do the live fetch (Wall-C) — Brush's cat finds no
         // real file → nonzero. (We only assert it doesn't crash / doesn't print the live body.)
-        let subst = session.eval_line("echo $(cat /mnt/mcp/srv/metrics/cpu)").await;
-        assert!(!String::from_utf8_lossy(&subst.stdout).contains("cpu: 42%"), "dynamic read must not run in $()");
+        let subst = session
+            .eval_line("echo $(cat /mnt/mcp/srv/metrics/cpu)")
+            .await;
+        assert!(
+            !String::from_utf8_lossy(&subst.stdout).contains("cpu: 42%"),
+            "dynamic read must not run in $()"
+        );
     });
 }
 
@@ -753,10 +873,12 @@ fn mcp_templates_and_resource_info() {
             "serverInfo":{"name":"gh","version":"1"},"capabilities":{"resources":{}}}}));
         init.headers.push(("mcp-session-id".into(), "s-1".into()));
         // One static resource (with annotations) + one template.
-        let res_list = mcp_json(serde_json::json!({"jsonrpc":"2.0","id":2,"result":{"resources":[
+        let res_list = mcp_json(
+            serde_json::json!({"jsonrpc":"2.0","id":2,"result":{"resources":[
             {"uri":"file:///repo/README.md","name":"readme","mimeType":"text/markdown",
              "size":42,"annotations":{"lastModified":"2026-01-01T00:00:00Z","priority":0.8,
-             "audience":["user","assistant"]}}]}}));
+             "audience":["user","assistant"]}}]}}),
+        );
         let static_read = mcp_json(serde_json::json!({"jsonrpc":"2.0","id":3,"result":{
             "contents":[{"uri":"file:///repo/README.md","text":"readme body"}]}}));
         let tmpl_list = mcp_json(serde_json::json!({"jsonrpc":"2.0","id":4,"result":{
@@ -774,11 +896,25 @@ fn mcp_templates_and_resource_info() {
             ("resources/read:file:///repo/README.md", static_read),
             ("resources/read:github://repo/src/main.rs", tmpl_read),
         ])));
-        session.run_line("grease registry add https://reg.example").await;
+        session
+            .run_line("grease registry add https://reg.example")
+            .await;
 
-        let inst = session.eval_line("sudo grease install gh --resources").await;
-        assert_eq!(inst.exit_code, 0, "install stderr: {}", String::from_utf8_lossy(&inst.stderr));
-        assert!(String::from_utf8(inst.stdout).unwrap().contains("1 templates"), "reports templates");
+        let inst = session
+            .eval_line("sudo grease install gh --resources")
+            .await;
+        assert_eq!(
+            inst.exit_code,
+            0,
+            "install stderr: {}",
+            String::from_utf8_lossy(&inst.stderr)
+        );
+        assert!(
+            String::from_utf8(inst.stdout)
+                .unwrap()
+                .contains("1 templates"),
+            "reports templates"
+        );
 
         // The template executable exists (`type`/`ls` see it).
         let ls = String::from_utf8(session.eval_line("ls /mnt/mcp/gh").await.stdout).unwrap();
@@ -786,17 +922,34 @@ fn mcp_templates_and_resource_info() {
 
         // Running the template with a positional arg substitutes {path} and reads the URI.
         let run = session.eval_line("gh-file-lookup src/main.rs").await;
-        assert_eq!(run.exit_code, 0, "template run stderr: {}", String::from_utf8_lossy(&run.stderr));
+        assert_eq!(
+            run.exit_code,
+            0,
+            "template run stderr: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
         assert_eq!(String::from_utf8(run.stdout).unwrap(), "fn main() {}");
 
         // `mcp resource info` shows the annotations.
         let info = String::from_utf8(
-            session.eval_line("mcp resource info /mnt/mcp/gh/repo/README.md").await.stdout,
+            session
+                .eval_line("mcp resource info /mnt/mcp/gh/repo/README.md")
+                .await
+                .stdout,
         )
         .unwrap();
-        assert!(info.contains("2026-01-01"), "info shows lastModified: {info}");
-        assert!(info.contains("priority: 0.8"), "info shows priority: {info}");
-        assert!(info.contains("user,assistant"), "info shows audience: {info}");
+        assert!(
+            info.contains("2026-01-01"),
+            "info shows lastModified: {info}"
+        );
+        assert!(
+            info.contains("priority: 0.8"),
+            "info shows priority: {info}"
+        );
+        assert!(
+            info.contains("user,assistant"),
+            "info shows audience: {info}"
+        );
     });
 }
 
@@ -816,8 +969,10 @@ fn mcp_watch_is_a_bounded_poll() {
             "serverInfo":{"name":"metrics","version":"1"},"capabilities":{"resources":{}}}}));
         init.headers.push(("mcp-session-id".into(), "s-1".into()));
         // resources/list makes the server own the metrics:// uri.
-        let res_list = mcp_json(serde_json::json!({"jsonrpc":"2.0","id":2,"result":{"resources":[
-            {"uri":"metrics://cpu","name":"cpu"}]}}));
+        let res_list = mcp_json(
+            serde_json::json!({"jsonrpc":"2.0","id":2,"result":{"resources":[
+            {"uri":"metrics://cpu","name":"cpu"}]}}),
+        );
         // resources/read for the dynamic uri (install read fails → dynamic; watch reads succeed).
         let read_ok = mcp_json(serde_json::json!({"jsonrpc":"2.0","id":9,"result":{
             "contents":[{"uri":"metrics://cpu","text":"cpu: 10%"}]}}));
@@ -826,18 +981,33 @@ fn mcp_watch_is_a_bounded_poll() {
             ("/packages/", grease_json(pkg)),
             ("initialize", init),
             ("resources/list", res_list),
-            ("resources/templates/list", mcp_json(serde_json::json!({"jsonrpc":"2.0","id":3,"result":{"resourceTemplates":[]}}))),
+            (
+                "resources/templates/list",
+                mcp_json(
+                    serde_json::json!({"jsonrpc":"2.0","id":3,"result":{"resourceTemplates":[]}}),
+                ),
+            ),
             ("resources/read:metrics://cpu", read_ok),
-            ("resources/subscribe", mcp_json(serde_json::json!({"jsonrpc":"2.0","id":4,"result":{}}))),
+            (
+                "resources/subscribe",
+                mcp_json(serde_json::json!({"jsonrpc":"2.0","id":4,"result":{}})),
+            ),
         ])));
-        session.run_line("grease registry add https://reg.example").await;
-        session.eval_line("sudo grease install metrics --resources").await;
+        session
+            .run_line("grease registry add https://reg.example")
+            .await;
+        session
+            .eval_line("sudo grease install metrics --resources")
+            .await;
 
         let watch = session.eval_line("mcp watch metrics://cpu").await;
         assert_eq!(watch.exit_code, 0);
         let out = String::from_utf8(watch.stdout).unwrap();
         assert!(out.contains("bounded poll"), "honest about polling: {out}");
-        assert!(out.contains("cpu: 10%"), "prints the resource content: {out}");
+        assert!(
+            out.contains("cpu: 10%"),
+            "prints the resource content: {out}"
+        );
         assert!(out.contains("done"), "terminates: {out}");
     });
 }
@@ -850,10 +1020,7 @@ struct FakeAgentInvoker {
 }
 #[async_trait::async_trait(?Send)]
 impl crate::golem::agent::AgentInvoker for FakeAgentInvoker {
-    async fn invoke(
-        &self,
-        inv: &crate::golem::agent::AgentInvocation,
-    ) -> Result<String, String> {
+    async fn invoke(&self, inv: &crate::golem::agent::AgentInvocation) -> Result<String, String> {
         *self.seen.lock().unwrap() = Some(inv.clone());
         Ok(self.reply.clone())
     }
@@ -869,7 +1036,10 @@ impl crate::golem::agent::AgentInvoker for FakeAgentInvoker {
             }
             crate::golem::agent::InvokeMode::Await => (None, String::new()),
         };
-        Ok(crate::golem::agent::InvokeHandle { cancel_token: token, note })
+        Ok(crate::golem::agent::InvokeHandle {
+            cancel_token: token,
+            note,
+        })
     }
 }
 
@@ -921,21 +1091,36 @@ fn grease_install_then_invoke_a_golem_agent() {
             "constructor-params": ["userid"],
             "methods": [{"name": "add-item", "description": "add an item", "params": ["sku"]}]
         });
-        session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![("/packages/", grease_json(pkg))])));
-        session.run_line("grease registry add https://reg.example").await;
+        session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![(
+            "/packages/",
+            grease_json(pkg),
+        )])));
+        session
+            .run_line("grease registry add https://reg.example")
+            .await;
 
         let inst = session.eval_line("sudo grease install shopping-cart").await;
-        assert_eq!(inst.exit_code, 0, "install stderr: {}", String::from_utf8_lossy(&inst.stderr));
+        assert_eq!(
+            inst.exit_code,
+            0,
+            "install stderr: {}",
+            String::from_utf8_lossy(&inst.stderr)
+        );
         assert!(String::from_utf8(inst.stdout).unwrap().contains("[agent]"));
         assert!(session.grease.is_agent("shopping-cart"));
         // The agent bin stub landed in the agents bin dir.
-        assert!(crate::grease::config::agent_bin_dir().join("shopping-cart").exists());
+        assert!(crate::grease::config::agent_bin_dir()
+            .join("shopping-cart")
+            .exists());
 
         // `--help` describes the type + methods (no invocation).
         let help = session.eval_line("shopping-cart --help").await;
         assert_eq!(help.exit_code, 0);
         let help_s = String::from_utf8(help.stdout).unwrap();
-        assert!(help_s.contains("ShoppingCart") && help_s.contains("add-item"), "help: {help_s}");
+        assert!(
+            help_s.contains("ShoppingCart") && help_s.contains("add-item"),
+            "help: {help_s}"
+        );
 
         // `<agent> help` — the bare reserved word (README:840) prints the SAME generated help as
         // `--help`, never treated as a method name (it used to error "unknown method 'help'").
@@ -946,8 +1131,15 @@ fn grease_install_then_invoke_a_golem_agent() {
             "bare help stderr: {}",
             String::from_utf8_lossy(&bare_help.stderr)
         );
-        assert_eq!(String::from_utf8(bare_help.stdout).unwrap(), help_s, "`help` must match `--help`");
-        assert!(seen.lock().unwrap().is_none(), "`help` must not invoke the agent");
+        assert_eq!(
+            String::from_utf8(bare_help.stdout).unwrap(),
+            help_s,
+            "`help` must match `--help`"
+        );
+        assert!(
+            seen.lock().unwrap().is_none(),
+            "`help` must not invoke the agent"
+        );
 
         // `sudo <agent> --help` must print the SAME help: sudo only pre-authorizes. It used to look up
         // a package named "sudo", find none, and fall through to the agent parser → exit 2 "unknown
@@ -961,35 +1153,69 @@ fn grease_install_then_invoke_a_golem_agent() {
             "sudo --help stderr: {}",
             String::from_utf8_lossy(&sudo_help.stderr)
         );
-        assert_eq!(String::from_utf8(sudo_help.stdout).unwrap(), help_s, "sudo must not change --help");
-        assert!(seen.lock().unwrap().is_none(), "--help must not invoke the agent");
+        assert_eq!(
+            String::from_utf8(sudo_help.stdout).unwrap(),
+            help_s,
+            "sudo must not change --help"
+        );
+        assert!(
+            seen.lock().unwrap().is_none(),
+            "--help must not invoke the agent"
+        );
 
         // An unknown method → exit 2 (no invocation).
-        let bad = session.eval_line("sudo shopping-cart --userid jd frobnicate").await;
+        let bad = session
+            .eval_line("sudo shopping-cart --userid jd frobnicate")
+            .await;
         assert_eq!(bad.exit_code, 2);
-        assert!(String::from_utf8(bad.stderr).unwrap().contains("unknown method"));
-        assert!(seen.lock().unwrap().is_none(), "no invocation on unknown method");
+        assert!(String::from_utf8(bad.stderr)
+            .unwrap()
+            .contains("unknown method"));
+        assert!(
+            seen.lock().unwrap().is_none(),
+            "no invocation on unknown method"
+        );
 
         // Invoke it (sudo pre-authorizes the Confirm) → the invoker sees the parsed invocation.
-        let run = session.eval_line("sudo shopping-cart --userid jd add-item -- --sku abc123").await;
-        assert_eq!(run.exit_code, 0, "run stderr: {}", String::from_utf8_lossy(&run.stderr));
-        assert_eq!(String::from_utf8(run.stdout).unwrap().trim_end(), "added sku abc123");
+        let run = session
+            .eval_line("sudo shopping-cart --userid jd add-item -- --sku abc123")
+            .await;
+        assert_eq!(
+            run.exit_code,
+            0,
+            "run stderr: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(run.stdout).unwrap().trim_end(),
+            "added sku abc123"
+        );
         let inv = seen.lock().unwrap().clone().unwrap();
         assert_eq!(inv.agent_type, "ShoppingCart");
-        assert_eq!(inv.constructor, vec![("userid".to_string(), "jd".to_string())]);
+        assert_eq!(
+            inv.constructor,
+            vec![("userid".to_string(), "jd".to_string())]
+        );
         assert_eq!(inv.method, "add-item");
         assert_eq!(inv.args, vec![("sku".to_string(), "abc123".to_string())]);
 
         // A bare (non-sudo) agent run confirms (remote invocation is a Confirm capability).
-        let confirm = session.eval_line("shopping-cart --userid jd add-item -- --sku x").await;
-        assert!(confirm.pending_prompt.is_some(), "agent run should confirm without sudo");
+        let confirm = session
+            .eval_line("shopping-cart --userid jd add-item -- --sku x")
+            .await;
+        assert!(
+            confirm.pending_prompt.is_some(),
+            "agent run should confirm without sudo"
+        );
         session.answer_prompt(Some("no".into())).await;
 
         // Remove deregisters + deletes the stub.
         let rm = session.eval_line("sudo grease remove shopping-cart").await;
         assert_eq!(rm.exit_code, 0);
         assert!(!session.grease.is_agent("shopping-cart"));
-        assert!(!crate::grease::config::agent_bin_dir().join("shopping-cart").exists());
+        assert!(!crate::grease::config::agent_bin_dir()
+            .join("shopping-cart")
+            .exists());
     });
 }
 
@@ -1005,13 +1231,20 @@ fn agent_invocation_without_a_cluster_errors_honestly() {
             "constructor-params": ["id"],
             "methods": [{"name": "increment", "params": []}]
         });
-        session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![("/packages/", grease_json(pkg))])));
-        session.run_line("grease registry add https://reg.example").await;
+        session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![(
+            "/packages/",
+            grease_json(pkg),
+        )])));
+        session
+            .run_line("grease registry add https://reg.example")
+            .await;
         session.eval_line("sudo grease install counter").await;
 
         let run = session.eval_line("sudo counter --id x increment").await;
         assert_eq!(run.exit_code, 4);
-        assert!(String::from_utf8(run.stderr).unwrap().contains("requires a configured cluster"));
+        assert!(String::from_utf8(run.stderr)
+            .unwrap()
+            .contains("requires a configured cluster"));
     });
 }
 
@@ -1022,8 +1255,13 @@ async fn install_shopping_cart(session: &mut Session) {
         "agent-type": "ShoppingCart", "constructor-params": ["userid"],
         "methods": [{"name": "add-item", "params": ["sku"]}], "ephemeral": false
     });
-    session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![("/packages/", grease_json(pkg))])));
-    session.run_line("grease registry add https://reg.example").await;
+    session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![(
+        "/packages/",
+        grease_json(pkg),
+    )])));
+    session
+        .run_line("grease registry add https://reg.example")
+        .await;
     session.eval_line("sudo grease install shopping-cart").await;
 }
 
@@ -1035,11 +1273,21 @@ fn agent_trigger_mode_and_kill() {
         let _dirs = set_grease_dirs();
         let mut session = Session::new().await.unwrap();
         let seen = std::sync::Arc::new(Mutex::new(None));
-        session.set_agent_invoker(Box::new(FakeAgentInvoker { reply: String::new(), seen: seen.clone() }));
+        session.set_agent_invoker(Box::new(FakeAgentInvoker {
+            reply: String::new(),
+            seen: seen.clone(),
+        }));
         install_shopping_cart(&mut session).await;
 
-        let run = session.eval_line("sudo shopping-cart --userid jd --trigger add-item -- --sku abc").await;
-        assert_eq!(run.exit_code, 0, "trigger stderr: {}", String::from_utf8_lossy(&run.stderr));
+        let run = session
+            .eval_line("sudo shopping-cart --userid jd --trigger add-item -- --sku abc")
+            .await;
+        assert_eq!(
+            run.exit_code,
+            0,
+            "trigger stderr: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
         let out = String::from_utf8(run.stdout).unwrap();
         assert!(out.contains("triggered"), "reports triggered: {out}");
         let inv = seen.lock().unwrap().clone().unwrap();
@@ -1047,10 +1295,21 @@ fn agent_trigger_mode_and_kill() {
         assert_eq!(inv.args, vec![("sku".to_string(), "abc".to_string())]);
 
         // The trigger spawned a PID row; `kill <pid>` clears it. Extract the pid from "[<pid>] …".
-        let pid: u32 = out.trim_start_matches('[').split(']').next().unwrap().parse().unwrap();
+        let pid: u32 = out
+            .trim_start_matches('[')
+            .split(']')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
         let kill = session.eval_line(&format!("kill {pid}")).await;
         assert_eq!(kill.exit_code, 0);
-        assert!(String::from_utf8(kill.stdout).unwrap().contains("cannot cancel"), "fire-and-forget");
+        assert!(
+            String::from_utf8(kill.stdout)
+                .unwrap()
+                .contains("cannot cancel"),
+            "fire-and-forget"
+        );
     });
 }
 
@@ -1063,15 +1322,25 @@ fn trigger_invocation_tracking_is_bounded() {
         let _dirs = set_grease_dirs();
         let mut session = Session::new().await.unwrap();
         let seen = std::sync::Arc::new(Mutex::new(None));
-        session.set_agent_invoker(Box::new(FakeAgentInvoker { reply: String::new(), seen: seen.clone() }));
+        session.set_agent_invoker(Box::new(FakeAgentInvoker {
+            reply: String::new(),
+            seen: seen.clone(),
+        }));
         install_shopping_cart(&mut session).await;
 
         // Fire well past the cap (MAX_PENDING_INVOCATIONS = 64).
         for i in 0..80 {
             let r = session
-                .eval_line(&format!("sudo shopping-cart --userid jd --trigger add-item -- --sku s{i}"))
+                .eval_line(&format!(
+                    "sudo shopping-cart --userid jd --trigger add-item -- --sku s{i}"
+                ))
                 .await;
-            assert_eq!(r.exit_code, 0, "trigger {i}: {}", String::from_utf8_lossy(&r.stderr));
+            assert_eq!(
+                r.exit_code,
+                0,
+                "trigger {i}: {}",
+                String::from_utf8_lossy(&r.stderr)
+            );
         }
         assert!(
             session.pending_invocations.len() <= 64,
@@ -1088,22 +1357,44 @@ fn agent_schedule_mode_and_kill_cancels() {
         let _dirs = set_grease_dirs();
         let mut session = Session::new().await.unwrap();
         let seen = std::sync::Arc::new(Mutex::new(None));
-        session.set_agent_invoker(Box::new(FakeAgentInvoker { reply: String::new(), seen: seen.clone() }));
+        session.set_agent_invoker(Box::new(FakeAgentInvoker {
+            reply: String::new(),
+            seen: seen.clone(),
+        }));
         install_shopping_cart(&mut session).await;
 
         let run = session
             .eval_line("sudo shopping-cart --userid jd --schedule 2026-06-01T09:00:00Z add-item -- --sku x")
             .await;
-        assert_eq!(run.exit_code, 0, "schedule stderr: {}", String::from_utf8_lossy(&run.stderr));
+        assert_eq!(
+            run.exit_code,
+            0,
+            "schedule stderr: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
         let out = String::from_utf8(run.stdout).unwrap();
-        assert!(out.contains("scheduled for 2026-06-01"), "reports schedule: {out}");
+        assert!(
+            out.contains("scheduled for 2026-06-01"),
+            "reports schedule: {out}"
+        );
         assert_eq!(
             seen.lock().unwrap().clone().unwrap().mode,
             crate::golem::agent::InvokeMode::Schedule("2026-06-01T09:00:00Z".to_string())
         );
-        let pid: u32 = out.trim_start_matches('[').split(']').next().unwrap().parse().unwrap();
+        let pid: u32 = out
+            .trim_start_matches('[')
+            .split(']')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
         let kill = session.eval_line(&format!("kill {pid}")).await;
-        assert!(String::from_utf8(kill.stdout).unwrap().contains("cancelled"), "scheduled cancels");
+        assert!(
+            String::from_utf8(kill.stdout)
+                .unwrap()
+                .contains("cancelled"),
+            "scheduled cancels"
+        );
     });
 }
 
@@ -1114,18 +1405,29 @@ fn agent_honest_stubs() {
         let _dirs = set_grease_dirs();
         let mut session = Session::new().await.unwrap();
         let seen = std::sync::Arc::new(Mutex::new(None));
-        session.set_agent_invoker(Box::new(FakeAgentInvoker { reply: "ok".into(), seen }));
+        session.set_agent_invoker(Box::new(FakeAgentInvoker {
+            reply: "ok".into(),
+            seen,
+        }));
         install_shopping_cart(&mut session).await;
 
         // --revision → honest exit 2 (no SDK slot).
-        let rev = session.eval_line("sudo shopping-cart --userid jd --revision 3 add-item -- --sku x").await;
+        let rev = session
+            .eval_line("sudo shopping-cart --userid jd --revision 3 add-item -- --sku x")
+            .await;
         assert_eq!(rev.exit_code, 2);
-        assert!(String::from_utf8(rev.stderr).unwrap().contains("--revision targeting is not supported"));
+        assert!(String::from_utf8(rev.stderr)
+            .unwrap()
+            .contains("--revision targeting is not supported"));
 
         // stream/repl → honest (interactive/streaming not on the durable agent).
-        let stream = session.eval_line("sudo shopping-cart --userid jd stream").await;
+        let stream = session
+            .eval_line("sudo shopping-cart --userid jd stream")
+            .await;
         assert_eq!(stream.exit_code, 2);
-        assert!(String::from_utf8(stream.stderr).unwrap().contains("interactive/streaming"));
+        assert!(String::from_utf8(stream.stderr)
+            .unwrap()
+            .contains("interactive/streaming"));
     });
 }
 
@@ -1139,23 +1441,47 @@ fn golem_command_dispatch_and_honest_stubs() {
         // No cluster injected → honest error (but NOT for interrupt/resume, which are honest anyway).
         let no_cluster = session.eval_line("golem agent list").await;
         assert_eq!(no_cluster.exit_code, 4);
-        assert!(String::from_utf8(no_cluster.stderr).unwrap().contains("requires a configured Golem cluster"));
+        assert!(String::from_utf8(no_cluster.stderr)
+            .unwrap()
+            .contains("requires a configured Golem cluster"));
 
         // interrupt/resume are honest-stubbed regardless of cluster.
         let interrupt = session.eval_line("golem agent interrupt 42").await;
         assert_eq!(interrupt.exit_code, 2);
-        assert!(String::from_utf8(interrupt.stderr).unwrap().contains("no guest host binding"));
+        assert!(String::from_utf8(interrupt.stderr)
+            .unwrap()
+            .contains("no guest host binding"));
 
         // With a cluster: list/status/fork/oplog dispatch.
         session.set_golem_cluster(Box::new(FakeGolemCluster));
         // list/oplog/status are Allow (read-only); fork/rollback are Confirm → sudo pre-authorizes.
-        assert!(String::from_utf8(session.eval_line("golem agent list").await.stdout).unwrap().contains("agent-1"));
-        assert!(String::from_utf8(session.eval_line("sudo golem fork").await.stdout).unwrap().contains("forked"));
-        assert!(String::from_utf8(session.eval_line("golem oplog").await.stdout).unwrap().contains("self oplog"));
-        let status = session.eval_line("golem agent status --type ShoppingCart --userid jd").await;
-        assert!(String::from_utf8(status.stdout).unwrap().contains("status for ShoppingCart"));
+        assert!(
+            String::from_utf8(session.eval_line("golem agent list").await.stdout)
+                .unwrap()
+                .contains("agent-1")
+        );
+        assert!(
+            String::from_utf8(session.eval_line("sudo golem fork").await.stdout)
+                .unwrap()
+                .contains("forked")
+        );
+        assert!(
+            String::from_utf8(session.eval_line("golem oplog").await.stdout)
+                .unwrap()
+                .contains("self oplog")
+        );
+        let status = session
+            .eval_line("golem agent status --type ShoppingCart --userid jd")
+            .await;
+        assert!(String::from_utf8(status.stdout)
+            .unwrap()
+            .contains("status for ShoppingCart"));
         // `type golem` resolves (the new intercepted verb).
-        assert!(String::from_utf8(session.eval_line("type golem").await.stdout).unwrap().contains("golem"));
+        assert!(
+            String::from_utf8(session.eval_line("type golem").await.stdout)
+                .unwrap()
+                .contains("golem")
+        );
     });
 }
 
@@ -1169,20 +1495,35 @@ fn grease_registry_add_list_remove() {
         let mut session = Session::new().await.unwrap();
 
         let list0 = session.eval_line("grease registry list").await;
-        assert!(String::from_utf8(list0.stdout).unwrap().contains("no registries configured"));
+        assert!(String::from_utf8(list0.stdout)
+            .unwrap()
+            .contains("no registries configured"));
 
-        let add = session.eval_line("grease registry add https://reg.example").await;
+        let add = session
+            .eval_line("grease registry add https://reg.example")
+            .await;
         assert_eq!(add.exit_code, 0);
-        assert!(add.pending_prompt.is_none(), "registry add is Allow — no pause");
-        assert!(String::from_utf8(add.stdout).unwrap().contains("added registry"));
+        assert!(
+            add.pending_prompt.is_none(),
+            "registry add is Allow — no pause"
+        );
+        assert!(String::from_utf8(add.stdout)
+            .unwrap()
+            .contains("added registry"));
 
         let list1 = session.eval_line("grease registry list").await;
-        assert!(String::from_utf8(list1.stdout).unwrap().contains("https://reg.example"));
+        assert!(String::from_utf8(list1.stdout)
+            .unwrap()
+            .contains("https://reg.example"));
 
-        let rm = session.eval_line("grease registry remove https://reg.example").await;
+        let rm = session
+            .eval_line("grease registry remove https://reg.example")
+            .await;
         assert_eq!(rm.exit_code, 0);
         let list2 = session.eval_line("grease registry list").await;
-        assert!(String::from_utf8(list2.stdout).unwrap().contains("no registries configured"));
+        assert!(String::from_utf8(list2.stdout)
+            .unwrap()
+            .contains("no registries configured"));
     });
 }
 
@@ -1206,13 +1547,25 @@ fn grease_install_then_run_a_prompt() {
         });
         // No index route → the index lookup 404s → record-only install (these tests don't assert
         // on integrity; the verify path has its own dedicated tests).
-        session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![("/packages/", grease_json(pkg))])));
-        session.run_line("grease registry add https://reg.example").await;
+        session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![(
+            "/packages/",
+            grease_json(pkg),
+        )])));
+        session
+            .run_line("grease registry add https://reg.example")
+            .await;
 
         // Install (sudo pre-authorizes the Confirm).
         let inst = session.eval_line("sudo grease install tldr").await;
-        assert_eq!(inst.exit_code, 0, "install stderr: {}", String::from_utf8_lossy(&inst.stderr));
-        assert!(String::from_utf8(inst.stdout).unwrap().contains("installed tldr"));
+        assert_eq!(
+            inst.exit_code,
+            0,
+            "install stderr: {}",
+            String::from_utf8_lossy(&inst.stderr)
+        );
+        assert!(String::from_utf8(inst.stdout)
+            .unwrap()
+            .contains("installed tldr"));
 
         // It's now an installed prompt: `grease list` shows it, `type tldr` sees it.
         let list = session.eval_line("grease list").await;
@@ -1226,7 +1579,9 @@ fn grease_install_then_run_a_prompt() {
         // Missing required arg → exit 2 (no model call).
         let miss = session.eval_line("sudo tldr").await;
         assert_eq!(miss.exit_code, 2);
-        assert!(String::from_utf8(miss.stderr).unwrap().contains("missing required argument --file"));
+        assert!(String::from_utf8(miss.stderr)
+            .unwrap()
+            .contains("missing required argument --file"));
 
         // Run it with the arg (sudo pre-authorizes the prompt's Confirm) → the model sees the
         // FILLED body.
@@ -1234,11 +1589,17 @@ fn grease_install_then_run_a_prompt() {
         assert_eq!(run.exit_code, 0);
         assert_eq!(String::from_utf8(run.stdout).unwrap(), "the summary");
         let content = seen.lock().unwrap()[0].user_content();
-        assert!(content.contains("Summarize the file report.md concisely."), "got: {content}");
+        assert!(
+            content.contains("Summarize the file report.md concisely."),
+            "got: {content}"
+        );
 
         // A bare (non-sudo) prompt run confirms (outbound LLM).
         let confirm = session.eval_line("tldr --file x.md").await;
-        assert!(confirm.pending_prompt.is_some(), "prompt run should confirm without sudo");
+        assert!(
+            confirm.pending_prompt.is_some(),
+            "prompt run should confirm without sudo"
+        );
         session.answer_prompt(Some("no".into())).await;
 
         // Remove deregisters: the name is no longer an installed prompt.
@@ -1273,11 +1634,20 @@ fn grease_install_then_run_a_markdown_prompt() {
             "/packages/tldr.md",
             grease_text(md),
         )])));
-        session.run_line("grease registry add https://reg.example").await;
+        session
+            .run_line("grease registry add https://reg.example")
+            .await;
 
         let inst = session.eval_line("sudo grease install tldr").await;
-        assert_eq!(inst.exit_code, 0, "install stderr: {}", String::from_utf8_lossy(&inst.stderr));
-        assert!(String::from_utf8(inst.stdout).unwrap().contains("installed tldr"));
+        assert_eq!(
+            inst.exit_code,
+            0,
+            "install stderr: {}",
+            String::from_utf8_lossy(&inst.stderr)
+        );
+        assert!(String::from_utf8(inst.stdout)
+            .unwrap()
+            .contains("installed tldr"));
 
         // Installed as a prompt with the declared arg (from the frontmatter).
         let help = session.eval_line("tldr --help").await;
@@ -1289,7 +1659,10 @@ fn grease_install_then_run_a_markdown_prompt() {
         assert_eq!(run.exit_code, 0);
         assert_eq!(String::from_utf8(run.stdout).unwrap(), "the summary");
         let content = seen.lock().unwrap()[0].user_content();
-        assert!(content.contains("Summarize the file report.md concisely."), "got: {content}");
+        assert!(
+            content.contains("Summarize the file report.md concisely."),
+            "got: {content}"
+        );
     });
 }
 
@@ -1304,7 +1677,10 @@ fn proc_system_prompt_reflects_installed_prompts() {
 
         // Before install: the proc file has the base surface but NOT our prompt.
         let before = String::from_utf8(
-            session.eval_line("cat /proc/clank/system-prompt").await.stdout,
+            session
+                .eval_line("cat /proc/clank/system-prompt")
+                .await
+                .stdout,
         )
         .unwrap();
         assert!(!before.contains("prompt__hello"), "not installed yet");
@@ -1312,18 +1688,32 @@ fn proc_system_prompt_reflects_installed_prompts() {
         let pkg = serde_json::json!({
             "kind": "prompt", "name": "hello", "description": "say hi", "body": "Say hi."
         });
-        session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![("/packages/", grease_json(pkg))])));
-        session.run_line("grease registry add https://reg.example").await;
+        session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![(
+            "/packages/",
+            grease_json(pkg),
+        )])));
+        session
+            .run_line("grease registry add https://reg.example")
+            .await;
         session.eval_line("sudo grease install hello").await;
 
         // After install: the proc file lists the installed prompt tool + the "Installed prompt
         // tools" heading from build_system_prompt_with_capabilities.
         let after = String::from_utf8(
-            session.eval_line("cat /proc/clank/system-prompt").await.stdout,
+            session
+                .eval_line("cat /proc/clank/system-prompt")
+                .await
+                .stdout,
         )
         .unwrap();
-        assert!(after.contains("prompt__hello"), "system prompt lists the installed prompt: {after}");
-        assert!(after.contains("Installed prompt tools"), "and its heading: {after}");
+        assert!(
+            after.contains("prompt__hello"),
+            "system prompt lists the installed prompt: {after}"
+        );
+        assert!(
+            after.contains("Installed prompt tools"),
+            "and its heading: {after}"
+        );
     });
 }
 
@@ -1344,52 +1734,88 @@ fn grease_install_then_run_a_script() {
             "arguments": [{"name":"who","required":true}],
             "body": "echo hello {{who}}"
         });
-        session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![("/packages/", grease_json(pkg))])));
-        session.run_line("grease registry add https://reg.example").await;
+        session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![(
+            "/packages/",
+            grease_json(pkg),
+        )])));
+        session
+            .run_line("grease registry add https://reg.example")
+            .await;
 
         let inst = session.eval_line("sudo grease install greet").await;
-        assert_eq!(inst.exit_code, 0, "install stderr: {}", String::from_utf8_lossy(&inst.stderr));
+        assert_eq!(
+            inst.exit_code,
+            0,
+            "install stderr: {}",
+            String::from_utf8_lossy(&inst.stderr)
+        );
         let out = String::from_utf8(inst.stdout).unwrap();
         assert!(out.contains("installed greet"), "install output: {out}");
-        assert!(out.contains("[script]"), "install output names the kind: {out}");
+        assert!(
+            out.contains("[script]"),
+            "install output names the kind: {out}"
+        );
 
         // It's an installed SCRIPT (not a prompt), and its stub is in the script bin dir.
         assert!(session.grease.is_script("greet"));
         assert!(!session.grease.is_prompt("greet"));
-        assert!(crate::grease::config::script_bin_dir().join("greet").exists());
+        assert!(crate::grease::config::script_bin_dir()
+            .join("greet")
+            .exists());
         assert!(!crate::grease::config::bin_dir().join("greet").exists());
 
         // `grease list` shows it tagged as a script.
         let list = String::from_utf8(session.eval_line("grease list").await.stdout).unwrap();
-        assert!(list.contains("greet") && list.contains("[script]"), "list: {list}");
+        assert!(
+            list.contains("greet") && list.contains("[script]"),
+            "list: {list}"
+        );
 
         // `greet --help` shows generated help disclosing the local-shell capability, no confirm.
         let help = session.eval_line("greet --help").await;
         assert_eq!(help.exit_code, 0);
         let help_s = String::from_utf8(help.stdout).unwrap();
         assert!(help_s.contains("--who"), "help: {help_s}");
-        assert!(help_s.contains("local shell"), "help discloses shell capability: {help_s}");
+        assert!(
+            help_s.contains("local shell"),
+            "help discloses shell capability: {help_s}"
+        );
 
         // Missing required arg → exit 2, no shell run.
         let miss = session.eval_line("sudo greet").await;
         assert_eq!(miss.exit_code, 2);
-        assert!(String::from_utf8(miss.stderr).unwrap().contains("missing required argument --who"));
+        assert!(String::from_utf8(miss.stderr)
+            .unwrap()
+            .contains("missing required argument --who"));
 
         // Run it (sudo pre-authorizes the Confirm) → the FILLED shell body runs locally.
         let run = session.eval_line("sudo greet --who world").await;
-        assert_eq!(run.exit_code, 0, "run stderr: {}", String::from_utf8_lossy(&run.stderr));
-        assert_eq!(String::from_utf8(run.stdout).unwrap().trim_end(), "hello world");
+        assert_eq!(
+            run.exit_code,
+            0,
+            "run stderr: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(run.stdout).unwrap().trim_end(),
+            "hello world"
+        );
 
         // A bare (non-sudo) script run confirms (running local shell is a Confirm capability).
         let confirm = session.eval_line("greet --who x").await;
-        assert!(confirm.pending_prompt.is_some(), "script run should confirm without sudo");
+        assert!(
+            confirm.pending_prompt.is_some(),
+            "script run should confirm without sudo"
+        );
         session.answer_prompt(Some("no".into())).await;
 
         // Remove deregisters and deletes the script stub.
         let rm = session.eval_line("sudo grease remove greet").await;
         assert_eq!(rm.exit_code, 0);
         assert!(!session.grease.is_script("greet"));
-        assert!(!crate::grease::config::script_bin_dir().join("greet").exists());
+        assert!(!crate::grease::config::script_bin_dir()
+            .join("greet")
+            .exists());
     });
 }
 
@@ -1410,13 +1836,26 @@ fn grease_install_a_skill_materializes_and_surfaces_it() {
             "documents": [{"path": "SKILL.md", "content": "Review for correctness first."}],
             "scripts": [{"name": "lint-all", "body": "echo linting"}]
         });
-        session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![("/packages/", grease_json(pkg))])));
-        session.run_line("grease registry add https://reg.example").await;
+        session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![(
+            "/packages/",
+            grease_json(pkg),
+        )])));
+        session
+            .run_line("grease registry add https://reg.example")
+            .await;
 
         let inst = session.eval_line("sudo grease install code-review").await;
-        assert_eq!(inst.exit_code, 0, "install stderr: {}", String::from_utf8_lossy(&inst.stderr));
+        assert_eq!(
+            inst.exit_code,
+            0,
+            "install stderr: {}",
+            String::from_utf8_lossy(&inst.stderr)
+        );
         let out = String::from_utf8(inst.stdout).unwrap();
-        assert!(out.contains("installed code-review") && out.contains("[skill]"), "out: {out}");
+        assert!(
+            out.contains("installed code-review") && out.contains("[skill]"),
+            "out: {out}"
+        );
 
         // The dir tree is materialized: doc + bundled bin script.
         let skill_root = crate::grease::config::skills_dir().join("code-review");
@@ -1437,8 +1876,12 @@ fn grease_install_a_skill_materializes_and_surfaces_it() {
         assert!(session.grease.ask_tool_definitions().is_empty());
 
         // `grease info` describes the envelope + bundles.
-        let info = String::from_utf8(session.eval_line("grease info code-review").await.stdout).unwrap();
-        assert!(info.contains("[skill]") && info.contains("SKILL.md") && info.contains("lint-all"), "info: {info}");
+        let info =
+            String::from_utf8(session.eval_line("grease info code-review").await.stdout).unwrap();
+        assert!(
+            info.contains("[skill]") && info.contains("SKILL.md") && info.contains("lint-all"),
+            "info: {info}"
+        );
 
         // The skill is surfaced in the agentic system prompt (context, not a callable tool).
         let sys = crate::ai::ask::build_system_prompt_with_capabilities(
@@ -1446,8 +1889,13 @@ fn grease_install_a_skill_materializes_and_surfaces_it() {
             &session.mcp,
             &session.grease,
         );
-        assert!(sys.contains("Installed skills"), "system prompt lists skills: …");
-        assert!(sys.contains("code-review") && sys.contains("when the user asks for a code review"));
+        assert!(
+            sys.contains("Installed skills"),
+            "system prompt lists skills: …"
+        );
+        assert!(
+            sys.contains("code-review") && sys.contains("when the user asks for a code review")
+        );
 
         // Remove deletes the dir tree and deregisters.
         let rm = session.eval_line("sudo grease remove code-review").await;
@@ -1492,22 +1940,38 @@ fn grease_install_verifies_a_valid_signature() {
         });
         session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![
             ("/index.json", grease_json(index)),
-            ("/packages/", crate::mcp::client::HttpResponse {
-                status: 200,
-                headers: vec![("content-type".into(), "application/json".into())],
-                body,
-            }),
+            (
+                "/packages/",
+                crate::mcp::client::HttpResponse {
+                    status: 200,
+                    headers: vec![("content-type".into(), "application/json".into())],
+                    body,
+                },
+            ),
         ])));
-        session.run_line(&format!("grease registry add https://reg.example --key {pubkey}")).await;
+        session
+            .run_line(&format!(
+                "grease registry add https://reg.example --key {pubkey}"
+            ))
+            .await;
 
         let inst = session.eval_line("sudo grease install signed-pkg").await;
-        assert_eq!(inst.exit_code, 0, "install stderr: {}", String::from_utf8_lossy(&inst.stderr));
+        assert_eq!(
+            inst.exit_code,
+            0,
+            "install stderr: {}",
+            String::from_utf8_lossy(&inst.stderr)
+        );
         let out = String::from_utf8(inst.stdout).unwrap();
         assert!(out.contains("signed"), "install reports signed: {out}");
         assert!(session.grease.is_prompt("signed-pkg"));
         // `grease info` shows the signer.
-        let info = String::from_utf8(session.eval_line("grease info signed-pkg").await.stdout).unwrap();
-        assert!(info.contains("signed by alice"), "info shows signer: {info}");
+        let info =
+            String::from_utf8(session.eval_line("grease info signed-pkg").await.stdout).unwrap();
+        assert!(
+            info.contains("signed by alice"),
+            "info shows signer: {info}"
+        );
     });
 }
 
@@ -1535,18 +1999,30 @@ fn grease_install_rejects_a_bad_signature() {
         });
         session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![
             ("/index.json", grease_json(index)),
-            ("/packages/", crate::mcp::client::HttpResponse {
-                status: 200,
-                headers: vec![("content-type".into(), "application/json".into())],
-                body,
-            }),
+            (
+                "/packages/",
+                crate::mcp::client::HttpResponse {
+                    status: 200,
+                    headers: vec![("content-type".into(), "application/json".into())],
+                    body,
+                },
+            ),
         ])));
-        session.run_line(&format!("grease registry add https://reg.example --key {pubkey}")).await;
+        session
+            .run_line(&format!(
+                "grease registry add https://reg.example --key {pubkey}"
+            ))
+            .await;
 
         let inst = session.eval_line("sudo grease install bad-sig").await;
         assert_eq!(inst.exit_code, 4, "a bad signature must reject");
-        assert!(String::from_utf8(inst.stderr).unwrap().contains("signature verification failed"));
-        assert!(!session.grease.is_prompt("bad-sig"), "nothing installed on sig failure");
+        assert!(String::from_utf8(inst.stderr)
+            .unwrap()
+            .contains("signature verification failed"));
+        assert!(
+            !session.grease.is_prompt("bad-sig"),
+            "nothing installed on sig failure"
+        );
     });
 }
 
@@ -1568,17 +2044,26 @@ fn grease_install_rejects_unsigned_package_from_signed_registry() {
         });
         session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![
             ("/index.json", grease_json(index)),
-            ("/packages/", crate::mcp::client::HttpResponse {
-                status: 200,
-                headers: vec![("content-type".into(), "application/json".into())],
-                body,
-            }),
+            (
+                "/packages/",
+                crate::mcp::client::HttpResponse {
+                    status: 200,
+                    headers: vec![("content-type".into(), "application/json".into())],
+                    body,
+                },
+            ),
         ])));
-        session.run_line(&format!("grease registry add https://reg.example --key {pubkey}")).await;
+        session
+            .run_line(&format!(
+                "grease registry add https://reg.example --key {pubkey}"
+            ))
+            .await;
 
         let inst = session.eval_line("sudo grease install nosig").await;
         assert_eq!(inst.exit_code, 4);
-        assert!(String::from_utf8(inst.stderr).unwrap().contains("no signature"));
+        assert!(String::from_utf8(inst.stderr)
+            .unwrap()
+            .contains("no signature"));
         assert!(!session.grease.is_prompt("nosig"));
     });
 }
@@ -1592,11 +2077,21 @@ fn grease_install_from_unsigned_registry_is_record_only() {
         let pkg = serde_json::json!({
             "kind": "prompt", "name": "plain", "description": "d", "body": "hi"
         });
-        session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![("/packages/", grease_json(pkg))])));
-        session.run_line("grease registry add https://reg.example").await; // no --key
+        session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![(
+            "/packages/",
+            grease_json(pkg),
+        )])));
+        session
+            .run_line("grease registry add https://reg.example")
+            .await; // no --key
 
         let inst = session.eval_line("sudo grease install plain").await;
-        assert_eq!(inst.exit_code, 0, "install stderr: {}", String::from_utf8_lossy(&inst.stderr));
+        assert_eq!(
+            inst.exit_code,
+            0,
+            "install stderr: {}",
+            String::from_utf8_lossy(&inst.stderr)
+        );
         assert!(session.grease.is_prompt("plain"));
         let info = String::from_utf8(session.eval_line("grease info plain").await.stdout).unwrap();
         assert!(info.contains("unsigned"), "info shows unsigned: {info}");
@@ -1654,19 +2149,37 @@ fn grease_install_verifies_transparency_log_inclusion() {
         });
         session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![
             ("/index.json", grease_json(index)),
-            ("/packages/", crate::mcp::client::HttpResponse {
-                status: 200,
-                headers: vec![("content-type".into(), "application/json".into())],
-                body,
-            }),
+            (
+                "/packages/",
+                crate::mcp::client::HttpResponse {
+                    status: 200,
+                    headers: vec![("content-type".into(), "application/json".into())],
+                    body,
+                },
+            ),
         ])));
-        session.run_line(&format!("grease registry add https://reg.example --key {pubkey}")).await;
+        session
+            .run_line(&format!(
+                "grease registry add https://reg.example --key {pubkey}"
+            ))
+            .await;
 
         let inst = session.eval_line("sudo grease install logged").await;
-        assert_eq!(inst.exit_code, 0, "install stderr: {}", String::from_utf8_lossy(&inst.stderr));
-        assert!(String::from_utf8(inst.stdout).unwrap().contains("in log"), "reports in-log");
+        assert_eq!(
+            inst.exit_code,
+            0,
+            "install stderr: {}",
+            String::from_utf8_lossy(&inst.stderr)
+        );
+        assert!(
+            String::from_utf8(inst.stdout).unwrap().contains("in log"),
+            "reports in-log"
+        );
         let info = String::from_utf8(session.eval_line("grease info logged").await.stdout).unwrap();
-        assert!(info.contains("transparency log @0"), "info shows log index: {info}");
+        assert!(
+            info.contains("transparency log @0"),
+            "info shows log index: {info}"
+        );
     });
 }
 
@@ -1695,18 +2208,30 @@ fn grease_install_rejects_bad_transparency_log_proof() {
         });
         session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![
             ("/index.json", grease_json(index)),
-            ("/packages/", crate::mcp::client::HttpResponse {
-                status: 200,
-                headers: vec![("content-type".into(), "application/json".into())],
-                body,
-            }),
+            (
+                "/packages/",
+                crate::mcp::client::HttpResponse {
+                    status: 200,
+                    headers: vec![("content-type".into(), "application/json".into())],
+                    body,
+                },
+            ),
         ])));
-        session.run_line(&format!("grease registry add https://reg.example --key {pubkey}")).await;
+        session
+            .run_line(&format!(
+                "grease registry add https://reg.example --key {pubkey}"
+            ))
+            .await;
 
         let inst = session.eval_line("sudo grease install badlog").await;
         assert_eq!(inst.exit_code, 4, "a bad log proof must reject");
-        assert!(String::from_utf8(inst.stderr).unwrap().contains("transparency-log check failed"));
-        assert!(!session.grease.is_prompt("badlog"), "nothing installed on log failure");
+        assert!(String::from_utf8(inst.stderr)
+            .unwrap()
+            .contains("transparency-log check failed"));
+        assert!(
+            !session.grease.is_prompt("badlog"),
+            "nothing installed on log failure"
+        );
     });
 }
 
@@ -1718,14 +2243,28 @@ fn grease_install_discloses_capabilities() {
     on_rt(async {
         let _dirs = set_grease_dirs();
         let mut session = Session::new().await.unwrap();
-        session.run_line("grease registry add https://reg.example/pkgs").await;
+        session
+            .run_line("grease registry add https://reg.example/pkgs")
+            .await;
 
         let surface = session.eval_line("grease install tldr").await;
-        let q = surface.pending_prompt.expect("install should confirm").question;
+        let q = surface
+            .pending_prompt
+            .expect("install should confirm")
+            .question;
         assert!(q.contains("\"tldr\""), "discloses the package name: {q}");
-        assert!(q.contains("https://reg.example/pkgs"), "discloses the source registry: {q}");
-        assert!(q.contains("run via ask"), "discloses the ask capability: {q}");
-        assert!(q.contains("local shell"), "discloses the local-shell capability: {q}");
+        assert!(
+            q.contains("https://reg.example/pkgs"),
+            "discloses the source registry: {q}"
+        );
+        assert!(
+            q.contains("run via ask"),
+            "discloses the ask capability: {q}"
+        );
+        assert!(
+            q.contains("local shell"),
+            "discloses the local-shell capability: {q}"
+        );
         // Deny to leave state clean.
         session.answer_prompt(Some("no".into())).await;
 
@@ -1753,9 +2292,16 @@ fn grease_install_verifies_matching_sha256() {
             ("/index.json", grease_json(index)),
             ("/packages/", grease_json(pkg)),
         ])));
-        session.run_line("grease registry add https://reg.example").await;
+        session
+            .run_line("grease registry add https://reg.example")
+            .await;
         let inst = session.eval_line("sudo grease install vpkg").await;
-        assert_eq!(inst.exit_code, 0, "stderr: {}", String::from_utf8_lossy(&inst.stderr));
+        assert_eq!(
+            inst.exit_code,
+            0,
+            "stderr: {}",
+            String::from_utf8_lossy(&inst.stderr)
+        );
         assert!(String::from_utf8(inst.stdout).unwrap().contains("verified"));
         assert!(session.grease.is_prompt("vpkg"));
     });
@@ -1775,11 +2321,18 @@ fn grease_install_rejects_sha256_mismatch() {
             ("/index.json", grease_json(index)),
             ("/packages/", grease_json(pkg)),
         ])));
-        session.run_line("grease registry add https://reg.example").await;
+        session
+            .run_line("grease registry add https://reg.example")
+            .await;
         let inst = session.eval_line("sudo grease install vpkg").await;
         assert_eq!(inst.exit_code, 4);
-        assert!(String::from_utf8(inst.stderr).unwrap().contains("integrity check failed"));
-        assert!(!session.grease.is_prompt("vpkg"), "a mismatched package must not install");
+        assert!(String::from_utf8(inst.stderr)
+            .unwrap()
+            .contains("integrity check failed"));
+        assert!(
+            !session.grease.is_prompt("vpkg"),
+            "a mismatched package must not install"
+        );
         assert!(!crate::grease::config::store_dir().join("vpkg").exists());
     });
 }
@@ -1798,7 +2351,9 @@ fn grease_install_rejects_indexed_package_without_hash() {
             ("/index.json", grease_json(index)),
             ("/packages/", grease_json(pkg)),
         ])));
-        session.run_line("grease registry add https://reg.example").await;
+        session
+            .run_line("grease registry add https://reg.example")
+            .await;
         let inst = session.eval_line("sudo grease install loose").await;
         assert_eq!(inst.exit_code, 4, "indexed-but-unhashed must be refused");
         let err = String::from_utf8(inst.stderr).unwrap();
@@ -1825,8 +2380,13 @@ fn ask_can_call_an_installed_prompt() {
         });
         // No index route → the index lookup 404s → record-only install (these tests don't assert
         // on integrity; the verify path has its own dedicated tests).
-        session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![("/packages/", grease_json(pkg))])));
-        session.run_line("grease registry add https://reg.example").await;
+        session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![(
+            "/packages/",
+            grease_json(pkg),
+        )])));
+        session
+            .run_line("grease registry add https://reg.example")
+            .await;
         let inst = session.eval_line("sudo grease install tldr").await;
         assert_eq!(inst.exit_code, 0);
 
@@ -1852,8 +2412,15 @@ fn ask_can_call_an_installed_prompt() {
             ask_seen.clone(),
         )));
 
-        let result = session.eval_line(r#"sudo ask "summarize report.md with the tldr prompt""#).await;
-        assert_eq!(result.exit_code, 0, "stderr: {}", String::from_utf8_lossy(&result.stderr));
+        let result = session
+            .eval_line(r#"sudo ask "summarize report.md with the tldr prompt""#)
+            .await;
+        assert_eq!(
+            result.exit_code,
+            0,
+            "stderr: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
         assert_eq!(String::from_utf8(result.stdout).unwrap(), "summarized it");
 
         let turns = ask_seen.lock().unwrap();
@@ -1863,12 +2430,18 @@ fn ask_can_call_an_installed_prompt() {
             "the prompt should be an ask tool"
         );
         let system = turns[0].system.clone().unwrap_or_default();
-        assert!(system.contains("prompt__tldr"), "system prompt should list the prompt tool");
+        assert!(
+            system.contains("prompt__tldr"),
+            "system prompt should list the prompt tool"
+        );
         // The nested prompt run saw the FILLED body (turn 2 — the {{file}} was substituted).
         let saw_filled = turns
             .iter()
             .any(|t| t.user_content().contains("TL;DR of report.md please."));
-        assert!(saw_filled, "the model should have seen the filled prompt body");
+        assert!(
+            saw_filled,
+            "the model should have seen the filled prompt body"
+        );
     });
 }
 
@@ -1884,8 +2457,13 @@ fn ask_prompt_tool_pauses_without_sudo() {
         });
         // No index route → the index lookup 404s → record-only install (these tests don't assert
         // on integrity; the verify path has its own dedicated tests).
-        session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![("/packages/", grease_json(pkg))])));
-        session.run_line("grease registry add https://reg.example").await;
+        session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![(
+            "/packages/",
+            grease_json(pkg),
+        )])));
+        session
+            .run_line("grease registry add https://reg.example")
+            .await;
         session.eval_line("sudo grease install greet").await;
 
         session.set_ask_provider(Box::new(FakeProvider::scripted(
@@ -1905,7 +2483,10 @@ fn ask_prompt_tool_pauses_without_sudo() {
         let r = session.eval_line(r#"ask "greet the user""#).await;
         // The ask itself first confirms (outbound HTTP), then the tool call confirms — either way a
         // pause is surfaced.
-        assert!(r.pending_prompt.is_some(), "a plain ask + prompt tool call should pause");
+        assert!(
+            r.pending_prompt.is_some(),
+            "a plain ask + prompt tool call should pause"
+        );
         session.answer_prompt(Some("no".into())).await; // drain
     });
 }
@@ -1917,11 +2498,15 @@ fn grease_install_rejects_builtin_collision() {
         let _dirs = set_grease_dirs();
         let mut session = Session::new().await.unwrap();
         session.set_mcp_http(Box::new(FakeMcpHttp::new(vec![])));
-        session.run_line("grease registry add https://reg.example").await;
+        session
+            .run_line("grease registry add https://reg.example")
+            .await;
         // `ask` is a builtin — installing a package named `ask` must fail before any fetch.
         let r = session.eval_line("sudo grease install ask").await;
         assert_eq!(r.exit_code, 2);
-        assert!(String::from_utf8(r.stderr).unwrap().contains("collides with a built-in"));
+        assert!(String::from_utf8(r.stderr)
+            .unwrap()
+            .contains("collides with a built-in"));
     });
 }
 
@@ -1935,17 +2520,24 @@ fn grease_install_confirms_and_errors_without_registry() {
 
         let bad = session.eval_line("grease registry add not-a-url").await;
         assert_eq!(bad.exit_code, 2);
-        assert!(String::from_utf8(bad.stderr).unwrap().contains("not an http"));
+        assert!(String::from_utf8(bad.stderr)
+            .unwrap()
+            .contains("not an http"));
 
         // `install` is Confirm — a bare invocation pauses.
         let confirm = session.eval_line("grease install summarize").await;
-        assert!(confirm.pending_prompt.is_some(), "install should confirm without sudo");
+        assert!(
+            confirm.pending_prompt.is_some(),
+            "install should confirm without sudo"
+        );
         session.answer_prompt(Some("no".into())).await;
 
         // Under sudo it runs; with no registry configured it errors honestly (no panic).
         let inst = session.eval_line("sudo grease install summarize").await;
         assert_eq!(inst.exit_code, 1);
-        assert!(String::from_utf8(inst.stderr).unwrap().contains("no registries configured"));
+        assert!(String::from_utf8(inst.stderr)
+            .unwrap()
+            .contains("no registries configured"));
     });
 }
 
@@ -1956,23 +2548,38 @@ fn mcp_add_installs_and_surfaces_the_server() {
         let dirs = set_mcp_dirs();
         let mut session = Session::new().await.unwrap();
         // Put the mcp bin dir on PATH so `which` finds the stub.
-        session.run_line(&format!("export PATH={}:$PATH", dirs.bin)).await;
+        session
+            .run_line(&format!("export PATH={}:$PATH", dirs.bin))
+            .await;
         session.set_mcp_http(Box::new(FakeMcpHttp::new(mcp_install_script())));
 
-        let add = session.eval_line("sudo mcp add demo https://x.example/mcp").await;
-        assert_eq!(add.exit_code, 0, "add failed: {}", String::from_utf8_lossy(&add.stderr));
+        let add = session
+            .eval_line("sudo mcp add demo https://x.example/mcp")
+            .await;
+        assert_eq!(
+            add.exit_code,
+            0,
+            "add failed: {}",
+            String::from_utf8_lossy(&add.stderr)
+        );
         assert!(String::from_utf8(add.stdout).unwrap().contains("1 tools"));
 
         let (list, _) = session.run_line("mcp list").await;
         let list = String::from_utf8(list).unwrap();
-        assert!(list.contains("demo") && list.contains("1 tools"), "got: {list}");
+        assert!(
+            list.contains("demo") && list.contains("1 tools"),
+            "got: {list}"
+        );
 
         let (tools, _) = session.run_line("mcp tools demo").await;
         assert!(String::from_utf8(tools).unwrap().contains("echo"));
 
         // The /usr/lib/mcp/bin stub is a real file, so `which` finds it.
         let (which, _) = session.run_line("which demo").await;
-        assert!(String::from_utf8(which).unwrap().contains("demo"), "which should find the stub");
+        assert!(
+            String::from_utf8(which).unwrap().contains("demo"),
+            "which should find the stub"
+        );
     });
 }
 
@@ -1990,17 +2597,31 @@ fn mcp_dispatch_survives_restart_without_reload() {
             let mut session = Session::new().await.unwrap();
             session.set_mcp_http(Box::new(FakeMcpHttp::new(mcp_install_script())));
             let add = session.eval_line("sudo mcp add demo https://x/mcp").await;
-            assert_eq!(add.exit_code, 0, "add: {}", String::from_utf8_lossy(&add.stderr));
+            assert_eq!(
+                add.exit_code,
+                0,
+                "add: {}",
+                String::from_utf8_lossy(&add.stderr)
+            );
         }
         // Restart: a brand-new Session (reconstruction runs), transport re-injected as native::run
         // does AFTER Session::new. Serve ONLY the tools/call response — no re-initialize.
         let mut fresh = Session::new().await.unwrap();
-        fresh.set_mcp_http(Box::new(FakeMcpHttp::new(vec![mcp_call_response("echoed: hi")])));
+        fresh.set_mcp_http(Box::new(FakeMcpHttp::new(vec![mcp_call_response(
+            "echoed: hi",
+        )])));
 
         // Dispatch WITHOUT `mcp reload`.
         let out = fresh.eval_line("sudo demo echo --text hi").await;
-        assert_eq!(out.exit_code, 0, "dispatch: {}", String::from_utf8_lossy(&out.stderr));
-        assert!(String::from_utf8(out.stdout).unwrap().contains("echoed: hi"));
+        assert_eq!(
+            out.exit_code,
+            0,
+            "dispatch: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(String::from_utf8(out.stdout)
+            .unwrap()
+            .contains("echoed: hi"));
     });
 }
 
@@ -2015,14 +2636,24 @@ fn mcp_state_reconstructs_from_config_cache() {
         {
             let mut session = Session::new().await.unwrap();
             session.set_mcp_http(Box::new(FakeMcpHttp::new(mcp_install_script())));
-            let add = session.eval_line("sudo mcp add demo https://x.example/mcp").await;
-            assert_eq!(add.exit_code, 0, "add failed: {}", String::from_utf8_lossy(&add.stderr));
+            let add = session
+                .eval_line("sudo mcp add demo https://x.example/mcp")
+                .await;
+            assert_eq!(
+                add.exit_code,
+                0,
+                "add failed: {}",
+                String::from_utf8_lossy(&add.stderr)
+            );
         }
         // A brand-new Session, same CLANK_MCP_ETC, no HTTP transport at all.
         let mut fresh = Session::new().await.unwrap();
         let (list, _) = fresh.run_line("mcp list").await;
         let list = String::from_utf8(list).unwrap();
-        assert!(list.contains("demo"), "reconstructed server missing: {list}");
+        assert!(
+            list.contains("demo"),
+            "reconstructed server missing: {list}"
+        );
         let (tools, _) = fresh.run_line("mcp tools demo").await;
         let tools = String::from_utf8(tools).unwrap();
         assert!(tools.contains("echo"), "cached tools missing: {tools}");
@@ -2036,10 +2667,16 @@ fn mcp_add_transport_failure_is_configured_not_installed() {
         let _dirs = set_mcp_dirs();
         let mut session = Session::new().await.unwrap();
         // initialize returns a 500.
-        let bad = crate::mcp::client::HttpResponse { status: 500, headers: vec![], body: vec![] };
+        let bad = crate::mcp::client::HttpResponse {
+            status: 500,
+            headers: vec![],
+            body: vec![],
+        };
         session.set_mcp_http(Box::new(FakeMcpHttp::new(vec![bad])));
 
-        let add = session.eval_line("sudo mcp add demo https://x.example/mcp").await;
+        let add = session
+            .eval_line("sudo mcp add demo https://x.example/mcp")
+            .await;
         assert_eq!(add.exit_code, 4);
         let (list, _) = session.run_line("mcp list").await;
         assert!(String::from_utf8(list).unwrap().contains("not installed"));
@@ -2100,8 +2737,15 @@ fn mcp_tool_dispatch_maps_args_and_returns_text() {
 
         // `sudo demo echo --text hello` runs the tool (sudo pre-authorizes the Confirm).
         let out = session.eval_line("sudo demo echo --text hello").await;
-        assert_eq!(out.exit_code, 0, "stderr: {}", String::from_utf8_lossy(&out.stderr));
-        assert!(String::from_utf8(out.stdout).unwrap().contains("echoed: hello"));
+        assert_eq!(
+            out.exit_code,
+            0,
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(String::from_utf8(out.stdout)
+            .unwrap()
+            .contains("echoed: hello"));
         let _ = dirs;
     });
 }
@@ -2133,7 +2777,10 @@ fn mcp_tool_confirms_then_runs() {
         session.eval_line("sudo mcp add demo https://x/mcp").await;
 
         let first = session.eval_line("demo echo --text hi").await;
-        assert!(first.pending_prompt.is_some(), "MCP tool call should confirm");
+        assert!(
+            first.pending_prompt.is_some(),
+            "MCP tool call should confirm"
+        );
         let done = session.answer_prompt(Some("yes".to_string())).await;
         assert_eq!(done.exit_code, 0);
         assert!(String::from_utf8(done.stdout).unwrap().contains("ran"));
@@ -2154,7 +2801,10 @@ fn mcp_server_help_and_man_surfaces() {
         assert!(String::from_utf8(help.stdout).unwrap().contains("echo"));
 
         let (man, _) = session.run_line("man demo").await;
-        assert!(String::from_utf8(man).unwrap().contains("demo"), "man should resolve the server");
+        assert!(
+            String::from_utf8(man).unwrap().contains("demo"),
+            "man should resolve the server"
+        );
     });
 }
 
@@ -2171,12 +2821,23 @@ fn mcp_tool_raw_args_escape_hatch() {
         session.set_mcp_http(Box::new(http));
         session.eval_line("sudo mcp add demo https://x/mcp").await;
 
-        let out = session.eval_line(r#"sudo demo echo --args '{"text":"direct"}'"#).await;
-        assert_eq!(out.exit_code, 0, "stderr: {}", String::from_utf8_lossy(&out.stderr));
+        let out = session
+            .eval_line(r#"sudo demo echo --args '{"text":"direct"}'"#)
+            .await;
+        assert_eq!(
+            out.exit_code,
+            0,
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         // The tools/call body carried the raw args verbatim.
         let calls = seen.lock().unwrap();
         let last = calls.last().unwrap();
-        assert!(last.1.contains("\"text\":\"direct\""), "tools/call body: {}", last.1);
+        assert!(
+            last.1.contains("\"text\":\"direct\""),
+            "tools/call body: {}",
+            last.1
+        );
     });
 }
 
@@ -2191,7 +2852,9 @@ fn mcp_session_lifecycle() {
         let mut open_init = mcp_json(serde_json::json!({"jsonrpc":"2.0","id":3,"result":{
             "protocolVersion":"2025-03-26",
             "serverInfo":{"name":"demo","version":"1.0"},"capabilities":{"tools":{}}}}));
-        open_init.headers.push(("mcp-session-id".into(), "srv-open".into()));
+        open_init
+            .headers
+            .push(("mcp-session-id".into(), "srv-open".into()));
         script.push(open_init);
         script.push(mcp_json(serde_json::json!({}))); // initialized
         script.push(mcp_json(serde_json::json!({}))); // DELETE close (200)
@@ -2200,16 +2863,26 @@ fn mcp_session_lifecycle() {
 
         // No sessions yet.
         let (list0, _) = session.run_line("mcp session list").await;
-        assert!(String::from_utf8(list0).unwrap().contains("no open MCP sessions"));
+        assert!(String::from_utf8(list0)
+            .unwrap()
+            .contains("no open MCP sessions"));
 
         // Open one.
         let open = session.eval_line("sudo mcp session open demo").await;
-        assert_eq!(open.exit_code, 0, "stderr: {}", String::from_utf8_lossy(&open.stderr));
+        assert_eq!(
+            open.exit_code,
+            0,
+            "stderr: {}",
+            String::from_utf8_lossy(&open.stderr)
+        );
         assert!(String::from_utf8(open.stdout).unwrap().contains("s1"));
 
         let (list1, _) = session.run_line("mcp session list").await;
         let list1 = String::from_utf8(list1).unwrap();
-        assert!(list1.contains("s1") && list1.contains("srv-open"), "got: {list1}");
+        assert!(
+            list1.contains("s1") && list1.contains("srv-open"),
+            "got: {list1}"
+        );
 
         let (info, _) = session.run_line("mcp session info s1").await;
         assert!(String::from_utf8(info).unwrap().contains("demo"));
@@ -2218,7 +2891,9 @@ fn mcp_session_lifecycle() {
         let close = session.eval_line("sudo mcp session close s1").await;
         assert_eq!(close.exit_code, 0);
         let (list2, _) = session.run_line("mcp session list").await;
-        assert!(String::from_utf8(list2).unwrap().contains("no open MCP sessions"));
+        assert!(String::from_utf8(list2)
+            .unwrap()
+            .contains("no open MCP sessions"));
     });
 }
 
@@ -2231,10 +2906,16 @@ fn mcp_session_close_405_removes_locally() {
         let mut script = mcp_install_script();
         let mut open_init = mcp_json(serde_json::json!({"jsonrpc":"2.0","id":3,"result":{
             "serverInfo":{"name":"demo","version":"1.0"},"capabilities":{}}}));
-        open_init.headers.push(("mcp-session-id".into(), "srv-open".into()));
+        open_init
+            .headers
+            .push(("mcp-session-id".into(), "srv-open".into()));
         script.push(open_init);
         script.push(mcp_json(serde_json::json!({}))); // initialized
-        script.push(crate::mcp::client::HttpResponse { status: 405, headers: vec![], body: vec![] });
+        script.push(crate::mcp::client::HttpResponse {
+            status: 405,
+            headers: vec![],
+            body: vec![],
+        });
         session.set_mcp_http(Box::new(FakeMcpHttp::new(script)));
         session.eval_line("sudo mcp add demo https://x/mcp").await;
         session.eval_line("sudo mcp session open demo").await;
@@ -2246,9 +2927,14 @@ fn mcp_session_close_405_removes_locally() {
             String::from_utf8_lossy(&close.stdout),
             String::from_utf8_lossy(&close.stderr)
         );
-        assert!(combined.contains("405") || combined.contains("locally"), "got: {combined}");
+        assert!(
+            combined.contains("405") || combined.contains("locally"),
+            "got: {combined}"
+        );
         let (list, _) = session.run_line("mcp session list").await;
-        assert!(String::from_utf8(list).unwrap().contains("no open MCP sessions"));
+        assert!(String::from_utf8(list)
+            .unwrap()
+            .contains("no open MCP sessions"));
     });
 }
 
@@ -2285,18 +2971,36 @@ fn ask_can_call_an_mcp_tool() {
             ask_seen.clone(),
         )));
 
-        let result = session.eval_line(r#"sudo ask "use the demo echo tool""#).await;
-        assert_eq!(result.exit_code, 0, "stderr: {}", String::from_utf8_lossy(&result.stderr));
-        assert_eq!(String::from_utf8(result.stdout).unwrap(), "done, the tool ran");
+        let result = session
+            .eval_line(r#"sudo ask "use the demo echo tool""#)
+            .await;
+        assert_eq!(
+            result.exit_code,
+            0,
+            "stderr: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(result.stdout).unwrap(),
+            "done, the tool ran"
+        );
         // The MCP server saw a tools/call carrying the tool's arguments.
         let calls = seen.lock().unwrap();
-        let tool_call = calls.iter().find(|(_url, body)| body.contains("tools/call"));
+        let tool_call = calls
+            .iter()
+            .find(|(_url, body)| body.contains("tools/call"));
         assert!(tool_call.is_some(), "expected a tools/call, saw: {calls:?}");
-        assert!(tool_call.unwrap().1.contains("hi mcp"), "args should reach the server");
+        assert!(
+            tool_call.unwrap().1.contains("hi mcp"),
+            "args should reach the server"
+        );
         // The tool surface the model saw included the MCP tool definition.
         let ask_turns = ask_seen.lock().unwrap();
         assert!(
-            ask_turns[0].tools.iter().any(|t| t.name == "mcp__demo__echo"),
+            ask_turns[0]
+                .tools
+                .iter()
+                .any(|t| t.name == "mcp__demo__echo"),
             "the MCP tool should be in the ask tool surface"
         );
     });
@@ -2333,7 +3037,10 @@ fn ask_mcp_tool_pauses_without_sudo() {
         // Plain ask: approve the ask, then the MCP tool call pauses for its own authz.
         session.eval_line(r#"ask "use the tool""#).await;
         let after_ask = session.answer_prompt(Some("yes".to_string())).await;
-        assert!(after_ask.pending_prompt.is_some(), "MCP tool call should pause under plain ask");
+        assert!(
+            after_ask.pending_prompt.is_some(),
+            "MCP tool call should pause under plain ask"
+        );
         let done = session.answer_prompt(Some("yes".to_string())).await;
         assert_eq!(done.exit_code, 0);
         assert_eq!(String::from_utf8(done.stdout).unwrap(), "finished");
@@ -2348,7 +3055,9 @@ fn mcp_watch_unknown_uri_errors() {
         let mut session = Session::new().await.unwrap();
         let result = session.eval_line("mcp watch some://uri").await;
         assert_eq!(result.exit_code, 1);
-        assert!(String::from_utf8(result.stderr).unwrap().contains("no installed server owns"));
+        assert!(String::from_utf8(result.stderr)
+            .unwrap()
+            .contains("no installed server owns"));
     });
 }
 
@@ -2368,7 +3077,9 @@ fn ask_returns_reply_and_feeds_transcript_as_context() {
         // Run a command first so there's transcript history to feed as context.
         session.run_line("echo marker_abc").await;
 
-        let result = session.eval_line(r#"sudo ask "what did I just echo?""#).await;
+        let result = session
+            .eval_line(r#"sudo ask "what did I just echo?""#)
+            .await;
         assert_eq!(result.exit_code, 0);
         assert!(result.pending_prompt.is_none(), "sudo ask must not confirm");
         assert_eq!(
@@ -2420,13 +3131,18 @@ fn auto_compaction_summarizes_the_dropped_span() {
             shown.contains("[summary of") && shown.contains("SUMMARY: earlier work happened"),
             "expected a summary block at the leading edge, got:\n{shown}"
         );
-        assert!(!shown.contains("earlier entries dropped"), "count marker should be upgraded");
+        assert!(
+            !shown.contains("earlier entries dropped"),
+            "count marker should be upgraded"
+        );
 
         // The provider was asked to summarize the DROPPED span (system = SUMMARIZE_SYSTEM_PROMPT),
         // not the whole transcript.
         let turns = seen.lock().unwrap().clone();
         assert!(
-            turns.iter().any(|t| t.system.as_deref() == Some(crate::ai::ask::SUMMARIZE_SYSTEM_PROMPT)),
+            turns
+                .iter()
+                .any(|t| t.system.as_deref() == Some(crate::ai::ask::SUMMARIZE_SYSTEM_PROMPT)),
             "a summarize turn should have fired"
         );
     });
@@ -2449,7 +3165,10 @@ fn auto_compaction_falls_back_to_count_marker_without_a_provider() {
             shown.contains("earlier entries dropped"),
             "without a provider the count marker stays, got:\n{shown}"
         );
-        assert!(!shown.contains("[summary of"), "no summary block without a provider");
+        assert!(
+            !shown.contains("[summary of"),
+            "no summary block without a provider"
+        );
     });
 }
 
@@ -2490,7 +3209,10 @@ fn shell_log_records_start_and_end() {
         let log = cap.read(crate::logging::LogFile::Shell);
         assert!(log.contains(r#"start line="echo hi""#), "got:\n{log}");
         assert!(log.contains(r#"end line="echo hi" exit=0"#), "got:\n{log}");
-        assert!(log.contains("exit=1"), "the failing command's exit code is logged, got:\n{log}");
+        assert!(
+            log.contains("exit=1"),
+            "the failing command's exit code is logged, got:\n{log}"
+        );
     });
 }
 
@@ -2506,7 +3228,10 @@ fn ops_log_records_destructive_ops() {
         assert!(r.pending_prompt.is_some(), "rm should confirm");
         session.answer_prompt(Some("no".into())).await;
         let log = cap.read(crate::logging::LogFile::Ops);
-        assert!(log.contains("destructive"), "ops.log should record the destructive op, got:\n{log}");
+        assert!(
+            log.contains("destructive"),
+            "ops.log should record the destructive op, got:\n{log}"
+        );
         assert!(log.contains("cmd=rm"), "got:\n{log}");
         assert!(log.contains("confirm-required"), "got:\n{log}");
     });
@@ -2522,7 +3247,10 @@ fn http_log_records_the_llm_turn() {
         session.set_ask_provider(Box::new(FakeProvider::reply("reply", seen)));
         session.eval_line(r#"sudo ask "hello""#).await;
         let log = cap.read(crate::logging::LogFile::Http);
-        assert!(log.contains("kind=llm"), "http.log should record the LLM call, got:\n{log}");
+        assert!(
+            log.contains("kind=llm"),
+            "http.log should record the LLM call, got:\n{log}"
+        );
         assert!(log.contains("status=ok"), "got:\n{log}");
     });
 }
@@ -2562,7 +3290,9 @@ fn ask_json_valid_reply_exits_zero() {
             seen.clone(),
         )));
 
-        let result = session.eval_line(r#"sudo ask --json --fresh "give me json""#).await;
+        let result = session
+            .eval_line(r#"sudo ask --json --fresh "give me json""#)
+            .await;
         assert_eq!(result.exit_code, 0);
         assert_eq!(String::from_utf8(result.stdout).unwrap(), r#"{"ok":true}"#);
 
@@ -2601,12 +3331,20 @@ fn ask_json_invalid_reply_exits_six() {
             "sorry, I cannot do that",
             std::sync::Arc::new(Mutex::new(Vec::new())),
         )));
-        let result = session.eval_line(r#"sudo ask --json --fresh "give me json""#).await;
+        let result = session
+            .eval_line(r#"sudo ask --json --fresh "give me json""#)
+            .await;
         assert_eq!(result.exit_code, 6);
         assert!(result.stdout.is_empty(), "no stdout on a --json failure");
         let stderr = String::from_utf8(result.stderr).unwrap();
-        assert!(stderr.contains("did not return valid JSON"), "stderr: {stderr}");
-        assert!(stderr.contains("sorry, I cannot do that"), "raw text preserved: {stderr}");
+        assert!(
+            stderr.contains("did not return valid JSON"),
+            "stderr: {stderr}"
+        );
+        assert!(
+            stderr.contains("sorry, I cannot do that"),
+            "raw text preserved: {stderr}"
+        );
     });
 }
 
@@ -2654,8 +3392,14 @@ fn ask_pipe_confirmation_preserves_stdin() {
         let surface = session
             .eval_line(r#"echo survives_pause_marker | ask --fresh "q""#)
             .await;
-        assert!(surface.pending_prompt.is_some(), "bare ask-pipe should confirm");
-        assert!(seen.lock().unwrap().is_empty(), "model not called before approval");
+        assert!(
+            surface.pending_prompt.is_some(),
+            "bare ask-pipe should confirm"
+        );
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "model not called before approval"
+        );
 
         // Approve ⇒ the ask runs with the preserved stdin.
         let done = session.answer_prompt(Some("yes".into())).await;
@@ -2676,11 +3420,16 @@ fn ask_pipe_denied_exits_five_and_clears_stdin() {
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         session.set_ask_provider(Box::new(FakeProvider::reply("later", seen.clone())));
 
-        let surface = session.eval_line(r#"echo leak_marker | ask --fresh "q""#).await;
+        let surface = session
+            .eval_line(r#"echo leak_marker | ask --fresh "q""#)
+            .await;
         assert!(surface.pending_prompt.is_some());
         let denied = session.answer_prompt(Some("no".into())).await;
         assert_eq!(denied.exit_code, 5);
-        assert!(seen.lock().unwrap().is_empty(), "denied ask never calls the model");
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "denied ask never calls the model"
+        );
 
         // A subsequent unrelated sudo ask must not carry the earlier pipe's stdin.
         session.eval_line(r#"sudo ask --fresh "hello""#).await;
@@ -2720,7 +3469,10 @@ fn context_summarize_returns_summary_without_mutating() {
         // The transcript is UNCHANGED: both echoes still there, the summary is NOT recorded.
         let shown = String::from_utf8(session.eval_line("context show").await.stdout).unwrap();
         assert!(shown.contains("original_marker_one") && shown.contains("original_marker_two"));
-        assert!(!shown.contains("You ran two echo commands"), "summary must not be recorded");
+        assert!(
+            !shown.contains("You ran two echo commands"),
+            "summary must not be recorded"
+        );
     });
 }
 
@@ -2736,8 +3488,14 @@ fn context_summarize_confirms_then_runs() {
 
         // Bare summarize pauses.
         let surface = session.eval_line("context summarize").await;
-        assert!(surface.pending_prompt.is_some(), "bare summarize should confirm");
-        assert!(seen.lock().unwrap().is_empty(), "model not called before approval");
+        assert!(
+            surface.pending_prompt.is_some(),
+            "bare summarize should confirm"
+        );
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "model not called before approval"
+        );
 
         // Approve ⇒ runs.
         let done = session.answer_prompt(Some("yes".into())).await;
@@ -2745,7 +3503,10 @@ fn context_summarize_confirms_then_runs() {
         assert_eq!(String::from_utf8(done.stdout).unwrap(), "a summary\n");
         // The summary is still not recorded after the deferred run.
         let shown = String::from_utf8(session.eval_line("context show").await.stdout).unwrap();
-        assert!(!shown.contains("a summary"), "deferred summary must not be recorded");
+        assert!(
+            !shown.contains("a summary"),
+            "deferred summary must not be recorded"
+        );
     });
 }
 
@@ -2761,7 +3522,10 @@ fn context_summarize_denied_exits_five() {
         assert!(surface.pending_prompt.is_some());
         let denied = session.answer_prompt(Some("no".into())).await;
         assert_eq!(denied.exit_code, 5);
-        assert!(seen.lock().unwrap().is_empty(), "denied summarize never calls the model");
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "denied summarize never calls the model"
+        );
     });
 }
 
@@ -2773,7 +3537,9 @@ fn context_summarize_without_provider_errors() {
         session.run_line("echo x").await;
         let result = session.eval_line("sudo context summarize").await;
         assert_eq!(result.exit_code, 4);
-        assert!(String::from_utf8(result.stderr).unwrap().contains("no model provider"));
+        assert!(String::from_utf8(result.stderr)
+            .unwrap()
+            .contains("no model provider"));
     });
 }
 
@@ -2809,7 +3575,10 @@ fn ask_repl_via_eval_line_is_honest_message() {
         let result = session.eval_line("ask repl").await;
         assert_eq!(result.exit_code, 2);
         let stderr = String::from_utf8(result.stderr).unwrap();
-        assert!(stderr.contains("native-terminal feature"), "stderr: {stderr}");
+        assert!(
+            stderr.contains("native-terminal feature"),
+            "stderr: {stderr}"
+        );
         assert!(result.pending_prompt.is_none());
     });
 }
@@ -2842,21 +3611,33 @@ fn repl_turn_uses_isolated_transcript() {
         assert_eq!(r1, "first reply");
         // The first turn saw a fresh context (no main-transcript marker).
         let content1 = seen.lock().unwrap()[0].user_content();
-        assert!(!content1.contains("main_transcript_marker"), "repl leaked main: {content1}");
+        assert!(
+            !content1.contains("main_transcript_marker"),
+            "repl leaked main: {content1}"
+        );
         assert!(content1.contains("hello there"));
 
         // The second turn sees the FIRST exchange (isolated transcript grew).
         let _r2 = session.repl_turn("and again").await;
         let content2 = seen.lock().unwrap()[1].user_content();
-        assert!(content2.contains("first reply"), "repl turn2 missing history: {content2}");
-        assert!(content2.contains("hello there"), "repl turn2 missing prior prompt");
+        assert!(
+            content2.contains("first reply"),
+            "repl turn2 missing history: {content2}"
+        );
+        assert!(
+            content2.contains("hello there"),
+            "repl turn2 missing prior prompt"
+        );
 
         // Exiting renders the REPL session; the main transcript still has only its own marker.
         let rendered = String::from_utf8(session.repl_end()).unwrap();
         assert!(rendered.contains("first reply") && rendered.contains("and again"));
         let main = String::from_utf8(session.eval_line("context show").await.stdout).unwrap();
         assert!(main.contains("main_transcript_marker"));
-        assert!(!main.contains("first reply"), "REPL content leaked into main mid-session");
+        assert!(
+            !main.contains("first reply"),
+            "REPL content leaked into main mid-session"
+        );
     });
 }
 
@@ -2874,10 +3655,15 @@ fn repl_meta_commands() {
             seed: crate::ai::ask::ReplSeed::Fresh,
         };
         session.repl_start(&args).unwrap();
-        assert_eq!(session.repl_model().as_deref(), Some(crate::ai::ask::DEFAULT_MODEL));
+        assert_eq!(
+            session.repl_model().as_deref(),
+            Some(crate::ai::ask::DEFAULT_MODEL)
+        );
 
         // :model switches (anthropic/ prefix stripped).
-        let (out, exit) = session.repl_meta(":model anthropic/claude-sonnet-5").unwrap();
+        let (out, exit) = session
+            .repl_meta(":model anthropic/claude-sonnet-5")
+            .unwrap();
         assert!(!exit);
         assert!(out.contains("claude-sonnet-5"));
         assert_eq!(session.repl_model().as_deref(), Some("claude-sonnet-5"));
@@ -2890,7 +3676,10 @@ fn repl_meta_commands() {
         session.set_ask_provider(Box::new(FakeProvider::reply("ok2", seen.clone())));
         session.repl_turn("fresh start").await;
         let content = seen.lock().unwrap()[0].user_content();
-        assert!(!content.contains("hi"), "new-session should have cleared history: {content}");
+        assert!(
+            !content.contains("hi"),
+            "new-session should have cleared history: {content}"
+        );
 
         // :exit signals exit; a non-meta line returns None.
         assert!(session.repl_meta(":exit").unwrap().1);
@@ -2945,15 +3734,27 @@ fn ask_surfaces_a_confirmation() {
         )));
 
         let result = session.eval_line(r#"ask "hi""#).await;
-        let pending = result.pending_prompt.expect("bare ask should surface a confirm");
-        assert!(pending.question.to_lowercase().contains("ask"), "got: {}", pending.question);
+        let pending = result
+            .pending_prompt
+            .expect("bare ask should surface a confirm");
+        assert!(
+            pending.question.to_lowercase().contains("ask"),
+            "got: {}",
+            pending.question
+        );
         // The provider must NOT have run before approval.
-        assert!(seen.lock().unwrap().is_empty(), "provider ran before approval");
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "provider ran before approval"
+        );
 
         // Approving runs the deferred ask.
         let answered = session.answer_prompt(Some("yes".to_string())).await;
         assert_eq!(answered.exit_code, 0);
-        assert_eq!(String::from_utf8(answered.stdout).unwrap(), "should not run yet");
+        assert_eq!(
+            String::from_utf8(answered.stdout).unwrap(),
+            "should not run yet"
+        );
     });
 }
 
@@ -2976,7 +3777,10 @@ fn ask_shell_tool_runs_command_and_feeds_result_back() {
 
         let result = session.eval_line(r#"sudo ask "echo the marker""#).await;
         assert_eq!(result.exit_code, 0);
-        assert_eq!(String::from_utf8(result.stdout).unwrap(), "done: I saw MARK_42");
+        assert_eq!(
+            String::from_utf8(result.stdout).unwrap(),
+            "done: I saw MARK_42"
+        );
         // Trace framing on stderr.
         let stderr = String::from_utf8(result.stderr).unwrap();
         assert!(stderr.contains("[tool] $ echo MARK_42"), "got: {stderr}");
@@ -3005,15 +3809,27 @@ fn ask_confirm_tool_pauses_and_deny_continues() {
 
         // Bare ask → surfaces the ask confirmation; approve it (blanket stays false).
         let first = session.eval_line(r#"ask "fetch it""#).await;
-        assert!(first.pending_prompt.is_some(), "bare ask should confirm first");
+        assert!(
+            first.pending_prompt.is_some(),
+            "bare ask should confirm first"
+        );
         let second = session.answer_prompt(Some("yes".to_string())).await;
         // The curl tool call now surfaces its OWN authorization pause.
-        let pending = second.pending_prompt.expect("curl tool should pause for authz");
-        assert!(pending.question.to_lowercase().contains("permission"), "got: {}", pending.question);
+        let pending = second
+            .pending_prompt
+            .expect("curl tool should pause for authz");
+        assert!(
+            pending.question.to_lowercase().contains("permission"),
+            "got: {}",
+            pending.question
+        );
         // Deny it → loop continues, model answers, ask exits 0.
         let result = session.answer_prompt(Some("no".to_string())).await;
         assert_eq!(result.exit_code, 0);
-        assert_eq!(String::from_utf8(result.stdout).unwrap(), "I could not fetch it");
+        assert_eq!(
+            String::from_utf8(result.stdout).unwrap(),
+            "I could not fetch it"
+        );
 
         let tr = last_tool_result(&seen, "c1").expect("a tool result for c1");
         let msg = tr.outcome.expect_err("denied curl is an error result");
@@ -3039,11 +3855,21 @@ fn ask_sudo_only_tool_pauses_even_under_sudo_ask() {
             seen.clone(),
         )));
 
-        let first = session.eval_line(&format!(r#"sudo ask "delete {}""#, path.display())).await;
+        let first = session
+            .eval_line(&format!(r#"sudo ask "delete {}""#, path.display()))
+            .await;
         // Even under sudo ask, the sudo-only rm pauses (no "all" offered for this tier).
-        let pending = first.pending_prompt.expect("sudo-only rm should pause under sudo ask");
-        assert!(!pending.choices.clone().unwrap_or_default().contains(&"all".to_string()),
-            "sudo-only pause must not offer 'all'");
+        let pending = first
+            .pending_prompt
+            .expect("sudo-only rm should pause under sudo ask");
+        assert!(
+            !pending
+                .choices
+                .clone()
+                .unwrap_or_default()
+                .contains(&"all".to_string()),
+            "sudo-only pause must not offer 'all'"
+        );
         let result = session.answer_prompt(Some("no".to_string())).await;
         assert_eq!(result.exit_code, 0);
         let tr = last_tool_result(&seen, "c1").expect("a tool result for c1");
@@ -3071,10 +3897,16 @@ fn ask_sudo_pre_authorizes_confirm_tool() {
 
         let first = session.eval_line(r#"sudo ask "fetch it""#).await;
         // sudo ask grants blanket confirm-tier up front → curl does not pause.
-        assert!(first.pending_prompt.is_none(), "sudo ask pre-authorizes curl (no pause)");
+        assert!(
+            first.pending_prompt.is_none(),
+            "sudo ask pre-authorizes curl (no pause)"
+        );
         assert_eq!(first.exit_code, 0);
         let tr = last_tool_result(&seen, "c1").unwrap().outcome.unwrap();
-        assert!(tr.contains("fetched-body"), "curl body should be in the tool result: {tr}");
+        assert!(
+            tr.contains("fetched-body"),
+            "curl body should be in the tool result: {tr}"
+        );
     });
 }
 
@@ -3099,15 +3931,29 @@ fn ask_all_answer_upgrades_blanket_mid_loop() {
         // Plain ask (blanket false): approve the ask, then the first curl pauses.
         session.eval_line(r#"ask "fetch a then b""#).await;
         let after_ask = session.answer_prompt(Some("yes".to_string())).await;
-        assert!(after_ask.pending_prompt.is_some(), "first curl should pause");
+        assert!(
+            after_ask.pending_prompt.is_some(),
+            "first curl should pause"
+        );
         // Answer "all" → runs c1 AND pre-authorizes c2 (no second pause) → loop completes.
         let done = session.answer_prompt(Some("all".to_string())).await;
-        assert!(done.pending_prompt.is_none(), "all should carry through to c2");
+        assert!(
+            done.pending_prompt.is_none(),
+            "all should carry through to c2"
+        );
         assert_eq!(done.exit_code, 0);
         assert_eq!(String::from_utf8(done.stdout).unwrap(), "done");
         // Both curls actually ran.
-        assert!(last_tool_result(&seen, "c1").unwrap().outcome.unwrap().contains("body-a"));
-        assert!(last_tool_result(&seen, "c2").unwrap().outcome.unwrap().contains("body-b"));
+        assert!(last_tool_result(&seen, "c1")
+            .unwrap()
+            .outcome
+            .unwrap()
+            .contains("body-a"));
+        assert!(last_tool_result(&seen, "c2")
+            .unwrap()
+            .outcome
+            .unwrap()
+            .contains("body-b"));
     });
 }
 
@@ -3130,19 +3976,29 @@ fn ask_prompt_user_tool_round_trips() {
             error: None,
         };
         session.set_ask_provider(Box::new(FakeProvider::scripted(
-            vec![prompt_call, crate::ai::ask::AskResponse::text("using port 8080")],
+            vec![
+                prompt_call,
+                crate::ai::ask::AskResponse::text("using port 8080"),
+            ],
             seen.clone(),
         )));
 
         let first = session.eval_line(r#"sudo ask "set up the server""#).await;
         let pending = first.pending_prompt.expect("prompt_user should pause");
-        assert!(pending.question.contains("port"), "got: {}", pending.question);
+        assert!(
+            pending.question.contains("port"),
+            "got: {}",
+            pending.question
+        );
         let done = session.answer_prompt(Some("8080".to_string())).await;
         assert_eq!(done.exit_code, 0);
         assert_eq!(String::from_utf8(done.stdout).unwrap(), "using port 8080");
         // The answer reached the model as the tool result.
         let tr = last_tool_result(&seen, "p1").unwrap();
-        assert!(tr.outcome.unwrap().contains("8080"), "answer should be the tool result");
+        assert!(
+            tr.outcome.unwrap().contains("8080"),
+            "answer should be the tool result"
+        );
     });
 }
 
@@ -3163,7 +4019,10 @@ fn ask_pause_kill_aborts_the_whole_ask() {
             error: None,
         };
         session.set_ask_provider(Box::new(FakeProvider::scripted(
-            vec![prompt_call, crate::ai::ask::AskResponse::text("should not reach")],
+            vec![
+                prompt_call,
+                crate::ai::ask::AskResponse::text("should not reach"),
+            ],
             seen.clone(),
         )));
 
@@ -3219,7 +4078,10 @@ fn ask_uses_model_default_and_flag_overrides() {
         session
             .run_line(r#"sudo ask --fresh --model claude-haiku-4-5 "hi""#)
             .await;
-        assert_eq!(seen.lock().unwrap().last().unwrap().model, "claude-haiku-4-5");
+        assert_eq!(
+            seen.lock().unwrap().last().unwrap().model,
+            "claude-haiku-4-5"
+        );
 
         std::fs::remove_dir_all(&home).ok();
     });
@@ -3237,7 +4099,9 @@ fn ask_unknown_provider_prefix_errors() {
             .eval_line(r#"sudo ask --model frobnicate/x --fresh "hi""#)
             .await;
         assert_eq!(result.exit_code, 2);
-        assert!(String::from_utf8(result.stderr).unwrap().contains("unknown provider"));
+        assert!(String::from_utf8(result.stderr)
+            .unwrap()
+            .contains("unknown provider"));
         // The provider was never called.
         assert!(seen.lock().unwrap().is_empty());
     });
@@ -3305,9 +4169,14 @@ fn ask_compound_tool_call_cannot_smuggle_a_shell_internal_command() {
 
         session.eval_line(r#"sudo ask "sneak""#).await;
         let tr = last_tool_result(&seen, "c1").expect("a tool result for c1");
-        let msg = tr.outcome.expect_err("a compound line hiding `cd` must be refused");
+        let msg = tr
+            .outcome
+            .expect_err("a compound line hiding `cd` must be refused");
         assert!(msg.contains("shell-internal"), "got: {msg}");
-        assert!(msg.contains("cd"), "the offending command should be named: {msg}");
+        assert!(
+            msg.contains("cd"),
+            "the offending command should be named: {msg}"
+        );
     });
 }
 
@@ -3328,7 +4197,9 @@ fn ask_command_substitution_tool_call_is_refused() {
 
         session.eval_line(r#"sudo ask "sneak""#).await;
         let tr = last_tool_result(&seen, "c1").expect("a tool result for c1");
-        let msg = tr.outcome.expect_err("command substitution must be refused");
+        let msg = tr
+            .outcome
+            .expect_err("command substitution must be refused");
         assert!(msg.contains("command substitution"), "got: {msg}");
     });
 }
@@ -3357,7 +4228,11 @@ fn ask_unknown_tool_command_is_denied_but_safe_builtins_run() {
         assert!(msg.contains("not a recognized command"), "got: {msg}");
         // `echo` (known-safe builtin, no manifest) → runs.
         let e = last_tool_result(&seen, "c2").expect("a tool result for c2");
-        assert!(e.outcome.is_ok(), "echo should run as a tool, got: {:?}", e.outcome);
+        assert!(
+            e.outcome.is_ok(),
+            "echo should run as a tool, got: {:?}",
+            e.outcome
+        );
     });
 }
 
@@ -3385,7 +4260,10 @@ fn ask_malformed_tool_args_error_and_continue() {
         let result = session.eval_line(r#"sudo ask "do something""#).await;
         assert_eq!(String::from_utf8(result.stdout).unwrap(), "recovered");
         let tr = last_tool_result(&seen, "c1").expect("a tool result for c1");
-        assert!(tr.outcome.unwrap_err().contains("malformed"), "expected a malformed-args error");
+        assert!(
+            tr.outcome.unwrap_err().contains("malformed"),
+            "expected a malformed-args error"
+        );
     });
 }
 
@@ -3405,7 +4283,9 @@ fn ask_loop_stops_at_the_iteration_cap() {
         let result = session.eval_line(r#"sudo ask "loop forever""#).await;
         assert_eq!(result.exit_code, 0);
         assert!(
-            String::from_utf8(result.stderr).unwrap().contains("tool-call limit"),
+            String::from_utf8(result.stderr)
+                .unwrap()
+                .contains("tool-call limit"),
             "expected a cap notice on stderr"
         );
         // Exactly cap turns were requested.
@@ -3446,18 +4326,28 @@ fn help_flag_prints_help_for_intercepted_commands() {
 
         let result = session.eval_line("curl --help").await;
         assert_eq!(result.exit_code, 0);
-        assert!(result.pending_prompt.is_none(), "curl --help must not confirm");
+        assert!(
+            result.pending_prompt.is_none(),
+            "curl --help must not confirm"
+        );
         let out = String::from_utf8(result.stdout).unwrap();
         assert!(out.contains("fetch a URL over"), "got: {out}");
 
         let result = session.eval_line("prompt-user --help").await;
         assert_eq!(result.exit_code, 0);
-        assert!(result.pending_prompt.is_none(), "help must not surface a prompt");
-        assert!(String::from_utf8(result.stdout).unwrap().contains("pause the"));
+        assert!(
+            result.pending_prompt.is_none(),
+            "help must not surface a prompt"
+        );
+        assert!(String::from_utf8(result.stdout)
+            .unwrap()
+            .contains("pause the"));
 
         let result = session.eval_line("wget --help").await;
         assert_eq!(result.exit_code, 0);
-        assert!(String::from_utf8(result.stdout).unwrap().contains("download a URL"));
+        assert!(String::from_utf8(result.stdout)
+            .unwrap()
+            .contains("download a URL"));
 
         let result = session.eval_line("context --help").await;
         assert_eq!(result.exit_code, 0);
@@ -3509,9 +4399,13 @@ fn prompt_user_surfaces_then_answer_resolves() {
         let mut session = Session::new().await.unwrap();
 
         // Step 1: surface. The question comes back and the prompt is pending — no hang.
-        let surfaced = session.eval_line(r#"prompt-user "Which environment?""#).await;
+        let surfaced = session
+            .eval_line(r#"prompt-user "Which environment?""#)
+            .await;
         assert_eq!(surfaced.exit_code, 0);
-        let pending = surfaced.pending_prompt.expect("should surface a pending prompt");
+        let pending = surfaced
+            .pending_prompt
+            .expect("should surface a pending prompt");
         assert_eq!(pending.question, "Which environment?");
         assert!(session.has_pending_prompt());
 
@@ -3548,7 +4442,9 @@ fn kill_of_pending_prompt_pid_aborts_it() {
         };
 
         // A kill of some other pid is rejected like any other command.
-        let other = session.eval_line(&format!("kill {}", paused_pid + 100)).await;
+        let other = session
+            .eval_line(&format!("kill {}", paused_pid + 100))
+            .await;
         assert_eq!(other.exit_code, 1);
         assert!(session.has_pending_prompt());
 
@@ -3689,13 +4585,17 @@ fn sudo_only_rm_without_sudo_surfaces_confirmation() {
     on_rt(async {
         let path = seed_file("gate");
         let mut session = Session::new().await.unwrap();
-        let result = session
-            .eval_line(&format!("rm {}", path.display()))
-            .await;
+        let result = session.eval_line(&format!("rm {}", path.display())).await;
         // A confirmation was surfaced, not a deletion.
-        assert!(result.pending_prompt.is_some(), "rm should surface a sudo confirmation");
+        assert!(
+            result.pending_prompt.is_some(),
+            "rm should surface a sudo confirmation"
+        );
         assert!(session.has_pending_prompt());
-        assert!(path.exists(), "file must survive an unapproved sudo-only rm");
+        assert!(
+            path.exists(),
+            "file must survive an unapproved sudo-only rm"
+        );
         let _ = std::fs::remove_file(&path);
     });
 }
@@ -3785,7 +4685,10 @@ fn curl_surfaces_a_confirmation() {
         let url = http_mock("body");
         let mut session = Session::new().await.unwrap();
         let result = session.eval_line(&format!("curl {url}")).await;
-        assert!(result.pending_prompt.is_some(), "curl should surface a confirm");
+        assert!(
+            result.pending_prompt.is_some(),
+            "curl should surface a confirm"
+        );
         assert!(session.has_pending_prompt());
         // No request ran yet: resolve the prompt so the mock thread can exit cleanly.
         session.answer_prompt(Some("no".to_string())).await;
@@ -3815,12 +4718,21 @@ static CWD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// the response as stdin. `sudo` pre-authorizes, so the pipeline runs directly.
 #[test]
 fn curl_headed_pipeline_feeds_the_downstream() {
-    let _cwd = CWD_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _cwd = CWD_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     on_rt(async {
         let url = http_mock("alpha\nbeta\ngamma\n");
         let mut session = Session::new().await.unwrap();
-        let result = session.eval_line(&format!("sudo curl -s {url} | grep beta")).await;
-        assert_eq!(result.exit_code, 0, "stderr: {}", String::from_utf8_lossy(&result.stderr));
+        let result = session
+            .eval_line(&format!("sudo curl -s {url} | grep beta"))
+            .await;
+        assert_eq!(
+            result.exit_code,
+            0,
+            "stderr: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
         assert_eq!(String::from_utf8(result.stdout).unwrap(), "beta\n");
     });
 }
@@ -3828,7 +4740,9 @@ fn curl_headed_pipeline_feeds_the_downstream() {
 /// The downstream may itself be a multi-stage Brush pipeline.
 #[test]
 fn curl_headed_pipeline_multistage_downstream() {
-    let _cwd = CWD_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _cwd = CWD_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     on_rt(async {
         let url = http_mock("c\nb\na\n");
         let mut session = Session::new().await.unwrap();
@@ -3845,12 +4759,19 @@ fn curl_headed_pipeline_multistage_downstream() {
 /// have re-broken it.
 #[test]
 fn curl_headed_pipeline_approved_after_confirm() {
-    let _cwd = CWD_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _cwd = CWD_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     on_rt(async {
         let url = http_mock("x1\nx2\n");
         let mut session = Session::new().await.unwrap();
-        let pending = session.eval_line(&format!("curl -s {url} | grep -c x")).await;
-        assert!(pending.pending_prompt.is_some(), "pipeline curl should confirm");
+        let pending = session
+            .eval_line(&format!("curl -s {url} | grep -c x"))
+            .await;
+        assert!(
+            pending.pending_prompt.is_some(),
+            "pipeline curl should confirm"
+        );
         let out = session.answer_prompt(Some("yes".to_string())).await;
         assert_eq!(out.exit_code, 0);
         assert_eq!(String::from_utf8(out.stdout).unwrap(), "2\n");
@@ -3865,8 +4786,13 @@ fn curl_headed_pipeline_approved_after_confirm() {
 fn curl_mid_pipeline_is_an_honest_stub_error() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
-        let gated = session.eval_line("echo feed | curl https://unused.invalid").await;
-        assert!(gated.pending_prompt.is_some(), "curl mid-pipeline should gate (unelevated)");
+        let gated = session
+            .eval_line("echo feed | curl https://unused.invalid")
+            .await;
+        assert!(
+            gated.pending_prompt.is_some(),
+            "curl mid-pipeline should gate (unelevated)"
+        );
         let result = session.answer_prompt(Some("yes".to_string())).await;
         assert_eq!(result.exit_code, 1);
         let stderr = String::from_utf8(result.stderr).unwrap();
@@ -3937,7 +4863,10 @@ fn http_commands_have_confirm_manifests() {
         let session = Session::new().await.unwrap();
         for name in ["curl", "wget"] {
             let m = session.registry().get(name).expect("manifest");
-            assert_eq!(m.execution_scope, crate::manifest::ExecutionScope::Subprocess);
+            assert_eq!(
+                m.execution_scope,
+                crate::manifest::ExecutionScope::Subprocess
+            );
             assert_eq!(
                 m.authorization_policy,
                 crate::manifest::AuthorizationPolicy::Confirm
@@ -3997,7 +4926,10 @@ fn effective_path_honors_the_mcp_bin_override() {
         path.contains(bin.to_str().unwrap()),
         "PATH should contain the override: {path}"
     );
-    assert!(!path.contains("/usr/lib/mcp/bin"), "default entry should be replaced: {path}");
+    assert!(
+        !path.contains("/usr/lib/mcp/bin"),
+        "default entry should be replaced: {path}"
+    );
 }
 
 /// `which` finds nothing for a name with no file-backed form, and does NOT report a phantom
@@ -4058,7 +4990,10 @@ fn type_reports_a_builtin() {
         let (out, _) = session.run_line("type ls").await;
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("ls"), "got: {out}");
-        assert!(out.contains("builtin"), "type should call ls a builtin, got: {out}");
+        assert!(
+            out.contains("builtin"),
+            "type should call ls a builtin, got: {out}"
+        );
     });
 }
 
@@ -4275,7 +5210,9 @@ fn secret_export_with_operators_is_refused() {
         assert!(stderr.contains("standalone command"), "got: {stderr}");
         // Neither half ran: the variable is unset and the `&&` tail never printed.
         assert!(String::from_utf8(result.stdout).unwrap().is_empty());
-        let echoed = session.eval_line(r#"echo "${CLANK_SECRET_NONPLAIN:-unset}""#).await;
+        let echoed = session
+            .eval_line(r#"echo "${CLANK_SECRET_NONPLAIN:-unset}""#)
+            .await;
         assert_eq!(String::from_utf8(echoed.stdout).unwrap(), "unset\n");
     });
 }
@@ -4495,7 +5432,9 @@ fn secret_value_masked_in_later_output() {
         session
             .run_line("export --secret CLANK_SECRET_OUT=sk-outmask-abc")
             .await;
-        session.run_line(r#"echo "leaked: $CLANK_SECRET_OUT""#).await;
+        session
+            .run_line(r#"echo "leaked: $CLANK_SECRET_OUT""#)
+            .await;
         let (show_out, _) = session.run_line("context show").await;
         let show_out = String::from_utf8(show_out).unwrap();
         assert!(
@@ -4571,4 +5510,3 @@ fn man_export_documents_secret() {
         );
     });
 }
-

@@ -105,7 +105,11 @@ pub(crate) fn split_http_head(line: &str) -> Option<HttpHeadPipe> {
     if downstream.is_empty() {
         return None; // `curl … |` with no consumer — not a real pipeline
     }
-    Some(HttpHeadPipe { cmd, args, downstream })
+    Some(HttpHeadPipe {
+        cmd,
+        args,
+        downstream,
+    })
 }
 
 /// The `curl` and `wget` manifests. `Subprocess` scope (they run isolated, no shell-state access),

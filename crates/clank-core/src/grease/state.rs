@@ -164,7 +164,10 @@ impl GreaseState {
             }
         }
         packages.sort_by(|a, b| a.name().cmp(b.name()));
-        Self { packages, version: 0 }
+        Self {
+            packages,
+            version: 0,
+        }
     }
 
     /// The mutation counter — see [`version`](Self::version)'s field docs. Any change to the package
@@ -309,7 +312,9 @@ impl GreaseState {
     /// Whether `cmd` is an installed MCP resource-template executable.
     #[must_use]
     pub fn is_mcp_template(&self, cmd: &str) -> bool {
-        self.mcp_packages().iter().any(|m| m.templates.iter().any(|t| t.name == cmd))
+        self.mcp_packages()
+            .iter()
+            .any(|m| m.templates.iter().any(|t| t.name == cmd))
     }
 
     /// Look up a resource entry by its `/mnt/mcp/<server>/<rel_path>` — for `mcp resource info`/`stat`.
@@ -319,7 +324,10 @@ impl GreaseState {
         server: &str,
         rel_path: &str,
     ) -> Option<&crate::grease::pkg::McpResourceCache> {
-        self.mcp(server)?.resources.iter().find(|r| r.rel_path == rel_path)
+        self.mcp(server)?
+            .resources
+            .iter()
+            .find(|r| r.rel_path == rel_path)
     }
 
     /// All installed MCP-server packages (for boot reconstruction into `McpState`).
@@ -341,8 +349,12 @@ impl GreaseState {
         let mut out = Vec::new();
         for m in self.mcp_packages() {
             for r in &m.resources {
-                let mut e =
-                    crate::runtime::mcpfs::ResourceEntry::plain(&m.name, &r.rel_path, &r.uri, r.is_static);
+                let mut e = crate::runtime::mcpfs::ResourceEntry::plain(
+                    &m.name,
+                    &r.rel_path,
+                    &r.uri,
+                    r.is_static,
+                );
                 e.last_modified.clone_from(&r.last_modified);
                 e.audience.clone_from(&r.audience);
                 e.priority = r.priority;
@@ -353,7 +365,12 @@ impl GreaseState {
             // Templates appear as stubs in `/mnt/mcp/<server>/` (README:774) — rel_path is the
             // `<server>-<name>` executable name; the URI carries the template for display.
             for t in &m.templates {
-                let mut e = crate::runtime::mcpfs::ResourceEntry::plain(&m.name, &t.name, &t.uri_template, false);
+                let mut e = crate::runtime::mcpfs::ResourceEntry::plain(
+                    &m.name,
+                    &t.name,
+                    &t.uri_template,
+                    false,
+                );
                 e.is_template = true;
                 e.description.clone_from(&t.description);
                 out.push(e);
@@ -369,8 +386,14 @@ impl GreaseState {
     pub fn manifest_for(&self, name: &str) -> Option<Manifest> {
         let pkg = self.get(name)?;
         let (synopsis, params): (String, Vec<crate::manifest::ParamSpec>) = match &pkg.payload {
-            Payload::Prompt(p) => (fallback_synopsis(name, &p.description, "prompt"), p.param_specs()),
-            Payload::Script(s) => (fallback_synopsis(name, &s.description, "script"), s.param_specs()),
+            Payload::Prompt(p) => (
+                fallback_synopsis(name, &p.description, "prompt"),
+                p.param_specs(),
+            ),
+            Payload::Script(s) => (
+                fallback_synopsis(name, &s.description, "script"),
+                s.param_specs(),
+            ),
             Payload::Agent(a) => {
                 // An agent IS a command (remote wRPC invocation → Confirm). Its input schema is the
                 // constructor params (the instance-identifying flags); method args are per-method.
@@ -404,7 +427,10 @@ impl GreaseState {
     /// per-line [`crate::runtime::dynreg`] slot. Skills contribute nothing here.
     #[must_use]
     pub fn all_manifests(&self) -> Vec<Manifest> {
-        self.packages.iter().filter_map(|p| self.manifest_for(p.name())).collect()
+        self.packages
+            .iter()
+            .filter_map(|p| self.manifest_for(p.name()))
+            .collect()
     }
 
     /// Installed prompts (and only prompts) as [`crate::ai::ask::AskTool`]s, so the model can invoke
@@ -431,8 +457,12 @@ impl GreaseState {
                         )
                     })
                     .collect();
-                let required: Vec<&str> =
-                    p.arguments.iter().filter(|a| a.required).map(|a| a.name.as_str()).collect();
+                let required: Vec<&str> = p
+                    .arguments
+                    .iter()
+                    .filter(|a| a.required)
+                    .map(|a| a.name.as_str())
+                    .collect();
                 let schema = serde_json::json!({
                     "type": "object", "properties": props, "required": required
                 });
@@ -469,7 +499,11 @@ impl GreaseState {
             let _ = write!(
                 out,
                 "\nConstructor flags (identify the instance): {}\n",
-                a.constructor_params.iter().map(|p| format!("--{p}")).collect::<Vec<_>>().join(" ")
+                a.constructor_params
+                    .iter()
+                    .map(|p| format!("--{p}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
             );
         }
         if a.methods.is_empty() {
@@ -480,7 +514,14 @@ impl GreaseState {
                 let params = if m.params.is_empty() {
                     String::new()
                 } else {
-                    format!(" ({})", m.params.iter().map(|p| format!("--{p}")).collect::<Vec<_>>().join(" "))
+                    format!(
+                        " ({})",
+                        m.params
+                            .iter()
+                            .map(|p| format!("--{p}"))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    )
                 };
                 let _ = writeln!(out, "  {} — {}{params}", m.name, m.description);
             }
@@ -506,7 +547,11 @@ impl GreaseState {
             out.push_str("\nArguments:\n");
             for a in &p.arguments {
                 let req = if a.required { " (required)" } else { "" };
-                let def = a.default.as_deref().map(|d| format!(" [default: {d}]")).unwrap_or_default();
+                let def = a
+                    .default
+                    .as_deref()
+                    .map(|d| format!(" [default: {d}]"))
+                    .unwrap_or_default();
                 let _ = writeln!(out, "  --{} — {}{req}{def}", a.name, a.description);
             }
         }
@@ -530,7 +575,11 @@ impl GreaseState {
             out.push_str("\nArguments:\n");
             for a in &s.arguments {
                 let req = if a.required { " (required)" } else { "" };
-                let def = a.default.as_deref().map(|d| format!(" [default: {d}]")).unwrap_or_default();
+                let def = a
+                    .default
+                    .as_deref()
+                    .map(|d| format!(" [default: {d}]"))
+                    .unwrap_or_default();
                 let _ = writeln!(out, "  --{} — {}{req}{def}", a.name, a.description);
             }
         }
@@ -558,8 +607,15 @@ fn fallback_synopsis(name: &str, description: &str, kind: &str) -> String {
 /// The integrity note used in help text: the sha256 status, the signer (when signed), and the
 /// transparency-log leaf index (when log-audited).
 fn integrity_note(marker: &InstallMarker) -> String {
-    let status = if marker.verified { "verified" } else { "unverified" };
-    let sha = format!("sha256 {} ({status})", &marker.sha256[..marker.sha256.len().min(12)]);
+    let status = if marker.verified {
+        "verified"
+    } else {
+        "unverified"
+    };
+    let sha = format!(
+        "sha256 {} ({status})",
+        &marker.sha256[..marker.sha256.len().min(12)]
+    );
     let mut out = if marker.signature_verified {
         let signer = marker.signer.as_deref().unwrap_or("registry key");
         format!("{sha}, signed by {signer}")
@@ -582,8 +638,9 @@ fn integrity_note(marker: &InstallMarker) -> String {
 fn load_one(name: &str) -> Option<InstalledPackage> {
     let marker_path = crate::grease::config::etc_dir().join(format!("{name}.toml"));
     let marker: InstallMarker = toml::from_str(&std::fs::read_to_string(marker_path).ok()?).ok()?;
-    let payload_path =
-        crate::grease::config::store_dir().join(name).join(marker.kind.payload_file());
+    let payload_path = crate::grease::config::store_dir()
+        .join(name)
+        .join(marker.kind.payload_file());
     let bytes = std::fs::read(payload_path).ok()?;
     let payload = match marker.kind {
         PackageKind::Prompt => Payload::Prompt(PromptPackage::from_json(&bytes).ok()?),

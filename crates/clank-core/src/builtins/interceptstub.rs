@@ -104,7 +104,10 @@ pub(crate) fn builtins<SE: ShellExtensions>() -> Vec<(String, Registration<SE>)>
         ("ask".into(), simple_builtin_with_help::<AskStub, SE>()),
         ("kill".into(), simple_builtin_with_help::<KillStub, SE>()),
         ("mcp".into(), simple_builtin_with_help::<McpStub, SE>()),
-        ("grease".into(), simple_builtin_with_help::<GreaseStub, SE>()),
+        (
+            "grease".into(),
+            simple_builtin_with_help::<GreaseStub, SE>(),
+        ),
         ("golem".into(), simple_builtin_with_help::<GolemStub, SE>()),
     ]
 }

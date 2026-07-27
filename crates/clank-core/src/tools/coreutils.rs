@@ -80,7 +80,9 @@ struct ShellCwd;
 impl ShellCwd {
     fn enter<SE: ShellExtensions>(context: &ExecutionContext<'_, SE>) -> Self {
         // Poisoning is harmless — the state is two plain fields — so recover the guard either way.
-        let mut state = CWD_STATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = CWD_STATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let target = context.shell.working_dir();
         let current = std::env::current_dir().ok();
 
@@ -104,7 +106,9 @@ impl ShellCwd {
 
 impl Drop for ShellCwd {
     fn drop(&mut self) {
-        let mut state = CWD_STATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = CWD_STATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.depth -= 1;
         // Last one out returns the process, so a still-running stage never has it moved underneath it.
         if state.depth == 0 {
@@ -218,7 +222,9 @@ pub(crate) fn run_uu<SE: ShellExtensions>(
 
     // Serialize the process-global fd swap (see `FD_SWAP_LOCK`). Poisoning is harmless here — the
     // guarded region restores fds even on panic paths — so recover the guard either way.
-    let _fd_guard = FD_SWAP_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _fd_guard = FD_SWAP_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
     // Relative operands (`cat f`, `ls`, `touch f`) resolve against the shell's `cd`, not the process's
     // directory. See `ShellCwd`.
@@ -421,7 +427,9 @@ fn effective_stdin<SE: ShellExtensions>(
 ) -> Box<dyn std::io::Read> {
     use brush_core::openfiles::{OpenFile, OpenFiles};
     match context.try_fd(OpenFiles::STDIN_FD) {
-        Some(f @ (OpenFile::File(_) | OpenFile::PipeReader(_) | OpenFile::Stream(_))) => Box::new(f),
+        Some(f @ (OpenFile::File(_) | OpenFile::PipeReader(_) | OpenFile::Stream(_))) => {
+            Box::new(f)
+        }
         _ => Box::new(std::io::empty()),
     }
 }
@@ -476,9 +484,9 @@ fn uu_get_content(name: &str, synopsis: &str, content_type: ContentType) -> Resu
     match content_type {
         ContentType::ShortDescription => Ok(format!("{name} - {synopsis}\n")),
         ContentType::ShortUsage => Ok(format!("{name}: {name} [args...]\n")),
-        ContentType::DetailedHelp => {
-            Ok(format!("{name} - {synopsis}\n\n(uutils coreutils builtin)\n"))
-        }
+        ContentType::DetailedHelp => Ok(format!(
+            "{name} - {synopsis}\n\n(uutils coreutils builtin)\n"
+        )),
         ContentType::ManPage => brush_core::error::unimp("man page not yet implemented"),
     }
 }
@@ -531,7 +539,12 @@ macro_rules! uu_builtin {
 // namespace: `/proc` operands are resolved from the process table and written to stdout, while any
 // real path is delegated to the uutils `uumain` unchanged. See `Cat`/`Ls` below.
 uu_builtin!(Wc, "wc", "count lines, words, and bytes", uu_wc::uumain);
-uu_builtin!(Head, "head", "print the first lines of a file", uu_head::uumain);
+uu_builtin!(
+    Head,
+    "head",
+    "print the first lines of a file",
+    uu_head::uumain
+);
 uu_builtin!(Sort, "sort", "sort lines of text", uu_sort::uumain);
 uu_builtin!(Rm, "rm", "remove files and directories", uu_rm::uumain);
 uu_builtin!(Mv, "mv", "move or rename files", uu_mv::uumain);
@@ -545,10 +558,25 @@ uu_builtin!(Mkdir, "mkdir", "create directories", uu_mkdir::uumain);
 // through `env` (and, worse, `env | grep …` in a pipeline). See `Env` below.
 uu_builtin!(Cut, "cut", "select fields from each line", uu_cut::uumain);
 uu_builtin!(Tr, "tr", "translate or delete characters", uu_tr::uumain);
-uu_builtin!(Uniq, "uniq", "report or omit repeated lines", uu_uniq::uumain);
-uu_builtin!(Tail, "tail", "print the last lines of a file", uu_tail::uumain);
+uu_builtin!(
+    Uniq,
+    "uniq",
+    "report or omit repeated lines",
+    uu_uniq::uumain
+);
+uu_builtin!(
+    Tail,
+    "tail",
+    "print the last lines of a file",
+    uu_tail::uumain
+);
 uu_builtin!(Tee, "tee", "copy stdin to stdout and files", uu_tee::uumain);
-uu_builtin!(Touch, "touch", "create files or update timestamps", uu_touch::uumain);
+uu_builtin!(
+    Touch,
+    "touch",
+    "create files or update timestamps",
+    uu_touch::uumain
+);
 uu_builtin!(Sleep, "sleep", "pause for a duration", uu_sleep::uumain);
 // printf shadows Brush's builtin (registered after `default_builtins`; last write wins). Brush's
 // printf is gated to `any(unix, windows)` upstream, so without this the wasm agent has no printf
@@ -580,9 +608,7 @@ thread_local! {
 /// output exactly like GNU `ls`. The only imprecision is harmless under-triggering (e.g. `ls $(pwd)`,
 /// `foo; ls`, or a quoted operator like `ls "a(b)"` stay one-per-line). Bare `$VAR` is allowed.
 pub(crate) fn note_simple_line(line: &str) {
-    let simple = !line.contains(|c: char| {
-        matches!(c, '|' | '<' | '>' | ';' | '&' | '(' | ')' | '`' | '\n')
-    });
+    let simple = !line.contains(['|', '<', '>', ';', '&', '(', ')', '`', '\n']);
     SIMPLE_LINE.with(|s| s.set(simple));
 }
 
@@ -683,7 +709,10 @@ impl SimpleCommand for Cat {
     }
 
     #[allow(clippy::cast_sign_loss)] // code is clamped to 0..=255 before the u8 cast
-    fn execute<SE, I, S>(context: ExecutionContext<'_, SE>, args: I) -> Result<ExecutionResult, Error>
+    fn execute<SE, I, S>(
+        context: ExecutionContext<'_, SE>,
+        args: I,
+    ) -> Result<ExecutionResult, Error>
     where
         SE: ShellExtensions,
         I: Iterator<Item = S>,
@@ -721,9 +750,13 @@ impl SimpleCommand for Cat {
                     had_error = true;
                 }
             } else if crate::runtime::procfs::is_proc_path(op) {
-                let resolved = table
-                    .as_ref()
-                    .map(|t| crate::runtime::procfs::resolve(op, &t.lock().unwrap_or_else(std::sync::PoisonError::into_inner), &environ));
+                let resolved = table.as_ref().map(|t| {
+                    crate::runtime::procfs::resolve(
+                        op,
+                        &t.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+                        &environ,
+                    )
+                });
                 if let Some(Ok(content)) = resolved {
                     let _ = out.write_all(content.as_bytes());
                 } else {
@@ -732,7 +765,10 @@ impl SimpleCommand for Cat {
                 }
             } else {
                 // A real path in a mixed invocation: delegate just this operand to uutils.
-                let one = [std::ffi::OsString::from("cat"), std::ffi::OsString::from(op)];
+                let one = [
+                    std::ffi::OsString::from("cat"),
+                    std::ffi::OsString::from(op),
+                ];
                 let code = run_uu(&context, move || uu_cat::uumain(one.into_iter()));
                 if code != 0 {
                     had_error = true;
@@ -767,7 +803,10 @@ impl SimpleCommand for Env {
     }
 
     #[allow(clippy::cast_sign_loss)] // code is clamped to 0..=255 before the u8 cast
-    fn execute<SE, I, S>(context: ExecutionContext<'_, SE>, args: I) -> Result<ExecutionResult, Error>
+    fn execute<SE, I, S>(
+        context: ExecutionContext<'_, SE>,
+        args: I,
+    ) -> Result<ExecutionResult, Error>
     where
         SE: ShellExtensions,
         I: Iterator<Item = S>,
@@ -781,10 +820,7 @@ impl SimpleCommand for Env {
         // (with or without `-i`/`-u`/`-0`) is served here so the secret filter always applies; there
         // is no child to inherit anything, so uu_env's env-manipulation flags reduce to display rules
         // we can honor directly.
-        let has_command = argv
-            .iter()
-            .skip(1)
-            .any(|a| !is_flag(a) && !a.contains('='));
+        let has_command = argv.iter().skip(1).any(|a| !is_flag(a) && !a.contains('='));
         if has_command {
             let os_argv = argv.iter().map(std::ffi::OsString::from);
             let code = run_uu(&context, move || uu_env::uumain(os_argv));
@@ -821,7 +857,9 @@ impl SimpleCommand for Env {
         let mut env: std::collections::BTreeMap<String, String> = if ignore_env {
             std::collections::BTreeMap::new()
         } else {
-            crate::runtime::procfs::current_environ().into_iter().collect()
+            crate::runtime::procfs::current_environ()
+                .into_iter()
+                .collect()
         };
         for name in &unset {
             env.remove(name);
@@ -862,7 +900,10 @@ impl SimpleCommand for Ls {
     }
 
     #[allow(clippy::cast_sign_loss, clippy::similar_names)] // code clamped to 0..=255 before the u8 cast; bin_operand/mcp_operand/proc_operand share the _operand suffix
-    fn execute<SE, I, S>(context: ExecutionContext<'_, SE>, args: I) -> Result<ExecutionResult, Error>
+    fn execute<SE, I, S>(
+        context: ExecutionContext<'_, SE>,
+        args: I,
+    ) -> Result<ExecutionResult, Error>
     where
         SE: ShellExtensions,
         I: Iterator<Item = S>,
@@ -1080,7 +1121,10 @@ mod tests {
             assert!(is_ls_layout_flag(f), "{f} should count as a layout flag");
         }
         for f in ["-a", "-A", "-h", "-R", "--all", "--", "-"] {
-            assert!(!is_ls_layout_flag(f), "{f} should NOT count as a layout flag");
+            assert!(
+                !is_ls_layout_flag(f),
+                "{f} should NOT count as a layout flag"
+            );
         }
     }
 

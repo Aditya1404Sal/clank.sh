@@ -14,7 +14,7 @@
 
 use serde_json::{json, Value};
 
-use crate::ai::ask::{AskResponse, AskProvider, AskTool, AskToolCall, AskTurn};
+use crate::ai::ask::{AskProvider, AskResponse, AskTool, AskToolCall, AskTurn};
 
 /// The Anthropic Messages API endpoint.
 const MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -72,7 +72,9 @@ fn resolve_api_key() -> Option<String> {
             }
         }
     }
-    std::env::var("ANTHROPIC_API_KEY").ok().filter(|k| !k.is_empty())
+    std::env::var("ANTHROPIC_API_KEY")
+        .ok()
+        .filter(|k| !k.is_empty())
 }
 
 #[async_trait::async_trait(?Send)]
@@ -111,7 +113,9 @@ impl AskProvider for ReqwestAnthropicProvider {
         let status = response.status();
         let text = match response.text().await {
             Ok(t) => t,
-            Err(e) => return AskResponse::error(format!("ask: reading model response failed: {e}\n")),
+            Err(e) => {
+                return AskResponse::error(format!("ask: reading model response failed: {e}\n"))
+            }
         };
 
         if !status.is_success() {
@@ -137,7 +141,12 @@ impl AskProvider for ReqwestAnthropicProvider {
 /// Build the Anthropic `/v1/messages` request body from the neutral turn inputs. Mirrors the durable
 /// provider's request assembly (system as a top-level field, `max_tokens`, tools, and the message
 /// list from the history).
-fn build_request(system: Option<&str>, history: &[AskTurn], tools: &[AskTool], model: &str) -> Value {
+fn build_request(
+    system: Option<&str>,
+    history: &[AskTurn],
+    tools: &[AskTool],
+    model: &str,
+) -> Value {
     let mut body = json!({
         "model": model,
         "max_tokens": MAX_TOKENS,
@@ -233,7 +242,8 @@ fn parse_response(v: &Value) -> AskResponse {
                         // Re-serialize the parsed input object back to a JSON string (the neutral
                         // type carries arguments as a string).
                         arguments_json: block
-                            .get("input").map_or_else(|| "{}".to_string(), std::string::ToString::to_string),
+                            .get("input")
+                            .map_or_else(|| "{}".to_string(), std::string::ToString::to_string),
                     });
                 }
                 _ => {}
@@ -411,10 +421,17 @@ mod tests {
     async fn turn_end_to_end_phases() {
         // Phase 1: a text reply round-trips through reqwest against a mock server.
         std::env::set_var("ANTHROPIC_API_KEY", "sk-test-dummy");
-        let url = mock_anthropic(r#"{"content":[{"type":"text","text":"pong"}],"stop_reason":"end_turn"}"#);
+        let url = mock_anthropic(
+            r#"{"content":[{"type":"text","text":"pong"}],"stop_reason":"end_turn"}"#,
+        );
         let provider = ReqwestAnthropicProvider::with_endpoint(url);
         let resp = provider
-            .turn(Some("sys"), &[AskTurn::User("ping".into())], &[], "claude-haiku-4-5")
+            .turn(
+                Some("sys"),
+                &[AskTurn::User("ping".into())],
+                &[],
+                "claude-haiku-4-5",
+            )
             .await;
         assert_eq!(resp.text, "pong", "err: {:?}", resp.error);
         assert!(resp.error.is_none());
@@ -444,7 +461,9 @@ mod tests {
         let prev_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", &tmp);
         let provider = ReqwestAnthropicProvider::with_endpoint("http://127.0.0.1:1/v1/messages");
-        let resp = provider.turn(None, &[AskTurn::User("hi".into())], &[], "m").await;
+        let resp = provider
+            .turn(None, &[AskTurn::User("hi".into())], &[], "m")
+            .await;
         match prev_home {
             Some(h) => std::env::set_var("HOME", h),
             None => std::env::remove_var("HOME"),

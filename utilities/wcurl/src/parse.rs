@@ -135,7 +135,10 @@ pub(crate) fn parse(args: &[String]) -> Result<Request, ParseError> {
 
     let mut iter = expanded.into_iter();
     while let Some(arg) = iter.next() {
-        let mut next = |flag: &str| iter.next().ok_or_else(|| ParseError::MissingValue(flag.into()));
+        let mut next = |flag: &str| {
+            iter.next()
+                .ok_or_else(|| ParseError::MissingValue(flag.into()))
+        };
         match arg.as_str() {
             "-o" | "--output" => output = Some(next("-o")?),
             "-s" | "--silent" => silent = true,
@@ -167,7 +170,10 @@ pub(crate) fn parse(args: &[String]) -> Result<Request, ParseError> {
             "-e" | "--referer" => headers.push(("Referer".to_string(), next("-e")?)),
             "-u" | "--user" => {
                 let cred = next("-u")?;
-                headers.push(("Authorization".to_string(), format!("Basic {}", base64(cred.as_bytes()))));
+                headers.push((
+                    "Authorization".to_string(),
+                    format!("Basic {}", base64(cred.as_bytes())),
+                ));
             }
             "-m" | "--max-time" => max_time = Some(parse_secs(&next("-m")?)?),
             "--connect-timeout" => connect_timeout = Some(parse_secs(&next("--connect-timeout")?)?),
@@ -226,7 +232,9 @@ fn resolve_data(value: &str, raw: bool) -> Result<Vec<u8>, ParseError> {
     if !raw {
         if let Some(path) = value.strip_prefix('@') {
             if path == "-" {
-                return Err(ParseError::BadData("-d @-: stdin is not available here".into()));
+                return Err(ParseError::BadData(
+                    "-d @-: stdin is not available here".into(),
+                ));
             }
             return std::fs::read(path)
                 .map_err(|e| ParseError::BadData(format!("cannot read {path}: {e}")));
@@ -244,7 +252,9 @@ fn ensure_header(headers: &mut Vec<(String, String)>, name: &str, value: &str) {
 
 /// Parse a seconds value (curl accepts fractional seconds).
 fn parse_secs(value: &str) -> Result<f64, ParseError> {
-    value.parse::<f64>().map_err(|_| ParseError::BadNumber(value.to_string()))
+    value
+        .parse::<f64>()
+        .map_err(|_| ParseError::BadNumber(value.to_string()))
 }
 
 /// Split a `-H "Key: Value"` argument into `(key, value)`, trimming whitespace. No colon → an
@@ -268,8 +278,16 @@ fn base64(input: &[u8]) -> String {
         let n = u32::from(b0) << 16 | u32::from(b1) << 8 | u32::from(b2);
         out.push(T[(n >> 18 & 63) as usize] as char);
         out.push(T[(n >> 12 & 63) as usize] as char);
-        out.push(if chunk.len() > 1 { T[(n >> 6 & 63) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { T[(n & 63) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            T[(n >> 6 & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[(n & 63) as usize] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -335,27 +353,56 @@ mod tests {
     fn json_sets_content_headers_and_posts() {
         let r = parse(&argv(&["--json", r#"{"a":1}"#, "https://example.com"])).unwrap();
         assert_eq!(r.method, Method::POST);
-        assert!(r.headers.iter().any(|(k, v)| k == "Content-Type" && v == "application/json"));
-        assert!(r.headers.iter().any(|(k, v)| k == "Accept" && v == "application/json"));
+        assert!(r
+            .headers
+            .iter()
+            .any(|(k, v)| k == "Content-Type" && v == "application/json"));
+        assert!(r
+            .headers
+            .iter()
+            .any(|(k, v)| k == "Accept" && v == "application/json"));
     }
 
     #[test]
     fn basic_auth_encodes_credentials() {
         let r = parse(&argv(&["-u", "user:pass", "https://example.com"])).unwrap();
         // base64("user:pass") == "dXNlcjpwYXNz"
-        assert!(r.headers.iter().any(|(k, v)| k == "Authorization" && v == "Basic dXNlcjpwYXNz"));
+        assert!(r
+            .headers
+            .iter()
+            .any(|(k, v)| k == "Authorization" && v == "Basic dXNlcjpwYXNz"));
     }
 
     #[test]
     fn user_agent_and_referer_become_headers() {
-        let r = parse(&argv(&["-A", "clank/1", "-e", "https://ref", "https://example.com"])).unwrap();
-        assert!(r.headers.iter().any(|(k, v)| k == "User-Agent" && v == "clank/1"));
-        assert!(r.headers.iter().any(|(k, v)| k == "Referer" && v == "https://ref"));
+        let r = parse(&argv(&[
+            "-A",
+            "clank/1",
+            "-e",
+            "https://ref",
+            "https://example.com",
+        ]))
+        .unwrap();
+        assert!(r
+            .headers
+            .iter()
+            .any(|(k, v)| k == "User-Agent" && v == "clank/1"));
+        assert!(r
+            .headers
+            .iter()
+            .any(|(k, v)| k == "Referer" && v == "https://ref"));
     }
 
     #[test]
     fn timeouts_parse_as_seconds() {
-        let r = parse(&argv(&["-m", "2.5", "--connect-timeout", "1", "https://example.com"])).unwrap();
+        let r = parse(&argv(&[
+            "-m",
+            "2.5",
+            "--connect-timeout",
+            "1",
+            "https://example.com",
+        ]))
+        .unwrap();
         assert_eq!(r.max_time, Some(2.5));
         assert_eq!(r.connect_timeout, Some(1.0));
     }
@@ -385,7 +432,13 @@ mod tests {
 
     #[test]
     fn write_out_and_url_flags() {
-        let r = parse(&argv(&["-w", "%{http_code}", "--url", "https://example.com"])).unwrap();
+        let r = parse(&argv(&[
+            "-w",
+            "%{http_code}",
+            "--url",
+            "https://example.com",
+        ]))
+        .unwrap();
         assert_eq!(r.write_out.as_deref(), Some("%{http_code}"));
         assert_eq!(r.url, "https://example.com");
     }

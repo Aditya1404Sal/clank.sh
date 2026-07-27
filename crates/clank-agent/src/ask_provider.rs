@@ -24,11 +24,11 @@
 //! `clank-core`.
 
 use clank_core::ai::ask::{AskProvider, AskResponse, AskTool, AskToolCall, AskTurn};
+use golem_ai_llm::LlmProvider;
 use golem_ai_llm::model::{
     Config, ContentPart, Error, Event, FinishReason, Message, Response, ResponseMetadata, Role,
     ToolCall, ToolDefinition, ToolFailure, ToolResult, ToolSuccess,
 };
-use golem_ai_llm::LlmProvider;
 use golem_ai_llm_anthropic::{AnthropicConfig, DurableAnthropic};
 use golem_ai_llm_bedrock::{BedrockConfig, DurableBedrock};
 use golem_ai_llm_grok::{DurableGrok, GrokConfig};
@@ -121,7 +121,13 @@ impl AskProvider for DurableLlmProvider {
             "ollama" => send_with!(OllamaConfig, DurableOllama, provider, events, config),
             "grok" => send_with!(GrokConfig, DurableGrok, provider, events, config),
             "openrouter" => {
-                send_with!(OpenRouterConfig, DurableOpenRouter, provider, events, config)
+                send_with!(
+                    OpenRouterConfig,
+                    DurableOpenRouter,
+                    provider,
+                    events,
+                    config
+                )
             }
             "bedrock" => send_with!(BedrockConfig, DurableBedrock, provider, events, config),
             other => {
@@ -140,8 +146,10 @@ impl AskProvider for DurableLlmProvider {
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                let finished_for_tools =
-                    matches!(response.metadata.finish_reason, Some(FinishReason::ToolCalls));
+                let finished_for_tools = matches!(
+                    response.metadata.finish_reason,
+                    Some(FinishReason::ToolCalls)
+                );
                 AskResponse {
                     text,
                     tool_calls: response.tool_calls.iter().map(from_tool_call).collect(),

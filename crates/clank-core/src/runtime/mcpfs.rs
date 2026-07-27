@@ -98,7 +98,10 @@ pub fn is_mcp_path(path: &str) -> bool {
 /// children; a resource file is static or dynamic; anything else is `NotFound`.
 #[must_use]
 pub fn classify(path: &str, index: &[ResourceEntry]) -> McpPathKind {
-    let rel = path.trim_start_matches(MCP_ROOT).trim_start_matches('/').trim_end_matches('/');
+    let rel = path
+        .trim_start_matches(MCP_ROOT)
+        .trim_start_matches('/')
+        .trim_end_matches('/');
 
     // The root: list the distinct server names.
     if rel.is_empty() {
@@ -127,12 +130,19 @@ pub fn classify(path: &str, index: &[ResourceEntry]) -> McpPathKind {
         } else if entry.is_static {
             McpPathKind::Static
         } else {
-            McpPathKind::Dynamic { server, uri: entry.uri.clone() }
+            McpPathKind::Dynamic {
+                server,
+                uri: entry.uri.clone(),
+            }
         };
     }
 
     // Otherwise a directory: list the immediate children of `subpath` (or the server root).
-    let prefix = if subpath.is_empty() { String::new() } else { format!("{subpath}/") };
+    let prefix = if subpath.is_empty() {
+        String::new()
+    } else {
+        format!("{subpath}/")
+    };
     let mut children: Vec<String> = Vec::new();
     for e in &under_server {
         if let Some(rest) = e.rel_path.strip_prefix(&prefix) {
@@ -192,7 +202,12 @@ mod tests {
     fn idx() -> Vec<ResourceEntry> {
         vec![
             ResourceEntry::plain("github", "repo/README.md", "file:///repo/README.md", true),
-            ResourceEntry::plain("metrics", "current/cpu-usage", "metrics://current/cpu-usage", false),
+            ResourceEntry::plain(
+                "metrics",
+                "current/cpu-usage",
+                "metrics://current/cpu-usage",
+                false,
+            ),
         ]
     }
 
@@ -206,7 +221,10 @@ mod tests {
 
     #[test]
     fn server_and_subdir_listings() {
-        assert_eq!(classify("/mnt/mcp/github", &idx()), McpPathKind::Directory(vec!["repo".into()]));
+        assert_eq!(
+            classify("/mnt/mcp/github", &idx()),
+            McpPathKind::Directory(vec!["repo".into()])
+        );
         assert_eq!(
             classify("/mnt/mcp/github/repo", &idx()),
             McpPathKind::Directory(vec!["README.md".into()])
@@ -215,7 +233,10 @@ mod tests {
 
     #[test]
     fn static_and_dynamic_files() {
-        assert_eq!(classify("/mnt/mcp/github/repo/README.md", &idx()), McpPathKind::Static);
+        assert_eq!(
+            classify("/mnt/mcp/github/repo/README.md", &idx()),
+            McpPathKind::Static
+        );
         assert_eq!(
             classify("/mnt/mcp/metrics/current/cpu-usage", &idx()),
             McpPathKind::Dynamic {
@@ -228,7 +249,12 @@ mod tests {
     #[test]
     fn template_stubs_classify_as_template_and_list() {
         let mut index = idx();
-        let mut t = ResourceEntry::plain("github", "github-file-lookup", "github://repo/{path}", false);
+        let mut t = ResourceEntry::plain(
+            "github",
+            "github-file-lookup",
+            "github://repo/{path}",
+            false,
+        );
         t.is_template = true;
         index.push(t);
         // The template appears in the server dir listing (README:774) …
@@ -237,13 +263,19 @@ mod tests {
             McpPathKind::Directory(vec!["github-file-lookup".into(), "repo".into()])
         );
         // … and classifies as a Template stub (an executable, not a readable file).
-        assert_eq!(classify("/mnt/mcp/github/github-file-lookup", &index), McpPathKind::Template);
+        assert_eq!(
+            classify("/mnt/mcp/github/github-file-lookup", &index),
+            McpPathKind::Template
+        );
     }
 
     #[test]
     fn unknown_paths() {
         assert_eq!(classify("/mnt/mcp/nope", &idx()), McpPathKind::NotFound);
-        assert_eq!(classify("/mnt/mcp/github/missing.txt", &idx()), McpPathKind::NotFound);
+        assert_eq!(
+            classify("/mnt/mcp/github/missing.txt", &idx()),
+            McpPathKind::NotFound
+        );
     }
 
     #[test]
