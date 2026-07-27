@@ -241,12 +241,24 @@ pub fn bound_tail(buf: &mut String, max_bytes: usize) {
     }
     let cut = buf.len() - max_bytes;
     // Advance to just past the next newline so the retained tail starts on a line boundary.
-    let start = buf[cut..].find('\n').map_or(0, |i| cut + i + 1);
+    //
+    // Scan RAW BYTES rather than slicing `buf[cut..]`: `cut` is an arbitrary byte offset, so a
+    // multi-byte codepoint straddling it makes `str` indexing panic — and this runs on the durable
+    // agent (the only caller is the agent's log sink), where a panic traps the instance. Every
+    // command line reaches this buffer verbatim via shell.log, so a single non-ASCII character
+    // landing on the cut offset was enough to wedge the worker. Byte scanning is safe and gives the
+    // same answer: `\n` is ASCII, so it can never be a UTF-8 continuation byte, and any index
+    // derived from one is therefore a char boundary.
+    let start = buf.as_bytes()[cut..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(0, |i| cut + i + 1);
     // If the only newline is the very last byte (start == buf.len()), keep the last line rather than
     // emptying the buffer.
     let start = if start >= buf.len() {
-        buf[..buf.len().saturating_sub(1)]
-            .rfind('\n')
+        buf.as_bytes()[..buf.len() - 1]
+            .iter()
+            .rposition(|&b| b == b'\n')
             .map_or(0, |i| i + 1)
     } else {
         start
@@ -415,6 +427,38 @@ mod tests {
         s.push('\n');
         bound_tail(&mut s, 10);
         assert_eq!(s, format!("{}\n", "x".repeat(100)));
+    }
+
+    #[test]
+    fn bound_tail_survives_a_multibyte_char_on_the_cut_offset() {
+        // Regression: `cut` is a raw byte offset, so slicing `buf[cut..]` panicked whenever a
+        // multi-byte codepoint straddled it. The only caller is the durable agent's log sink, where
+        // a panic traps the instance — and every command line reaches that buffer verbatim through
+        // shell.log, so one non-ASCII character landing on the cut was enough to wedge the worker.
+        //
+        // 'é' occupies bytes 4..6; the cap is chosen so `cut` lands on its continuation byte.
+        let mut s = format!("aaaa\u{e9}{}", "b".repeat(10));
+        assert_eq!(s.len(), 16, "byte layout the cap below depends on");
+        // cut == 16 - 11 == 5, which is mid-'é'. No newline anywhere, so the lone oversized line is
+        // kept intact — the point is that getting there no longer panics.
+        bound_tail(&mut s, 11);
+        assert_eq!(s, format!("aaaa\u{e9}{}", "b".repeat(10)));
+
+        // With newlines present the tail is still trimmed to whole lines and stays valid UTF-8.
+        let mut s = String::new();
+        for i in 0..50 {
+            let _ = writeln!(s, "l{i}-\u{2014}-\u{e9}");
+        }
+        bound_tail(&mut s, 30);
+        assert!(s.len() <= 30, "tail must be under the cap, got {}", s.len());
+        assert!(
+            s.starts_with('l'),
+            "tail starts on a line boundary, got {s:?}"
+        );
+        assert!(
+            s.ends_with("l49-\u{2014}-\u{e9}\n"),
+            "the newest line survives, got {s:?}"
+        );
     }
 
     #[test]

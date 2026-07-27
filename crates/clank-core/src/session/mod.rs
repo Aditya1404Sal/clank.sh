@@ -1762,7 +1762,7 @@ impl InstallIntegrity {
         };
         let mut s = format!(
             "sha256 {} — {status}",
-            &self.sha256[..self.sha256.len().min(12)]
+            crate::grease::state::sha_prefix(&self.sha256)
         );
         if self.signature_verified {
             s.push_str(", signed");

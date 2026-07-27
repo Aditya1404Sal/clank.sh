@@ -606,16 +606,24 @@ fn fallback_synopsis(name: &str, description: &str, kind: &str) -> String {
 
 /// The integrity note used in help text: the sha256 status, the signer (when signed), and the
 /// transparency-log leaf index (when log-audited).
+/// The short display form of a package digest: the first 12 **characters**, not bytes.
+///
+/// Deliberately char-based. The digest is read back from a `<etc>/<name>.toml` marker — a file the
+/// shell itself can write — so it is not guaranteed to be ASCII hex. Byte-slicing it panicked on a
+/// multi-byte codepoint, and on the durable agent a panic traps the instance (Golem then retries the
+/// deterministic trap and parks the worker in `Failed`). For a well-formed digest this is identical
+/// to the old `&sha[..12]`.
+pub(crate) fn sha_prefix(sha: &str) -> String {
+    sha.chars().take(12).collect()
+}
+
 fn integrity_note(marker: &InstallMarker) -> String {
     let status = if marker.verified {
         "verified"
     } else {
         "unverified"
     };
-    let sha = format!(
-        "sha256 {} ({status})",
-        &marker.sha256[..marker.sha256.len().min(12)]
-    );
+    let sha = format!("sha256 {} ({status})", sha_prefix(&marker.sha256));
     let mut out = if marker.signature_verified {
         let signer = marker.signer.as_deref().unwrap_or("registry key");
         format!("{sha}, signed by {signer}")

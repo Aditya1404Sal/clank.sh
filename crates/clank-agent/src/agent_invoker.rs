@@ -14,18 +14,29 @@
 //! The invocation is **await mode**: `invoke-and-await` blocks (under the Golem reactor) until the
 //! remote agent returns, and the result `DataValue` is rendered to text.
 
-use clank_core::golem::agent::{AgentInvocation, AgentInvoker, InvokeHandle, InvokeMode};
+use clank_core::golem::agent::{
+    AgentInvocation, AgentInvoker, InvokeHandle, InvokeMode, parse_epoch_secs,
+};
 use golem_rust::agentic::Schema;
 use golem_rust::golem_agentic::golem::agent::common::DataValue;
 use golem_rust::golem_agentic::golem::agent::host::WasmRpc;
 
 /// Encode CLI string args (in order) as a `DataValue::Tuple` of string `ComponentModel` elements.
-fn encode_args(args: &[(String, String)]) -> DataValue {
-    let elements = args
-        .iter()
-        .filter_map(|(_name, value)| value.clone().to_element_value().ok())
-        .collect();
-    DataValue::Tuple(elements)
+///
+/// Fails loudly on an element that won't encode. This used to `filter_map(..ok())`, silently dropping
+/// it — which changed the tuple's ARITY after `order_agent_params` had already validated it, and a
+/// wrong-arity wRPC call is a fatal host trap that wedges the durable instance (see the note in
+/// `clank_core::session::agent`). Losing an argument is never the better outcome.
+fn encode_args(args: &[(String, String)]) -> Result<DataValue, String> {
+    let mut elements = Vec::with_capacity(args.len());
+    for (name, value) in args {
+        let encoded = value
+            .clone()
+            .to_element_value()
+            .map_err(|e| format!("cannot encode argument '{name}': {e:?}"))?;
+        elements.push(encoded);
+    }
+    Ok(DataValue::Tuple(elements))
 }
 
 /// Parse a `--phantom <uuid>` string into the WIT `uuid` (two u64 halves, `golem:core/types`).
@@ -50,9 +61,14 @@ fn parse_phantom(
 }
 
 /// Build the `WasmRpc` client for an invocation (agent type + constructor tuple + optional phantom).
-fn build_client(inv: &AgentInvocation) -> WasmRpc {
-    let ctor = encode_args(&inv.constructor);
-    WasmRpc::new(&inv.agent_type, &ctor, parse_phantom(&inv.phantom), &[])
+fn build_client(inv: &AgentInvocation) -> Result<WasmRpc, String> {
+    let ctor = encode_args(&inv.constructor)?;
+    Ok(WasmRpc::new(
+        &inv.agent_type,
+        &ctor,
+        parse_phantom(&inv.phantom),
+        &[],
+    ))
 }
 
 /// Render a returned `DataValue` to a display string (best-effort). A single string element renders as
@@ -78,8 +94,8 @@ impl AgentInvoker for WasmRpcInvoker {
     async fn invoke(&self, inv: &AgentInvocation) -> Result<String, String> {
         // Build the RPC client for the target agent type (the runtime upserts: finds-or-creates the
         // agent — README:803), then await the method result.
-        let client = build_client(inv);
-        let input = encode_args(&inv.args);
+        let client = build_client(inv)?;
+        let input = encode_args(&inv.args)?;
         match client.invoke_and_await(&inv.method, &input) {
             Ok(result) => Ok(render_result(result)),
             Err(e) => Err(format!("agent invocation failed: {e:?}")),
@@ -87,8 +103,8 @@ impl AgentInvoker for WasmRpcInvoker {
     }
 
     async fn invoke_async(&self, inv: &AgentInvocation) -> Result<InvokeHandle, String> {
-        let client = build_client(inv);
-        let input = encode_args(&inv.args);
+        let client = build_client(inv)?;
+        let input = encode_args(&inv.args)?;
         match &inv.mode {
             InvokeMode::Trigger => {
                 // Fire-and-forget: `invoke` returns immediately. No cancel token (a queued invocation
@@ -133,32 +149,5 @@ impl AgentInvoker for WasmRpcInvoker {
     }
 }
 
-/// Parse an ISO-8601 / RFC-3339 timestamp (e.g. `2026-06-01T09:00:00Z`) to Unix epoch seconds. A small
-/// dependency-free parser (clank-agent has no chrono): handles `YYYY-MM-DDThh:mm:ss[Z]`, UTC only.
-// the only cast (`secs as u64`) is guarded by the `secs < 0` check immediately above it
-#[allow(clippy::cast_sign_loss)]
-fn parse_epoch_secs(s: &str) -> Result<u64, String> {
-    let err = || format!("invalid --schedule time '{s}' (expected YYYY-MM-DDThh:mm:ssZ)");
-    let s = s.trim().trim_end_matches('Z');
-    let (date, time) = s.split_once('T').ok_or_else(err)?;
-    let mut d = date.split('-');
-    let year: i64 = d.next().ok_or_else(err)?.parse().map_err(|_| err())?;
-    let month: i64 = d.next().ok_or_else(err)?.parse().map_err(|_| err())?;
-    let day: i64 = d.next().ok_or_else(err)?.parse().map_err(|_| err())?;
-    let mut t = time.split(':');
-    let hh: i64 = t.next().ok_or_else(err)?.parse().map_err(|_| err())?;
-    let mm: i64 = t.next().ok_or_else(err)?.parse().map_err(|_| err())?;
-    let ss: i64 = t.next().unwrap_or("0").parse().map_err(|_| err())?;
-    // Days from the civil calendar (Howard Hinnant's days_from_civil).
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let doy = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    let secs = days * 86400 + hh * 3600 + mm * 60 + ss;
-    if secs < 0 {
-        return Err("scheduled time is before the epoch".to_string());
-    }
-    Ok(secs as u64)
-}
+// `parse_epoch_secs` lives in `clank_core::golem::agent` — target-agnostic arithmetic, and this crate
+// is a wasm-only cdylib with no test target, so it could not be tested here.
