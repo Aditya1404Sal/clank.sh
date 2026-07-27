@@ -621,7 +621,11 @@ impl Session {
                     );
                     return LineResult::from_outcome(Vec::new(), state.trace, 6);
                 }
-                return LineResult::from_outcome(Vec::new(), state.trace, 0);
+                // Exit 1, not 0. Hitting the cap means the model never reached a final answer — the
+                // work is INCOMPLETE, and reporting success for it misleads any non-interactive
+                // caller (a script, or an outer agent) that can only see the exit code. `--json`
+                // already got this right above; the plain path did not.
+                return LineResult::from_outcome(Vec::new(), state.trace, 1);
             }
 
             let resp = provider

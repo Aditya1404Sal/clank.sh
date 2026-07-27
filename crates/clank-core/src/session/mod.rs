@@ -186,6 +186,16 @@ impl LineResult {
         }
     }
 
+    /// Override the exit code, keeping the rest of the result.
+    ///
+    /// For commands that aggregate sub-results into one stdout blob and must still report the worst
+    /// outcome — the exit code is the only machine-readable channel a non-interactive driver has, so
+    /// "printed some failures, returned 0" is a lie to it.
+    fn with_exit_code(mut self, exit_code: u8) -> Self {
+        self.exit_code = exit_code;
+        self
+    }
+
     fn stderr(message: impl Into<Vec<u8>>) -> Self {
         Self {
             stdout: Vec::new(),

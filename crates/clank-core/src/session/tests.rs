@@ -4268,8 +4268,66 @@ fn ask_malformed_tool_args_error_and_continue() {
     });
 }
 
-/// The loop stops at the iteration cap when the model calls a tool every turn, exiting 0 with a
-/// stderr notice. The provider is called exactly `ASK_MAX_ITERATIONS` times.
+/// `grease search` must not answer "no packages match" when it could not read a single registry.
+///
+/// Regression: the fetch, the status check and the JSON parse were all `if let Ok(..)` with no else,
+/// so a dead registry produced the same "no packages match '<query>'" at exit 0 as a genuine empty
+/// result. A model searching an unreachable registry concluded the package did not exist and gave
+/// up. "I found nothing" and "I could not look" are different answers.
+#[test]
+fn grease_search_separates_an_unreadable_registry_from_a_real_no_match() {
+    on_rt(async {
+        let _dirs = set_grease_dirs();
+        let mut session = Session::new().await.unwrap();
+        // No routes → every index.json fetch 404s.
+        session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![])));
+        session
+            .run_line("grease registry add https://reg.example")
+            .await;
+
+        let r = session.eval_line("grease search anything").await;
+        assert_eq!(
+            r.exit_code, 4,
+            "an unreadable registry must not look like a clean no-match"
+        );
+        let err = String::from_utf8(r.stderr).unwrap();
+        assert!(err.contains("could not read registry"), "got {err:?}");
+        assert!(
+            !String::from_utf8(r.stdout).unwrap().contains("no packages"),
+            "must not claim the package is absent"
+        );
+    });
+}
+
+/// The counterpart: a registry that ANSWERS but holds no match is a real empty result — exit 0.
+#[test]
+fn grease_search_reports_a_genuine_no_match_as_success() {
+    on_rt(async {
+        let _dirs = set_grease_dirs();
+        let mut session = Session::new().await.unwrap();
+        session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![(
+            "/index.json",
+            grease_json(serde_json::json!({"packages": []})),
+        )])));
+        session
+            .run_line("grease registry add https://reg.example")
+            .await;
+
+        let r = session.eval_line("grease search anything").await;
+        assert_eq!(r.exit_code, 0, "an answered-but-empty search is success");
+        assert!(String::from_utf8(r.stdout)
+            .unwrap()
+            .contains("no packages match"));
+    });
+}
+
+/// The loop stops at the iteration cap when the model calls a tool every turn, exiting **non-zero**
+/// with a stderr notice. The provider is called exactly `ASK_MAX_ITERATIONS` times.
+///
+/// The exit code used to be 0. Hitting the cap means the model never reached a final answer, so the
+/// work is incomplete — and for a non-interactive caller (a script, or an outer agent) the exit code
+/// is the only signal that says so. `--json` already returned 6 for this; the plain path claimed
+/// success.
 #[test]
 fn ask_loop_stops_at_the_iteration_cap() {
     on_rt(async {
@@ -4282,7 +4340,10 @@ fn ask_loop_stops_at_the_iteration_cap() {
         session.set_ask_provider(Box::new(FakeProvider::scripted(script, seen.clone())));
 
         let result = session.eval_line(r#"sudo ask "loop forever""#).await;
-        assert_eq!(result.exit_code, 0);
+        assert_eq!(
+            result.exit_code, 1,
+            "a truncated agentic loop must not report success"
+        );
         assert!(
             String::from_utf8(result.stderr)
                 .unwrap()

@@ -830,37 +830,73 @@ impl Session {
             );
         };
         let mut hits = Vec::new();
+        // Track registries we could not read. Previously a DNS failure, a non-200, or unparseable
+        // JSON were all `if let Ok(..)` with no else, and the command then printed "no packages
+        // match '<query>'" at exit 0 — so a model searching an unreachable registry concluded the
+        // package did not exist and abandoned the task. "I found nothing" and "I could not look"
+        // are different answers and must not share an exit code.
+        let mut unreachable: Vec<String> = Vec::new();
         for base in &registries {
             let url = format!("{}/index.json", base.trim_end_matches('/'));
-            if let Ok(resp) = http.request("GET", &url, &[], None).await {
-                if resp.status == 200 {
-                    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&resp.body) {
-                        if let Some(arr) = v.get("packages").and_then(|p| p.as_array()) {
-                            for pkg in arr {
-                                let name = pkg.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                                let desc = pkg
-                                    .get("description")
-                                    .and_then(|d| d.as_str())
-                                    .unwrap_or("");
-                                let kind =
-                                    pkg.get("kind").and_then(|k| k.as_str()).unwrap_or("prompt");
-                                if name.contains(query) || desc.contains(query) {
-                                    hits.push(format!("{name}  [{kind}]  {desc}"));
-                                }
-                            }
-                        }
+            let index = match http.request("GET", &url, &[], None).await {
+                Err(e) => {
+                    unreachable.push(format!("{base}: {e}"));
+                    continue;
+                }
+                Ok(resp) if resp.status != 200 => {
+                    unreachable.push(format!("{base}: HTTP {}", resp.status));
+                    continue;
+                }
+                Ok(resp) => match serde_json::from_slice::<serde_json::Value>(&resp.body) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        unreachable.push(format!("{base}: index.json is not valid JSON: {e}"));
+                        continue;
+                    }
+                },
+            };
+            if let Some(arr) = index.get("packages").and_then(|p| p.as_array()) {
+                for pkg in arr {
+                    let name = pkg.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                    let desc = pkg
+                        .get("description")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("");
+                    let kind = pkg.get("kind").and_then(|k| k.as_str()).unwrap_or("prompt");
+                    if name.contains(query) || desc.contains(query) {
+                        hits.push(format!("{name}  [{kind}]  {desc}"));
                     }
                 }
             }
         }
+
+        let mut warnings = String::new();
+        for u in &unreachable {
+            let _ = writeln!(warnings, "grease search: could not read registry {u}");
+        }
         if hits.is_empty() {
-            return LineResult::continue_with_stdout(
-                format!("no packages match '{query}'\n").into_bytes(),
+            // Exit 4 (transport) when NO registry could be read: the honest answer is "I could not
+            // look", not "it does not exist". If at least one registry answered, an empty result is
+            // a real no-match and stays exit 0.
+            let searched_any = unreachable.len() < registries.len();
+            let body = if searched_any {
+                format!("no packages match '{query}'\n")
+            } else {
+                String::new()
+            };
+            return LineResult::from_outcome(
+                body.into_bytes(),
+                warnings.into_bytes(),
+                u8::from(!searched_any) * 4,
             );
         }
         hits.sort();
         hits.dedup();
-        LineResult::continue_with_stdout(format!("{}\n", hits.join("\n")).into_bytes())
+        LineResult::from_outcome(
+            format!("{}\n", hits.join("\n")).into_bytes(),
+            warnings.into_bytes(),
+            0,
+        )
     }
 
     /// `grease update [<name>]`: re-fetch + re-verify + re-persist installed packages (all, or one).
@@ -885,6 +921,12 @@ impl Session {
             return LineResult::continue_with_stdout(b"nothing to update\n".to_vec());
         }
         let mut out = String::new();
+        // Worst per-package exit code wins. Previously every result was stringified into stdout and
+        // the command returned 0 unconditionally — so `grease update` reported success even when
+        // every package failed to update. The exit code is the only machine-readable channel an LLM
+        // driver has, and it was saying "fine" while nothing had been updated.
+        let mut worst = 0u8;
+        let mut failed = 0usize;
         for t in targets {
             // Re-install preserving the package's existing artifact selection (for MCP; a no-op for
             // other kinds). The stored payload carries the prior `artifacts`, so pass its flags.
@@ -898,9 +940,16 @@ impl Session {
                 })
                 .unwrap_or_default();
             let result = Box::pin(self.grease_install(&t, flags)).await;
+            if result.exit_code != 0 {
+                failed += 1;
+                worst = worst.max(result.exit_code);
+            }
             out.push_str(&String::from_utf8_lossy(&result.terminal_output()));
         }
-        LineResult::continue_with_stdout(out.into_bytes())
+        if failed > 0 {
+            let _ = writeln!(out, "grease update: {failed} package(s) failed");
+        }
+        LineResult::continue_with_stdout(out.into_bytes()).with_exit_code(worst)
     }
 
     /// `grease registry add <url> [--key <base64-ed25519-pubkey>]`: record a registry URL and, if

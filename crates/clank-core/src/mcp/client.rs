@@ -542,7 +542,14 @@ impl<'a> McpClient<'a> {
                 _ => return Ok(tools),
             }
         }
-        Ok(tools)
+        // Falling out of the loop means the server still had pages. Returning `Ok(tools)` here used
+        // to silently hand back a PARTIAL tool surface — which grease then persisted into the
+        // package payload and rebuilt on every boot, so the model was permanently told the server
+        // had fewer tools than it does, with nothing anywhere saying so. A truncated capability set
+        // is not a successful listing.
+        Err(McpError::transport(format!(
+            "server paginated past {MAX_TOOL_PAGES} pages of tools/list; refusing a partial tool list"
+        )))
     }
 
     /// `tools/call` with the given arguments object.
