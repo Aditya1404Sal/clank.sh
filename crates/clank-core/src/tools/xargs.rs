@@ -11,9 +11,14 @@
 //! silently invoking a command with no arguments surprises more than it helps). Tokens are
 //! shell-quoted before re-entry so filenames with spaces survive the round trip.
 //!
-//! Authorization note: the re-entered lines run inside Brush directly and are not re-gated by
-//! `Session::eval_line` — the same leading-command-only scope documented in [`crate::authz`]
-//! (compound lines and `eval` already share this limitation).
+//! Authorization note: the re-entered lines run inside Brush directly and do NOT pass back through
+//! `Session::eval_line`, so they are not gated a second time on the way out. What closes the hole is
+//! that they are gated *before* they get here: [`crate::authz::resolve`] sees THROUGH this wrapper to
+//! the payload command, so `find . | xargs rm` resolves `rm`'s policy and pauses exactly as a bare
+//! `rm` would. Recursively, so `xargs xargs rm` resolves too.
+//!
+//! The residual is the leading-command-only scope documented in [`crate::authz`] — a payload that is
+//! itself a compound line or an `eval` still reaches Brush with only its own leading word gated.
 
 use std::io::{Read, Write as _};
 
