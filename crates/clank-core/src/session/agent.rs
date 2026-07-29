@@ -1,9 +1,8 @@
-//! `Session` methods for Golem agent invocation (`<agent> [flags] <method>`) and the `golem`
-//! cluster command. Invocation parsing (`parse_agent_line`) + types live in `super` (mod.rs).
+//! `Session` methods for Golem agent invocation (`<agent> [flags] <method>`), the `golem` cluster
+//! command, and the invocation-line parser they dispatch on ([`parse_agent_line`]).
 
-use super::{
-    parse_agent_line, prompt_leading_word, LineResult, ParsedAgentLine, PendingInvocation, Session,
-};
+use super::grease::prompt_leading_word;
+use super::{LineResult, PendingInvocation, Session};
 
 use crate::config::limits::MAX_PENDING_INVOCATIONS;
 
@@ -409,6 +408,138 @@ fn order_agent_params(
         }
     }
     Ok(ordered)
+}
+
+/// The parsed shape of an agent-executable line (everything after the command name).
+pub(super) struct ParsedAgentLine {
+    constructor: Vec<(String, String)>,
+    method: String,
+    args: Vec<(String, String)>,
+    mode: crate::golem::agent::InvokeMode,
+    phantom: Option<String>,
+    /// `--revision <n>` if given (honest-stubbed — no wasm-rpc slot).
+    revision: Option<String>,
+}
+
+/// Parse an agent line: `[--<ctor> val] [<wrapper-flags>] <method|subcommand> [--] [--<arg> val]`.
+/// Wrapper flags (`--trigger`/`--schedule <iso>`/`--phantom <uuid>`/`--revision <n>`) are recognized
+/// before the method (README:823); a `--<flag>` matching a declared constructor param is a ctor flag;
+/// the first bare word is the method (or a reserved subcommand). An explicit `--` separates the method
+/// from its args.
+// One flag-dispatch loop over a single word list; splitting it would mean threading the whole
+// accumulator set (constructor/args/mode/phantom/revision/method) through a helper for no gain.
+#[allow(clippy::too_many_lines)]
+pub(super) fn parse_agent_line(
+    words: &[String],
+    pkg: &crate::grease::pkg::AgentPackage,
+) -> crate::golem::error::Result<ParsedAgentLine> {
+    use crate::golem::agent::InvokeMode;
+    let is_ctor = |k: &str| pkg.constructor_params.iter().any(|p| p == k);
+    let mut constructor = Vec::new();
+    let mut method = String::new();
+    let mut args = Vec::new();
+    let mut mode = InvokeMode::Await;
+    let mut phantom = None;
+    let mut revision = None;
+    let mut i = 0;
+    // Phase 1: wrapper flags + constructor flags + the method word.
+    while i < words.len() {
+        let w = &words[i];
+        if w == "--" {
+            i += 1;
+            break;
+        }
+        if let Some(key) = w.strip_prefix("--") {
+            if method.is_empty() {
+                // Wrapper flags first (reserved; always before the method).
+                match key {
+                    "trigger" => {
+                        mode = InvokeMode::Trigger;
+                        i += 1;
+                        continue;
+                    }
+                    "schedule" => {
+                        let val = words.get(i + 1).ok_or_else(|| {
+                            crate::golem::Error::Invalid(
+                                "--schedule needs an ISO-8601 time\n".to_string(),
+                            )
+                        })?;
+                        mode = InvokeMode::Schedule(val.clone());
+                        i += 2;
+                        continue;
+                    }
+                    "phantom" => {
+                        let val = words.get(i + 1).ok_or_else(|| {
+                            crate::golem::Error::Invalid("--phantom needs a UUID\n".to_string())
+                        })?;
+                        phantom = Some(val.clone());
+                        i += 2;
+                        continue;
+                    }
+                    "revision" => {
+                        let val = words.get(i + 1).ok_or_else(|| {
+                            crate::golem::Error::Invalid("--revision needs a number\n".to_string())
+                        })?;
+                        revision = Some(val.clone());
+                        i += 2;
+                        continue;
+                    }
+                    _ if is_ctor(key) => {
+                        let val = words.get(i + 1).ok_or_else(|| {
+                            crate::golem::Error::Invalid(format!("--{key} needs a value\n"))
+                        })?;
+                        constructor.push((key.to_string(), val.clone()));
+                        i += 2;
+                        continue;
+                    }
+                    _ => {
+                        return Err(crate::golem::Error::Invalid(format!(
+                            "unknown flag --{key} before the method\n"
+                        )))
+                    }
+                }
+            }
+            // After the method: a method arg.
+            let val = words
+                .get(i + 1)
+                .ok_or_else(|| crate::golem::Error::Invalid(format!("--{key} needs a value\n")))?;
+            args.push((key.to_string(), val.clone()));
+            i += 2;
+            continue;
+        }
+        // A bare word: the method (first).
+        if method.is_empty() {
+            method.clone_from(w);
+            i += 1;
+            break;
+        }
+        i += 1;
+    }
+    // Phase 2: remaining words are method args.
+    while i < words.len() {
+        let w = &words[i];
+        if w == "--" {
+            i += 1;
+            continue;
+        }
+        if let Some(key) = w.strip_prefix("--") {
+            let val = words
+                .get(i + 1)
+                .ok_or_else(|| crate::golem::Error::Invalid(format!("--{key} needs a value\n")))?;
+            args.push((key.to_string(), val.clone()));
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    Ok(ParsedAgentLine {
+        constructor,
+        method,
+        args,
+        mode,
+        phantom,
+        revision,
+    })
 }
 
 #[cfg(test)]

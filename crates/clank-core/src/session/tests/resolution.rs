@@ -4,6 +4,7 @@
 //! Fixtures live in the parent module ([`super`]).
 
 use super::*;
+use crate::session::env::effective_path;
 
 /// `type` for a clank-intercepted command resolves through clank's own dispatch (Brush's `type`
 /// can't see it): `type curl` → "curl is a shell builtin", exit 0. This is the README's "type

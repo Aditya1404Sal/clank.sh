@@ -1,13 +1,12 @@
-//! `Session` methods for the grease package manager: install/remove/list/info/search/update
-//! and registry management. Shared install helpers + integrity types live in `super` (mod.rs).
+//! `Session` methods for the grease package manager: install/remove/list/info/search/update,
+//! registry management, and the install machinery those need: the integrity chain
+//! ([`InstallIntegrity`], [`fetch_index_entry`], [`verify_log_inclusion`]), the on-disk marker, and
+//! the `info` renderers.
 
 use std::fmt::Write as _;
 
-use super::{
-    fetch_index_entry, is_markdown_frontmatter, materialize_mcp_resources, mcp_info_text,
-    skill_info_text, verify_log_inclusion, write_install_marker, IndexEntry, InstallIntegrity,
-    LineResult, Session,
-};
+use super::mcp::materialize_mcp_resources;
+use super::{LineResult, Session};
 
 impl Session {
     /// Dispatch a parsed `grease` command.
@@ -1120,4 +1119,334 @@ impl Session {
             }
         }
     }
+}
+
+/// The resolved integrity status of a fetched package, threaded from `grease_install` into the
+/// finish/persist path. Bundles the content-hash + signature + transparency-log results so the marker
+/// construction has one source of truth.
+pub(super) struct InstallIntegrity {
+    /// The computed sha256 of the payload body.
+    sha256: String,
+    /// Whether the sha256 matched the registry's advertised hash.
+    verified: bool,
+    /// Whether the ed25519 signature verified against the registry's trusted key.
+    signature_verified: bool,
+    /// The signer identity (when signature-verified).
+    signer: Option<String>,
+    /// Whether the RFC-6962 inclusion proof verified against the advertised root.
+    log_verified: bool,
+    /// The transparency-log leaf index (when log-verified).
+    log_index: Option<u64>,
+}
+
+impl InstallIntegrity {
+    /// Build the on-disk install marker for a given kind + registry.
+    fn to_marker(
+        &self,
+        kind: crate::grease::pkg::PackageKind,
+        registry: &str,
+    ) -> crate::grease::state::InstallMarker {
+        crate::grease::state::InstallMarker {
+            kind,
+            registry: registry.to_string(),
+            sha256: self.sha256.clone(),
+            verified: self.verified,
+            signature_verified: self.signature_verified,
+            signer: self.signer.clone(),
+            log_verified: self.log_verified,
+            log_index: self.log_index,
+        }
+    }
+
+    /// The `sha256 … — verified, signed[, log proof …]` summary for the install output.
+    fn summary(&self) -> String {
+        let status = if self.verified {
+            "verified"
+        } else {
+            "unverified"
+        };
+        let mut s = format!(
+            "sha256 {} — {status}",
+            crate::grease::state::sha_prefix(&self.sha256)
+        );
+        if self.signature_verified {
+            s.push_str(", signed");
+        }
+        if self.log_verified {
+            // Not "in log" — see `grease::state::log_inclusion_note` for why that overstated it.
+            s.push_str(", log proof (registry-asserted root)");
+        }
+        s
+    }
+}
+
+/// A package's advertised transparency-log inclusion proof (RFC-6962), from the index `log` object.
+pub(super) struct LogProof {
+    leaf_index: u64,
+    tree_size: u64,
+    /// The tree's Merkle root (base64, 32 bytes).
+    root: String,
+    /// The audit path — sibling hashes bottom-up (base64, 32 bytes each).
+    proof: Vec<String>,
+}
+
+/// A package's advertised integrity metadata from a registry's `index.json` entry.
+#[derive(Default)]
+pub(super) struct IndexEntry {
+    /// Whether the registry actually served an index that LISTS this package. Distinguishes an index
+    /// entry that omits the hash (a tamper vector — reject) from no index at all (a raw/indexless
+    /// registry with no integrity claim — trust-on-first-use).
+    found_in_index: bool,
+    /// The advertised sha256 of the payload (content-addressing).
+    sha256: Option<String>,
+    /// The advertised base64 detached ed25519 signature over the payload body.
+    sig: Option<String>,
+    /// The advertised signer identity (surfaced in `info`/`list`).
+    signer: Option<String>,
+    /// The advertised RFC-6962 inclusion proof, if the registry runs a transparency log.
+    log: Option<LogProof>,
+}
+
+/// Whether a fetched package body is a Markdown prompt with a leading `---` frontmatter fence (as
+/// opposed to the JSON payload shape). Used to route `.md`-authored prompts through the frontmatter
+/// converter after integrity verification. Checks the raw byte prefix directly (the fence is ASCII), so
+/// a multibyte character right after the fence can't cause a misclassification.
+pub(super) fn is_markdown_frontmatter(body: &[u8]) -> bool {
+    body.starts_with(b"---\n") || body.starts_with(b"---\r\n")
+}
+
+/// Best-effort lookup of a package's index entry (`sha256` + `sig` + `signer`). GETs
+/// `<base>/index.json` and returns the fields of the entry whose `name` matches. Empty (`None`s) if the
+/// index is unreachable, unparseable, or has no entry for `name` — the caller then falls back to
+/// record-only integrity (and unsigned).
+pub(super) async fn fetch_index_entry(
+    http: &dyn crate::mcp::client::McpHttp,
+    base: &str,
+    name: &str,
+) -> IndexEntry {
+    let url = format!("{}/index.json", base.trim_end_matches('/'));
+    let Ok(resp) = http.request("GET", &url, &[], None).await else {
+        return IndexEntry::default();
+    };
+    if resp.status != 200 {
+        return IndexEntry::default();
+    }
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&resp.body) else {
+        return IndexEntry::default();
+    };
+    let entry = v
+        .get("packages")
+        .and_then(|p| p.as_array())
+        .and_then(|arr| {
+            arr.iter()
+                .find(|p| p.get("name").and_then(|n| n.as_str()) == Some(name))
+        });
+    let Some(entry) = entry else {
+        return IndexEntry::default();
+    };
+    let s = |k: &str| entry.get(k).and_then(|x| x.as_str()).map(String::from);
+    // The optional RFC-6962 transparency-log inclusion proof.
+    let log = entry.get("log").and_then(|l| {
+        let leaf_index = l
+            .get("leaf-index")
+            .or_else(|| l.get("leaf_index"))?
+            .as_u64()?;
+        let tree_size = l
+            .get("tree-size")
+            .or_else(|| l.get("tree_size"))?
+            .as_u64()?;
+        let root = l.get("root")?.as_str()?.to_string();
+        let proof = l
+            .get("proof")?
+            .as_array()?
+            .iter()
+            .filter_map(|h| h.as_str().map(String::from))
+            .collect();
+        Some(LogProof {
+            leaf_index,
+            tree_size,
+            root,
+            proof,
+        })
+    });
+    IndexEntry {
+        found_in_index: true,
+        sha256: s("sha256"),
+        sig: s("sig"),
+        signer: s("signer"),
+        log,
+    }
+}
+
+/// Verify a package's RFC-6962 inclusion proof: the log leaf is the payload's hex sha256 string (the
+/// content-address), so the proof witnesses that this exact content was logged. Decodes the base64
+/// root + proof nodes and delegates to [`crate::grease::pkg::verify_inclusion_proof`].
+pub(super) fn verify_log_inclusion(
+    payload_sha256_hex: &str,
+    log: &LogProof,
+) -> crate::grease::error::Result<()> {
+    use base64::Engine;
+    let root = base64::engine::general_purpose::STANDARD
+        .decode(log.root.trim())
+        .map_err(|e| crate::grease::Error::LogProof(format!("invalid log root (base64): {e}")))?;
+    let proof: crate::grease::error::Result<Vec<Vec<u8>>> = log
+        .proof
+        .iter()
+        .map(|h| {
+            base64::engine::general_purpose::STANDARD
+                .decode(h.trim())
+                .map_err(|e| {
+                    crate::grease::Error::LogProof(format!("invalid proof node (base64): {e}"))
+                })
+        })
+        .collect();
+    let proof = proof?;
+    crate::grease::pkg::verify_inclusion_proof(
+        payload_sha256_hex.as_bytes(),
+        log.leaf_index,
+        log.tree_size,
+        &root,
+        &proof,
+    )
+}
+
+/// Persist an install marker to `<etc>/<name>.toml`. Returns a user-facing error string on failure.
+pub(super) fn write_install_marker(
+    name: &str,
+    marker: &crate::grease::state::InstallMarker,
+) -> crate::grease::error::Result<()> {
+    let marker_toml = toml::to_string_pretty(marker).map_err(|e| {
+        crate::grease::Error::Io(format!("grease install: marker serialize error: {e}\n"))
+    })?;
+    let etc = crate::grease::config::etc_dir();
+    let _ = std::fs::create_dir_all(&etc);
+    std::fs::write(etc.join(format!("{name}.toml")), marker_toml).map_err(|e| {
+        crate::grease::Error::Io(format!("grease install: cannot write marker: {e}\n"))
+    })
+}
+
+/// `grease info <skill>` text: the skill is not a command, so we describe its envelope + the bundled
+/// documents/scripts rather than generated command help.
+pub(super) fn skill_info_text(
+    sk: &crate::grease::pkg::SkillPackage,
+    columns: Option<usize>,
+) -> String {
+    let mut out = format!("{} — {} [skill]\n", sk.name, sk.description);
+    if let Some(use_) = &sk.intended_use {
+        let _ = writeln!(out, "\nIntended use: {use_}");
+    }
+    if !sk.documents.is_empty() {
+        out.push_str("\nDocuments (under /usr/share/skills/");
+        out.push_str(&sk.name);
+        out.push_str("/):\n");
+        for d in &sk.documents {
+            let _ = writeln!(out, "  {}", d.path);
+        }
+    }
+    if !sk.scripts.is_empty() {
+        out.push_str("\nBundled scripts (on $PATH via /usr/share/skills/");
+        out.push_str(&sk.name);
+        out.push_str("/bin/):\n");
+        // Short script basenames read better filled horizontally (like `ls`) when a terminal is
+        // driving this (COLUMNS set → `Some`); non-interactive output stays one-per-line. Each row is
+        // indented by 2 to match the section, so pack to `width - 2`.
+        let names: Vec<&str> = sk.scripts.iter().map(|s| s.name.as_str()).collect();
+        match columns {
+            Some(w) => {
+                for line in
+                    crate::tools::coreutils::format_columns(&names, w.saturating_sub(2)).lines()
+                {
+                    let _ = writeln!(out, "  {line}");
+                }
+            }
+            None => {
+                for name in &names {
+                    let _ = writeln!(out, "  {name}");
+                }
+            }
+        }
+    }
+    out.push_str(
+        "\nA skill is a capability-context package, not a command; it is surfaced to the model \
+         when you run `ask`.\n",
+    );
+    out
+}
+
+/// `grease info <mcp-server>` text: the server endpoint, exposed artifact types, and the cached
+/// tool/prompt listings.
+pub(super) fn mcp_info_text(m: &crate::grease::pkg::McpPackage) -> String {
+    let mut out = format!("{} — {} [mcp]\n", m.name, m.description);
+    let _ = writeln!(out, "\nServer: {}", m.url);
+    let mut kinds = Vec::new();
+    if m.artifacts.tools {
+        kinds.push("tools");
+    }
+    if m.artifacts.prompts {
+        kinds.push("prompts");
+    }
+    if m.artifacts.resources {
+        kinds.push("resources");
+    }
+    let _ = writeln!(out, "Artifacts: {}", kinds.join(", "));
+    if !m.tools.is_empty() {
+        let _ = writeln!(out, "\nTools (run as `{} <tool>`):", m.name);
+        for t in &m.tools {
+            let _ = writeln!(out, "  {} — {}", t.name, t.description);
+        }
+    }
+    if !m.prompts.is_empty() {
+        out.push_str("\nPrompts (installed as $PATH commands):\n");
+        for p in &m.prompts {
+            let _ = writeln!(out, "  {} — {}", p.name, p.description);
+        }
+    }
+    out
+}
+
+/// The leading command word of a top-level (operator-free) `line`, with any `sudo` prefix stripped —
+/// for matching against installed grease prompts. `None` for a nested line (operators present).
+pub(super) fn prompt_leading_word(line: &str) -> Option<String> {
+    let words = crate::ai::ask::dequote_words(line)?;
+    let first = words.first()?;
+    if first == "sudo" {
+        words.get(1).cloned()
+    } else {
+        Some(first.clone())
+    }
+}
+
+/// Parse an installed-package invocation line (`<name> --key value … [--model id]`) into its
+/// `(name, provided-args, model-override)`. Shared by `run_prompt` and `run_script`. The line is NOT
+/// `sudo`-prefixed here (the caller reaches this after the authz gate strips sudo). Returns a
+/// pre-built exit-2 `LineResult` on a parse error or a `--key` missing its value.
+#[allow(clippy::type_complexity)]
+pub(super) fn parse_pkg_invocation(
+    line: &str,
+) -> Result<(String, Vec<(String, String)>, Option<String>), LineResult> {
+    let words = crate::ai::ask::dequote_words(line).ok_or_else(|| {
+        LineResult::from_outcome(Vec::new(), b"grease: parse error\n".to_vec(), 2)
+    })?;
+    let name = words[0].clone();
+    let mut provided: Vec<(String, String)> = Vec::new();
+    let mut model_override: Option<String> = None;
+    let mut iter = words[1..].iter();
+    while let Some(w) = iter.next() {
+        if let Some(key) = w.strip_prefix("--") {
+            let Some(val) = iter.next() else {
+                return Err(LineResult::from_outcome(
+                    Vec::new(),
+                    format!("{name}: --{key} needs a value\n").into_bytes(),
+                    2,
+                ));
+            };
+            if key == "model" {
+                model_override = Some(val.clone());
+            } else {
+                provided.push((key.to_string(), val.clone()));
+            }
+        }
+        // Bare positional words are ignored in v1 (args are named).
+    }
+    Ok((name, provided, model_override))
 }

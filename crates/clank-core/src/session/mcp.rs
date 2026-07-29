@@ -1,9 +1,11 @@
 //! `Session` methods for MCP: the `mcp` management command, tool/resource/template dispatch,
-//! session management, and the `/mnt/mcp` dynamic-read + `mcp watch` paths.
+//! session management, the `/mnt/mcp` dynamic-read + `mcp watch` paths, and the URI/argument
+//! plumbing they need ([`fill_uri_template`], [`build_mcp_arguments`], [`materialize_mcp_resources`]).
 
 use std::fmt::Write as _;
 
-use super::{fill_uri_template, prompt_leading_word, LineResult, Session};
+use super::grease::prompt_leading_word;
+use super::{LineResult, Session};
 
 impl Session {
     /// Dispatch a parsed `mcp` management command. HTTP-performing subcommands (`add`, `reload`,
@@ -633,4 +635,171 @@ impl Session {
             ),
         }
     }
+}
+
+/// Materialize an MCP server's resources under `/mnt/mcp/<server>/` and return the cache entries that
+/// drive the virtual-fs listing. Fetches `resources/list`; each resource whose `resources/read`
+/// succeeds at install is written as a real STATIC file (composes in pipes); a resource that can't be
+/// read now is recorded as DYNAMIC (served live on a top-level `cat` interception). Path-confined.
+/// Free fn (no `self`) so it can run while `client` borrows `self.mcp_http`.
+pub(super) async fn materialize_mcp_resources(
+    server: &str,
+    client: &mut crate::mcp::client::McpClient<'_>,
+    session: Option<&str>,
+) -> Vec<crate::grease::pkg::McpResourceCache> {
+    let Ok(resources) = client.list_resources(session).await else {
+        return Vec::new();
+    };
+    let root = crate::grease::config::mcp_mount_dir().join(server);
+    let mut cache = Vec::new();
+    for res in &resources {
+        let rel = mcp_resource_rel_path(&res.uri);
+        let mut is_static = false;
+        if let Some(dest) = crate::grease::config::mcp_safe_join(&root, &rel) {
+            if let Ok(contents) = client.read_resource(&res.uri, session).await {
+                if let Some(parent) = dest.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                is_static = std::fs::write(&dest, contents.as_bytes()).is_ok();
+            }
+        }
+        cache.push(crate::grease::pkg::McpResourceCache {
+            uri: res.uri.clone(),
+            rel_path: rel,
+            description: res.description.clone().unwrap_or_default(),
+            mime_type: res.mime_type.clone(),
+            is_static,
+            last_modified: res.last_modified.clone(),
+            audience: res.audience.clone(),
+            priority: res.priority,
+            size: res.size,
+        });
+    }
+    cache
+}
+
+/// Fill an RFC-6570-lite URI template's `{param}` placeholders from CLI `args`. `--name value` fills
+/// the placeholder named `name`; bare positional args fill the remaining placeholders left-to-right.
+/// Values are inserted verbatim (MCP servers accept literal path segments). An unfilled placeholder is
+/// an error. Walks the template once, resolving each placeholder as it's encountered.
+pub(super) fn fill_uri_template(
+    template: &str,
+    args: &[String],
+) -> crate::mcp::error::Result<String> {
+    // Parse args: `--name value` pairs + positionals.
+    let mut named: Vec<(String, String)> = Vec::new();
+    let mut positionals: Vec<String> = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if let Some(key) = a.strip_prefix("--") {
+            let val = it
+                .next()
+                .ok_or_else(|| crate::mcp::Error::Usage(format!("--{key} needs a value")))?;
+            named.push((key.to_string(), val.clone()));
+        } else {
+            positionals.push(a.clone());
+        }
+    }
+    let mut pos_iter = positionals.into_iter();
+
+    // Walk the template, replacing each `{…}` with its resolved value in order.
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let Some(close_rel) = rest[open..].find('}') else {
+            // Unbalanced brace — emit verbatim and stop.
+            out.push_str(&rest[open..]);
+            return Ok(out);
+        };
+        let raw = &rest[open + 1..open + close_rel];
+        let name = raw
+            .trim_start_matches(['+', '#', '.', '/', ';', '?', '&'])
+            .trim_end_matches('*');
+        let value = named
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+            .or_else(|| pos_iter.next())
+            .ok_or_else(|| {
+                crate::mcp::Error::Usage(format!("missing value for template parameter '{name}'"))
+            })?;
+        out.push_str(&value);
+        rest = &rest[open + close_rel + 1..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+/// Convert an MCP resource URI to a relative path under `/mnt/mcp/<server>/`. Strips a `<scheme>://`
+/// (or `<scheme>:`) prefix and any leading slashes, leaving the path-like remainder (e.g.
+/// `file:///repo/README.md` → `repo/README.md`, `github://repo/src/main.rs` → `repo/src/main.rs`).
+/// Query/fragment are dropped. The caller path-confines the result with `mcp_safe_join`.
+pub(super) fn mcp_resource_rel_path(uri: &str) -> String {
+    // Drop the scheme.
+    let after_scheme = match uri.split_once("://") {
+        Some((_scheme, rest)) => rest,
+        None => match uri.split_once(':') {
+            Some((_scheme, rest)) => rest,
+            None => uri,
+        },
+    };
+    // Drop query/fragment.
+    let path = after_scheme
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    let trimmed = path.trim_start_matches('/');
+    if trimmed.is_empty() {
+        "resource".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Build an MCP `tools/call` arguments object from `--flag value` pairs, coercing each value per the
+/// tool's JSON inputSchema (integer/number → number, boolean → bool, array/object → parsed JSON, else
+/// string). Bare flags (`--verbose`) become `true`. Errors if a required property is missing.
+pub(super) fn build_mcp_arguments(
+    schema: &serde_json::Value,
+    flags: &[(String, Option<String>)],
+) -> crate::mcp::error::Result<serde_json::Value> {
+    use serde_json::Value;
+    let props = schema.get("properties").and_then(Value::as_object);
+    let mut obj = serde_json::Map::new();
+    for (key, value) in flags {
+        let ty = props
+            .and_then(|p| p.get(key))
+            .and_then(|s| s.get("type"))
+            .and_then(Value::as_str);
+        let coerced = match (ty, value) {
+            (Some("boolean"), Some(v)) => Value::Bool(v == "true" || v == "1" || v == "yes"),
+            (Some("integer" | "number"), Some(v)) => v
+                .parse::<f64>()
+                .map(|n| serde_json::json!(n))
+                .map_err(|_| crate::mcp::Error::Usage(format!("--{key}: '{v}' is not a number")))?,
+            (Some("array" | "object"), Some(v)) => serde_json::from_str(v)
+                .map_err(|e| crate::mcp::Error::Usage(format!("--{key}: expected JSON: {e}")))?,
+            (_, Some(v)) => Value::String(v.clone()),
+            // A bare flag with no schema type: treat as a present boolean.
+            (_, None) => Value::Bool(true),
+        };
+        obj.insert(key.clone(), coerced);
+    }
+    // Check required properties are present.
+    if let Some(required) = schema.get("required").and_then(Value::as_array) {
+        let missing: Vec<String> = required
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|r| !obj.contains_key(*r))
+            .map(String::from)
+            .collect();
+        if !missing.is_empty() {
+            return Err(crate::mcp::Error::Usage(format!(
+                "missing required argument(s): {}",
+                missing.join(", ")
+            )));
+        }
+    }
+    Ok(Value::Object(obj))
 }

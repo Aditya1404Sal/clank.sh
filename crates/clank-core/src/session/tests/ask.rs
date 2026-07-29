@@ -4,6 +4,7 @@
 //! Fixtures live in the parent module ([`super`]).
 
 use super::*;
+use crate::config::limits::ASK_MAX_ITERATIONS;
 
 /// With a provider installed, `ask` returns the model's reply on stdout (exit 0), and the request
 /// it assembled carries the current transcript as context (the README "transcript is the context").

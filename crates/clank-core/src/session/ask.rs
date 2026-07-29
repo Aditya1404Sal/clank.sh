@@ -5,10 +5,10 @@
 use std::fmt::Write as _;
 
 use super::{
-    ask_reconstruct, authz, truncate_tool_output, AskLoopState, AskPause, AskPauseKind, Decision,
-    LineResult, PendingKind, PendingPrompt, ReplState, Resolution, Session, ToolStep, Transcript,
-    ASK_MAX_ITERATIONS, DEFAULT_HOME,
+    authz, strip_sudo_prefix, AskLoopState, AskPause, AskPauseKind, Decision, LineResult,
+    PendingKind, PendingPrompt, ReplState, Resolution, Session, ToolStep, Transcript, DEFAULT_HOME,
 };
+use crate::config::limits::{ASK_MAX_ITERATIONS, ASK_TOOL_RESULT_CAP};
 
 /// Read-only Brush builtins the model may call as tools even though clank keeps no manifest for them.
 /// They don't mutate parent-shell state, so the model-tool scope gate allows them explicitly rather
@@ -1301,6 +1301,57 @@ fn truncate_to(line: &str, width: usize) -> String {
         w += cw;
     }
     s.push('…');
+    s
+}
+
+/// Whether `line` is a top-level `context summarize` (optionally `sudo`-prefixed) — the one context
+/// subcommand that needs the async LLM layer. False for any line with shell operators (`|&;<>` `$`),
+/// so `$(context summarize)` / `context summarize | …` fall through to Brush and hit the honest error
+/// in `apply_context` (the LLM can't run in Brush's nested runtime — the "Wall C" wall). Matches the
+/// operator-bail in [`crate::dispatch_context`].
+pub(super) fn is_context_summarize(line: &str) -> bool {
+    if line.chars().any(|c| "|&;<>`$".contains(c)) {
+        return false;
+    }
+    let effective = strip_sudo_prefix(line);
+    let mut words = effective.split_whitespace();
+    words.next() == Some("context") && words.next() == Some("summarize") && words.next().is_none()
+}
+
+/// Reconstruct a top-level `ask` command line from parsed [`AskArgs`], for deferring an ask-tail
+/// pipeline's confirmation (the deferred path re-runs a line string). Flags come first, then the
+/// single-quoted prompt. The captured stdin travels separately via `next_ask_stdin`, so it is NOT
+/// embedded here. Single quotes in the prompt are escaped bash-style (`'\''`).
+pub(super) fn ask_reconstruct(args: &crate::ai::ask::AskArgs) -> String {
+    let mut line = String::from("ask");
+    if args.fresh {
+        line.push_str(" --fresh");
+    }
+    if args.json {
+        line.push_str(" --json");
+    }
+    if let Some(m) = &args.model {
+        let _ = write!(line, " --model {m}");
+    }
+    let escaped = args.prompt.replace('\'', r"'\''");
+    let _ = write!(line, " '{escaped}'");
+    line
+}
+
+/// Truncate a tool-output stream to [`ASK_TOOL_RESULT_CAP`] bytes (on a UTF-8 boundary), appending a
+/// marker when clipped. Returns a `String` (lossy) for JSON embedding.
+pub(super) fn truncate_tool_output(bytes: &[u8]) -> String {
+    if bytes.len() <= ASK_TOOL_RESULT_CAP {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    // Lossy-decode the whole prefix, then clip to the cap on a char boundary of the resulting string.
+    let decoded = String::from_utf8_lossy(bytes);
+    let mut end = ASK_TOOL_RESULT_CAP.min(decoded.len());
+    while end > 0 && !decoded.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut s = decoded[..end].to_string();
+    s.push_str("…[truncated]");
     s
 }
 
