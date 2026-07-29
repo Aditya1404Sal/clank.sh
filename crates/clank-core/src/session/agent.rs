@@ -5,9 +5,7 @@ use super::{
     parse_agent_line, prompt_leading_word, LineResult, ParsedAgentLine, PendingInvocation, Session,
 };
 
-/// The most fire-and-forget (`--trigger`/`--schedule`) invocations tracked at once. Beyond this the
-/// oldest is presumed complete and reaped — see [`Session::spawn_agent_invocation_row`].
-const MAX_PENDING_INVOCATIONS: usize = 64;
+use crate::config::limits::MAX_PENDING_INVOCATIONS;
 
 impl Session {
     /// Whether `line`'s leading word is an installed Golem agent. Drives the `run_agent` dispatch.

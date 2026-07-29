@@ -19,8 +19,7 @@
 use std::cell::RefCell;
 use std::sync::Arc;
 
-/// The virtual mount root.
-const MCP_ROOT: &str = "/mnt/mcp";
+use crate::config::vfs::MCP_MOUNT as MCP_ROOT;
 
 /// One resource entry in the per-line index (a flattened view of an installed server's resources).
 #[derive(Clone, Debug)]

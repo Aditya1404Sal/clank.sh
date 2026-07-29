@@ -16,12 +16,12 @@ use serde_json::{json, Value};
 
 use crate::ai::ask::{AskProvider, AskResponse, AskTool, AskToolCall, AskTurn};
 
+use crate::config::model::MAX_TOKENS;
+
 /// The Anthropic Messages API endpoint.
 const MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 /// The Anthropic API version header (stable public value).
 const ANTHROPIC_VERSION: &str = "2023-06-01";
-/// Output-token ceiling for an `ask` reply — matches the durable provider's `MAX_TOKENS`.
-const MAX_TOKENS: u32 = 4096;
 /// The provider name under which the key is stored in `ask.toml`.
 const PROVIDER: &str = "anthropic";
 

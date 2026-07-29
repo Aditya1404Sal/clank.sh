@@ -2377,13 +2377,7 @@ fn ask_reconstruct(args: &crate::ai::ask::AskArgs) -> String {
     line
 }
 
-/// The most tool-calling turns the agentic `ask` loop will drive before giving up. Bounds runaway
-/// tool use; the loop exits 0 with whatever text it has plus a stderr notice on hitting the cap.
-const ASK_MAX_ITERATIONS: usize = 40;
-
-/// Per-stream byte cap on a tool result fed back to the model. Bounds context growth from a `cat` of a
-/// large file; the payload is truncated with a marker, the JSON envelope is not.
-const ASK_TOOL_RESULT_CAP: usize = 16 * 1024;
+use crate::config::limits::{ASK_MAX_ITERATIONS, ASK_TOOL_RESULT_CAP};
 
 /// Truncate a tool-output stream to [`ASK_TOOL_RESULT_CAP`] bytes (on a UTF-8 boundary), appending a
 /// marker when clipped. Returns a `String` (lossy) for JSON embedding.
@@ -2449,15 +2443,6 @@ fn build_mcp_arguments(
     Ok(Value::Object(obj))
 }
 
-/// The README's default `$PATH` — the resolution namespace clank's package layout installs into.
-/// Kept as the documented default and the drift-guard baseline; the value actually installed is
-/// [`effective_path`], which resolves the package dirs through their env-overridable config fns.
-// Referenced only by the drift-guard test (pins `effective_path()` == this with no overrides); kept
-// as the documented baseline, so it reads as dead outside `cfg(test)`.
-#[allow(dead_code)]
-const DEFAULT_PATH: &str =
-    "/usr/local/bin:/usr/bin:/usr/lib/mcp/bin:/usr/lib/agents/bin:/usr/lib/prompts/bin:/usr/share/skills/*/bin";
-
 /// The README `$PATH` with every package dir resolved through its env-overridable config fn, so a
 /// native session pointed at writable dirs (`CLANK_MCP_BIN=~/.clank/mcp-bin` etc. — required on
 /// macOS, where `/usr/lib/...` isn't writable) RESOLVES what it installs: before this, `mcp add`
@@ -2475,9 +2460,7 @@ fn effective_path() -> String {
     )
 }
 
-/// The README's home directory. Seeded as `$HOME` on the agent (empty env) so `~` expansion and
-/// `~/.config/ask/ask.toml` resolve; native keeps the host's real `$HOME`.
-const DEFAULT_HOME: &str = "/home/user";
+use crate::config::vfs::HOME as DEFAULT_HOME;
 
 /// One-time, best-effort filesystem layout at session start.
 ///

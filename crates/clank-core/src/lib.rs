@@ -56,27 +56,17 @@ pub enum Flow {
     Exit,
 }
 
-/// Default transcript safety cap, in estimated tokens. Sized so an ordinary session accumulates
-/// freely but a runaway one is bounded before it would blow an LLM context window. This is a fixed
-/// safety limit, not a user-tunable knob: it is set once at session construction from
-/// [`configured_context_cap`] — there is no `context` subcommand to change it at runtime.
-pub const DEFAULT_CONTEXT_CAP_TOKENS: usize = 24_000;
-
-/// The environment variable that overrides [`DEFAULT_CONTEXT_CAP_TOKENS`]. On the durable agent it is
-/// injected by `golem.yaml` (`components.clank:agent.env`); natively it is an ordinary env var. Unset
-/// or non-positive ⇒ the default.
-const CONTEXT_CAP_ENV: &str = "CLANK_CONTEXT_CAP_TOKENS";
-
-/// The configured transcript safety cap: `CLANK_CONTEXT_CAP_TOKENS` when set to a positive integer,
-/// else [`DEFAULT_CONTEXT_CAP_TOKENS`]. Read once by [`session::Session::new`] and passed to
-/// [`Transcript::with_cap`]; [`Transcript::new`] itself stays on the default so unit tests are hermetic.
+/// The configured transcript safety cap: [`config::env::CONTEXT_CAP_TOKENS`] when set to a positive
+/// integer, else [`config::limits::DEFAULT_CONTEXT_CAP_TOKENS`]. Read once by
+/// [`session::Session::new`] and passed to [`Transcript::with_cap`]; [`Transcript::new`] itself stays
+/// on the default so unit tests are hermetic.
 #[must_use]
 pub fn configured_context_cap() -> usize {
-    std::env::var(CONTEXT_CAP_ENV)
+    std::env::var(config::env::CONTEXT_CAP_TOKENS)
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
         .filter(|&n| n > 0)
-        .unwrap_or(DEFAULT_CONTEXT_CAP_TOKENS)
+        .unwrap_or(config::limits::DEFAULT_CONTEXT_CAP_TOKENS)
 }
 
 /// A shell-owned, in-memory record of the session: each command typed and the output it
@@ -102,7 +92,7 @@ impl Default for Transcript {
     fn default() -> Self {
         Self {
             entries: Vec::new(),
-            cap_tokens: DEFAULT_CONTEXT_CAP_TOKENS,
+            cap_tokens: config::limits::DEFAULT_CONTEXT_CAP_TOKENS,
             last_dropped: Vec::new(),
         }
     }
@@ -253,10 +243,9 @@ impl Transcript {
             // entries are compacted — an unbounded RAM leak that `clear()` doesn't reclaim. Keep the
             // most recent bytes (the text is later read via `from_utf8_lossy`, which tolerates a
             // mid-char cut). See audit P1-3.
-            #[allow(clippy::items_after_statements)] // the cap lives beside its explanatory comment
-            const LAST_DROPPED_CAP: usize = 128 * 1024;
-            if self.last_dropped.len() > LAST_DROPPED_CAP {
-                let cut = self.last_dropped.len() - LAST_DROPPED_CAP;
+            let cap = config::limits::LAST_DROPPED_CAP;
+            if self.last_dropped.len() > cap {
+                let cut = self.last_dropped.len() - cap;
                 self.last_dropped.drain(..cut);
             }
         }

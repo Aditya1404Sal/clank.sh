@@ -1,5 +1,6 @@
-//! The AI layer: the `ask` command + LLM seam ([`ask`]), the `~/.config/ask/ask.toml` model/provider
-//! config ([`config`]), and the `model` command ([`model`]).
+//! The AI layer: the `ask` command + LLM seam ([`ask`]), the text sent to the model ([`prompts`]),
+//! the `~/.config/ask/ask.toml` model/provider config ([`config`]), and the `model` command
+//! ([`model`]).
 //!
 //! The concrete LLM provider is injected into the `Session`: the durable golem-ai-llm provider lives
 //! in `clank-agent` (wasm), and the native reqwest→Anthropic provider is [`anthropic_native`]. This
@@ -10,6 +11,7 @@ pub mod error;
 pub use error::Error;
 
 pub mod ask;
+pub mod prompts;
 // The native (reqwest) `ask` providers. wasm uses the injected durable golem-ai-llm dispatcher from
 // `clank-agent`; these fill the same seam off-Golem. cfg-gated so `reqwest` never reaches wasm.
 // `anthropic_native` maps Anthropic's Messages API; `openai_native` maps the OpenAI Chat Completions

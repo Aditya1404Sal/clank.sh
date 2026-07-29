@@ -36,12 +36,7 @@ use golem_ai_llm_ollama::{DurableOllama, OllamaConfig};
 use golem_ai_llm_openai::{DurableOpenAI, OpenAiConfig};
 use golem_ai_llm_openrouter::{DurableOpenRouter, OpenRouterConfig};
 
-/// Default output-token ceiling for an `ask` reply. Providers that require a `max_tokens` (Anthropic)
-/// get this; others treat it as an upper bound. A sensible default for a shell answer.
-const MAX_TOKENS: u32 = 4096;
-
-/// The default provider when a model id carries no `provider/` prefix.
-const DEFAULT_PROVIDER: &str = "anthropic";
+use clank_core::config::model::{DEFAULT_PROVIDER, MAX_TOKENS};
 
 /// Route one send to the durable provider named at the call site: resolve that provider's config from
 /// the agent environment (its own `*_API_KEY`), then issue one durable send. On a missing/invalid

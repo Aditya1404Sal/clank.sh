@@ -324,7 +324,7 @@ fn shell_tool_call(id: &str, command: &str) -> crate::ai::ask::AskResponse {
         text: String::new(),
         tool_calls: vec![crate::ai::ask::AskToolCall {
             id: id.to_string(),
-            name: crate::ai::ask::SHELL_TOOL.to_string(),
+            name: crate::ai::prompts::SHELL_TOOL.to_string(),
             arguments_json: serde_json::json!({ "command": command }).to_string(),
         }],
         finished_for_tools: true,
@@ -3139,7 +3139,7 @@ fn ask_returns_reply_and_feeds_transcript_as_context() {
             content.contains("what did I just echo?"),
             "user content should carry the prompt, got: {content}"
         );
-        assert_eq!(turns[0].model, crate::ai::ask::DEFAULT_MODEL);
+        assert_eq!(turns[0].model, crate::config::model::DEFAULT_MODEL);
         assert!(
             content.contains("marker_abc"),
             "transcript context should include the prior echo, got: {content}"
@@ -3185,7 +3185,7 @@ fn auto_compaction_summarizes_the_dropped_span() {
         assert!(
             turns
                 .iter()
-                .any(|t| t.system.as_deref() == Some(crate::ai::ask::SUMMARIZE_SYSTEM_PROMPT)),
+                .any(|t| t.system.as_deref() == Some(crate::ai::prompts::SUMMARIZE_SYSTEM_PROMPT)),
             "a summarize turn should have fired"
         );
     });
@@ -3227,7 +3227,7 @@ impl LogCapture {
         let lock = crate::logging::test_env_lock();
         let dir = std::env::temp_dir().join(format!("clank-sesslog-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        std::env::set_var(crate::logging::LOG_DIR_ENV, &dir);
+        std::env::set_var(crate::config::env::LOG_DIR, &dir);
         Self { _lock: lock, dir }
     }
     fn read(&self, file: crate::logging::LogFile) -> String {
@@ -3236,7 +3236,7 @@ impl LogCapture {
 }
 impl Drop for LogCapture {
     fn drop(&mut self) {
-        std::env::remove_var(crate::logging::LOG_DIR_ENV);
+        std::env::remove_var(crate::config::env::LOG_DIR);
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
@@ -3705,7 +3705,7 @@ fn repl_meta_commands() {
         session.repl_start(&args).unwrap();
         assert_eq!(
             session.repl_model().as_deref(),
-            Some(crate::ai::ask::DEFAULT_MODEL)
+            Some(crate::config::model::DEFAULT_MODEL)
         );
 
         // :model switches (anthropic/ prefix stripped).
@@ -4016,7 +4016,7 @@ fn ask_prompt_user_tool_round_trips() {
             text: String::new(),
             tool_calls: vec![crate::ai::ask::AskToolCall {
                 id: "p1".into(),
-                name: crate::ai::ask::PROMPT_USER_TOOL.into(),
+                name: crate::ai::prompts::PROMPT_USER_TOOL.into(),
                 arguments_json: serde_json::json!({ "question": "What port should I use?" })
                     .to_string(),
             }],
@@ -4060,7 +4060,7 @@ fn ask_pause_kill_aborts_the_whole_ask() {
             text: String::new(),
             tool_calls: vec![crate::ai::ask::AskToolCall {
                 id: "p1".into(),
-                name: crate::ai::ask::PROMPT_USER_TOOL.into(),
+                name: crate::ai::prompts::PROMPT_USER_TOOL.into(),
                 arguments_json: serde_json::json!({ "question": "continue?" }).to_string(),
             }],
             finished_for_tools: true,
@@ -4294,7 +4294,7 @@ fn ask_malformed_tool_args_error_and_continue() {
             text: String::new(),
             tool_calls: vec![crate::ai::ask::AskToolCall {
                 id: "c1".into(),
-                name: crate::ai::ask::SHELL_TOOL.into(),
+                name: crate::ai::prompts::SHELL_TOOL.into(),
                 arguments_json: "{".into(), // not valid JSON
             }],
             finished_for_tools: true,
@@ -5163,7 +5163,8 @@ fn path_is_the_readme_default() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
         let (out, _) = session.run_line("echo $PATH").await;
-        assert_eq!(String::from_utf8(out).unwrap(), format!("{DEFAULT_PATH}\n"));
+        let expected = format!("{}\n", crate::config::vfs::DEFAULT_PATH);
+        assert_eq!(String::from_utf8(out).unwrap(), expected);
     });
 }
 
@@ -5178,7 +5179,7 @@ fn effective_path_defaults_to_the_readme_path() {
     let _mcp = crate::mcp::config::TEST_ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert_eq!(effective_path(), DEFAULT_PATH);
+    assert_eq!(effective_path(), crate::config::vfs::DEFAULT_PATH);
 }
 
 /// A `CLANK_MCP_BIN` override lands in `$PATH`, so a native session RESOLVES what `mcp add`

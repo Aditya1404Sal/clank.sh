@@ -380,7 +380,7 @@ impl Session {
         };
         let resp = provider
             .turn(
-                Some(crate::ai::ask::SUMMARIZE_SYSTEM_PROMPT),
+                Some(crate::ai::prompts::SUMMARIZE_SYSTEM_PROMPT),
                 &[AskTurn::User(text.to_string())],
                 &[],
                 model,
@@ -431,7 +431,7 @@ impl Session {
     }
 
     /// Resolve the model id `ask` should target: `--model` (if given) > the ask.toml default > the
-    /// built-in [`crate::ai::ask::DEFAULT_MODEL`]. Returns `(bare_model_id, optional_warning)` — the
+    /// built-in [`crate::config::model::DEFAULT_MODEL`]. Returns `(bare_model_id, optional_warning)` — the
     /// `anthropic/` prefix is stripped for the provider. An unknown `provider/` prefix is an `Err`
     /// (surfaced before any model call). An ask.toml parse error is a non-fatal warning that falls
     /// back to the built-in default.
@@ -446,10 +446,10 @@ impl Session {
             let home = self.shell_home();
             match crate::ai::config::default_model(&home) {
                 Ok(Some(m)) => m,
-                Ok(None) => crate::ai::ask::DEFAULT_MODEL.to_string(),
+                Ok(None) => crate::config::model::DEFAULT_MODEL.to_string(),
                 Err(e) => {
                     warning = Some(format!("ask: {e}; using the built-in default\n"));
-                    crate::ai::ask::DEFAULT_MODEL.to_string()
+                    crate::config::model::DEFAULT_MODEL.to_string()
                 }
             }
         };
@@ -947,7 +947,7 @@ impl Session {
         };
 
         // The `prompt_user` tool: pause and ask the human directly; the answer becomes the result.
-        if call.name == crate::ai::ask::PROMPT_USER_TOOL {
+        if call.name == crate::ai::prompts::PROMPT_USER_TOOL {
             let question = match serde_json::from_str::<serde_json::Value>(&call.arguments_json) {
                 Ok(v) => match v.get("question").and_then(|q| q.as_str()) {
                     Some(s) => s.to_string(),
@@ -1011,7 +1011,7 @@ impl Session {
                 }
             }
             line
-        } else if call.name == crate::ai::ask::SHELL_TOOL {
+        } else if call.name == crate::ai::prompts::SHELL_TOOL {
             // Extract the `command` string from the tool arguments.
             match serde_json::from_str::<serde_json::Value>(&call.arguments_json) {
                 Ok(v) => match v.get("command").and_then(|c| c.as_str()) {

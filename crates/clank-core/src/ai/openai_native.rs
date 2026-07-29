@@ -16,8 +16,7 @@ use serde_json::{json, Value};
 use crate::ai::ask::{AskResponse, AskToolCall};
 use crate::ai::ask::{AskTool, AskTurn};
 
-/// Output-token ceiling for an `ask` reply — matches the Anthropic path's `MAX_TOKENS`.
-const MAX_TOKENS: u32 = 4096;
+use crate::config::model::MAX_TOKENS;
 
 /// A static description of one OpenAI-compatible provider: where to send and which env var holds the
 /// key. `requires_key` is false for local Ollama (no auth).

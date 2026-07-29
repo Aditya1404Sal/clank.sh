@@ -30,8 +30,7 @@ impl Model {
         "list and configure model providers and the default model";
 }
 
-/// The default provider when a model id carries no `provider/` prefix.
-const PROVIDER: &str = "anthropic";
+use crate::config::model::DEFAULT_PROVIDER as PROVIDER;
 
 /// Every provider clank can route `ask` to. On the Golem agent all six are reachable (via
 /// golem-ai-llm); natively, anthropic + the OpenAI-compatible family (`openai`/`grok`/`openrouter`/
@@ -52,7 +51,7 @@ pub(crate) fn is_known_provider(provider: &str) -> bool {
 }
 
 /// The built-in model catalog (an honest subset; each provider accepts any id, these are vetted
-/// examples). Haiku is the built-in default (matches [`crate::ai::ask::DEFAULT_MODEL`]) — the lightest
+/// examples). Haiku is the built-in default (matches [`crate::config::model::DEFAULT_MODEL`]) — the lightest
 /// and cheapest; opt into a bigger model or another provider explicitly.
 const CATALOG: &[&str] = &[
     "anthropic/claude-haiku-4-5-20251001",
@@ -150,9 +149,13 @@ fn run(home: &str, argv: &[String]) -> (String, String, u8) {
 fn resolved_default(home: &str) -> (String, &'static str, Option<String>) {
     match crate::ai::config::default_model(home) {
         Ok(Some(m)) => (m, "~/.config/ask/ask.toml", None),
-        Ok(None) => (crate::ai::ask::DEFAULT_MODEL.to_string(), "built-in", None),
+        Ok(None) => (
+            crate::config::model::DEFAULT_MODEL.to_string(),
+            "built-in",
+            None,
+        ),
         Err(e) => (
-            crate::ai::ask::DEFAULT_MODEL.to_string(),
+            crate::config::model::DEFAULT_MODEL.to_string(),
             "built-in",
             Some(format!("model: {e}; using the built-in default\n")),
         ),

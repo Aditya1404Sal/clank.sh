@@ -31,8 +31,7 @@ pub enum ProcError {
     NotFound(String),
 }
 
-/// The virtual root prefix.
-const PROC_ROOT: &str = "/proc/";
+use crate::config::vfs::PROC_ROOT;
 
 /// Snapshot the shell's current environment as `(key, value)` pairs — the same source `env`
 /// (`uu_env`) reads, so `/proc/<pid>/environ` and `env` never disagree. Used to populate the

@@ -20,21 +20,7 @@ fn io_err(msg: impl Into<String>) -> crate::grease::Error {
     crate::grease::Error::Io(msg.into())
 }
 
-/// Default config directory (`registries.toml` + one `<name>.toml` per installed package).
-pub const DEFAULT_ETC: &str = "/etc/grease";
-/// Default payload store (`<store>/<name>/<kind>.json`), the source of truth for derived executables.
-pub const DEFAULT_STORE: &str = "/var/lib/grease";
-/// Default prompt bin directory (`/usr/lib/prompts/bin/<name>`), already on `$PATH`.
-pub const DEFAULT_BIN: &str = "/usr/lib/prompts/bin";
-/// Default script bin directory (`/usr/bin/<name>`), already on `$PATH`.
-pub const DEFAULT_SCRIPT_BIN: &str = "/usr/bin";
-/// Default skills directory (`/usr/share/skills/<name>/`), whose `*/bin` glob is already on `$PATH`.
-pub const DEFAULT_SKILLS: &str = "/usr/share/skills";
-/// Default MCP resource mount root (`/mnt/mcp/<server>/`) — where an MCP server's resources are
-/// materialized (static files) and its dynamic/template stubs are surfaced (README:669).
-pub const DEFAULT_MCP_MOUNT: &str = "/mnt/mcp";
-/// Default Golem-agent bin directory (`/usr/lib/agents/bin/<name>`), already on `$PATH` (README:671).
-pub const DEFAULT_AGENT_BIN: &str = "/usr/lib/agents/bin";
+use crate::config::{env, vfs};
 
 /// The registry list — configured registry URLs `grease install`/`search` fetch from, in order.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,54 +48,51 @@ pub struct RegistryEntry {
 #[cfg(test)]
 pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// The config directory, honoring `$CLANK_GREASE_ETC`.
+/// Resolve one directory: the env override if set, else the default from [`crate::config::vfs`].
+fn resolve(var: &str, default: &str) -> PathBuf {
+    PathBuf::from(std::env::var(var).unwrap_or_else(|_| default.to_string()))
+}
+
+/// The config directory (`/etc/grease`), honoring `$CLANK_GREASE_ETC`.
 #[must_use]
 pub fn etc_dir() -> PathBuf {
-    PathBuf::from(std::env::var("CLANK_GREASE_ETC").unwrap_or_else(|_| DEFAULT_ETC.to_string()))
+    resolve(env::GREASE_ETC, vfs::GREASE_ETC)
 }
 
-/// The payload store directory, honoring `$CLANK_GREASE_STORE`.
+/// The payload store directory (`/var/lib/grease`), honoring `$CLANK_GREASE_STORE`.
 #[must_use]
 pub fn store_dir() -> PathBuf {
-    PathBuf::from(std::env::var("CLANK_GREASE_STORE").unwrap_or_else(|_| DEFAULT_STORE.to_string()))
+    resolve(env::GREASE_STORE, vfs::GREASE_STORE)
 }
 
-/// The prompt bin directory, honoring `$CLANK_GREASE_BIN`.
+/// The prompt bin directory (`/usr/lib/prompts/bin`), honoring `$CLANK_GREASE_BIN`.
 #[must_use]
 pub fn bin_dir() -> PathBuf {
-    PathBuf::from(std::env::var("CLANK_GREASE_BIN").unwrap_or_else(|_| DEFAULT_BIN.to_string()))
+    resolve(env::GREASE_BIN, vfs::PROMPT_BIN)
 }
 
 /// The script bin directory (`/usr/bin`), honoring `$CLANK_GREASE_SCRIPT_BIN`.
 #[must_use]
 pub fn script_bin_dir() -> PathBuf {
-    PathBuf::from(
-        std::env::var("CLANK_GREASE_SCRIPT_BIN").unwrap_or_else(|_| DEFAULT_SCRIPT_BIN.to_string()),
-    )
+    resolve(env::GREASE_SCRIPT_BIN, vfs::SCRIPT_BIN)
 }
 
 /// The skills directory (`/usr/share/skills`), honoring `$CLANK_GREASE_SKILLS`.
 #[must_use]
 pub fn skills_dir() -> PathBuf {
-    PathBuf::from(
-        std::env::var("CLANK_GREASE_SKILLS").unwrap_or_else(|_| DEFAULT_SKILLS.to_string()),
-    )
+    resolve(env::GREASE_SKILLS, vfs::SKILLS)
 }
 
 /// The MCP resource mount root (`/mnt/mcp`), honoring `$CLANK_GREASE_MCP_MOUNT`.
 #[must_use]
 pub fn mcp_mount_dir() -> PathBuf {
-    PathBuf::from(
-        std::env::var("CLANK_GREASE_MCP_MOUNT").unwrap_or_else(|_| DEFAULT_MCP_MOUNT.to_string()),
-    )
+    resolve(env::GREASE_MCP_MOUNT, vfs::MCP_MOUNT)
 }
 
 /// The Golem-agent bin directory (`/usr/lib/agents/bin`), honoring `$CLANK_GREASE_AGENT_BIN`.
 #[must_use]
 pub fn agent_bin_dir() -> PathBuf {
-    PathBuf::from(
-        std::env::var("CLANK_GREASE_AGENT_BIN").unwrap_or_else(|_| DEFAULT_AGENT_BIN.to_string()),
-    )
+    resolve(env::GREASE_AGENT_BIN, vfs::AGENT_BIN)
 }
 
 /// The `registries.toml` path.

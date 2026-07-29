@@ -19,84 +19,43 @@ use std::fmt::Write as _;
 
 use brush_parser::{tokenize_str, unquote_str, Token};
 
+use crate::ai::prompts;
 use crate::manifest::{AuthorizationPolicy, ExecutionScope, Manifest};
 use crate::registry::CommandRegistry;
 
-/// The default model `ask` targets when `--model` is not given and no ask.toml default is set.
-/// Deliberately the lightest/cheapest model — callers opt into a bigger model explicitly.
-pub const DEFAULT_MODEL: &str = "claude-haiku-4-5-20251001";
-
-/// The fixed preamble of the `ask` system prompt: who the model is and how the shell context works.
-/// [`build_system_prompt`] appends the live command surface (rendered from the registry) after it.
-pub const CORE_SYSTEM_PROMPT: &str =
-    "You are clank, an AI assistant embedded in a Unix-like shell. The user's shell transcript \
-     (commands they ran and the output) is provided as context. Answer their question concisely.";
-
-/// The system prompt for `context summarize`: a narrow, tool-less summarization instruction. Distinct
-/// from [`build_system_prompt`] (no command surface — summarize never calls tools). The transcript is
-/// passed as the single user turn's content.
-pub const SUMMARIZE_SYSTEM_PROMPT: &str =
-    "You are summarizing a shell session transcript. Produce a concise plain-prose summary of what the \
-     user did, the key command outputs, and the current state of the session. No preamble, no \
-     bullet-point boilerplate, no Markdown headers — just the summary.";
-
-/// The name of the generic shell tool the model calls to run a command line.
-pub const SHELL_TOOL: &str = "shell";
-
-/// The name of the tool the model calls to ask the human a question (the model→human back-channel).
-pub const PROMPT_USER_TOOL: &str = "prompt_user";
-
-/// The JSON schema for the `shell` tool's parameters: a single required `command` string.
-const SHELL_TOOL_SCHEMA: &str = r#"{"type":"object","properties":{"command":{"type":"string","description":"the shell command line to execute"}},"required":["command"]}"#;
-
-/// The JSON schema for the `prompt_user` tool: a required `question` string (Markdown allowed).
-const PROMPT_USER_TOOL_SCHEMA: &str = r#"{"type":"object","properties":{"question":{"type":"string","description":"the question to put to the human; Markdown is allowed"}},"required":["question"]}"#;
-
-/// The tool definitions exposed to the model each turn: the generic [`SHELL_TOOL`] (executes a command
-/// line in the clank session — pipes/redirects/`$(...)` come free) and [`PROMPT_USER_TOOL`] (the
-/// model→human back-channel; pauses the loop for an answer). Per-command and MCP tools arrive later.
-/// Takes the registry so future increments can derive tools from it without a signature change.
+/// The tool definitions exposed to the model each turn: the generic [`prompts::SHELL_TOOL`] (executes
+/// a command line in the clank session — pipes/redirects/`$(...)` come free) and
+/// [`prompts::PROMPT_USER_TOOL`] (the model→human back-channel; pauses the loop for an answer).
+/// Per-command and MCP tools arrive later. Takes the registry so future increments can derive tools
+/// from it without a signature change.
 #[must_use]
 pub fn build_ask_tools(_registry: &CommandRegistry) -> Vec<AskTool> {
     vec![
         AskTool {
-            name: SHELL_TOOL.to_string(),
-            description: "Execute one shell command line in the clank session and return its \
-                          stdout, stderr, and exit code. Supports pipes, redirects, and command \
-                          substitution."
-                .to_string(),
-            parameters_schema: SHELL_TOOL_SCHEMA.to_string(),
+            name: prompts::SHELL_TOOL.to_string(),
+            description: prompts::SHELL_TOOL_DESCRIPTION.to_string(),
+            parameters_schema: prompts::SHELL_TOOL_SCHEMA.to_string(),
         },
         AskTool {
-            name: PROMPT_USER_TOOL.to_string(),
-            description: "Ask the human user a question and get their answer. Use this to gather \
-                          information you need, confirm intent, or collect a missing value before \
-                          proceeding. The user's typed reply is returned to you."
-                .to_string(),
-            parameters_schema: PROMPT_USER_TOOL_SCHEMA.to_string(),
+            name: prompts::PROMPT_USER_TOOL.to_string(),
+            description: prompts::PROMPT_USER_TOOL_DESCRIPTION.to_string(),
+            parameters_schema: prompts::PROMPT_USER_TOOL_SCHEMA.to_string(),
         },
     ]
 }
 
-/// Build the `ask` system prompt: the fixed [`CORE_SYSTEM_PROMPT`] preamble plus the live command
-/// surface rendered from the registry. Only `Subprocess`-scoped commands are listed — per the README,
-/// `shell-internal`/`parent-shell` commands are not part of the model's tool surface (they mutate
-/// shell state a subprocess can't reach). Each line carries an authorization marker so the model knows
-/// which commands run freely vs. which come back needing confirmation.
+/// Build the `ask` system prompt: the fixed [`prompts::CORE_SYSTEM_PROMPT`] preamble plus the live
+/// command surface rendered from the registry. Only `Subprocess`-scoped commands are listed — per the
+/// README, `shell-internal`/`parent-shell` commands are not part of the model's tool surface (they
+/// mutate shell state a subprocess can't reach). Each line carries an authorization marker so the
+/// model knows which commands run freely vs. which come back needing confirmation.
 ///
 /// Shared with `/proc/clank/system-prompt` (inspectable at runtime) so the model's instructions and
 /// the user-visible view are the same bytes.
 #[must_use]
 pub fn build_system_prompt(registry: &CommandRegistry) -> String {
-    let mut out = String::from(CORE_SYSTEM_PROMPT);
-    out.push_str(
-        "\n\nYou have two tools. `shell` runs a single command line in this session and returns its \
-         stdout, stderr, and exit code — use it to inspect and act on the system; compose with pipes, \
-         redirects, and $(...) as needed. `prompt_user` asks the human a question and returns their \
-         answer — use it to gather information or confirm intent.\n\nAvailable commands (authorization \
-         in brackets; [confirm] and [sudo-only] commands pause for the user's approval unless the user \
-         ran `sudo ask`, which pre-approves [confirm] commands):\n",
-    );
+    let mut out = String::from(prompts::CORE_SYSTEM_PROMPT);
+    out.push_str(prompts::TOOLS_PREAMBLE);
 
     let mut rows: Vec<(&str, &str, &str)> = registry
         .iter()
@@ -115,13 +74,7 @@ pub fn build_system_prompt(registry: &CommandRegistry) -> String {
         let _ = writeln!(out, "  {name} — {synopsis}{marker}");
     }
 
-    out.push_str(
-        "\nNotes: `context`, `cd`, `export`, `kill`, and other shell-internal commands are NOT \
-         available through the `shell` tool (they mutate shell state a subprocess can't reach); to \
-         reach the human, use the `prompt_user` tool, not a `prompt-user` shell line. `ask` cannot \
-         call itself. To change directory or set a variable for a command, do it inside a single line \
-         (e.g. `cd /tmp && ls`).",
-    );
+    out.push_str(prompts::COMMANDS_FOOTER);
     out
 }
 
@@ -148,23 +101,16 @@ pub fn build_system_prompt_with_capabilities(
 ) -> String {
     let mut out = build_system_prompt(registry);
     append_mcp_tools(&mut out, mcp);
-    let prompts = grease.ask_tool_definitions();
-    if !prompts.is_empty() {
-        out.push_str(
-            "\n\nInstalled prompt tools (call them by their exact tool name; each runs a stored prompt \
-             through the model and requires confirmation unless the user ran `sudo ask`):\n",
-        );
-        for t in &prompts {
+    let prompt_tools = grease.ask_tool_definitions();
+    if !prompt_tools.is_empty() {
+        out.push_str(prompts::PROMPT_TOOLS_HEADER);
+        for t in &prompt_tools {
             let _ = writeln!(out, "  {} — {}", t.name, t.description);
         }
     }
     let skills = grease.skills();
     if !skills.is_empty() {
-        out.push_str(
-            "\n\nInstalled skills (capability-context packages, not callable tools — consult the \
-             skill's documents under /usr/share/skills/<name>/ and use its bundled $PATH scripts when \
-             relevant):\n",
-        );
+        out.push_str(prompts::SKILLS_HEADER);
         for s in &skills {
             let intended = s
                 .intended_use
@@ -181,10 +127,7 @@ pub fn build_system_prompt_with_capabilities(
 fn append_mcp_tools(out: &mut String, mcp: &crate::mcp::state::McpState) {
     let mcp_tools = mcp.ask_tool_definitions();
     if !mcp_tools.is_empty() {
-        out.push_str(
-            "\n\nInstalled MCP tools (call them by their exact tool name; they run over HTTP and \
-             require confirmation unless the user ran `sudo ask`):\n",
-        );
+        out.push_str(prompts::MCP_TOOLS_HEADER);
         for t in &mcp_tools {
             let _ = writeln!(out, "  {} — {}", t.name, t.description);
         }
@@ -396,7 +339,8 @@ pub struct AskArgs {
     /// The prompt text (the non-flag words, space-joined).
     pub prompt: String,
     /// The model id from `--model <id>`, or `None` to fall back to the ask.toml default / built-in.
-    /// The `Session` resolves the final id (`--model` > ask.toml > [`DEFAULT_MODEL`]).
+    /// The `Session` resolves the final id (`--model` > ask.toml >
+    /// [`crate::config::model::DEFAULT_MODEL`]).
     pub model: Option<String>,
     /// `--fresh` / `--no-transcript`: send no transcript context.
     pub fresh: bool,
@@ -550,29 +494,22 @@ pub fn user_content_with_stdin(transcript: &str, prompt: &str, stdin: Option<&st
     let mut out = if transcript.is_empty() {
         prompt.to_string()
     } else {
-        format!("# Shell transcript (context)\n{transcript}\n# Question\n{prompt}")
+        let (t_hdr, q_hdr) = (prompts::TRANSCRIPT_HEADER, prompts::QUESTION_HEADER);
+        format!("{t_hdr}\n{transcript}\n{q_hdr}\n{prompt}")
     };
     if let Some(input) = stdin {
-        let _ = write!(out, "\n# Piped input (stdin)\n{input}");
+        let _ = write!(out, "\n{}\n{input}", prompts::STDIN_HEADER);
     }
     out
 }
 
-/// The JSON-mode addendum appended to the system prompt when `ask --json` is in effect: the model's
-/// FINAL answer must be one valid JSON value and nothing else. The `Session` still validates the
-/// output and enforces the exit-6 contract, but the instruction makes the happy path reliable.
-pub const JSON_SYSTEM_ADDENDUM: &str =
-    "\n\nOUTPUT FORMAT: Your final answer MUST be a single valid JSON value (object, array, string, \
-     number, boolean, or null) and NOTHING else — no prose, no explanation, no Markdown code fences. \
-     Emit only the JSON.";
-
-/// Append [`JSON_SYSTEM_ADDENDUM`] to `system` when `json` is set; return `system` unchanged
+/// Append [`prompts::JSON_SYSTEM_ADDENDUM`] to `system` when `json` is set; return `system` unchanged
 /// otherwise. Kept out of [`build_system_prompt`] so `/proc/clank/system-prompt` (the human-facing,
 /// non-JSON view) is unaffected.
 #[must_use]
 pub fn with_json_addendum(system: String, json: bool) -> String {
     if json {
-        system + JSON_SYSTEM_ADDENDUM
+        system + prompts::JSON_SYSTEM_ADDENDUM
     } else {
         system
     }

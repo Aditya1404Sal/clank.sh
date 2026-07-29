@@ -63,11 +63,10 @@ async fn run_plain(session: &mut Session) -> Result<(), Box<dyn std::error::Erro
         // typed the way every shell user expects. Ctrl-D mid-construct discards the construct, not
         // the shell. The cap is a backstop against a pathological feed; overflowing it falls
         // through to eval, where the Session's incomplete-input check answers exit 2 honestly.
-        #[allow(clippy::items_after_statements)] // the cap lives beside its explanatory comment
-        const MAX_CONTINUATION_LINES: usize = 512;
+        let max_continuations = crate::config::limits::MAX_CONTINUATION_LINES;
         let mut continuations = 0usize;
         let mut aborted = false;
-        while session.line_is_incomplete(&line_str) && continuations < MAX_CONTINUATION_LINES {
+        while session.line_is_incomplete(&line_str) && continuations < max_continuations {
             write_stdout(b"> ")?;
             line.clear();
             if read_line_raw(&mut line)? == 0 {
@@ -132,7 +131,7 @@ async fn run_interactive(session: &mut Session) -> Result<(), Box<dyn std::error
     use reedline::Signal;
 
     // Backstop against a pathological continuation feed (matches the plain loop).
-    const MAX_CONTINUATION_LINES: usize = 512;
+    use crate::config::limits::MAX_CONTINUATION_LINES;
 
     let mut editor = build_editor();
     let mut last_ok = true;

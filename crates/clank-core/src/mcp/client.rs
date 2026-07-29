@@ -19,8 +19,7 @@ use serde_json::Value;
 /// The MCP protocol version clank advertises (Streamable HTTP).
 pub const PROTOCOL_VERSION: &str = "2025-03-26";
 
-/// Max `tools/list` pages to follow (bounds a misbehaving server's pagination).
-const MAX_TOOL_PAGES: usize = 16;
+use crate::config::limits::MAX_TOOL_PAGES;
 
 // ---- transport seam -------------------------------------------------------------------------------
 

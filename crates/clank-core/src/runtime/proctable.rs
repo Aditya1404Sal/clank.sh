@@ -41,11 +41,7 @@ pub const SHELL_ROOT_PID: u32 = 1;
 /// The first PID handed out to a real (spawned) process. PID 1 is reserved for the root.
 pub const FIRST_PID: u32 = 2;
 
-/// The most rows the table retains. `ps`/`/proc` present a bounded recent view — beyond this, the
-/// oldest terminal (`Z`) rows are evicted ([`ProcessTable::prune`]) so a long-lived durable agent
-/// (thousands of eval lines, fire-and-forget invocations) can't grow the table without limit.
-/// Generous enough that normal interactive use never evicts a row still of interest.
-const MAX_ROWS: usize = 512;
+use crate::config::limits::MAX_PROC_ROWS as MAX_ROWS;
 
 /// Process state, the README's five. `R` (running), `Z` (completed), `P` (prompt-paused), and `S`
 /// (a background job parked on async work) are reachable; `T` remains defined-but-unreachable

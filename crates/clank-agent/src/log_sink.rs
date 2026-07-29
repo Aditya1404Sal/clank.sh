@@ -40,7 +40,7 @@ use clank_core::logging::{LogFile, LogSink, bound_tail, log_dir};
 ///
 /// Shared with the native append path's rotation, so both targets bound the same way by construction
 /// rather than by two constants that happen to match.
-use clank_core::logging::MAX_LOG_BYTES;
+use clank_core::config::limits::MAX_LOG_BYTES;
 
 /// A replay-safe log sink: buffers each log file's recent lines in memory (bounded, rolling) and rewrites
 /// the whole file on every append via idempotent `std::fs::write`.

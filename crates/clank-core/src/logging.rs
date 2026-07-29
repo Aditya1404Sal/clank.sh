@@ -32,17 +32,15 @@ use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Default log directory (README filesystem layout).
-pub const DEFAULT_LOG_DIR: &str = "/var/log";
+pub(crate) use crate::config::env::LOG_DIR as LOG_DIR_ENV;
+use crate::config::limits::MAX_LOG_BYTES;
 
-/// The one env override, mirroring `greaseconfig`'s `CLANK_GREASE_*` seams — lets tests point the log
-/// layer at a temp dir instead of the real `/var/log`.
-pub const LOG_DIR_ENV: &str = "CLANK_LOG_DIR";
-
-/// The log directory: `$CLANK_LOG_DIR` if set, else `/var/log`.
+/// The log directory: [`crate::config::env::LOG_DIR`] if set, else [`crate::config::vfs::LOG_DIR`].
 #[must_use]
 pub fn log_dir() -> PathBuf {
-    PathBuf::from(std::env::var(LOG_DIR_ENV).unwrap_or_else(|_| DEFAULT_LOG_DIR.to_string()))
+    PathBuf::from(
+        std::env::var(LOG_DIR_ENV).unwrap_or_else(|_| crate::config::vfs::LOG_DIR.to_string()),
+    )
 }
 
 /// A process-wide lock any test that mutates the global `CLANK_LOG_DIR` env var must hold — shared
@@ -133,10 +131,6 @@ fn rotate_if_oversized(path: &std::path::Path) {
         let _ = std::fs::write(path, contents);
     }
 }
-
-/// Cap on a single log file. Shared by the append path's rotation and the agent's rolling tail, so
-/// the two targets bound the same way.
-pub const MAX_LOG_BYTES: usize = 256 * 1024;
 
 /// The four log files. Each maps to a fixed filename under [`log_dir`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

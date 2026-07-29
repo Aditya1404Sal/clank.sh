@@ -35,11 +35,9 @@ impl std::fmt::Debug for ClusterConfig {
     }
 }
 
-/// Environment variables that configure the native cluster path.
-const ENV_URL: &str = "GOLEM_URL";
-const ENV_TOKEN: &str = "GOLEM_TOKEN";
-const ENV_APP: &str = "GOLEM_APP";
-const ENV_ENV: &str = "GOLEM_ENV";
+use crate::config::env::{
+    GOLEM_APP as ENV_APP, GOLEM_ENV as ENV_ENV, GOLEM_TOKEN as ENV_TOKEN, GOLEM_URL as ENV_URL,
+};
 
 /// Load the cluster config from the environment. Returns `None` (native stays honest-error) unless at
 /// least `GOLEM_URL` is set; the app/env default to `default`/`local` (the usual local-server names)

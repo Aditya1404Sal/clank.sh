@@ -11,10 +11,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// Default config directory (one `<name>.toml` per server).
-pub const DEFAULT_ETC: &str = "/etc/mcp";
-/// Default generated-command directory (`/usr/lib/mcp/bin/<server>`), already on `$PATH`.
-pub const DEFAULT_BIN: &str = "/usr/lib/mcp/bin";
+use crate::config::{env, vfs};
 
 /// A parsed `<server>.toml`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,16 +91,16 @@ impl McpServerConfig {
 #[cfg(test)]
 pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// The config directory, honoring `$CLANK_MCP_ETC`.
+/// The config directory (`/etc/mcp`), honoring `$CLANK_MCP_ETC`.
 #[must_use]
 pub fn etc_dir() -> PathBuf {
-    PathBuf::from(std::env::var("CLANK_MCP_ETC").unwrap_or_else(|_| DEFAULT_ETC.to_string()))
+    PathBuf::from(std::env::var(env::MCP_ETC).unwrap_or_else(|_| vfs::MCP_ETC.to_string()))
 }
 
-/// The generated-command directory, honoring `$CLANK_MCP_BIN`.
+/// The generated-command directory (`/usr/lib/mcp/bin`), honoring `$CLANK_MCP_BIN`.
 #[must_use]
 pub fn bin_dir() -> PathBuf {
-    PathBuf::from(std::env::var("CLANK_MCP_BIN").unwrap_or_else(|_| DEFAULT_BIN.to_string()))
+    PathBuf::from(std::env::var(env::MCP_BIN).unwrap_or_else(|_| vfs::MCP_BIN.to_string()))
 }
 
 /// The config path for a server name.

@@ -12,8 +12,7 @@
 
 use clank_core::mcp::client::{HttpResponse, McpHttp};
 
-/// Cap on a single response body (bounds a runaway/held-open server).
-const MAX_BODY: usize = 4 * 1024 * 1024;
+use clank_core::config::limits::MAX_HTTP_BODY as MAX_BODY;
 
 /// An [`McpHttp`] backed by the durable `wstd` client.
 pub(crate) struct WstdMcpHttp;
