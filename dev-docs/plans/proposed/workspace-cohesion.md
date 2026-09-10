@@ -543,4 +543,43 @@ stay 0.
 
 ## Deviations noted during implementation
 
-_None yet._
+### Ticket 1 — merged 2026-09-11 (`dadfb15`), follow-up fix `ec1a870`
+
+**The ticket badly overstated `session/tests.rs`.** It budgeted the bulk of the work for
+"redistributing rc-1's 1,675 lines of test changes across main's eleven modules." Measuring first
+showed 186 test functions on both sides with none added or removed, only two rc-1 commits touching
+the file (one a repo-wide `cargo fmt` sweep), and the other's six-line `set_context_cap` change
+already present in main's split. The correct action was `git rm`. **Lesson for the remaining
+tickets: measure the delta before planning to port it.**
+
+**The ticket understated everything else.** It was scoped as conflict resolution; it was an
+architectural re-convergence. main had built five typed-error modules, a `config` module, multi-
+provider LLM support, `panicreport`, `session/env`/`session/streams`, and a resilience conformance
+tier. Consequence for the plan: **a large part of ticket 13 is already delivered** — re-scope it to
+the seams main did not convert rather than all five.
+
+**`ask` now differs by target, which the design did not anticipate.** main's multi-provider routing
+needs `golem-ai-llm` (hard-pins `golem-rust = "=2.1.0"`, cannot link here), but main's *native*
+dispatcher is pure reqwest — so native `ask` gained openai/grok/openrouter/ollama while the agent
+keeps direct-HTTP Anthropic. Aditya approved "Anthropic-only"; the constraint turned out to bind
+only the agent side. The follow-up commit adds the provider-prefix split and an honest rejection on
+the agent, because `model` accepts every provider clank knows and the transport speaks one.
+
+**Parallel conflict resolution worked and should be reused.** Five sonnet agents took 22 of the 43
+files under one written policy. Three caught defects invisible from a conflict hunk in isolation: an
+E0592 duplicate definition, an E0255 collision, and — the valuable one — rc-1's `if let Code(want)`
+in `matcher.rs`, which would have made `exit nonzero` a **silent no-op**, quietly neutering the
+resilience tier the merge was partly for. All three required knowing what the *unconflicted* code
+around them expected. This is the argument for `assisted`, not `mechanical`, on merge-shaped work.
+
+**Ticket 4 is now the highest-priority item in P1.** The `golem build` staleness blind spot bit
+THREE times in one session: it fabricated an 80/272 failure against a binary that never contained
+the code under test, and later reported a correct fix as failing because the fix was never deployed.
+Both times the tally looked authoritative. It is documented in four markdown files and still bit
+three times — a comment is not a mechanism. Raise ticket 4 above tickets 2, 3, 5 and 6.
+
+**One assertion in the e2e was pinning a security hole**, which is worth watching for elsewhere:
+`nested curl errors honestly` asserted that `echo x | xargs curl` slips past the authz gate. main had
+fixed exactly that bypass (`xargs` re-enters via `run_string`, never passing back through the gate —
+`echo /path | xargs rm` deleted the file at exit 0 while bare `rm` paused). A test can encode a bug
+as expected behaviour; when a merge "breaks" a test, check which side is right before restoring it.
