@@ -40,6 +40,28 @@ impl AskProvider for DurableAnthropicProvider {
         tools: &[AskTool],
         model: &str,
     ) -> AskResponse {
+        // `provider/model` → (provider, bare). No prefix ⇒ the default provider. The Messages API
+        // wants the BARE id: sending `anthropic/claude-…` verbatim is a 404 from Anthropic, and
+        // `model default anthropic/claude-sonnet-4-5` writes exactly that prefixed form into
+        // ask.toml. The native dispatcher (`clank_core::ai::llm_native`) splits the same way.
+        let (provider, bare) = match model.split_once('/') {
+            Some((p, m)) => (p, m),
+            None => (clank_core::config::model::DEFAULT_PROVIDER, model),
+        };
+        // `model` accepts every provider clank knows, but this transport speaks only Anthropic —
+        // the multi-provider dispatcher depends on golem-ai-llm, which hard-pins golem-rust 2.1.0
+        // and cannot be linked on this SDK track. Say so, rather than posting an openai model id to
+        // Anthropic and surfacing whatever HTTP error comes back.
+        if provider != clank_core::config::model::DEFAULT_PROVIDER {
+            return AskResponse::error(format!(
+                "ask: provider '{provider}' is not available on this agent build (only \
+                 '{}' is); choose an {} model, or run `ask` natively where every provider is \
+                 wired\n",
+                clank_core::config::model::DEFAULT_PROVIDER,
+                clank_core::config::model::DEFAULT_PROVIDER,
+            ));
+        }
+
         // The API key comes from ANTHROPIC_API_KEY in the agent environment (golem.yaml). Empty/unset ⇒
         // report not-configured instead of sending an unauthenticated request.
         let api_key = match std::env::var("ANTHROPIC_API_KEY") {
@@ -52,7 +74,7 @@ impl AskProvider for DurableAnthropicProvider {
             }
         };
 
-        let body_bytes = serialize_request(&build_request(system, history, tools, model));
+        let body_bytes = serialize_request(&build_request(system, history, tools, bare));
 
         match send(&api_key, body_bytes).await {
             Ok((status, text)) if (200..300).contains(&status) => parse_response_body(&text),

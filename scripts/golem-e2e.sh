@@ -742,6 +742,13 @@ expect_contains "ls /bin lists ask"                   'ls /bin'           'ask'
 expect_contains "ask --help prints help (no confirm)" 'ask --help'        'send the current shell transcript'
 expect_contains "ask --help documents --json"         'ask --help'        '--json'
 expect_contains "ask --help documents piped stdin"    'ask --help'        'Piped input'
+# The agent's ask transport is Anthropic-only: the multi-provider dispatcher depends on
+# golem-ai-llm, which hard-pins golem-rust 2.1.0 and cannot link on this SDK track. `model` still
+# ACCEPTS every provider clank knows, so the provider check must live in the transport — and it must
+# fire before the API-key lookup, which is why this asserts without a key. Without it the agent
+# posted `openai/gpt-4o` to Anthropic and surfaced whatever HTTP error came back.
+expect_contains "agent rejects a non-anthropic provider" 'sudo ask --model openai/gpt-4o probe' \
+  'not available on this agent build'
 # ask inside a command substitution hits the honest stub with a pointer to the working forms.
 # No API key needed — the stub fires before any model call (it can't run under Brush's nested runtime).
 ASK_SUBST="$(eval_json eval '"echo $(ask \"q\")"')"
@@ -876,8 +883,11 @@ expect_contains "model default sets sonnet"           'model default anthropic/c
 expect_contains "ask.toml persisted the default"      'cat ~/.config/ask/ask.toml'  'claude-sonnet-4-5'
 expect_contains "list now marks sonnet default"       'model list'  '* anthropic/claude-sonnet-4-5'
 expect_contains "model info reports default"          'model info claude-sonnet-4-5'  'default:   yes'
-expect_contains "model add is an honest key error"    'model add anthropic --key sk-fake'  'ANTHROPIC_API_KEY'
-expect_contains "unknown provider is rejected"        'model default openai/gpt-4o'  "unknown provider 'openai'"
+# The agent stores no provider keys — they arrive as env vars through golem.yaml. The message is
+# provider-generic now (it used to name ANTHROPIC_API_KEY, back when anthropic was the only provider).
+expect_contains "model add is an honest key error"    'model add anthropic --key sk-fake'  'not stored on the agent'
+# `openai` IS a known provider now, so reach for one that genuinely is not.
+expect_contains "unknown provider is rejected"        'model default nosuchvendor/x'  "unknown provider 'nosuchvendor'"
 # Restore the built-in default (haiku, the lightest model) so any later ask stays cheap.
 expect_contains "restore haiku default"               'model default anthropic/claude-haiku-4-5-20251001'  'set to anthropic/claude-haiku-4-5-20251001'
 
@@ -1534,8 +1544,19 @@ expect_contains "context show composes in \$( )"   'B=$(context show); echo "$B"
 expect "context show pipes"                   'context show | head -n 1 | wc -l'       $'1'
 NESTED_ASK="$(eval_json eval '"echo got=$(ask q)"')"
 expect_eval "nested ask errors honestly"   "$NESTED_ASK" '.stderr | contains("top-level command")' 'true'
-NESTED_CURL="$(eval_json eval '"echo x | xargs curl"')"
+# Genuine nesting — inside `$(...)`, curl is unreachable from the Session-layer interception, so the
+# registered Brush stub answers with the honest limitation instead of a misleading exec failure.
+NESTED_CURL="$(eval_json eval '"echo got=$(curl example.com)"')"
 expect_eval "nested curl errors honestly"  "$NESTED_CURL" '.stderr | contains("top-level command")' 'true'
+# `xargs` is NOT nesting for authorization purposes — it re-enters via `run_string`, straight into
+# Brush, never passing back through the authz gate. So the gate resolves the wrapper's payload and
+# gates THAT: `echo x | xargs curl` must surface curl's confirmation, not slip past it. (Before this
+# was fixed, `echo /path | xargs rm` deleted the file at exit 0 while bare `rm` paused — the same
+# bypass, with teeth.) Abort the prompt so the pending question doesn't block what follows.
+XARGS_CURL="$(eval_json eval '"echo x | xargs curl"')"
+expect_eval "xargs-wrapped curl is gated, not smuggled past authz" \
+  "$XARGS_CURL" '.pending_prompt.question | contains("permission")' 'true'
+eval_json abort_prompt >/dev/null
 
 # ============================================================================
 # 3. Durability — write in one invocation, read in a SEPARATE invocation
