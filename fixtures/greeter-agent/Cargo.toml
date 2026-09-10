@@ -24,5 +24,5 @@ golem-rust = { path = "/Users/adityasalunkhe/Desktop/clank.sh/golem-stuff/golem/
 
 # The embedded shell surface (eval/answer_prompt/abort_prompt + EvalResult), making this the second
 # implementer of the contract `golem agent shell` drives. Deliberately WITHOUT the `providers`
-# feature: the log-sink-only tier proves the minimal correct embed (no wstd, no env vars).
+# feature: the log-sink-only tier proves the minimal correct embed (no HTTP client, no env vars).
 clank-embed = { path = "../../crates/clank-embed" }

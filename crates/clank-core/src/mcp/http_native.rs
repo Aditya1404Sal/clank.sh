@@ -1,6 +1,6 @@
 //! The native (reqwest) implementation of the [`McpHttp`](crate::mcp::client::McpHttp) transport.
 //!
-//! On the Golem agent this seam is filled by `clank-agent`'s `wstd` client; natively there was no
+//! On the Golem agent this seam is filled by `clank-embed`'s WASI-HTTP client; natively there was no
 //! transport, so MCP and `grease`-over-network degraded to an honest "not configured" error. This
 //! module fills the seam off-Golem — and because `grease` shares the same `mcp_http` field on the
 //! `Session`, one impl unblocks both MCP tool calls and every `grease` registry/install/update fetch.

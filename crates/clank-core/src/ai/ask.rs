@@ -317,8 +317,8 @@ impl AskOutcome {
 /// The LLM transport seam. Implemented in `clank-agent` by the durable Anthropic provider and injected
 /// into the `Session`; absent on native. **Async** — `golem-ai-llm`'s `LlmProvider::send` is an
 /// `async fn`, so `turn` is too; it is awaited from `Session::run_ask` (under `run_command`), one level
-/// under the Golem SDK's `wstd::block_on` where the durable-execution context and the WASI-HTTP reactor
-/// are live (the same "await at the Session layer, never through the nested Brush runtime" rule as
+/// under the Golem SDK's executor, where the durable-execution context is live and WASI-HTTP futures
+/// actually complete (the same "await at the Session layer, never through the nested Brush runtime" rule as
 /// curl/wget).
 ///
 /// The provider is a **single-turn transport**: it sends one turn of the conversation (system +

@@ -220,6 +220,15 @@ It cost nothing to reach for: **`wstd` was already a direct dependency** at `=0.
 (`crates/clank-agent/Cargo.toml:19`, unchanged from `main`). **Net: the spike removes two dependencies
 and adds none.**
 
+> **Update (2026-09-11) — the transport changed, the argument did not.** After the rebase onto
+> upstream main, golem-rust drives agent methods with wit-bindgen's async runtime and has dropped
+> `wstd` entirely; wstd's client resolves its reactor from a thread-local only `wstd::block_on`
+> installs, so every request panicked `Reactor::current must be called within a wstd runtime` and
+> trapped the agent. All three transports (`whttp`, `mcp_http`, `ask_provider`) now use
+> **`wasi-fetch = "=0.2.0"`** over the wasip3 WASI-HTTP bindings — the client upstream uses in its
+> own agent components. The reasoning above is untouched: durability still comes from the
+> transport being WASI-HTTP recorded in the oplog, not from a wrapper crate.
+
 **The wire module is the interesting part.** The request/response mapping (neutral
 `AskTurn`/`AskTool`/`AskToolCall`/`AskToolResult` ↔ Anthropic JSON) was already written and tested — but
 privately, inside the native-only provider. It was extracted verbatim into `anthropic_wire`, which is
@@ -356,7 +365,10 @@ sandbox. That is the credibility proof that the surface is a contract, not a cla
 - `derive(Schema)` needs golem-rust's **default features** (`macro` is the load-bearing one). Do
   **NOT** enable `export_golem_agentic` in a library crate — that feature compiles the SDK's own
   `Component` export; only the leaf agent crate enables it, exactly once.
-- `wstd` must stay pinned `=0.6.5` in lockstep with golem-rust's own hard pin.
+- ~~`wstd` must stay pinned `=0.6.5` in lockstep with golem-rust's own hard pin.~~ **No longer true
+  as of 2026-09-11:** golem-rust has no `wstd` dependency at all, and wstd's client cannot run under
+  its executor. The HTTP client is now `wasi-fetch = "=0.2.0"`, pinned exactly because upstream pins
+  it exactly in its own agent components and in the app template the CLI generates.
 - One agent instance = one worker = **one isolated VFS** (the FS dir derives from the agent-id
   string, which embeds the type name + ctor params). A sidecar "shell agent type" can never see the
   main agent's files — the shell must be methods on the agent's own trait. That is WHY this is a

@@ -121,7 +121,7 @@ if ! golem -Y build 2>&1 | tail -4; then
 fi
 
 step "Starting throwaway golem server (data dir: $DATA_DIR)"
-golem server run --clean --router-port "$ROUTER_PORT" --data-dir "$DATA_DIR" --ports-file "$PORTS_FILE" \
+golem -Y server run --clean --router-port "$ROUTER_PORT" --data-dir "$DATA_DIR" --ports-file "$PORTS_FILE" \
   >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 note "server pid $SERVER_PID"
@@ -143,20 +143,30 @@ if ! golem -Y deploy 2>&1 | tail -5; then
   exit 1
 fi
 
+# Under `golem:agent@2.0.0` the CLI's JSON key is `resultJson` (not `result_json`) and the record
+# arrives as a POSITIONAL schema-value-tree — field names live in the type graph, not the value, so
+# `.value.stdout` does not exist. Fields come back in declaration order as tagged `{kind, value}`
+# nodes: [0]=stdout [1]=stderr [2]=exit_code. Both mismatches fail SILENTLY (the grep matches no
+# line, jq finds no path), so every command reads back an empty string and the agent looks dead
+# when it is fine — which is exactly how this script misreported a healthy agent. Declaration order
+# in `clank_agent.rs`'s `EvalResult` is load-bearing here, as it is in golem-e2e.sh.
+EVAL_REMAP='.resultJson.value.value.fields as $f
+  | { stdout: $f[0].value, stderr: $f[1].value, exit_code: $f[2].value }'
+
 # --- invoke `eval` for a command and print its stdout+stderr merged as text (the agent's single
 #     entry point; this flattens the structured EvalResult to what a terminal would show) ---
 run_line() {
   local cmd="$1"
   golem agent invoke -q --format json "$AGENT_ID" eval "\"${cmd//\"/\\\"}\"" 2>>"$SERVER_LOG" \
-    | grep '"result_json"' | tail -1 \
-    | jq -r '(.result_json.value.stdout // "") + (.result_json.value.stderr // "")' 2>/dev/null
+    | grep '"resultJson"' | tail -1 \
+    | jq -r "$EVAL_REMAP | (.stdout // \"\") + (.stderr // \"\")" 2>/dev/null
 }
 
 # --- invoke eval for a command and return the structured EvalResult JSON (stdout/stderr/exit split) ---
 eval_json() {
   local cmd="$1"
   golem agent invoke -q --format json "$AGENT_ID" eval "\"${cmd//\"/\\\"}\"" 2>>"$SERVER_LOG" \
-    | grep '"result_json"' | tail -1 | jq -c '.result_json.value // empty' 2>/dev/null
+    | grep '"resultJson"' | tail -1 | jq -c "$EVAL_REMAP" 2>/dev/null
 }
 
 step "Probing ${#CMDS[@]} command(s) on agent $AGENT_ID"

@@ -3,15 +3,16 @@
 //! **dev-SDK build.** The original provider used `golem-ai-llm` / `golem-ai-llm-anthropic` (crates.io),
 //! which hard-pin `golem-rust = "=2.1.0"` — irreconcilable with the dev SDK this branch builds against.
 //! Rather than wait for a dev-SDK-compatible golem-ai-llm, this provider now talks to Anthropic's
-//! `POST /v1/messages` directly over `wstd::http` — the same durable HTTP client `WstdMcpHttp` uses for
-//! MCP and `wcurl`/`waget` use for `curl`/`wget`. On Golem the runtime records the HTTP call in the
-//! oplog and replays it on recovery, so the LLM response is not re-billed after a restart — the same
-//! durability guarantee `golem-ai-llm`'s `DurableAnthropic` provided, obtained from the transport
-//! instead of a wrapper crate.
+//! `POST /v1/messages` directly over `wasi-fetch` — the same durable WASI-HTTP client
+//! [`WasiFetchMcpHttp`](crate::mcp_http::WasiFetchMcpHttp) uses for MCP and `wcurl`/`waget` use for
+//! `curl`/`wget`. On Golem the runtime records the HTTP call in the oplog and replays it on
+//! recovery, so the LLM response is not re-billed after a restart — the same durability guarantee
+//! `golem-ai-llm`'s `DurableAnthropic` provided, obtained from the transport instead of a wrapper
+//! crate.
 //!
 //! The request/response wire mapping (neutral `AskTurn`/`AskTool`/… ↔ Anthropic JSON) is shared with
 //! the native reqwest provider via [`clank_core::ai::anthropic_wire`], so the two can't drift. This
-//! module is just the `wstd` transport + key resolution around it.
+//! module is just the WASI-HTTP transport + key resolution around it.
 //!
 //! **API key**: read from `ANTHROPIC_API_KEY` in the agent environment (supplied through golem.yaml at
 //! deploy time). Absent/empty ⇒ an honest "not configured" [`AskResponse`], so `ask` degrades cleanly
@@ -27,7 +28,7 @@ use clank_core::ai::ask::{AskProvider, AskResponse, AskTool, AskTurn};
 /// hundred KB of JSON; 8 MiB is generous headroom.
 const MAX_BODY: usize = 8 * 1024 * 1024;
 
-/// An [`AskProvider`] that POSTs to the Anthropic Messages API over the durable `wstd` client.
+/// An [`AskProvider`] that POSTs to the Anthropic Messages API over the durable `wasi-fetch` client.
 pub struct DurableAnthropicProvider;
 
 #[async_trait::async_trait(?Send)]
@@ -64,23 +65,29 @@ impl AskProvider for DurableAnthropicProvider {
     }
 }
 
-/// POST the request body to the Anthropic Messages API over the durable `wstd` client and return
-/// `(status, body_text)`. Mirrors [`crate::mcp_http::WstdMcpHttp::request`]'s transport (the Golem
-/// runtime records this call in the oplog and replays it on recovery).
+/// POST the request body to the Anthropic Messages API over the durable `wasi-fetch` client and
+/// return `(status, body_text)`. Mirrors [`crate::mcp_http::WasiFetchMcpHttp::request`]'s transport
+/// (the Golem runtime records this call in the oplog and replays it on recovery).
 async fn send(api_key: &str, body: Vec<u8>) -> Result<(u16, String), String> {
-    use wstd::http::{Body, Client, Request};
+    // Build the key's header value explicitly. `wasi-fetch` SILENTLY DROPS a header it cannot
+    // parse, so a key carrying a stray newline (a common copy-paste artifact in a golem.yaml env
+    // literal) would otherwise go out as an UNAUTHENTICATED request and come back as an opaque 401.
+    // The message deliberately describes the key without quoting it.
+    let api_key = http::HeaderValue::try_from(api_key).map_err(|_| {
+        "ANTHROPIC_API_KEY contains characters that are not valid in an HTTP header \
+         (a stray newline is the usual cause)"
+            .to_string()
+    })?;
 
-    let request = Request::builder()
-        .method(wstd::http::Method::POST)
-        .uri(MESSAGES_URL)
+    let response = wasi_fetch::Client::new()
+        .post(MESSAGES_URL)
         .header("x-api-key", api_key)
         .header("anthropic-version", ANTHROPIC_VERSION)
         .header("content-type", "application/json")
-        .body(Body::from(body))
-        .map_err(|e| format!("bad request: {e}"))?;
-
-    let mut response = Client::new()
-        .send(request)
+        .body(body)
+        // The Messages API does not redirect, and the previous transport followed none.
+        .redirect_limit(0)
+        .send()
         .await
         .map_err(|e| format!("request failed: {e}"))?;
 
@@ -98,12 +105,7 @@ async fn send(api_key: &str, body: Vec<u8>) -> Result<(u16, String), String> {
             "response Content-Length {len} exceeds {MAX_BODY} bytes"
         ));
     }
-    let bytes = response
-        .body_mut()
-        .contents()
-        .await
-        .map_err(|e| format!("reading response failed: {e}"))?
-        .to_vec();
+    let bytes = response.into_body().bytes().await;
     if bytes.len() > MAX_BODY {
         return Err(format!("response body exceeded {MAX_BODY} bytes"));
     }

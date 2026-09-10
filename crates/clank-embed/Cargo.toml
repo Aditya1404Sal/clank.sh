@@ -12,12 +12,12 @@ publish = false
 
 [features]
 default = []
-# The full Golem provider set (ask/mcp/agent-invoker/cluster). ask+mcp need the wstd HTTP client;
+# The full Golem provider set (ask/mcp/agent-invoker/cluster). ask+mcp need the WASI-HTTP client;
 # the invoker+cluster use only ungated golem-rust surface, but ship under the same umbrella so an
 # embedder makes ONE decision: bare exploration shell vs the full clank command surface.
 # The replay-safe log sink is NOT gated: it is std-only and every Golem embed needs it (the default
 # append sink duplicates /var/log lines under oplog replay).
-providers = ["dep:wstd", "dep:async-trait"]
+providers = ["dep:wasi-fetch", "dep:http", "dep:async-trait"]
 
 [dependencies]
 # The shell core. default-features=false drops `repl-driver`, so this links as a plain rlib WITHOUT
@@ -31,9 +31,14 @@ clank-core = { path = "../clank-core", default-features = false }
 golem-rust = { path = "/Users/adityasalunkhe/Desktop/clank.sh/golem-stuff/golem/sdks/rust/golem-rust" }
 serde = { version = "1", features = ["derive"] }
 
-# Behind `providers`: wstd is the durable HTTP client for ask+mcp (the exact `=0.6.5` pin matches
-# golem-rust's own hard pin — lockstep required); async-trait implements the ?Send seam traits.
-wstd = { version = "=0.6.5", features = ["default", "json"], optional = true }
+# Behind `providers`: `wasi-fetch` is the durable HTTP client for ask+mcp — a reqwest-shaped client
+# over the wasip3 WASI-HTTP bindings, pinned exactly as upstream golem pins it in its own agent
+# components. It replaced wstd, whose client panics under this SDK: wstd resolves its reactor from
+# a thread-local only `wstd::block_on` installs, and golem-rust now drives agent methods with
+# wit-bindgen's async runtime instead. `http` types the headers these providers build; async-trait
+# implements the ?Send seam traits.
+wasi-fetch = { version = "=0.2.0", optional = true }
+http = { version = "1", optional = true }
 async-trait = { version = "0.1", optional = true }
 
 [dev-dependencies]

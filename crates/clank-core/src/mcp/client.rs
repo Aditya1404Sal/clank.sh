@@ -6,7 +6,7 @@
 //!
 //! The HTTP transport is a **trait seam** ([`McpHttp`]) — unlike curl/wget's cfg-gated `fetch`, MCP
 //! needs response *headers* (the `Mcp-Session-Id`) and scriptable multi-step fakes for tests. The
-//! concrete `wstd` implementation lives in `clank-agent` (`WstdMcpHttp`) and is injected into the
+//! concrete WASI-HTTP implementation lives in `clank-embed` (`WasiFetchMcpHttp`) and is injected into the
 //! `Session`; on native, no transport is installed and MCP degrades to an honest error.
 //!
 //! Servers may answer `application/json` or `text/event-stream` (SSE). The Streamable HTTP spec
@@ -52,7 +52,7 @@ impl HttpResponse {
     }
 }
 
-/// The MCP HTTP transport. Implemented in `clank-agent` by the durable `wstd` client and injected into
+/// The MCP HTTP transport. Implemented in `clank-embed` by the durable WASI-HTTP client and injected into
 /// the `Session`; absent on native (MCP degrades to an honest error there).
 #[async_trait::async_trait(?Send)]
 pub trait McpHttp {

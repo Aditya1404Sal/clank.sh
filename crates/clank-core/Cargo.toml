@@ -111,7 +111,7 @@ tempfile = "3"
 libc = "0.2"
 # The native HTTP transport backing the ask/MCP/grease/golem provider shims (McpHttp, AskProvider,
 # GolemCluster/AgentInvoker). Same crate + rustls-tls features wcurl/waget already use, so the whole
-# workspace resolves one reqwest; on wasm those seams use the injected wstd impls instead (this dep
+# workspace resolves one reqwest; on wasm those seams use the injected WASI-HTTP impls instead (this dep
 # never reaches the wasm build — it's under the not(wasm32) target block).
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 # The interactive REPL's line editor (native TTY only): history, fish-style ghost autosuggestions,

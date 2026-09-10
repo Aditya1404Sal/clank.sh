@@ -270,7 +270,7 @@ pub struct Session {
     repl: Option<ReplState>,
     /// Installed MCP servers + open sessions. Reconstructed deterministically under Golem replay.
     mcp: crate::mcp::state::McpState,
-    /// The injected MCP HTTP transport. Installed by the agent build (a durable `wstd` client);
+    /// The injected MCP HTTP transport. Installed by the agent build (a durable WASI-HTTP client);
     /// `None` on native, in which case MCP degrades to a clean "not configured" error. Also used by
     /// `grease` for registry fetches (it's a generic durable "fetch bytes over HTTPS" seam).
     mcp_http: Option<Box<dyn crate::mcp::client::McpHttp>>,
@@ -484,7 +484,7 @@ impl Session {
         self.golem_cluster = Some(cluster);
     }
 
-    /// Install the MCP HTTP transport (a durable `wstd` client on the agent). Without one, MCP
+    /// Install the MCP HTTP transport (a durable WASI-HTTP client on the agent). Without one, MCP
     /// commands report "not configured" (exit 4). Injected after construction like the ask provider.
     pub fn set_mcp_http(&mut self, http: Box<dyn crate::mcp::client::McpHttp>) {
         // Wrap the transport so every MCP + grease-registry request is logged to http.log (redacted).
@@ -955,10 +955,10 @@ impl Session {
     /// approved gated command). Does not record the transcript — the caller decides.
     ///
     /// `curl`/`wget` are dispatched here to their async HTTP crates, NOT through `execute`. This is
-    /// load-bearing: `execute` runs Brush on clank's nested `rt.block_on`, where the wstd WASI-HTTP
-    /// reactor is not the running executor (the "Wall C" shape). Awaiting `wcurl::run`/`waget::run`
-    /// directly here keeps the HTTP one level under the Golem SDK's `wstd::block_on`, where the
-    /// reactor is live. Both call paths funnel through here, so the direct-allow and
+    /// load-bearing: `execute` runs Brush on clank's nested `rt.block_on`, and a WASI-HTTP future
+    /// polled by that tokio runtime never gets woken — nothing there performs the component-model
+    /// wait (the "Wall C" shape). Awaiting `wcurl::run`/`waget::run` directly here keeps the HTTP
+    /// one level under the SDK's own executor. Both call paths funnel through here, so the direct-allow and
     /// post-approval-deferred routes both reach the HTTP correctly. See `httpcmd`.
     async fn run_command(
         &mut self,
@@ -984,8 +984,8 @@ impl Session {
         } else if let Some(args) = crate::ai::ask::classify(line) {
             // `ask` dispatches to the injected LLM provider — same "await at the Session layer, never
             // through `execute`'s nested runtime" rule as curl/wget. The provider's async `complete`
-            // is awaited here, one level under the Golem SDK's `wstd::block_on` where the durable
-            // context and the WASI-HTTP reactor are live. See `askcmd`.
+            // is awaited here, one level under the Golem SDK's executor, where the durable context
+            // is live and WASI-HTTP futures actually complete. See `askcmd`.
             self.run_ask(args, blanket_authorized).await
         } else if let Some(parsed) = crate::mcp::cmd::classify(line) {
             // `mcp` management runs at the Session layer — its add/reload/session subcommands do
@@ -1070,7 +1070,7 @@ impl Session {
     }
 
     /// Run a curl/wget-headed pipeline (`curl … | rest…`): the head's HTTP at the Session layer
-    /// (Wall C — the wstd reactor must be the running executor), then the downstream program
+    /// (Wall C — the SDK's executor must be the running one), then the downstream program
     /// through Brush with the response bytes as its stdin. POSIX pipe semantics: the downstream
     /// always runs, fed whatever the head produced (possibly nothing); the line's exit code is the
     /// downstream's; both stages' stderr concatenate in order.
@@ -1806,7 +1806,7 @@ struct IndexEntry {
 }
 
 /// Log a curl/wget invocation to http.log: the tool, its target URL (the first non-flag argument), and
-/// the exit code. curl/wget bypass the `McpHttp` seam (their own `wstd`/`reqwest` fetch), so they're
+/// the exit code. curl/wget bypass the `McpHttp` seam (their own `whttp` fetch), so they're
 /// logged here at the dispatch site rather than by the `LoggingMcpHttp` decorator.
 fn log_http_tool(tool: &str, args: &[String], exit_code: u8) {
     let url = args

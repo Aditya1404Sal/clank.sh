@@ -47,7 +47,7 @@ multi-user: `sudo` means "the human authorized this," not Unix uid 0.
 | **`clank-agent`** | clank's own Golem agent type — ~60 lines that wire the shell surface to the full provider set. | wasm |
 | **`clank-embed`** | The shell surface *as a reusable library*: `EmbeddedShell` + the wasm HTTP providers. Any Golem agent can embed it. | wasm |
 | **`greeter-agent`** | A trivial second agent that proves the shell surface is a contract, not a clank-only feature. | wasm |
-| **`whttp`** | The shared HTTP transport — one `cfg`-gated client (`wstd` on wasm, `reqwest` on native) plus target-agnostic redirect/timeout handling. | both |
+| **`whttp`** | The shared HTTP transport — one `cfg`-gated client (`wasi-fetch` on wasm, `reqwest` on native) plus target-agnostic redirect/timeout handling. | both |
 | **`wcurl` / `waget`** | `curl` / `wget` clones over `whttp`. | both |
 | **`clank-conformance`** | One `.clank` test corpus run against two backends (native `Session` and a live Golem agent). | both |
 | **`grease-tool`** | A dev tool that authors + serves a signed grease registry. | native |
@@ -163,7 +163,7 @@ flowchart TB
 **How each world injects providers.** Native: [`native::inject_native_providers`](../crates/clank-core/src/native.rs)
 installs `reqwest`/`rustls` shims for the LLM, MCP HTTP, and (if a cluster is configured) Golem. The
 agent: `ClankAgent::new` builds an `EmbeddedShell::with_default_golem_providers()`, whose `Session`
-gets durable `wstd`/`golem-rust` implementations. Same four `Option<Box<dyn …>>` fields on `Session`;
+gets durable `wasi-fetch`/`golem-rust` implementations. Same four `Option<Box<dyn …>>` fields on `Session`;
 different boxes.
 
 **What "durable" buys and demands.** On Golem, `ClankAgent::eval` is an *exported component function*.

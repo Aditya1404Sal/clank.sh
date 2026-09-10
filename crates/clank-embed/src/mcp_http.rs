@@ -1,10 +1,10 @@
-//! The durable `wstd` HTTP transport backing MCP on the Golem agent.
+//! The durable WASI-HTTP transport backing MCP on the Golem agent.
 //!
 //! `clank-core` defines the [`McpHttp`](clank_core::mcp::client::McpHttp) seam but is dual-target and
-//! can't link the Golem-host-only `wstd` client. This module (in `clank-embed`, for any Golem agent
-//! embedding the shell) implements it with
-//! `wstd::http`, mirroring `wcurl`'s wasm `fetch` and additionally collecting response headers (MCP
-//! needs the `Mcp-Session-Id`). The Golem runtime records the HTTP call in the oplog and replays it on
+//! can't link a Golem-host-only HTTP client. This module (in `clank-embed`, for any Golem agent
+//! embedding the shell) implements it with `wasi-fetch` over the wasip3 WASI-HTTP bindings,
+//! mirroring `wcurl`'s wasm `fetch` and additionally collecting response headers (MCP needs the
+//! `Mcp-Session-Id`). The Golem runtime records the HTTP call in the oplog and replays it on
 //! recovery, so the `mcp add`/`tools/list` install flow is durable and replay-deterministic.
 //!
 //! A response `Content-Type: text/event-stream` (SSE) body is read to EOF like any other — MCP-lite
@@ -16,11 +16,11 @@ use clank_core::mcp::client::{HttpResponse, McpHttp};
 /// Cap on a single response body (bounds a runaway/held-open server).
 const MAX_BODY: usize = 4 * 1024 * 1024;
 
-/// An [`McpHttp`] backed by the durable `wstd` client.
-pub(crate) struct WstdMcpHttp;
+/// An [`McpHttp`] backed by the durable `wasi-fetch` client.
+pub(crate) struct WasiFetchMcpHttp;
 
 #[async_trait::async_trait(?Send)]
-impl McpHttp for WstdMcpHttp {
+impl McpHttp for WasiFetchMcpHttp {
     async fn request(
         &self,
         method: &str,
@@ -28,25 +28,30 @@ impl McpHttp for WstdMcpHttp {
         headers: &[(String, String)],
         body: Option<Vec<u8>>,
     ) -> Result<HttpResponse, String> {
-        use wstd::http::{Body, Client, Method, Request};
-
-        let method = method
-            .parse::<Method>()
+        let parsed = method
+            .parse::<http::Method>()
             .map_err(|e| format!("bad method '{method}': {e}"))?;
-        let mut builder = Request::builder().method(method).uri(url);
+        // MCP speaks to one endpoint and expects to see a 3xx itself (the caller decides what a
+        // redirect means for a session); the previous transport followed none, so neither does this.
+        let mut builder = wasi_fetch::Client::new()
+            .request(parsed, url)
+            .redirect_limit(0);
+        // Build the header parts explicitly: `wasi-fetch` SILENTLY DROPS a header whose name or
+        // value does not parse, which for MCP would mean quietly omitting the session id or the
+        // auth header and getting an opaque 4xx back. Reject it with a real message instead.
         for (k, v) in headers {
-            builder = builder.header(k, v);
+            let name = http::HeaderName::try_from(k.as_str())
+                .map_err(|e| format!("bad request header '{k}': {e}"))?;
+            let value = http::HeaderValue::try_from(v.as_str())
+                .map_err(|e| format!("bad value for request header '{k}': {e}"))?;
+            builder = builder.header(name, value);
         }
-        let wstd_body = match body {
-            Some(bytes) => Body::from(bytes),
-            None => Body::empty(),
-        };
-        let request = builder
-            .body(wstd_body)
-            .map_err(|e| format!("bad request: {e}"))?;
+        if let Some(bytes) = body {
+            builder = builder.body(bytes);
+        }
 
-        let mut response = Client::new()
-            .send(request)
+        let response = builder
+            .send()
             .await
             .map_err(|e| format!("request failed: {e}"))?;
 
@@ -75,12 +80,7 @@ impl McpHttp for WstdMcpHttp {
                 "response Content-Length {len} exceeds {MAX_BODY} bytes"
             ));
         }
-        let bytes = response
-            .body_mut()
-            .contents()
-            .await
-            .map_err(|e| format!("reading response failed: {e}"))?
-            .to_vec();
+        let bytes = response.into_body().bytes().await.to_vec();
         if bytes.len() > MAX_BODY {
             return Err(format!("response body exceeded {MAX_BODY} bytes"));
         }

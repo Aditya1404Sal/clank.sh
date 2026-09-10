@@ -17,15 +17,19 @@ name = "wcurl"
 path = "src/main.rs"
 
 [dependencies]
-# `http::Method` in the parsed request; `whttp` is the shared cfg-gated transport (wstd/reqwest)
-# plus redirect following + timeouts, so wcurl only parses flags and formats output.
+# `http::Method` in the parsed request; `whttp` is the shared cfg-gated transport
+# (wasi-fetch/reqwest) plus redirect following + timeouts, so wcurl only parses flags and formats
+# output.
 http = "1"
 whttp = { path = "../whttp" }
 
-# wasm: wstd supplies the standalone bin's `block_on` (the WASI-HTTP reactor). The library's HTTP
-# lives in whttp; this dep is only the bin's runtime.
+# wasm: `wasip3` re-exports the wit-bindgen whose async runtime drives whttp's wasi-fetch futures,
+# and that runtime's `block_on` is what the standalone bin's `main` needs. It must be THIS
+# wit-bindgen (the one wasip3 pins), not golem-rust's fork, or the futures would be polled by a
+# runtime that never receives their wakeups. The library's HTTP lives in whttp; this dep is only
+# the bin's runtime.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wstd = { version = "=0.6.5", features = ["default", "json"] }
+wasip3 = "0.7"
 
 # native: tokio gives the standalone bin a runtime. (reqwest moved to whttp.)
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

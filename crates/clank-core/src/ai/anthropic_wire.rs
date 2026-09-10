@@ -1,7 +1,7 @@
 //! The target-agnostic Anthropic Messages API wire format for `ask`.
 //!
 //! Both `ask` providers — the native reqwest one ([`anthropic_native`](super::anthropic_native)) and
-//! the durable `wstd` one in `clank-agent` — map the neutral `AskTurn`/`AskTool`/`AskToolCall`/
+//! the durable WASI-HTTP one in `clank-embed` — map the neutral `AskTurn`/`AskTool`/`AskToolCall`/
 //! `AskToolResult`/`AskResponse` types onto Anthropic's `POST /v1/messages` JSON. That mapping is pure
 //! `serde_json` (no HTTP client), so it lives here, defined once, and each provider is a thin transport
 //! wrapper around [`build_request`] + [`parse_response`] / [`parse_error`]. Keeping the wire format in

@@ -1,5 +1,6 @@
 //! Standalone `waget` CLI. The embeddable library ([`waget::run`]) does the work; this wrapper
-//! supplies a runtime, forwards argv, and writes the outcome (wstd's reactor on wasm, tokio native).
+//! supplies a runtime, forwards argv, and writes the outcome (wit-bindgen's async runtime — the one
+//! driving the wasip3 WASI-HTTP futures — on wasm, tokio natively).
 
 use std::io::Write;
 
@@ -14,7 +15,9 @@ fn main() {
 
 #[cfg(target_arch = "wasm32")]
 fn block_on(fut: impl std::future::Future<Output = waget::Outcome>) -> waget::Outcome {
-    wstd::runtime::block_on(fut)
+    // Reached through `wasip3` so this is the same wit-bindgen instance that owns the WASI-HTTP
+    // futures; a different one would poll them without ever seeing their wakeups.
+    wasip3::wit_bindgen::block_on(fut)
 }
 
 #[cfg(not(target_arch = "wasm32"))]

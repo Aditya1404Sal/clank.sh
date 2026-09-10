@@ -2,12 +2,12 @@
 //!
 //! Exposes an async [`run`] that takes argv (without the leading `curl` word) and returns a
 //! structured [`Outcome`] (stdout bytes, stderr bytes, exit code). The HTTP transport — the
-//! cfg-gated `wstd`/`reqwest` seam plus redirect following and timeouts — lives in [`whttp`]; this
-//! crate parses `curl` flags and formats the response.
+//! cfg-gated `wasi-fetch`/`reqwest` seam plus redirect following and timeouts — lives in [`whttp`];
+//! this crate parses `curl` flags and formats the response.
 //!
 //! `run` is `async` and does NOT create its own runtime: the caller awaits it under whatever async
-//! executor is running (clank awaits it one level under the Golem SDK's `wstd::block_on`, where the
-//! wstd reactor is live; the standalone `main` wraps it in its own `block_on`).
+//! executor is running (clank awaits it one level under the executor golem-rust drives agent
+//! methods with; the standalone `main` wraps it in its own `block_on`).
 
 mod parse;
 

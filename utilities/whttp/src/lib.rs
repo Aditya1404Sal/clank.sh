@@ -1,19 +1,20 @@
 //! `whttp` — the shared HTTP transport behind `wcurl` and `waget`.
 //!
-//! One cfg-gated client seam (`wstd::http` on wasm, `reqwest` on native) plus **target-agnostic**
+//! One cfg-gated client seam (`wasi-fetch` on wasm, `reqwest` on native) plus **target-agnostic**
 //! redirect following and timeouts, so the two command clients behave identically on native and on
-//! the Golem/wasip2 agent. This is the "fourth crate" the duplicated seams in `wcurl`/`waget`
-//! anticipated.
+//! the Golem agent. This is the "fourth crate" the duplicated seams in `wcurl`/`waget` anticipated.
 //!
-//! Redirect following lives here, not in the transport: `wstd` does not follow redirects at all and
-//! `reqwest` follows by default, so leaving it to the transport made `curl`/`wget` behave
-//! differently on the two targets. The native path disables reqwest's auto-follow so this loop is
-//! the single source of truth. `Location` resolution (see [`resolve_url`]) uses `iri-string` for
-//! RFC 3986 reference resolution — pure-Rust and wasm-clean, avoiding the `url` crate's `idna`→`icu`
-//! Unicode tables.
+//! Redirect following lives here, not in the transport: both clients follow redirects on their own
+//! (`reqwest` up to 10 by default, `wasi-fetch` likewise), and their policies differ in the details,
+//! so leaving it to the transport made `curl`/`wget` behave differently on the two targets. Each
+//! arm disables its client's own follower — `redirect(none)` natively, `redirect_limit(0)` on wasm —
+//! so this loop is the single source of truth. `Location` resolution (see [`resolve_url`]) uses
+//! `iri-string` for RFC 3986 reference resolution — pure-Rust and wasm-clean, avoiding the `url`
+//! crate's `idna`→`icu` Unicode tables.
 //!
 //! [`fetch`] is `async` and creates no runtime — the caller awaits it under whatever executor is
-//! live (clank awaits one level under the Golem SDK's `wstd::block_on`).
+//! live. On the agent that is the executor golem-rust drives agent methods with; in the standalone
+//! `wcurl`/`waget` binaries it is the `block_on` their `main` supplies.
 
 use http::Method;
 use std::time::Duration;
@@ -210,31 +211,35 @@ async fn fetch_once(
     connect_timeout: Option<Duration>,
     timeout: Option<Duration>,
 ) -> Result<Response, Error> {
-    use wstd::http::{Body, Client, Request as WstdRequest};
-
-    let mut client = Client::new();
-    if let Some(d) = connect_timeout {
-        client.set_connect_timeout(d);
-    }
-    if let Some(d) = timeout {
-        // The closest WASI-HTTP primitive to a total deadline is the first-byte timeout.
-        client.set_first_byte_timeout(d);
-    }
-
-    let mut builder = WstdRequest::builder().method(method.clone()).uri(url);
+    // `redirect_limit(0)` is load-bearing, exactly as `redirect(none)` is on the native arm: the
+    // shared loop above is the single source of redirect behavior across both targets.
+    let mut builder = wasi_fetch::Client::new()
+        .request(method.clone(), url)
+        .redirect_limit(0);
+    // Build each header value up front rather than letting the builder take `&str`: `wasi-fetch`
+    // SILENTLY DROPS a header whose name or value does not parse, which would turn a malformed
+    // `curl -H` into a request that quietly omits it. Reject it instead, as the native arm does.
     for (k, v) in headers {
-        builder = builder.header(k, v);
+        let name = http::HeaderName::try_from(k.as_str())
+            .map_err(|e| Error::Transport(format!("bad request header '{k}': {e}")))?;
+        let value = http::HeaderValue::try_from(v.as_str())
+            .map_err(|e| Error::Transport(format!("bad value for request header '{k}': {e}")))?;
+        builder = builder.header(name, value);
     }
-    let wstd_body = match body {
-        Some(bytes) => Body::from(bytes),
-        None => Body::empty(),
-    };
-    let request = builder
-        .body(wstd_body)
-        .map_err(|e| Error::Transport(format!("bad request: {e}")))?;
+    if let Some(bytes) = body {
+        builder = builder.body(bytes);
+    }
+    // WASI-HTTP's `request-options` carries separate connect and first-byte deadlines, but this
+    // client exposes one knob that sets both. Prefer the total budget (curl `-m`) and fall back to
+    // the connect budget, so a request is never left unbounded on a durable agent — where a hung
+    // peer wedges every invocation queued behind it. The lossy case is `--connect-timeout` with no
+    // `-m`: the connect bound then also caps the wait for the first byte.
+    if let Some(d) = timeout.or(connect_timeout) {
+        builder = builder.timeout(d);
+    }
 
-    let mut response = client
-        .send(request)
+    let response = builder
+        .send()
         .await
         .map_err(|e| Error::Transport(format!("request failed: {e}")))?;
     let status = response.status().as_u16();
@@ -245,12 +250,7 @@ async fn fetch_once(
     let bytes = if is_bodyless(method, status) {
         Vec::new()
     } else {
-        response
-            .body_mut()
-            .contents()
-            .await
-            .map_err(|e| Error::Transport(format!("reading response failed: {e}")))?
-            .to_vec()
+        response.into_body().bytes().await.to_vec()
     };
     Ok(Response {
         status,

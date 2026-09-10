@@ -619,8 +619,10 @@ expect "which on an unknown cmd finds nothing" 'which clank-no-such-cmd-xyz; ech
 # ============================================================================
 # 2j. Network — outbound HTTP (curl/wget) from the deployed agent
 # ============================================================================
-# THE POINT OF THIS BLOCK: prove wstd WASI-HTTP works when awaited from eval_line (one level under
-# the Golem SDK's wstd::block_on) on a real deployed agent — the transport ask/grease will need.
+# THE POINT OF THIS BLOCK: prove WASI-HTTP works when awaited from eval_line (one level under the
+# Golem SDK's own executor) on a real deployed agent — the transport ask/grease will need. It is
+# also the regression guard for the wstd->wasi-fetch migration: wstd's client panicked
+# "Reactor::current must be called within a wstd runtime" here and trapped the instance.
 # curl/wget are Confirm-gated (outbound HTTP), so each is a surface→approve two-invocation dance,
 # exactly like the authz rm block above. Uses https://example.com (stable, tiny, TLS). Resolve each
 # prompt before any other run_line (a pending prompt rejects ordinary commands).

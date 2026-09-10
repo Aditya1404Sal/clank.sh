@@ -150,7 +150,7 @@ Multiple shell processes can make progress concurrently within the single clank 
 
 ### Compile targets
 
-The shell targets both `wasm32-wasip2` and native Rust. The Rust standard library covers most of both targets without abstraction (filesystem, env vars, etc.). Seams appear where crate support diverges — primarily HTTP clients (`reqwest` on native, `wstd` or equivalent on wasm-wasi). Conditional compilation handles these seams, backed by a small trait with two implementations where needed.
+The shell targets both `wasm32-wasip2` and native Rust. The Rust standard library covers most of both targets without abstraction (filesystem, env vars, etc.). Seams appear where crate support diverges — primarily HTTP clients (`reqwest` on native, `wasi-fetch` over WASI-HTTP on wasm-wasi). Conditional compilation handles these seams, backed by a small trait with two implementations where needed.
 
 A second compile seam arises from Brush's use of the `nix` crate for Unix process operations. Since clank replaces the entire process execution layer, `nix` usage is excluded at that boundary via conditional compilation. No `nix` code surfaces outside the process trait implementations being replaced.
 

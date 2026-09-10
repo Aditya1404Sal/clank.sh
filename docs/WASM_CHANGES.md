@@ -137,26 +137,34 @@ must be redirected onto Brush's assigned `OpenFile`s.
   `OpenFile::Stdin` — it never touches the real stdin resource. Native `tool_stdin` just hands over
   `context.stdin()`.
 
-### 3c. HTTP transport seam — wstd (wasm) / reqwest (native)
+### 3c. HTTP transport seam — wasi-fetch (wasm) / reqwest (native)
 
-The only HTTP client that works inside a Golem/wasip2 component is `wstd::http` (WASI-HTTP, recorded
-in the oplog and replayed on recovery). Native uses `reqwest`. The seam is a small trait with two
-`cfg`-gated implementations:
+Inside a Golem component, HTTP means WASI-HTTP (recorded in the oplog and replayed on recovery).
+`wasi-fetch` is the client: a reqwest-shaped wrapper over the wasip3 bindings, pinned `=0.2.0` as
+upstream golem pins it in its own agent components. Native uses `reqwest`. The seam is `cfg`-gated:
 
-- **`utilities/wcurl/src/lib.rs`** — `fetch` is `#[cfg(target_arch = "wasm32")]` wstd (`lib.rs:91`) vs
-  `#[cfg(not(...))]` reqwest (`lib.rs:126`). Deps split in `utilities/wcurl/Cargo.toml` lines 22–30.
-- **`utilities/waget/`** — same split (`utilities/waget/Cargo.toml` lines 22–29).
-- **`crates/clank-agent/src/mcp_http.rs`** — `WstdMcpHttp` implements the dual-target
-  `clank_core::mcp::client::McpHttp` seam using `wstd::http` (this agent crate is wasm-only, so it can
-  link the Golem-host-only `wstd` client that `clank-core` cannot). It additionally collects response
-  headers because MCP needs `Mcp-Session-Id`.
-- Both `wcurl`/`waget` pin `wstd = "=0.6.5"` to match `clank-agent` so the whole app resolves one
-  `wstd`. `reqwest` is `default-features = false, features = ["rustls-tls"]` — see §6.
+- **`utilities/whttp/src/lib.rs`** — `fetch_once` is the whole transport seam: a
+  `#[cfg(target_arch = "wasm32")]` wasi-fetch arm and a `#[cfg(not(...))]` reqwest arm, with the
+  redirect loop and `Location` resolution living *above* it so both targets behave identically.
+  `wcurl`/`waget` only parse flags and format output; they hold no HTTP of their own.
+- **`crates/clank-embed/src/mcp_http.rs`** — `WasiFetchMcpHttp` implements the dual-target
+  `clank_core::mcp::client::McpHttp` seam (clank-embed is wasm-only, so it can link a
+  Golem-host-only client that `clank-core` cannot). It additionally collects response headers
+  because MCP needs `Mcp-Session-Id`.
+- **`crates/clank-embed/src/ask_provider.rs`** — the same client behind `ask`.
+- `reqwest` is `default-features = false, features = ["rustls-tls"]` — see §6.
 
-Note the load-bearing dispatch rule in `session/mod.rs:718–780`: `curl`/`wget`/`ask`/`mcp`/`grease` are
+**This replaced `wstd`, which the current SDK broke outright.** wstd's client resolves its reactor
+from a thread-local that only `wstd::block_on` installs; golem-rust now drives agent methods with
+wit-bindgen's async runtime and no longer depends on wstd at all, so every outbound request panicked
+`Reactor::current must be called within a wstd runtime` and trapped the agent. `wasi-fetch` holds no
+runtime state of its own — its futures are driven by whatever executor polls them.
+
+Note the load-bearing dispatch rule in `session/mod.rs`: `curl`/`wget`/`ask`/`mcp`/`grease` are
 awaited directly at the Session layer, **not** through `execute`. `execute` drives Brush on the
-nested `rt.block_on` (the "Wall C" shape), where the wstd WASI-HTTP reactor is not the running
-executor; awaiting these one level under the Golem SDK's `wstd::block_on` keeps the reactor live.
+nested `rt.block_on` (the "Wall C" shape); a WASI-HTTP future polled by that tokio runtime is never
+woken, because nothing there performs the component-model wait. Awaiting these one level under the
+Golem SDK's own executor is what makes them complete.
 
 ### 3d. `wasi:cli/run` p3 entrypoint vs native blocking split
 
@@ -221,7 +229,7 @@ fork/exec on wasm, not because no crate exists.)
 
 For completeness, so a maintainer doesn't go hunting for phantom patches:
 
-- **`getrandom`, `ring`, `tokio`, `wstd`** are plain crates.io dependencies — no fork, no git rev, no
+- **`getrandom`, `ring`, `tokio`, `wasi-fetch`** are plain crates.io dependencies — no fork, no git rev, no
   `[patch]`. Verified: `Cargo.lock` shows `ring 0.17.14`, `getrandom 0.2.17`/`0.4.3`, all
   `registry+…crates.io`. The only `git+` sources in the lock are the Brush and coreutils forks.
 - Wasm compatibility for these is handled by **`cfg`-gated deps** (the `[target.'cfg(...)']` blocks

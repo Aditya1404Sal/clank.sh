@@ -1,8 +1,8 @@
 //! Honest-error Brush builtins for the Session-intercepted commands in NESTED contexts.
 //!
 //! `curl`, `wget`, `ask`, and `kill` are Session-layer interceptions: curl/wget/ask must await
-//! their async work directly under the Golem SDK's `wstd::block_on` (the WASI-HTTP reactor is not
-//! live inside `execute`'s nested runtime — the "Wall C shape"), and `kill` mutates Session state
+//! their async work directly under the Golem SDK's executor (a WASI-HTTP future never completes
+//! under `execute`'s nested tokio runtime — the "Wall C shape"), and `kill` mutates Session state
 //! (the bg-job mapping, the pending prompt). Top-level lines never reach Brush for these names.
 //!
 //! But inside `$(...)`, pipelines, `xargs`, and `eval`, Brush dispatches directly — and these

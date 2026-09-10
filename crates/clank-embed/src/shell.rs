@@ -67,7 +67,7 @@ impl EmbeddedShell {
     }
 
     /// The full clank provider set — what `clank:agent` itself runs: the durable Anthropic `ask`
-    /// provider, the wstd MCP transport, the WasmRpc agent invoker, the `golem:api` cluster
+    /// provider, the WASI-HTTP MCP transport, the WasmRpc agent invoker, the `golem:api` cluster
     /// interface, and the replay-safe log sink.
     #[cfg(feature = "providers")]
     pub fn with_default_golem_providers() -> Self {
@@ -75,8 +75,8 @@ impl EmbeddedShell {
             // The durable Anthropic provider so `ask` can reach the model (reads ANTHROPIC_API_KEY
             // from the agent environment; absent ⇒ `ask` reports not-configured).
             s.set_ask_provider(Box::new(crate::ask_provider::DurableAnthropicProvider));
-            // The durable wstd HTTP transport so `mcp` can reach servers.
-            s.set_mcp_http(Box::new(crate::mcp_http::WstdMcpHttp));
+            // The durable WASI-HTTP transport so `mcp` can reach servers.
+            s.set_mcp_http(Box::new(crate::mcp_http::WasiFetchMcpHttp));
             // The durable WasmRpc invoker so grease-installed Golem agents can be invoked.
             s.set_agent_invoker(Box::new(crate::agent_invoker::WasmRpcInvoker));
             // The durable Golem cluster interface backing the `golem` command.

@@ -1,8 +1,9 @@
 //! `waget` — a `wasm32-wasip2`-compatible `wget` clone, embeddable in any wasm component.
 //!
 //! Exposes an async [`run`] that takes argv (without the leading `wget` word) and returns a
-//! structured [`Outcome`]. The HTTP transport — the cfg-gated `wstd`/`reqwest` seam plus redirect
-//! following and timeouts — lives in [`whttp`]; this crate parses `wget` flags and writes the file.
+//! structured [`Outcome`]. The HTTP transport — the cfg-gated `wasi-fetch`/`reqwest` seam plus
+//! redirect following and timeouts — lives in [`whttp`]; this crate parses `wget` flags and writes
+//! the file.
 //! `run` creates no runtime; the caller awaits it.
 //!
 //! Unlike curl, wget writes to a **file** by default (named after the URL's last path segment);

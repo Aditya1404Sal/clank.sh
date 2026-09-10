@@ -531,6 +531,48 @@ only the `agent shell` commits.
   conversions under the limit; the real fix is in the fork's `printf` padding (pad without a
   `fmt` width) plus a rev bump, and this is exactly the trap class ticket 12's panic-hygiene gate
   exists for.
+- **The scope grew by one unplanned migration: `wstd` → `wasi-fetch`.** The rebased golem-rust
+  drives agent methods with wit-bindgen's async runtime and has dropped `wstd` as a dependency
+  altogether. wstd's HTTP client resolves its reactor from a thread-local that only
+  `wstd::block_on` installs, so on this SDK *every* outbound request panics
+  `Reactor::current must be called within a wstd runtime` (wstd-0.6.5/src/runtime/reactor.rs:115)
+  and traps the instance — `curl`, `wget`, `ask` and MCP/grease alike. The second e2e run reached
+  80/272 and wedged at the first approved `curl`. All three transports now use
+  **`wasi-fetch = "=0.2.0"`** over the wasip3 bindings, the client upstream uses in its own agent
+  components (`test-components/agent-rpc`, `test-components/http-tests`) and pins in the app
+  template the CLI generates (`cli/golem-cli/tests/app/agents.rs`):
+  `utilities/whttp/src/lib.rs` (`fetch_once`'s wasm arm — `curl`/`wget`),
+  `crates/clank-embed/src/mcp_http.rs` (`WstdMcpHttp` → `WasiFetchMcpHttp`), and
+  `crates/clank-embed/src/ask_provider.rs`. Three consequences worth carrying forward:
+  - Wall C is **unchanged, for a restated reason**. It is no longer "the wstd reactor is not live";
+    it is that a WASI-HTTP future polled by clank's nested tokio `rt.block_on` is never woken,
+    because nothing there performs the component-model wait. Every doc that stated the old reason
+    was corrected.
+  - Two wit-bindgen crates now coexist in the component — 0.57.1 (under `wasip3`/`wasi-fetch`) and
+    the golemcloud fork 0.59.0 (under `golem-rust`). This is exactly what upstream's own agent
+    test components ship, so it is a supported configuration rather than a lucky resolution.
+  - `wasi-fetch` pulls in `url` → `idna` → `icu`, the Unicode-table stack `whttp` deliberately
+    avoided by choosing `iri-string`. Only its redirect resolver uses it and clank sets
+    `redirect_limit(0)`, so the path is dead code — but dead code still has to be stripped by LTO.
+    Worth a size check against ticket 12's budget. (Debug wasm went *down* 2 MB net, since wstd
+    and its async-executor stack left: the lock is −8 packages, +1.)
+
+  **Verified live**, not merely compiled: `sudo curl -sI` returns real response headers, `curl -s`
+  the body, `curl -s | grep -c` composes through the Wall C pipeline, and the instance answers
+  normally afterwards. Full `scripts/golem-e2e.sh`: **272 passed, 0 failed.**
+- **Two harness defects cost more time than the migration and both can fabricate results.** Neither
+  is a code bug; both make a healthy agent look broken, and one makes a broken agent look tested:
+  - `golem build` **silently skipped `clank:agent`** (`[UP-TO-DATE]`) while rebuilding the greeter,
+    so an e2e run deployed a wasm predating every source edit and reported a confident 80/272
+    against code that was never compiled. The e2e pipes `golem -Y build` through `tail -4`, which
+    hides the skip line. A guard comparing artifact mtime against sources before deploy would have
+    caught it; worth adding to the harness.
+  - `scripts/golem-probe.sh` was the **third** reader still on the pre-rc-1 invoke JSON shape
+    (`result_json` + named fields) after golem-e2e.sh and `clank-conformance`'s golem backend were
+    fixed. Both mismatches fail silently, so every probed command prints empty and a healthy agent
+    reads as stone dead. Fixed by lifting the e2e's `EVAL_REMAP` in. The lesson generalizes: when a
+    golem-facing reader shows empty output, suspect the JSON shape before the agent, and fix these
+    readers as a SET (`grep -rn result_json`) rather than one at a time.
 
 ---
 
@@ -1366,7 +1408,7 @@ the wire shape.
 default = ["tool"]
 tool = []                                   # forward to the bound `clank` tool over tool-rpc
 full = []                                   # in-process Session (today's behaviour); clank-agent and the clank tool use this
-providers = ["dep:wstd", "dep:async-trait"] # unchanged
+providers = ["dep:wasi-fetch", "dep:http", "dep:async-trait"] # unchanged
 ```
 
 `tool` and `full` are mutually exclusive (`compile_error!` when both are set).
