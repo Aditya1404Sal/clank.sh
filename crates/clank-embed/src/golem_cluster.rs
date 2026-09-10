@@ -23,15 +23,16 @@ use clank_core::golem::cluster::GolemCluster;
 pub(crate) struct GolemApiCluster;
 
 /// Render this instance's own metadata (used for `golem oplog`/`status` anchoring + a liveness check).
-fn self_metadata_text() -> String {
+fn self_metadata_text() -> Result<String, String> {
     // SPIKE (dev SDK): `get_self_metadata` moved from the now-private `bindings::golem::api::host`
-    // to the crate root; `AgentMetadata.agent_id` is a struct (no Display) whose `.agent_id` is the
-    // instance name string.
-    let md = golem_rust::get_self_metadata();
-    format!(
+    // to the crate root and is now fallible; `AgentMetadata.agent_id` is a struct (no Display)
+    // whose `.agent_id` is the instance name string.
+    let md =
+        golem_rust::get_self_metadata().map_err(|e| format!("self metadata unavailable: {e:?}"))?;
+    Ok(format!(
         "agent-id: {}\nstatus: {:?}\ncomponent-revision: {}\n",
         md.agent_id.agent_id, md.status, md.component_revision
-    )
+    ))
 }
 
 #[async_trait::async_trait(?Send)]
@@ -40,7 +41,8 @@ impl GolemCluster for GolemApiCluster {
         // `get-agents` enumerates agents for the current component. It's a paged resource; we render
         // the first page's agent ids. The constructor needs a component-id filter/precise flag — v1
         // lists the current component's agents via self metadata's component context.
-        let md = golem_rust::get_self_metadata();
+        let md = golem_rust::get_self_metadata()
+            .map_err(|e| format!("self metadata unavailable: {e:?}"))?;
         // Without a component-id + filter we can't page arbitrary agents here; report the self view as
         // the anchor + note that full enumeration needs a component filter (honest partial).
         Ok(format!(
@@ -81,7 +83,7 @@ impl GolemCluster for GolemApiCluster {
     async fn self_oplog(&self) -> Result<String, String> {
         // Anchor the shell instance's own oplog view on its self metadata (a full oplog paging read
         // needs the self agent-id + a get-oplog resource; v1 surfaces the metadata anchor).
-        Ok(self_metadata_text())
+        self_metadata_text()
     }
 
     async fn rollback(&self) -> Result<String, String> {
@@ -96,8 +98,9 @@ impl GolemCluster for GolemApiCluster {
         // SPIKE (dev SDK): `fork` moved to the crate root (host module is now private).
         use golem_rust::ForkResult;
         match golem_rust::fork() {
-            ForkResult::Original(_) => Ok("forked (this is the original instance)".to_string()),
-            ForkResult::Forked(_) => Ok("forked (this is the new instance)".to_string()),
+            Ok(ForkResult::Original(_)) => Ok("forked (this is the original instance)".to_string()),
+            Ok(ForkResult::Forked(_)) => Ok("forked (this is the new instance)".to_string()),
+            Err(e) => Err(format!("fork failed: {e:?}")),
         }
     }
 }

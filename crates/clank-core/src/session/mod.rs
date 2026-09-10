@@ -305,8 +305,12 @@ impl Session {
     /// Returns `Err` if the Brush shell fails to build or its `$PATH`/`$HOME` seeding fails (and,
     /// on wasm, if the current-thread tokio runtime cannot be constructed).
     // wasm builds the shell via `rt.block_on` (no `.await`), so clippy sees an unused `async`; the
-    // native arm awaits and the signature must stay async for both. Suppress on wasm only.
-    #[cfg_attr(target_arch = "wasm32", allow(clippy::unused_async))]
+    // native arm awaits and the signature must stay async for both. Suppress on wasm only
+    // (clippy 1.98 reports the same condition under `unused_async_trait_impl` as well).
+    #[cfg_attr(
+        target_arch = "wasm32",
+        allow(clippy::unused_async, clippy::unused_async_trait_impl)
+    )]
     pub async fn new() -> Result<Self, BoxError> {
         ensure_fs_layout();
         #[cfg(target_arch = "wasm32")]
@@ -1637,7 +1641,7 @@ impl Session {
     #[cfg(target_arch = "wasm32")]
     // Drives Brush inline (block_on at the call boundary); the mirror native `execute_impl` awaits, so
     // this stays async for parity even though its wasm body doesn't `.await`.
-    #[allow(clippy::unused_async)]
+    #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     async fn execute_impl(&mut self, line: &str, stdin_bytes: Option<&[u8]>) -> LineResult {
         let stdout_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
         let stderr_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));

@@ -120,7 +120,7 @@ if [[ -n "$existing" ]]; then
 fi
 
 step "Starting throwaway golem server (data dir: $DATA_DIR)"
-"$GOLEM" server run --clean --router-port "$ROUTER_PORT" --data-dir "$DATA_DIR" --ports-file "$PORTS_FILE" \
+"$GOLEM" -Y server run --clean --router-port "$ROUTER_PORT" --data-dir "$DATA_DIR" --ports-file "$PORTS_FILE" \
   >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 note "server pid $SERVER_PID — waiting for it to come up..."

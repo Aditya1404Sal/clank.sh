@@ -300,7 +300,7 @@ if [[ -n "$existing" ]]; then
 fi
 
 step "Starting throwaway golem server (data dir: $DATA_DIR)"
-golem server run --clean --router-port "$ROUTER_PORT" --data-dir "$DATA_DIR" --ports-file "$PORTS_FILE" \
+golem -Y server run --clean --router-port "$ROUTER_PORT" --data-dir "$DATA_DIR" --ports-file "$PORTS_FILE" \
   >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 note "server pid $SERVER_PID"
@@ -429,8 +429,12 @@ expect_contains "env lists variables"        'env'                              
 # start clean, record ONE command whose output alone exceeds the cap, then run a few short commands.
 # The oversized entry becomes the oldest and is dropped behind a marker while the newest survives.
 run_line 'context clear' >/dev/null
-# printf a ~150KB blob (≈37500 est. tokens) as one recorded entry — comfortably over the 24000 cap.
-run_line "printf '%150000s' ''" >/dev/null
+# printf a ~160KB blob (≈40000 est. tokens) as one recorded entry — comfortably over the 24000 cap.
+# Three conversions rather than one `%160000s`: Rust ≥1.88 stores `core::fmt` widths as u16, so a
+# single width above 65535 panics inside uucore's `write_padded` (`Argument::from_usize`), which
+# traps the durable agent and wedges the instance for every later invocation. The fork's printf
+# needs its own fix for that; the e2e only needs the entry to be oversized.
+run_line "printf '%60000s%60000s%40000s' '' '' ''" >/dev/null
 run_line 'echo alpha' >/dev/null
 run_line 'echo bravo' >/dev/null
 run_line 'echo charlie' >/dev/null

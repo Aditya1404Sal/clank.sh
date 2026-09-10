@@ -66,6 +66,8 @@ impl GreeterAgent for GreeterAgentImpl {
         }
     }
 
+    // The agent trait declares `greet` async; this trivial body has nothing to await.
+    #[allow(clippy::unused_async_trait_impl)]
     async fn greet(&mut self, who: String) -> String {
         format!("Hello, {who}! — from GreeterAgent({})", self.name)
     }

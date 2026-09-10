@@ -92,8 +92,9 @@ impl AgentInvoker for WasmRpcInvoker {
         // agent — README:803), then await the method result.
         let client = build_client(inv)?;
         let input = encode_args(&inv.args)?;
-        match client.invoke_and_await(&inv.method, input) {
-            Ok(result) => render_result(result),
+        // No scope card: the invocation runs with the caller's own authority.
+        match client.invoke_and_await(&inv.method, input, None) {
+            Ok(with_metadata) => render_result(with_metadata.result),
             Err(e) => Err(format!("agent invocation failed: {e:?}")),
         }
     }
@@ -106,7 +107,7 @@ impl AgentInvoker for WasmRpcInvoker {
                 // Fire-and-forget: `invoke` returns immediately. No cancel token (a queued invocation
                 // could be cancelled via async-invoke-and-await's future, but plain trigger has none).
                 client
-                    .invoke(&inv.method, input)
+                    .invoke(&inv.method, input, None)
                     .map_err(|e| format!("trigger failed: {e:?}"))?;
                 Ok(InvokeHandle {
                     cancel_token: None,
@@ -120,11 +121,15 @@ impl AgentInvoker for WasmRpcInvoker {
                 // invocations), so it can't be re-acquired for a later `kill` — the invocation IS
                 // scheduled, but cancel-after-return isn't supported (documented, honest handle).
                 let secs = parse_epoch_secs(when)?;
-                let dt = golem_rust::wasip2::clocks::wall_clock::Datetime {
-                    seconds: secs,
+                let seconds = i64::try_from(secs)
+                    .map_err(|_| format!("--schedule time '{when}' is out of range"))?;
+                let dt = golem_rust::ScheduledTime {
+                    seconds,
                     nanoseconds: 0,
                 };
-                let _token = client.schedule_cancelable_invocation(dt, &inv.method, input);
+                let _receipt = client
+                    .schedule_cancelable_invocation(dt, &inv.method, input, None)
+                    .map_err(|e| format!("schedule failed: {e:?}"))?;
                 Ok(InvokeHandle {
                     cancel_token: None,
                     note: format!("scheduled for {when}"),

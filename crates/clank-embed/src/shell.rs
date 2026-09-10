@@ -97,7 +97,7 @@ impl EmbeddedShell {
                 let cwd = session.cwd().display().to_string();
                 eval_result(result, cwd)
             }
-            Err(failure) => failure,
+            Err(failure) => *failure,
         }
     }
 
@@ -111,13 +111,13 @@ impl EmbeddedShell {
                 let cwd = session.cwd().display().to_string();
                 eval_result(result, cwd)
             }
-            Err(failure) => failure,
+            Err(failure) => *failure,
         }
     }
 
     /// Build the Session on first use (applying the deferred setup), or report the startup failure
-    /// as a well-formed result.
-    async fn ensure(&mut self) -> Result<&mut Session, EvalResult> {
+    /// as a well-formed result (boxed: it is the rare path, and the record is large).
+    async fn ensure(&mut self) -> Result<&mut Session, Box<EvalResult>> {
         if self.session.is_none() {
             match Session::new().await {
                 Ok(mut s) => {
@@ -127,14 +127,14 @@ impl EmbeddedShell {
                     self.session = Some(s);
                 }
                 Err(e) => {
-                    return Err(EvalResult {
+                    return Err(Box::new(EvalResult {
                         stdout: String::new(),
                         stderr: format!("clank: failed to start shell: {e}\n"),
                         exit_code: 1,
                         pending_prompt: None,
                         // No session yet, so no cwd to report; the shell shows the bare label.
                         cwd: String::new(),
-                    });
+                    }));
                 }
             }
         }
