@@ -32,17 +32,15 @@ use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Default log directory (README filesystem layout).
-pub const DEFAULT_LOG_DIR: &str = "/var/log";
+pub(crate) use crate::config::env::LOG_DIR as LOG_DIR_ENV;
+use crate::config::limits::MAX_LOG_BYTES;
 
-/// The one env override, mirroring `greaseconfig`'s `CLANK_GREASE_*` seams — lets tests point the log
-/// layer at a temp dir instead of the real `/var/log`.
-pub const LOG_DIR_ENV: &str = "CLANK_LOG_DIR";
-
-/// The log directory: `$CLANK_LOG_DIR` if set, else `/var/log`.
+/// The log directory: [`crate::config::env::LOG_DIR`] if set, else [`crate::config::vfs::LOG_DIR`].
 #[must_use]
 pub fn log_dir() -> PathBuf {
-    PathBuf::from(std::env::var(LOG_DIR_ENV).unwrap_or_else(|_| DEFAULT_LOG_DIR.to_string()))
+    PathBuf::from(
+        std::env::var(LOG_DIR_ENV).unwrap_or_else(|_| crate::config::vfs::LOG_DIR.to_string()),
+    )
 }
 
 /// A process-wide lock any test that mutates the global `CLANK_LOG_DIR` env var must hold — shared
@@ -113,6 +111,25 @@ pub fn write_line(file: LogFile, line: &str) {
             let _ = f.write_all(b"\n");
         }
     }
+    rotate_if_oversized(&path);
+}
+
+/// Keep an appended log file bounded by rewriting it to its last [`MAX_LOG_BYTES`] whole lines.
+///
+/// The agent's sink is bounded (it rebuilds a capped in-memory tail and rewrites the whole file);
+/// the append path had no counterpart, so a long-lived native session grew `shell.log` forever. Only
+/// runs once the file is meaningfully over the cap, so the rewrite is rare rather than per-line.
+fn rotate_if_oversized(path: &std::path::Path) {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
+    if meta.len() <= (MAX_LOG_BYTES as u64) * 2 {
+        return;
+    }
+    if let Ok(mut contents) = std::fs::read_to_string(path) {
+        bound_tail(&mut contents, MAX_LOG_BYTES);
+        let _ = std::fs::write(path, contents);
+    }
 }
 
 /// The four log files. Each maps to a fixed filename under [`log_dir`].
@@ -152,8 +169,14 @@ impl LogFile {
 pub fn append(file: LogFile, line: &str) {
     let masked = crate::runtime::secretenv::mask_values(line);
     ACTIVE.with(|a| {
-        if let Some(sink) = a.borrow().as_ref() {
-            sink.append(file, &masked);
+        // `try_borrow`, not `borrow`: this is reachable from the panic hook, which can fire at any
+        // point — including while `install`/`Drop` holds the mutable borrow. A panicking borrow
+        // there would be a panic inside a panic, which aborts immediately and destroys the very
+        // report we are trying to write. Dropping the line is the strictly better failure.
+        if let Ok(slot) = a.try_borrow() {
+            if let Some(sink) = slot.as_ref() {
+                sink.append(file, &masked);
+            }
         }
     });
 }
@@ -241,12 +264,24 @@ pub fn bound_tail(buf: &mut String, max_bytes: usize) {
     }
     let cut = buf.len() - max_bytes;
     // Advance to just past the next newline so the retained tail starts on a line boundary.
-    let start = buf[cut..].find('\n').map_or(0, |i| cut + i + 1);
+    //
+    // Scan RAW BYTES rather than slicing `buf[cut..]`: `cut` is an arbitrary byte offset, so a
+    // multi-byte codepoint straddling it makes `str` indexing panic — and this runs on the durable
+    // agent (the only caller is the agent's log sink), where a panic traps the instance. Every
+    // command line reaches this buffer verbatim via shell.log, so a single non-ASCII character
+    // landing on the cut offset was enough to wedge the worker. Byte scanning is safe and gives the
+    // same answer: `\n` is ASCII, so it can never be a UTF-8 continuation byte, and any index
+    // derived from one is therefore a char boundary.
+    let start = buf.as_bytes()[cut..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map_or(0, |i| cut + i + 1);
     // If the only newline is the very last byte (start == buf.len()), keep the last line rather than
     // emptying the buffer.
     let start = if start >= buf.len() {
-        buf[..buf.len().saturating_sub(1)]
-            .rfind('\n')
+        buf.as_bytes()[..buf.len() - 1]
+            .iter()
+            .rposition(|&b| b == b'\n')
             .map_or(0, |i| i + 1)
     } else {
         start
@@ -268,12 +303,41 @@ const SECRET_QUERY_PARAMS: &[&str] = &[
     "signature",
 ];
 
-/// Mask secret query-parameter values in a URL before it is logged, e.g.
-/// `https://h/mcp?token=sk-abc&x=1` → `https://h/mcp?token=<redacted>&x=1`. Anything before the `?` is
-/// untouched. A parameter whose name (case-insensitive) is in [`SECRET_QUERY_PARAMS`] has its value
-/// replaced. Non-secret params and a URL with no query string pass through unchanged.
+/// Mask the password in a URL's `userinfo` (`scheme://user:secret@host` → `scheme://user:<redacted>@host`).
+///
+/// `redact_url` used to document that "anything before the `?` is untouched", which meant a URL
+/// carrying credentials in its authority wrote them verbatim to http.log — the same leak class as
+/// the `model add --key` one, on a shape that `curl -u`, MCP configs and registry URLs all produce.
+/// Only the password is masked; the username stays legible because it is useful for debugging and is
+/// not the secret.
+fn redact_userinfo(url: &str) -> std::borrow::Cow<'_, str> {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return std::borrow::Cow::Borrowed(url);
+    };
+    // The userinfo ends at the first `@` BEFORE the first `/` — a later `@` is in the path or query.
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    let Some(at) = rest[..authority_end].find('@') else {
+        return std::borrow::Cow::Borrowed(url);
+    };
+    let (userinfo, after) = rest.split_at(at);
+    match userinfo.split_once(':') {
+        Some((user, _secret)) => {
+            std::borrow::Cow::Owned(format!("{scheme}://{user}:<redacted>{after}"))
+        }
+        // No password component — nothing secret to mask.
+        None => std::borrow::Cow::Borrowed(url),
+    }
+}
+
+/// Redact a URL for logging: the `userinfo` password (via [`redact_userinfo`]) and any secret
+/// query-parameter value, e.g. `https://h/mcp?token=sk-abc&x=1` → `https://h/mcp?token=<redacted>&x=1`.
+///
+/// A parameter whose name (case-insensitive) is in [`SECRET_QUERY_PARAMS`] has its value replaced.
+/// Non-secret params, and a URL with neither credentials nor a query string, pass through unchanged.
 #[must_use]
 pub fn redact_url(url: &str) -> String {
+    let url = redact_userinfo(url);
+    let url: &str = &url;
     let Some((base, query)) = url.split_once('?') else {
         return url.to_string();
     };
@@ -338,6 +402,30 @@ mod tests {
         assert_eq!(g.read(LogFile::Shell), "line one\nline two\n");
         // Different logs are separate files.
         assert!(g.read(LogFile::Http).is_empty());
+    }
+
+    /// A panic is reported to `ops.log` with its location and the command that caused it.
+    ///
+    /// This is the whole point of the panic hook: on wasm32-wasip2 (an ABORT target — verified via
+    /// `--print target-spec-json`) a panic cannot be caught, so the hook running just before the
+    /// abort is the only chance to record why the durable instance died. Exercised natively, where
+    /// unwinding lets `catch_unwind` hold the panic still long enough to inspect the log.
+    #[test]
+    fn a_panic_is_reported_to_ops_log_with_its_command() {
+        let g = LogDirGuard::new("panic-report");
+        crate::runtime::panicreport::install();
+        let _ctx = crate::runtime::panicreport::executing("some-failing-command --flag");
+        let caught = std::panic::catch_unwind(|| panic!("kaboom"));
+        assert!(caught.is_err(), "the panic must still propagate");
+
+        let ops = g.read(LogFile::Ops);
+        assert!(ops.starts_with("panic "), "got {ops:?}");
+        assert!(ops.contains("logging.rs"), "must name the site: {ops:?}");
+        assert!(ops.contains("kaboom"), "must carry the payload: {ops:?}");
+        assert!(
+            ops.contains("some-failing-command --flag"),
+            "must name the command being run: {ops:?}"
+        );
     }
 
     #[test]
@@ -415,6 +503,38 @@ mod tests {
         s.push('\n');
         bound_tail(&mut s, 10);
         assert_eq!(s, format!("{}\n", "x".repeat(100)));
+    }
+
+    #[test]
+    fn bound_tail_survives_a_multibyte_char_on_the_cut_offset() {
+        // Regression: `cut` is a raw byte offset, so slicing `buf[cut..]` panicked whenever a
+        // multi-byte codepoint straddled it. The only caller is the durable agent's log sink, where
+        // a panic traps the instance — and every command line reaches that buffer verbatim through
+        // shell.log, so one non-ASCII character landing on the cut was enough to wedge the worker.
+        //
+        // 'é' occupies bytes 4..6; the cap is chosen so `cut` lands on its continuation byte.
+        let mut s = format!("aaaa\u{e9}{}", "b".repeat(10));
+        assert_eq!(s.len(), 16, "byte layout the cap below depends on");
+        // cut == 16 - 11 == 5, which is mid-'é'. No newline anywhere, so the lone oversized line is
+        // kept intact — the point is that getting there no longer panics.
+        bound_tail(&mut s, 11);
+        assert_eq!(s, format!("aaaa\u{e9}{}", "b".repeat(10)));
+
+        // With newlines present the tail is still trimmed to whole lines and stays valid UTF-8.
+        let mut s = String::new();
+        for i in 0..50 {
+            let _ = writeln!(s, "l{i}-\u{2014}-\u{e9}");
+        }
+        bound_tail(&mut s, 30);
+        assert!(s.len() <= 30, "tail must be under the cap, got {}", s.len());
+        assert!(
+            s.starts_with('l'),
+            "tail starts on a line boundary, got {s:?}"
+        );
+        assert!(
+            s.ends_with("l49-\u{2014}-\u{e9}\n"),
+            "the newest line survives, got {s:?}"
+        );
     }
 
     #[test]

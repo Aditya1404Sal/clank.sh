@@ -1,9 +1,10 @@
 //! `Session` methods for the human-in-the-loop pause machinery: surfacing `prompt-user` and
 //! authorization-confirmation pauses (`P` state), and resolving them via `answer_prompt`.
 
+use super::ask::is_context_summarize;
 use super::{
-    authz, is_context_summarize, promptuser, AnswerInput, Flow, LineResult, Pending, PendingKind,
-    PendingPrompt, Resolution, Session,
+    authz, promptuser, AnswerInput, Flow, LineResult, Pending, PendingKind, PendingPrompt,
+    Resolution, Session,
 };
 
 impl Session {

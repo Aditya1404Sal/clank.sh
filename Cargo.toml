@@ -65,7 +65,8 @@ expect_used = "warn"
 # fallback. The fork makes that one call tolerant — fall back to (col 0, bottom row), which is
 # correct because clank always ends output in a newline. Vendored (not a git dep) because it is the
 # exact published 0.38.0 source plus a one-line patch; native-only, never in the wasm build. See
-# reedline-fork/src/painting/painter.rs.
+# reedline-fork/src/painting/painter.rs. To productionize, push it as a github fork and swap to a
+# `git`+`rev` pin like the coreutils/brush entries below.
 reedline = { path = "reedline-fork" }
 
 # crossterm forked for ONE fix, paired with the reedline fork above. crossterm's cursor::position()

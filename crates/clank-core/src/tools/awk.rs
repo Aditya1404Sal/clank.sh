@@ -320,6 +320,8 @@ const UNSUPPORTED_KEYWORDS: &[&str] = &[
 struct Parser {
     toks: Vec<Tok>,
     pos: usize,
+    /// Current expression-nesting depth, bounded by [`crate::config::limits::MAX_AWK_PARSE_DEPTH`].
+    depth: usize,
 }
 
 impl Parser {
@@ -453,7 +455,29 @@ impl Parser {
         }
     }
 
+    /// Depth-guarded entry point for every expression parse.
+    ///
+    /// Every recursion cycle in this parser passes through here — the parenthesised-expression and
+    /// function-argument cases in `parse_primary` both call back into it, as does the
+    /// right-associative assignment RHS below — so one counter at this choke point bounds the whole
+    /// descent. Without it, deeply nested input overflowed the stack, and a stack overflow aborts
+    /// the process (on the durable agent, an unrecoverable trap) rather than unwinding into an error.
     fn parse_expr(&mut self) -> AwkResult<Expr> {
+        self.depth += 1;
+        if self.depth > crate::config::limits::MAX_AWK_PARSE_DEPTH {
+            self.depth -= 1;
+            return Err(format!(
+                "expression nested deeper than {} levels",
+                crate::config::limits::MAX_AWK_PARSE_DEPTH
+            )
+            .into());
+        }
+        let parsed = self.parse_expr_inner();
+        self.depth -= 1;
+        parsed
+    }
+
+    fn parse_expr_inner(&mut self) -> AwkResult<Expr> {
         // Assignment: IDENT (=|+=|-=|*=|/=|%=) expr — right-associative via recursion.
         if let (Some(Tok::Ident(name)), Some(op)) = (self.peek(), self.peek2()) {
             let name = name.clone();
@@ -989,6 +1013,44 @@ fn exec_stmts(stmts: &[Stmt], env: &mut Env, out: &mut dyn Write) -> AwkResult<(
 }
 
 /// A subset printf: `%[-0][width][.prec](d|i|f|g|e|s|x|o|c|%)` plus `\n`/`\t` escapes.
+/// Parse the `<width>[.<precision>]` part of a `%` conversion, refusing absurd values.
+///
+/// Both are bounded by [`crate::config::limits::MAX_PRINTF_WIDTH`]. The padding built from `width`
+/// is exactly that many characters, so `%9999999999d` was a multi-gigabyte allocation from a single
+/// format string — a plausible malformed emission from a model, and on the agent a memory trap
+/// rather than an error. Refusing is more honest than silently clamping, which would hand back
+/// output the caller never asked for.
+fn parse_width_and_precision(
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+) -> AwkResult<(Option<usize>, Option<usize>)> {
+    let too_big =
+        |what: &str| format!("{what} exceeds {}", crate::config::limits::MAX_PRINTF_WIDTH);
+
+    let mut digits = String::new();
+    while let Some(c) = chars.next_if(char::is_ascii_digit) {
+        digits.push(c);
+    }
+    let width: Option<usize> = digits.parse().ok();
+    if width.is_some_and(|w| w > crate::config::limits::MAX_PRINTF_WIDTH) {
+        return Err(too_big("field width").into());
+    }
+
+    let mut prec: Option<usize> = None;
+    if chars.peek() == Some(&'.') {
+        chars.next();
+        let mut digits = String::new();
+        while let Some(c) = chars.next_if(char::is_ascii_digit) {
+            digits.push(c);
+        }
+        let parsed = digits.parse().unwrap_or(0);
+        if parsed > crate::config::limits::MAX_PRINTF_WIDTH {
+            return Err(too_big("precision").into());
+        }
+        prec = Some(parsed);
+    }
+    Ok((width, prec))
+}
+
 #[allow(clippy::cast_possible_truncation, clippy::similar_names)] // %d/%x/%o intentionally truncate the f64 to an integer; pad_len/pad_char share the pad_ prefix
 fn format_printf(format: &str, values: &[Value]) -> AwkResult<String> {
     let mut out = String::new();
@@ -1018,20 +1080,7 @@ fn format_printf(format: &str, values: &[Value]) -> AwkResult<String> {
                     }
                     chars.next();
                 }
-                let mut width = String::new();
-                while let Some(c) = chars.next_if(char::is_ascii_digit) {
-                    width.push(c);
-                }
-                let width: Option<usize> = width.parse().ok();
-                let mut prec: Option<usize> = None;
-                if chars.peek() == Some(&'.') {
-                    chars.next();
-                    let mut p = String::new();
-                    while let Some(c) = chars.next_if(char::is_ascii_digit) {
-                        p.push(c);
-                    }
-                    prec = Some(p.parse().unwrap_or(0));
-                }
+                let (width, prec) = parse_width_and_precision(&mut chars)?;
                 let conv = chars.next().ok_or("incomplete % conversion")?;
                 let value = next_value
                     .next()
@@ -1134,7 +1183,12 @@ pub(crate) fn run_awk(
     };
 
     let toks = lex(&program)?;
-    let rules = Parser { toks, pos: 0 }.parse_program()?;
+    let rules = Parser {
+        toks,
+        pos: 0,
+        depth: 0,
+    }
+    .parse_program()?;
 
     let mut env = Env::new(fs);
     for (k, v) in presets {
@@ -1210,6 +1264,31 @@ mod tests {
         run_awk(&argv, &mut stdin, &mut out, &mut err)
             .unwrap_err()
             .to_string()
+    }
+
+    #[test]
+    fn an_absurd_printf_width_is_refused_not_allocated() {
+        // Regression: width parsed as a bare usize and drove the pad-string length, so this was a
+        // ~10 GB allocation from one format string — an OOM natively, a memory trap on the agent.
+        let err = awk_err(&[r#"BEGIN{printf "%9999999999d", 1}"#]);
+        assert!(err.contains("field width exceeds"), "got {err:?}");
+        let err = awk_err(&[r#"BEGIN{printf "%.9999999999f", 1}"#]);
+        assert!(err.contains("precision exceeds"), "got {err:?}");
+        // A width that is merely large but sane still works.
+        assert_eq!(awk(&[r#"BEGIN{printf "%5d", 42}"#], ""), "   42");
+    }
+
+    #[test]
+    fn deeply_nested_expressions_are_refused_not_overflowed() {
+        // Regression: parse_expr → … → parse_primary → parse_expr had no depth limit, so this
+        // overflowed the stack. A stack overflow ABORTS — it cannot be caught, which on the durable
+        // agent means an unrecoverable trap rather than an error the caller can read.
+        let depth = crate::config::limits::MAX_AWK_PARSE_DEPTH + 50;
+        let program = format!("BEGIN{{print {}1{}}}", "(".repeat(depth), ")".repeat(depth));
+        let err = awk_err(&[program.as_str()]);
+        assert!(err.contains("nested deeper than"), "got {err:?}");
+        // Nesting well inside the limit still parses and evaluates.
+        assert_eq!(awk(&["BEGIN{print ((((1+2))))}"], ""), "3\n");
     }
 
     #[test]

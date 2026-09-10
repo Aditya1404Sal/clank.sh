@@ -63,7 +63,7 @@ struct FindOpts {
 }
 
 #[allow(clippy::similar_names)] // args/arg are conventional
-fn parse_find_args(args: &[String]) -> Result<FindOpts, String> {
+fn parse_find_args(args: &[String]) -> crate::error::Result<FindOpts> {
     let mut opts = FindOpts::default();
     let mut iter = args.iter();
     let mut seen_predicate = false;
@@ -71,50 +71,59 @@ fn parse_find_args(args: &[String]) -> Result<FindOpts, String> {
         let mut value_of = |flag: &str| {
             iter.next()
                 .cloned()
-                .ok_or_else(|| format!("missing argument to '{flag}'"))
+                .ok_or_else(|| crate::ShellError::usage(format!("missing argument to '{flag}'")))
         };
         match arg.as_str() {
             "-name" | "-iname" => {
                 seen_predicate = true;
                 let glob = value_of(arg)?;
-                opts.name = Some(
-                    glob_to_regex(&glob, arg == "-iname")
-                        .map_err(|e| format!("invalid glob '{glob}': {e}"))?,
-                );
+                opts.name = Some(glob_to_regex(&glob, arg == "-iname").map_err(|e| {
+                    crate::ShellError::usage(format!("invalid glob '{glob}': {e}"))
+                })?);
             }
             "-path" => {
                 seen_predicate = true;
                 let glob = value_of(arg)?;
-                opts.path_glob = Some(
-                    glob_to_regex(&glob, false)
-                        .map_err(|e| format!("invalid glob '{glob}': {e}"))?,
-                );
+                opts.path_glob = Some(glob_to_regex(&glob, false).map_err(|e| {
+                    crate::ShellError::usage(format!("invalid glob '{glob}': {e}"))
+                })?);
             }
             "-type" => {
                 seen_predicate = true;
                 match value_of(arg)?.as_str() {
                     "f" => opts.file_type = Some('f'),
                     "d" => opts.file_type = Some('d'),
-                    other => return Err(format!("unsupported -type '{other}' (only f and d)")),
+                    other => {
+                        return Err(crate::ShellError::usage(format!(
+                            "unsupported -type '{other}' (only f and d)"
+                        )))
+                    }
                 }
             }
             "-maxdepth" => {
                 seen_predicate = true;
                 let n = value_of(arg)?;
-                opts.maxdepth = Some(n.parse().map_err(|_| format!("invalid -maxdepth '{n}'"))?);
+                opts.maxdepth =
+                    Some(n.parse().map_err(|_| {
+                        crate::ShellError::usage(format!("invalid -maxdepth '{n}'"))
+                    })?);
             }
             "-mindepth" => {
                 seen_predicate = true;
                 let n = value_of(arg)?;
-                opts.mindepth = n.parse().map_err(|_| format!("invalid -mindepth '{n}'"))?;
+                opts.mindepth = n
+                    .parse()
+                    .map_err(|_| crate::ShellError::usage(format!("invalid -mindepth '{n}'")))?;
             }
             "-print" => seen_predicate = true, // the implicit default
             p if p.starts_with('-') || p.starts_with('!') || p.starts_with('(') => {
-                return Err(format!("unknown predicate '{p}'"));
+                return Err(crate::ShellError::usage(format!("unknown predicate '{p}'")));
             }
             path => {
                 if seen_predicate {
-                    return Err(format!("paths must precede expression: '{path}'"));
+                    return Err(crate::ShellError::usage(format!(
+                        "paths must precede expression: '{path}'"
+                    )));
                 }
                 opts.paths.push(path.to_string());
             }

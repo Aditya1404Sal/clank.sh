@@ -1,13 +1,12 @@
-//! `Session` methods for the grease package manager: install/remove/list/info/search/update
-//! and registry management. Shared install helpers + integrity types live in `super` (mod.rs).
+//! `Session` methods for the grease package manager: install/remove/list/info/search/update,
+//! registry management, and the install machinery those need: the integrity chain
+//! ([`InstallIntegrity`], [`fetch_index_entry`], [`verify_log_inclusion`]), the on-disk marker, and
+//! the `info` renderers.
 
 use std::fmt::Write as _;
 
-use super::{
-    fetch_index_entry, is_markdown_frontmatter, materialize_mcp_resources, mcp_info_text,
-    skill_info_text, verify_log_inclusion, write_install_marker, IndexEntry, InstallIntegrity,
-    LineResult, Session,
-};
+use super::mcp::materialize_mcp_resources;
+use super::{LineResult, Session};
 
 impl Session {
     /// Dispatch a parsed `grease` command.
@@ -16,7 +15,16 @@ impl Session {
         cmd: crate::grease::cmd::GreaseCommand,
     ) -> LineResult {
         use crate::grease::cmd::GreaseCommand;
-        match cmd {
+        // The audited operation, for the ops.log record below. `None` for read-only subcommands.
+        let audited = match &cmd {
+            GreaseCommand::Install { name, .. } => Some(("install", name.clone())),
+            GreaseCommand::Remove { name } => Some(("remove", name.clone())),
+            GreaseCommand::Update { name } => {
+                Some(("update", name.clone().unwrap_or_else(|| "*".to_string())))
+            }
+            _ => None,
+        };
+        let result = match cmd {
             GreaseCommand::RegistryAdd { url, key } => {
                 self.grease_registry_add(&url, key.as_deref())
             }
@@ -30,13 +38,35 @@ impl Session {
             GreaseCommand::Remove { name } => self.grease_remove(&name),
             GreaseCommand::Search { query } => self.grease_search(&query).await,
             GreaseCommand::Update { name } => self.grease_update(name.as_deref()).await,
+        };
+        // Audit the supply-chain operations. Nothing in the whole install pipeline used to reach any
+        // log — a sha256 mismatch, a bad signature, a failed inclusion proof, all wrote to the
+        // terminal and vanished. Only the registry's HTTP fetches showed up (in http.log), so a
+        // rejected package left no evidence anyone could find afterwards. On the agent the terminal
+        // output is gone the moment the invocation returns, which makes this the only record.
+        if let Some((op, name)) = audited {
+            let outcome = if result.exit_code == 0 {
+                "ok".to_string()
+            } else {
+                format!("failed:{}", result.exit_code)
+            };
+            let mut record = crate::logging::Record::new("grease")
+                .field("op", op)
+                .field("package", &name)
+                .field("outcome", &outcome);
+            if result.exit_code != 0 {
+                record = record.field("detail", String::from_utf8_lossy(&result.stderr).trim());
+            }
+            record.emit(crate::logging::LogFile::Ops);
         }
+        result
     }
 
     /// `grease list`: installed packages (all kinds), each tagged with its kind.
     fn grease_list(&self) -> LineResult {
         let packages = self.grease.packages();
-        if packages.is_empty() {
+        let broken = self.grease.broken();
+        if packages.is_empty() && broken.is_empty() {
             return LineResult::continue_with_stdout(b"no packages installed\n".to_vec());
         }
         let mut out = String::new();
@@ -49,7 +79,23 @@ impl Session {
                 p.payload.description()
             );
         }
-        LineResult::continue_with_stdout(out.into_bytes())
+        // Half-installed packages are LISTED, not hidden. Silently skipping them was the worst
+        // possible behaviour: the package was invisible here, so the obvious recovery
+        // (`grease remove <name>`) reported "is not installed" and the orphaned marker survived
+        // forever. Naming them makes the state recoverable and exits non-zero so a driver notices.
+        let mut err = String::new();
+        for (name, reason) in broken {
+            let _ = writeln!(out, "{name}  [broken]  {reason}");
+            let _ = writeln!(
+                err,
+                "grease list: '{name}' is installed but unusable: {reason}"
+            );
+        }
+        LineResult::from_outcome(
+            out.into_bytes(),
+            err.into_bytes(),
+            u8::from(!broken.is_empty()),
+        )
     }
 
     /// `grease info <name>`: an installed package's metadata. Command packages (prompt/script) show
@@ -378,8 +424,8 @@ impl Session {
             Err(e) => {
                 return LineResult::from_outcome(
                     Vec::new(),
-                    format!("grease install: {name}: {}\n", e.message).into_bytes(),
-                    e.exit_code,
+                    format!("grease install: {name}: {e}\n").into_bytes(),
+                    e.exit_code(),
                 )
             }
         };
@@ -394,8 +440,8 @@ impl Session {
                 Err(e) => {
                     return LineResult::from_outcome(
                         Vec::new(),
-                        format!("grease install: {name}: tools/list: {}\n", e.message).into_bytes(),
-                        e.exit_code,
+                        format!("grease install: {name}: tools/list: {e}\n").into_bytes(),
+                        e.exit_code(),
                     )
                 }
             }
@@ -478,11 +524,19 @@ impl Session {
         let payload = crate::grease::state::Payload::Mcp(pkg.clone());
         if let Err(msg) = self.persist_package(name, crate::grease::pkg::PackageKind::Mcp, &payload)
         {
-            return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 1);
+            return LineResult::from_outcome(
+                Vec::new(),
+                msg.to_string().into_bytes(),
+                msg.exit_code(),
+            );
         }
         let marker = integrity.to_marker(crate::grease::pkg::PackageKind::Mcp, registry);
         if let Err(msg) = write_install_marker(name, &marker) {
-            return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 1);
+            return LineResult::from_outcome(
+                Vec::new(),
+                msg.to_string().into_bytes(),
+                msg.exit_code(),
+            );
         }
 
         // Register the server + tools into `McpState` (so `<server> <tool>` dispatch + the mcp bin stub
@@ -557,16 +611,30 @@ impl Session {
         // misconfigured registry).
         let payload = match self.parse_and_check_payload(name, kind, body) {
             Ok(p) => p,
-            Err(msg) => return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 4),
+            Err(msg) => {
+                return LineResult::from_outcome(
+                    Vec::new(),
+                    msg.to_string().into_bytes(),
+                    msg.exit_code(),
+                )
+            }
         };
 
         // Persist the typed payload + write the marker + materialize the kind's on-disk surface.
         if let Err(msg) = self.persist_package(name, kind, &payload) {
-            return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 1);
+            return LineResult::from_outcome(
+                Vec::new(),
+                msg.to_string().into_bytes(),
+                msg.exit_code(),
+            );
         }
         let marker = integrity.to_marker(kind, registry);
         if let Err(msg) = write_install_marker(name, &marker) {
-            return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 1);
+            return LineResult::from_outcome(
+                Vec::new(),
+                msg.to_string().into_bytes(),
+                msg.exit_code(),
+            );
         }
         let installed = crate::grease::state::InstalledPackage { marker, payload };
         // Materialize the kind's on-disk surface (bin stub / skill dir tree) — needs the help text,
@@ -650,47 +718,52 @@ impl Session {
         name: &str,
         kind: crate::grease::pkg::PackageKind,
         body: &[u8],
-    ) -> Result<crate::grease::state::Payload, String> {
+    ) -> crate::grease::error::Result<crate::grease::state::Payload> {
         use crate::grease::pkg::{
             AgentPackage, McpPackage, PackageKind, PromptPackage, ScriptPackage, SkillPackage,
         };
         use crate::grease::state::Payload;
         let (payload, pkg_name) = match kind {
             PackageKind::Prompt => {
-                let p =
-                    PromptPackage::from_json(body).map_err(|e| format!("grease install: {e}\n"))?;
+                let p = PromptPackage::from_json(body).map_err(|e| {
+                    crate::grease::Error::Malformed(format!("grease install: {e}\n"))
+                })?;
                 let n = p.name.clone();
                 (Payload::Prompt(p), n)
             }
             PackageKind::Script => {
-                let s =
-                    ScriptPackage::from_json(body).map_err(|e| format!("grease install: {e}\n"))?;
+                let s = ScriptPackage::from_json(body).map_err(|e| {
+                    crate::grease::Error::Malformed(format!("grease install: {e}\n"))
+                })?;
                 let n = s.name.clone();
                 (Payload::Script(s), n)
             }
             PackageKind::Skill => {
-                let s =
-                    SkillPackage::from_json(body).map_err(|e| format!("grease install: {e}\n"))?;
+                let s = SkillPackage::from_json(body).map_err(|e| {
+                    crate::grease::Error::Malformed(format!("grease install: {e}\n"))
+                })?;
                 let n = s.name.clone();
                 (Payload::Skill(s), n)
             }
             PackageKind::Mcp => {
-                let m =
-                    McpPackage::from_json(body).map_err(|e| format!("grease install: {e}\n"))?;
+                let m = McpPackage::from_json(body).map_err(|e| {
+                    crate::grease::Error::Malformed(format!("grease install: {e}\n"))
+                })?;
                 let n = m.name.clone();
                 (Payload::Mcp(m), n)
             }
             PackageKind::Agent => {
-                let a =
-                    AgentPackage::from_json(body).map_err(|e| format!("grease install: {e}\n"))?;
+                let a = AgentPackage::from_json(body).map_err(|e| {
+                    crate::grease::Error::Malformed(format!("grease install: {e}\n"))
+                })?;
                 let n = a.name.clone();
                 (Payload::Agent(a), n)
             }
         };
         if pkg_name != name {
-            return Err(format!(
+            return Err(crate::grease::Error::Malformed(format!(
                 "grease install: registry returned package '{pkg_name}' for request '{name}'\n"
-            ));
+            )));
         }
         Ok(payload)
     }
@@ -703,11 +776,12 @@ impl Session {
         name: &str,
         kind: crate::grease::pkg::PackageKind,
         payload: &crate::grease::state::Payload,
-    ) -> Result<(), String> {
+    ) -> crate::grease::error::Result<()> {
         use crate::grease::state::Payload;
         let store = crate::grease::config::store_dir().join(name);
-        std::fs::create_dir_all(&store)
-            .map_err(|e| format!("grease install: cannot create store dir: {e}\n"))?;
+        std::fs::create_dir_all(&store).map_err(|e| {
+            crate::grease::Error::Io(format!("grease install: cannot create store dir: {e}\n"))
+        })?;
         let json = match payload {
             Payload::Prompt(p) => p.to_json(),
             Payload::Script(s) => s.to_json(),
@@ -715,8 +789,19 @@ impl Session {
             Payload::Mcp(m) => m.to_json(),
             Payload::Agent(a) => a.to_json(),
         };
-        std::fs::write(store.join(kind.payload_file()), json)
-            .map_err(|e| format!("grease install: cannot write payload: {e}\n"))
+        // `to_json` is `to_string_pretty(..).unwrap_or_default()`, so a serialization failure yields
+        // an EMPTY string. Writing that produces a zero-byte payload that installs "successfully"
+        // and then fails to parse on the next boot — a broken package created by the success path.
+        // Refuse instead; the marker is written after this, so nothing half-lands.
+        if json.trim().is_empty() {
+            return Err(crate::grease::Error::Io(format!(
+                "grease install: refusing to write an empty {} payload for '{name}'\n",
+                kind.label()
+            )));
+        }
+        std::fs::write(store.join(kind.payload_file()), json).map_err(|e| {
+            crate::grease::Error::Io(format!("grease install: cannot write payload: {e}\n"))
+        })
     }
 
     /// Materialize a kind's on-disk surface after registration: a bin stub for command packages
@@ -778,6 +863,19 @@ impl Session {
     /// deregister.
     fn grease_remove(&mut self, name: &str) -> LineResult {
         let Some(kind) = self.grease.kind_of(name) else {
+            // A half-installed package has no loadable kind, but its marker (and possibly a partial
+            // store dir) IS on disk — so "is not installed" would be false, and would leave the user
+            // with no way to clean it up. Remove what exists and say so.
+            if self.grease.broken().iter().any(|(n, _)| n == name) {
+                let _ = std::fs::remove_file(
+                    crate::grease::config::etc_dir().join(format!("{name}.toml")),
+                );
+                let _ = std::fs::remove_dir_all(crate::grease::config::store_dir().join(name));
+                self.grease.forget_broken(name);
+                return LineResult::continue_with_stdout(
+                    format!("removed {name} (was a half-installed package)\n").into_bytes(),
+                );
+            }
             return LineResult::from_outcome(
                 Vec::new(),
                 format!("grease remove: '{name}' is not installed\n").into_bytes(),
@@ -830,37 +928,73 @@ impl Session {
             );
         };
         let mut hits = Vec::new();
+        // Track registries we could not read. Previously a DNS failure, a non-200, or unparseable
+        // JSON were all `if let Ok(..)` with no else, and the command then printed "no packages
+        // match '<query>'" at exit 0 — so a model searching an unreachable registry concluded the
+        // package did not exist and abandoned the task. "I found nothing" and "I could not look"
+        // are different answers and must not share an exit code.
+        let mut unreachable: Vec<String> = Vec::new();
         for base in &registries {
             let url = format!("{}/index.json", base.trim_end_matches('/'));
-            if let Ok(resp) = http.request("GET", &url, &[], None).await {
-                if resp.status == 200 {
-                    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&resp.body) {
-                        if let Some(arr) = v.get("packages").and_then(|p| p.as_array()) {
-                            for pkg in arr {
-                                let name = pkg.get("name").and_then(|n| n.as_str()).unwrap_or("");
-                                let desc = pkg
-                                    .get("description")
-                                    .and_then(|d| d.as_str())
-                                    .unwrap_or("");
-                                let kind =
-                                    pkg.get("kind").and_then(|k| k.as_str()).unwrap_or("prompt");
-                                if name.contains(query) || desc.contains(query) {
-                                    hits.push(format!("{name}  [{kind}]  {desc}"));
-                                }
-                            }
-                        }
+            let index = match http.request("GET", &url, &[], None).await {
+                Err(e) => {
+                    unreachable.push(format!("{base}: {e}"));
+                    continue;
+                }
+                Ok(resp) if resp.status != 200 => {
+                    unreachable.push(format!("{base}: HTTP {}", resp.status));
+                    continue;
+                }
+                Ok(resp) => match serde_json::from_slice::<serde_json::Value>(&resp.body) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        unreachable.push(format!("{base}: index.json is not valid JSON: {e}"));
+                        continue;
+                    }
+                },
+            };
+            if let Some(arr) = index.get("packages").and_then(|p| p.as_array()) {
+                for pkg in arr {
+                    let name = pkg.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                    let desc = pkg
+                        .get("description")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("");
+                    let kind = pkg.get("kind").and_then(|k| k.as_str()).unwrap_or("prompt");
+                    if name.contains(query) || desc.contains(query) {
+                        hits.push(format!("{name}  [{kind}]  {desc}"));
                     }
                 }
             }
         }
+
+        let mut warnings = String::new();
+        for u in &unreachable {
+            let _ = writeln!(warnings, "grease search: could not read registry {u}");
+        }
         if hits.is_empty() {
-            return LineResult::continue_with_stdout(
-                format!("no packages match '{query}'\n").into_bytes(),
+            // Exit 4 (transport) when NO registry could be read: the honest answer is "I could not
+            // look", not "it does not exist". If at least one registry answered, an empty result is
+            // a real no-match and stays exit 0.
+            let searched_any = unreachable.len() < registries.len();
+            let body = if searched_any {
+                format!("no packages match '{query}'\n")
+            } else {
+                String::new()
+            };
+            return LineResult::from_outcome(
+                body.into_bytes(),
+                warnings.into_bytes(),
+                u8::from(!searched_any) * 4,
             );
         }
         hits.sort();
         hits.dedup();
-        LineResult::continue_with_stdout(format!("{}\n", hits.join("\n")).into_bytes())
+        LineResult::from_outcome(
+            format!("{}\n", hits.join("\n")).into_bytes(),
+            warnings.into_bytes(),
+            0,
+        )
     }
 
     /// `grease update [<name>]`: re-fetch + re-verify + re-persist installed packages (all, or one).
@@ -885,6 +1019,12 @@ impl Session {
             return LineResult::continue_with_stdout(b"nothing to update\n".to_vec());
         }
         let mut out = String::new();
+        // Worst per-package exit code wins. Previously every result was stringified into stdout and
+        // the command returned 0 unconditionally — so `grease update` reported success even when
+        // every package failed to update. The exit code is the only machine-readable channel an LLM
+        // driver has, and it was saying "fine" while nothing had been updated.
+        let mut worst = 0u8;
+        let mut failed = 0usize;
         for t in targets {
             // Re-install preserving the package's existing artifact selection (for MCP; a no-op for
             // other kinds). The stored payload carries the prior `artifacts`, so pass its flags.
@@ -898,9 +1038,16 @@ impl Session {
                 })
                 .unwrap_or_default();
             let result = Box::pin(self.grease_install(&t, flags)).await;
+            if result.exit_code != 0 {
+                failed += 1;
+                worst = worst.max(result.exit_code);
+            }
             out.push_str(&String::from_utf8_lossy(&result.terminal_output()));
         }
-        LineResult::continue_with_stdout(out.into_bytes())
+        if failed > 0 {
+            let _ = writeln!(out, "grease update: {failed} package(s) failed");
+        }
+        LineResult::continue_with_stdout(out.into_bytes()).with_exit_code(worst)
     }
 
     /// `grease registry add <url> [--key <base64-ed25519-pubkey>]`: record a registry URL and, if
@@ -909,10 +1056,10 @@ impl Session {
     // A method for call-site symmetry with the other `grease_*` dispatch handlers on `Session`.
     #[allow(clippy::unused_self)]
     fn grease_registry_add(&self, url: &str, key: Option<&str>) -> LineResult {
-        if !(url.starts_with("https://") || url.starts_with("http://")) {
+        if let Err(e) = crate::config::require_secure_url(url) {
             return LineResult::from_outcome(
                 Vec::new(),
-                format!("grease registry add: '{url}' is not an http(s) URL\n").into_bytes(),
+                format!("grease registry add: {e}\n").into_bytes(),
                 2,
             );
         }
@@ -972,4 +1119,334 @@ impl Session {
             }
         }
     }
+}
+
+/// The resolved integrity status of a fetched package, threaded from `grease_install` into the
+/// finish/persist path. Bundles the content-hash + signature + transparency-log results so the marker
+/// construction has one source of truth.
+pub(super) struct InstallIntegrity {
+    /// The computed sha256 of the payload body.
+    sha256: String,
+    /// Whether the sha256 matched the registry's advertised hash.
+    verified: bool,
+    /// Whether the ed25519 signature verified against the registry's trusted key.
+    signature_verified: bool,
+    /// The signer identity (when signature-verified).
+    signer: Option<String>,
+    /// Whether the RFC-6962 inclusion proof verified against the advertised root.
+    log_verified: bool,
+    /// The transparency-log leaf index (when log-verified).
+    log_index: Option<u64>,
+}
+
+impl InstallIntegrity {
+    /// Build the on-disk install marker for a given kind + registry.
+    fn to_marker(
+        &self,
+        kind: crate::grease::pkg::PackageKind,
+        registry: &str,
+    ) -> crate::grease::state::InstallMarker {
+        crate::grease::state::InstallMarker {
+            kind,
+            registry: registry.to_string(),
+            sha256: self.sha256.clone(),
+            verified: self.verified,
+            signature_verified: self.signature_verified,
+            signer: self.signer.clone(),
+            log_verified: self.log_verified,
+            log_index: self.log_index,
+        }
+    }
+
+    /// The `sha256 … — verified, signed[, log proof …]` summary for the install output.
+    fn summary(&self) -> String {
+        let status = if self.verified {
+            "verified"
+        } else {
+            "unverified"
+        };
+        let mut s = format!(
+            "sha256 {} — {status}",
+            crate::grease::state::sha_prefix(&self.sha256)
+        );
+        if self.signature_verified {
+            s.push_str(", signed");
+        }
+        if self.log_verified {
+            // Not "in log" — see `grease::state::log_inclusion_note` for why that overstated it.
+            s.push_str(", log proof (registry-asserted root)");
+        }
+        s
+    }
+}
+
+/// A package's advertised transparency-log inclusion proof (RFC-6962), from the index `log` object.
+pub(super) struct LogProof {
+    leaf_index: u64,
+    tree_size: u64,
+    /// The tree's Merkle root (base64, 32 bytes).
+    root: String,
+    /// The audit path — sibling hashes bottom-up (base64, 32 bytes each).
+    proof: Vec<String>,
+}
+
+/// A package's advertised integrity metadata from a registry's `index.json` entry.
+#[derive(Default)]
+pub(super) struct IndexEntry {
+    /// Whether the registry actually served an index that LISTS this package. Distinguishes an index
+    /// entry that omits the hash (a tamper vector — reject) from no index at all (a raw/indexless
+    /// registry with no integrity claim — trust-on-first-use).
+    found_in_index: bool,
+    /// The advertised sha256 of the payload (content-addressing).
+    sha256: Option<String>,
+    /// The advertised base64 detached ed25519 signature over the payload body.
+    sig: Option<String>,
+    /// The advertised signer identity (surfaced in `info`/`list`).
+    signer: Option<String>,
+    /// The advertised RFC-6962 inclusion proof, if the registry runs a transparency log.
+    log: Option<LogProof>,
+}
+
+/// Whether a fetched package body is a Markdown prompt with a leading `---` frontmatter fence (as
+/// opposed to the JSON payload shape). Used to route `.md`-authored prompts through the frontmatter
+/// converter after integrity verification. Checks the raw byte prefix directly (the fence is ASCII), so
+/// a multibyte character right after the fence can't cause a misclassification.
+pub(super) fn is_markdown_frontmatter(body: &[u8]) -> bool {
+    body.starts_with(b"---\n") || body.starts_with(b"---\r\n")
+}
+
+/// Best-effort lookup of a package's index entry (`sha256` + `sig` + `signer`). GETs
+/// `<base>/index.json` and returns the fields of the entry whose `name` matches. Empty (`None`s) if the
+/// index is unreachable, unparseable, or has no entry for `name` — the caller then falls back to
+/// record-only integrity (and unsigned).
+pub(super) async fn fetch_index_entry(
+    http: &dyn crate::mcp::client::McpHttp,
+    base: &str,
+    name: &str,
+) -> IndexEntry {
+    let url = format!("{}/index.json", base.trim_end_matches('/'));
+    let Ok(resp) = http.request("GET", &url, &[], None).await else {
+        return IndexEntry::default();
+    };
+    if resp.status != 200 {
+        return IndexEntry::default();
+    }
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&resp.body) else {
+        return IndexEntry::default();
+    };
+    let entry = v
+        .get("packages")
+        .and_then(|p| p.as_array())
+        .and_then(|arr| {
+            arr.iter()
+                .find(|p| p.get("name").and_then(|n| n.as_str()) == Some(name))
+        });
+    let Some(entry) = entry else {
+        return IndexEntry::default();
+    };
+    let s = |k: &str| entry.get(k).and_then(|x| x.as_str()).map(String::from);
+    // The optional RFC-6962 transparency-log inclusion proof.
+    let log = entry.get("log").and_then(|l| {
+        let leaf_index = l
+            .get("leaf-index")
+            .or_else(|| l.get("leaf_index"))?
+            .as_u64()?;
+        let tree_size = l
+            .get("tree-size")
+            .or_else(|| l.get("tree_size"))?
+            .as_u64()?;
+        let root = l.get("root")?.as_str()?.to_string();
+        let proof = l
+            .get("proof")?
+            .as_array()?
+            .iter()
+            .filter_map(|h| h.as_str().map(String::from))
+            .collect();
+        Some(LogProof {
+            leaf_index,
+            tree_size,
+            root,
+            proof,
+        })
+    });
+    IndexEntry {
+        found_in_index: true,
+        sha256: s("sha256"),
+        sig: s("sig"),
+        signer: s("signer"),
+        log,
+    }
+}
+
+/// Verify a package's RFC-6962 inclusion proof: the log leaf is the payload's hex sha256 string (the
+/// content-address), so the proof witnesses that this exact content was logged. Decodes the base64
+/// root + proof nodes and delegates to [`crate::grease::pkg::verify_inclusion_proof`].
+pub(super) fn verify_log_inclusion(
+    payload_sha256_hex: &str,
+    log: &LogProof,
+) -> crate::grease::error::Result<()> {
+    use base64::Engine;
+    let root = base64::engine::general_purpose::STANDARD
+        .decode(log.root.trim())
+        .map_err(|e| crate::grease::Error::LogProof(format!("invalid log root (base64): {e}")))?;
+    let proof: crate::grease::error::Result<Vec<Vec<u8>>> = log
+        .proof
+        .iter()
+        .map(|h| {
+            base64::engine::general_purpose::STANDARD
+                .decode(h.trim())
+                .map_err(|e| {
+                    crate::grease::Error::LogProof(format!("invalid proof node (base64): {e}"))
+                })
+        })
+        .collect();
+    let proof = proof?;
+    crate::grease::pkg::verify_inclusion_proof(
+        payload_sha256_hex.as_bytes(),
+        log.leaf_index,
+        log.tree_size,
+        &root,
+        &proof,
+    )
+}
+
+/// Persist an install marker to `<etc>/<name>.toml`. Returns a user-facing error string on failure.
+pub(super) fn write_install_marker(
+    name: &str,
+    marker: &crate::grease::state::InstallMarker,
+) -> crate::grease::error::Result<()> {
+    let marker_toml = toml::to_string_pretty(marker).map_err(|e| {
+        crate::grease::Error::Io(format!("grease install: marker serialize error: {e}\n"))
+    })?;
+    let etc = crate::grease::config::etc_dir();
+    let _ = std::fs::create_dir_all(&etc);
+    std::fs::write(etc.join(format!("{name}.toml")), marker_toml).map_err(|e| {
+        crate::grease::Error::Io(format!("grease install: cannot write marker: {e}\n"))
+    })
+}
+
+/// `grease info <skill>` text: the skill is not a command, so we describe its envelope + the bundled
+/// documents/scripts rather than generated command help.
+pub(super) fn skill_info_text(
+    sk: &crate::grease::pkg::SkillPackage,
+    columns: Option<usize>,
+) -> String {
+    let mut out = format!("{} — {} [skill]\n", sk.name, sk.description);
+    if let Some(use_) = &sk.intended_use {
+        let _ = writeln!(out, "\nIntended use: {use_}");
+    }
+    if !sk.documents.is_empty() {
+        out.push_str("\nDocuments (under /usr/share/skills/");
+        out.push_str(&sk.name);
+        out.push_str("/):\n");
+        for d in &sk.documents {
+            let _ = writeln!(out, "  {}", d.path);
+        }
+    }
+    if !sk.scripts.is_empty() {
+        out.push_str("\nBundled scripts (on $PATH via /usr/share/skills/");
+        out.push_str(&sk.name);
+        out.push_str("/bin/):\n");
+        // Short script basenames read better filled horizontally (like `ls`) when a terminal is
+        // driving this (COLUMNS set → `Some`); non-interactive output stays one-per-line. Each row is
+        // indented by 2 to match the section, so pack to `width - 2`.
+        let names: Vec<&str> = sk.scripts.iter().map(|s| s.name.as_str()).collect();
+        match columns {
+            Some(w) => {
+                for line in
+                    crate::tools::coreutils::format_columns(&names, w.saturating_sub(2)).lines()
+                {
+                    let _ = writeln!(out, "  {line}");
+                }
+            }
+            None => {
+                for name in &names {
+                    let _ = writeln!(out, "  {name}");
+                }
+            }
+        }
+    }
+    out.push_str(
+        "\nA skill is a capability-context package, not a command; it is surfaced to the model \
+         when you run `ask`.\n",
+    );
+    out
+}
+
+/// `grease info <mcp-server>` text: the server endpoint, exposed artifact types, and the cached
+/// tool/prompt listings.
+pub(super) fn mcp_info_text(m: &crate::grease::pkg::McpPackage) -> String {
+    let mut out = format!("{} — {} [mcp]\n", m.name, m.description);
+    let _ = writeln!(out, "\nServer: {}", m.url);
+    let mut kinds = Vec::new();
+    if m.artifacts.tools {
+        kinds.push("tools");
+    }
+    if m.artifacts.prompts {
+        kinds.push("prompts");
+    }
+    if m.artifacts.resources {
+        kinds.push("resources");
+    }
+    let _ = writeln!(out, "Artifacts: {}", kinds.join(", "));
+    if !m.tools.is_empty() {
+        let _ = writeln!(out, "\nTools (run as `{} <tool>`):", m.name);
+        for t in &m.tools {
+            let _ = writeln!(out, "  {} — {}", t.name, t.description);
+        }
+    }
+    if !m.prompts.is_empty() {
+        out.push_str("\nPrompts (installed as $PATH commands):\n");
+        for p in &m.prompts {
+            let _ = writeln!(out, "  {} — {}", p.name, p.description);
+        }
+    }
+    out
+}
+
+/// The leading command word of a top-level (operator-free) `line`, with any `sudo` prefix stripped —
+/// for matching against installed grease prompts. `None` for a nested line (operators present).
+pub(super) fn prompt_leading_word(line: &str) -> Option<String> {
+    let words = crate::ai::ask::dequote_words(line)?;
+    let first = words.first()?;
+    if first == "sudo" {
+        words.get(1).cloned()
+    } else {
+        Some(first.clone())
+    }
+}
+
+/// Parse an installed-package invocation line (`<name> --key value … [--model id]`) into its
+/// `(name, provided-args, model-override)`. Shared by `run_prompt` and `run_script`. The line is NOT
+/// `sudo`-prefixed here (the caller reaches this after the authz gate strips sudo). Returns a
+/// pre-built exit-2 `LineResult` on a parse error or a `--key` missing its value.
+#[allow(clippy::type_complexity)]
+pub(super) fn parse_pkg_invocation(
+    line: &str,
+) -> Result<(String, Vec<(String, String)>, Option<String>), LineResult> {
+    let words = crate::ai::ask::dequote_words(line).ok_or_else(|| {
+        LineResult::from_outcome(Vec::new(), b"grease: parse error\n".to_vec(), 2)
+    })?;
+    let name = words[0].clone();
+    let mut provided: Vec<(String, String)> = Vec::new();
+    let mut model_override: Option<String> = None;
+    let mut iter = words[1..].iter();
+    while let Some(w) = iter.next() {
+        if let Some(key) = w.strip_prefix("--") {
+            let Some(val) = iter.next() else {
+                return Err(LineResult::from_outcome(
+                    Vec::new(),
+                    format!("{name}: --{key} needs a value\n").into_bytes(),
+                    2,
+                ));
+            };
+            if key == "model" {
+                model_override = Some(val.clone());
+            } else {
+                provided.push((key.to_string(), val.clone()));
+            }
+        }
+        // Bare positional words are ignored in v1 (args are named).
+    }
+    Ok((name, provided, model_override))
 }

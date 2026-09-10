@@ -29,4 +29,10 @@ golem-rust = { path = "/Users/adityasalunkhe/Desktop/clank.sh/golem-stuff/golem/
 # provider implementations (ask/mcp/agent-invoker/cluster/log-sink) — comes from clank-embed, the
 # same crate any third-party Golem agent uses to embed the shell. This crate is deliberately the
 # thinnest possible consumer of it: the trait, the impl, three delegations.
+#
+# NOTE: main's six `golem-ai-llm-*` crates are deliberately NOT taken here. They hard-pin
+# `golem-rust = "=2.1.0"`, an exact requirement that cannot coexist with this branch's `0.0.0`
+# path dep and that `[patch]` cannot override (DEV_SDK_CHANGES.md §4). `ask` keeps clank-embed's
+# direct-HTTP Anthropic provider; porting main's multi-provider routing onto that transport is
+# tracked separately.
 clank-embed = { path = "../clank-embed", features = ["providers"] }

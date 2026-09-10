@@ -162,10 +162,20 @@ fn header_block(resp: &whttp::Response) -> String {
 }
 
 /// A `-v` trace: request line + request headers (`>`), then response status + headers (`<`).
+///
+/// Credential header VALUES are masked. `-u user:pass` synthesizes an `Authorization: Basic …`
+/// header, and this trace goes to stderr — which clank records into the session transcript that is
+/// fed back to the model as context. Printing it verbatim put a live credential into the model's
+/// window (and into `shell.log`) as a side effect of asking for verbose output. The header NAME is
+/// kept, so `-v` still shows what was sent.
 fn verbose_trace(req: &Request, resp: &whttp::Response) -> String {
     let mut s = format!("> {} {}\n", req.method, req.url);
     for (k, v) in &req.headers {
-        let _ = writeln!(s, "> {k}: {v}");
+        if whttp::is_credential_header(k) {
+            let _ = writeln!(s, "> {k}: <redacted>");
+        } else {
+            let _ = writeln!(s, "> {k}: {v}");
+        }
     }
     let _ = writeln!(s, "< HTTP/1.1 {}", resp.status);
     for (k, v) in &resp.headers {

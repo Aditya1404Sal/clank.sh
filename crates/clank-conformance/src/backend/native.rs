@@ -61,6 +61,39 @@ impl NativeBackend {
             .with_context(|| format!("sandbox path is not UTF-8: {}", tmp.display()))?
             .to_string();
 
+        // Point every clank-owned $PATH dir INTO the sandbox before building the Session, so the
+        // native tier resolves commands against an empty namespace instead of the host's.
+        //
+        // Without this the tier is not hermetic: `effective_path()` defaults `script_bin_dir()` to
+        // the real `/usr/bin`, so scenarios asserting "this command is not file-backed here" pass or
+        // fail on host layout. That is exactly how `nested-contexts` and `path-resolution` came to
+        // pass on macOS (where `bash` and `ls` live in /bin) while failing on Linux CI (usrmerge:
+        // /usr/bin/bash and /usr/bin/ls both exist) — the suite was green locally and red on every
+        // push. The sandbox is per-scenario and removed in `finish()`, and the env snapshot taken
+        // above restores these afterwards.
+        for (var, sub) in [
+            ("CLANK_GREASE_SCRIPT_BIN", "usr/bin"),
+            ("CLANK_GREASE_BIN", "usr/lib/prompts/bin"),
+            ("CLANK_GREASE_AGENT_BIN", "usr/lib/agents/bin"),
+            ("CLANK_GREASE_SKILLS", "usr/share/skills"),
+            ("CLANK_GREASE_ETC", "etc/grease"),
+            ("CLANK_GREASE_STORE", "var/lib/grease"),
+            ("CLANK_GREASE_MCP_MOUNT", "mnt/mcp"),
+            ("CLANK_MCP_BIN", "usr/lib/mcp/bin"),
+            ("CLANK_MCP_ETC", "etc/mcp"),
+            ("CLANK_LOG_DIR", "var/log"),
+        ] {
+            // Under a DOT-prefixed subdir, not the sandbox root: `ensure_fs_layout()` materializes
+            // these at session start, and scenarios that `ls` their sandbox (authz-*, cwd-lifecycle,
+            // file-management) would otherwise see etc/, usr/ and var/ mixed in with their fixtures.
+            // A leading dot keeps them out of a plain `ls`.
+            //
+            // The process env is global, but NATIVE_LOCK is held for the whole scenario and
+            // `finish()` restores the snapshot taken above — the same contract the existing
+            // `export --secret` env writes rely on.
+            std::env::set_var(var, tmp.join(".clank").join(sub));
+        }
+
         // The same current-thread runtime pattern the 456 in-crate tests use (`on_rt`).
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()

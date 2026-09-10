@@ -31,8 +31,8 @@ components:
       # tune the cap; a non-positive/unset value falls back to the built-in default (24000). A literal
       # (not a host passthrough), so no host var is required to deploy.
       CLANK_CONTEXT_CAP_TOKENS: "24000"
-  # The wRPC-invoke fixture: a trivial second agent that clank invokes through WasmRpcInvoker, proving
-  # agent→agent invocation round-trips. Exercised by `scripts/golem-e2e.sh --with-grease`.
+  # A minimal second agent (fixtures/greeter-agent) deployed alongside clank:agent purely to be the
+  # target of a grease-installed agent invocation — proving clank's WasmRpcInvoker wRPC round-trips.
   greeter:agent:
     dir: fixtures/greeter-agent
     templates: rust

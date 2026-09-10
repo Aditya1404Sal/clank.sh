@@ -63,11 +63,10 @@ async fn run_plain(session: &mut Session) -> Result<(), Box<dyn std::error::Erro
         // typed the way every shell user expects. Ctrl-D mid-construct discards the construct, not
         // the shell. The cap is a backstop against a pathological feed; overflowing it falls
         // through to eval, where the Session's incomplete-input check answers exit 2 honestly.
-        #[allow(clippy::items_after_statements)] // the cap lives beside its explanatory comment
-        const MAX_CONTINUATION_LINES: usize = 512;
+        let max_continuations = crate::config::limits::MAX_CONTINUATION_LINES;
         let mut continuations = 0usize;
         let mut aborted = false;
-        while session.line_is_incomplete(&line_str) && continuations < MAX_CONTINUATION_LINES {
+        while session.line_is_incomplete(&line_str) && continuations < max_continuations {
             write_stdout(b"> ")?;
             line.clear();
             if read_line_raw(&mut line)? == 0 {
@@ -132,7 +131,7 @@ async fn run_interactive(session: &mut Session) -> Result<(), Box<dyn std::error
     use reedline::Signal;
 
     // Backstop against a pathological continuation feed (matches the plain loop).
-    const MAX_CONTINUATION_LINES: usize = 512;
+    use crate::config::limits::MAX_CONTINUATION_LINES;
 
     let mut editor = build_editor();
     let mut last_ok = true;
@@ -582,7 +581,7 @@ async fn run_repl(
     let model = match session.repl_start(args) {
         Ok(m) => m,
         Err(msg) => {
-            write_stdout(msg.as_bytes())?;
+            write_stdout(msg.to_string().as_bytes())?;
             return Ok(());
         }
     };
@@ -641,9 +640,12 @@ async fn run_repl(
 ///   (otherwise native keeps the honest "needs a cluster" error, unchanged).
 fn inject_native_providers(session: &mut Session) {
     session.set_mcp_http(Box::new(crate::mcp::http_native::ReqwestMcpHttp::new()));
-    session.set_ask_provider(Box::new(
-        crate::ai::anthropic_native::ReqwestAnthropicProvider::new(),
-    ));
+    // The multi-provider dispatcher: routes `ask` by the model's `provider/` prefix (anthropic via
+    // the Messages API; openai/grok/openrouter/ollama via the OpenAI Chat Completions API; bedrock is
+    // an honest agent-only error). This is the NATIVE path and is pure reqwest — it carries no
+    // golem-ai-llm dependency, so it is unaffected by the pin that keeps the wasm agent's `ask`
+    // Anthropic-only on this branch. Native and agent therefore differ in provider coverage here.
+    session.set_ask_provider(Box::new(crate::ai::llm_native::NativeLlmProvider::new()));
 
     // Golem cluster + agent invoker: only when an external cluster config is present (README §161-163).
     // Without it, native keeps the honest "needs a cluster" error — Tier C is inert unless configured.

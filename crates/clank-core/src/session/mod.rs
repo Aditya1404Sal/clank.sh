@@ -20,7 +20,6 @@ use brush_builtins::{BuiltinSet, ShellBuilderExt};
 use brush_core::openfiles::{OpenFile, OpenFiles};
 use brush_core::{ExecutionControlFlow, Shell, SourceInfo};
 
-use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 
 use crate::authz::{self, AuthzState, Decision};
@@ -33,9 +32,23 @@ type BoxError = Box<dyn std::error::Error>;
 
 mod agent;
 mod ask;
+mod env;
 mod grease;
 mod mcp;
 mod prompt;
+mod streams;
+
+// What the eval pipeline still reaches for after the relocation. Everything else that used to live
+// here moved to the module that owns it AND is now only called from there — the short length of this
+// list is the evidence that the split fell along a real seam rather than an arbitrary one.
+use ask::is_context_summarize;
+use env::{build_shell, ensure_fs_layout};
+use grease::{parse_pkg_invocation, prompt_leading_word};
+use mcp::build_mcp_arguments;
+use streams::finish;
+// The wasm capture adapters; the code that constructs them is `cfg`-gated the same way.
+#[cfg(target_arch = "wasm32")]
+use streams::{BufSink, BufSource};
 
 /// Why the shell is paused awaiting a response — set alongside the [`PendingPrompt`].
 enum PendingKind {
@@ -184,6 +197,16 @@ impl LineResult {
             flow: Flow::Continue,
             pending_prompt: None,
         }
+    }
+
+    /// Override the exit code, keeping the rest of the result.
+    ///
+    /// For commands that aggregate sub-results into one stdout blob and must still report the worst
+    /// outcome — the exit code is the only machine-readable channel a non-interactive driver has, so
+    /// "printed some failures, returned 0" is a lie to it.
+    fn with_exit_code(mut self, exit_code: u8) -> Self {
+        self.exit_code = exit_code;
+        self
     }
 
     fn stderr(message: impl Into<Vec<u8>>) -> Self {
@@ -548,6 +571,12 @@ impl Session {
         // Install this session's log sink for the whole line so every logging call site (shell/http/mcp/
         // ops, deep in run_command / McpClient::call / coreutils) routes through it.
         let _log = crate::logging::install(self.log_sink.clone());
+        // Name this line in `ops.log` if it panics. On wasm a panic ABORTS (wasm32-wasip2 is an
+        // abort target), so there is nothing to catch — the hook running before the abort is the
+        // only chance to record where the instance died and what it was running. Redacted the same
+        // way the shell.log events are.
+        crate::runtime::panicreport::install();
+        let _panic_ctx = crate::runtime::panicreport::executing(log_safe_line(line).as_ref());
         if !line.trim().is_empty() {
             crate::logging::Record::new("start")
                 .field("line", log_safe_line(line).as_ref())
@@ -570,8 +599,13 @@ impl Session {
         } else {
             "end"
         };
-        let mut rec =
-            crate::logging::Record::new(event).field("line", log_safe_line(line).as_ref());
+        // Carry the shell's PID on every terminal event. `logging`'s module doc advertises
+        // "PID/PPID-addressable audit events", but the ordinary start/end pair carried only `line`
+        // — so two interleaved lines could not be told apart in the log, which is precisely when a
+        // reader needs to. Only the answer_prompt path stamped a pid.
+        let mut rec = crate::logging::Record::new(event)
+            .field("pid", crate::runtime::proctable::SHELL_ROOT_PID.to_string())
+            .field("line", log_safe_line(line).as_ref());
         if result.pending_prompt.is_none() {
             rec = rec.field("exit", result.exit_code.to_string());
         }
@@ -1460,8 +1494,8 @@ impl Session {
             }
             Err(e) => LineResult::from_outcome(
                 Vec::new(),
-                format!("{} {tool_name}: {}\n", inv.server, e.message).into_bytes(),
-                e.exit_code,
+                format!("{} {tool_name}: {e}\n", inv.server).into_bytes(),
+                e.exit_code(),
             ),
         }
     }
@@ -1720,91 +1754,6 @@ fn strip_sudo_prefix(line: &str) -> String {
     }
 }
 
-/// The resolved integrity status of a fetched package, threaded from `grease_install` into the
-/// finish/persist path. Bundles the content-hash + signature + transparency-log results so the marker
-/// construction has one source of truth.
-struct InstallIntegrity {
-    /// The computed sha256 of the payload body.
-    sha256: String,
-    /// Whether the sha256 matched the registry's advertised hash.
-    verified: bool,
-    /// Whether the ed25519 signature verified against the registry's trusted key.
-    signature_verified: bool,
-    /// The signer identity (when signature-verified).
-    signer: Option<String>,
-    /// Whether the RFC-6962 inclusion proof verified against the advertised root.
-    log_verified: bool,
-    /// The transparency-log leaf index (when log-verified).
-    log_index: Option<u64>,
-}
-
-impl InstallIntegrity {
-    /// Build the on-disk install marker for a given kind + registry.
-    fn to_marker(
-        &self,
-        kind: crate::grease::pkg::PackageKind,
-        registry: &str,
-    ) -> crate::grease::state::InstallMarker {
-        crate::grease::state::InstallMarker {
-            kind,
-            registry: registry.to_string(),
-            sha256: self.sha256.clone(),
-            verified: self.verified,
-            signature_verified: self.signature_verified,
-            signer: self.signer.clone(),
-            log_verified: self.log_verified,
-            log_index: self.log_index,
-        }
-    }
-
-    /// The `sha256 … — verified, signed[, in log]` summary for the install output.
-    fn summary(&self) -> String {
-        let status = if self.verified {
-            "verified"
-        } else {
-            "unverified"
-        };
-        let mut s = format!(
-            "sha256 {} — {status}",
-            &self.sha256[..self.sha256.len().min(12)]
-        );
-        if self.signature_verified {
-            s.push_str(", signed");
-        }
-        if self.log_verified {
-            s.push_str(", in log");
-        }
-        s
-    }
-}
-
-/// A package's advertised transparency-log inclusion proof (RFC-6962), from the index `log` object.
-struct LogProof {
-    leaf_index: u64,
-    tree_size: u64,
-    /// The tree's Merkle root (base64, 32 bytes).
-    root: String,
-    /// The audit path — sibling hashes bottom-up (base64, 32 bytes each).
-    proof: Vec<String>,
-}
-
-/// A package's advertised integrity metadata from a registry's `index.json` entry.
-#[derive(Default)]
-struct IndexEntry {
-    /// Whether the registry actually served an index that LISTS this package. Distinguishes an index
-    /// entry that omits the hash (a tamper vector — reject) from no index at all (a raw/indexless
-    /// registry with no integrity claim — trust-on-first-use).
-    found_in_index: bool,
-    /// The advertised sha256 of the payload (content-addressing).
-    sha256: Option<String>,
-    /// The advertised base64 detached ed25519 signature over the payload body.
-    sig: Option<String>,
-    /// The advertised signer identity (surfaced in `info`/`list`).
-    signer: Option<String>,
-    /// The advertised RFC-6962 inclusion proof, if the registry runs a transparency log.
-    log: Option<LogProof>,
-}
-
 /// Log a curl/wget invocation to http.log: the tool, its target URL (the first non-flag argument), and
 /// the exit code. curl/wget bypass the `McpHttp` seam (their own `whttp` fetch), so they're
 /// logged here at the dispatch site rather than by the `LoggingMcpHttp` decorator.
@@ -1818,486 +1767,6 @@ fn log_http_tool(tool: &str, args: &[String], exit_code: u8) {
         .field("url", crate::logging::redact_url(url))
         .field("exit", exit_code.to_string())
         .emit(crate::logging::LogFile::Http);
-}
-
-/// Whether a fetched package body is a Markdown prompt with a leading `---` frontmatter fence (as
-/// opposed to the JSON payload shape). Used to route `.md`-authored prompts through the frontmatter
-/// converter after integrity verification. Checks the raw byte prefix directly (the fence is ASCII), so
-/// a multibyte character right after the fence can't cause a misclassification.
-fn is_markdown_frontmatter(body: &[u8]) -> bool {
-    body.starts_with(b"---\n") || body.starts_with(b"---\r\n")
-}
-
-/// Best-effort lookup of a package's index entry (`sha256` + `sig` + `signer`). GETs
-/// `<base>/index.json` and returns the fields of the entry whose `name` matches. Empty (`None`s) if the
-/// index is unreachable, unparseable, or has no entry for `name` — the caller then falls back to
-/// record-only integrity (and unsigned).
-async fn fetch_index_entry(
-    http: &dyn crate::mcp::client::McpHttp,
-    base: &str,
-    name: &str,
-) -> IndexEntry {
-    let url = format!("{}/index.json", base.trim_end_matches('/'));
-    let Ok(resp) = http.request("GET", &url, &[], None).await else {
-        return IndexEntry::default();
-    };
-    if resp.status != 200 {
-        return IndexEntry::default();
-    }
-    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&resp.body) else {
-        return IndexEntry::default();
-    };
-    let entry = v
-        .get("packages")
-        .and_then(|p| p.as_array())
-        .and_then(|arr| {
-            arr.iter()
-                .find(|p| p.get("name").and_then(|n| n.as_str()) == Some(name))
-        });
-    let Some(entry) = entry else {
-        return IndexEntry::default();
-    };
-    let s = |k: &str| entry.get(k).and_then(|x| x.as_str()).map(String::from);
-    // The optional RFC-6962 transparency-log inclusion proof.
-    let log = entry.get("log").and_then(|l| {
-        let leaf_index = l
-            .get("leaf-index")
-            .or_else(|| l.get("leaf_index"))?
-            .as_u64()?;
-        let tree_size = l
-            .get("tree-size")
-            .or_else(|| l.get("tree_size"))?
-            .as_u64()?;
-        let root = l.get("root")?.as_str()?.to_string();
-        let proof = l
-            .get("proof")?
-            .as_array()?
-            .iter()
-            .filter_map(|h| h.as_str().map(String::from))
-            .collect();
-        Some(LogProof {
-            leaf_index,
-            tree_size,
-            root,
-            proof,
-        })
-    });
-    IndexEntry {
-        found_in_index: true,
-        sha256: s("sha256"),
-        sig: s("sig"),
-        signer: s("signer"),
-        log,
-    }
-}
-
-/// Verify a package's RFC-6962 inclusion proof: the log leaf is the payload's hex sha256 string (the
-/// content-address), so the proof witnesses that this exact content was logged. Decodes the base64
-/// root + proof nodes and delegates to [`crate::grease::pkg::verify_inclusion_proof`].
-fn verify_log_inclusion(payload_sha256_hex: &str, log: &LogProof) -> Result<(), String> {
-    use base64::Engine;
-    let root = base64::engine::general_purpose::STANDARD
-        .decode(log.root.trim())
-        .map_err(|e| format!("invalid log root (base64): {e}"))?;
-    let proof: Result<Vec<Vec<u8>>, String> = log
-        .proof
-        .iter()
-        .map(|h| {
-            base64::engine::general_purpose::STANDARD
-                .decode(h.trim())
-                .map_err(|e| format!("invalid proof node (base64): {e}"))
-        })
-        .collect();
-    let proof = proof?;
-    crate::grease::pkg::verify_inclusion_proof(
-        payload_sha256_hex.as_bytes(),
-        log.leaf_index,
-        log.tree_size,
-        &root,
-        &proof,
-    )
-}
-
-/// Materialize an MCP server's resources under `/mnt/mcp/<server>/` and return the cache entries that
-/// drive the virtual-fs listing. Fetches `resources/list`; each resource whose `resources/read`
-/// succeeds at install is written as a real STATIC file (composes in pipes); a resource that can't be
-/// read now is recorded as DYNAMIC (served live on a top-level `cat` interception). Path-confined.
-/// Free fn (no `self`) so it can run while `client` borrows `self.mcp_http`.
-async fn materialize_mcp_resources(
-    server: &str,
-    client: &mut crate::mcp::client::McpClient<'_>,
-    session: Option<&str>,
-) -> Vec<crate::grease::pkg::McpResourceCache> {
-    let Ok(resources) = client.list_resources(session).await else {
-        return Vec::new();
-    };
-    let root = crate::grease::config::mcp_mount_dir().join(server);
-    let mut cache = Vec::new();
-    for res in &resources {
-        let rel = mcp_resource_rel_path(&res.uri);
-        let mut is_static = false;
-        if let Some(dest) = crate::grease::config::mcp_safe_join(&root, &rel) {
-            if let Ok(contents) = client.read_resource(&res.uri, session).await {
-                if let Some(parent) = dest.parent() {
-                    let _ = std::fs::create_dir_all(parent);
-                }
-                is_static = std::fs::write(&dest, contents.as_bytes()).is_ok();
-            }
-        }
-        cache.push(crate::grease::pkg::McpResourceCache {
-            uri: res.uri.clone(),
-            rel_path: rel,
-            description: res.description.clone().unwrap_or_default(),
-            mime_type: res.mime_type.clone(),
-            is_static,
-            last_modified: res.last_modified.clone(),
-            audience: res.audience.clone(),
-            priority: res.priority,
-            size: res.size,
-        });
-    }
-    cache
-}
-
-/// Fill an RFC-6570-lite URI template's `{param}` placeholders from CLI `args`. `--name value` fills
-/// the placeholder named `name`; bare positional args fill the remaining placeholders left-to-right.
-/// Values are inserted verbatim (MCP servers accept literal path segments). An unfilled placeholder is
-/// an error. Walks the template once, resolving each placeholder as it's encountered.
-fn fill_uri_template(template: &str, args: &[String]) -> Result<String, String> {
-    // Parse args: `--name value` pairs + positionals.
-    let mut named: Vec<(String, String)> = Vec::new();
-    let mut positionals: Vec<String> = Vec::new();
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        if let Some(key) = a.strip_prefix("--") {
-            let val = it.next().ok_or_else(|| format!("--{key} needs a value"))?;
-            named.push((key.to_string(), val.clone()));
-        } else {
-            positionals.push(a.clone());
-        }
-    }
-    let mut pos_iter = positionals.into_iter();
-
-    // Walk the template, replacing each `{…}` with its resolved value in order.
-    let mut out = String::with_capacity(template.len());
-    let mut rest = template;
-    while let Some(open) = rest.find('{') {
-        out.push_str(&rest[..open]);
-        let Some(close_rel) = rest[open..].find('}') else {
-            // Unbalanced brace — emit verbatim and stop.
-            out.push_str(&rest[open..]);
-            return Ok(out);
-        };
-        let raw = &rest[open + 1..open + close_rel];
-        let name = raw
-            .trim_start_matches(['+', '#', '.', '/', ';', '?', '&'])
-            .trim_end_matches('*');
-        let value = named
-            .iter()
-            .find(|(k, _)| k == name)
-            .map(|(_, v)| v.clone())
-            .or_else(|| pos_iter.next())
-            .ok_or_else(|| format!("missing value for template parameter '{name}'"))?;
-        out.push_str(&value);
-        rest = &rest[open + close_rel + 1..];
-    }
-    out.push_str(rest);
-    Ok(out)
-}
-
-/// Convert an MCP resource URI to a relative path under `/mnt/mcp/<server>/`. Strips a `<scheme>://`
-/// (or `<scheme>:`) prefix and any leading slashes, leaving the path-like remainder (e.g.
-/// `file:///repo/README.md` → `repo/README.md`, `github://repo/src/main.rs` → `repo/src/main.rs`).
-/// Query/fragment are dropped. The caller path-confines the result with `mcp_safe_join`.
-fn mcp_resource_rel_path(uri: &str) -> String {
-    // Drop the scheme.
-    let after_scheme = match uri.split_once("://") {
-        Some((_scheme, rest)) => rest,
-        None => match uri.split_once(':') {
-            Some((_scheme, rest)) => rest,
-            None => uri,
-        },
-    };
-    // Drop query/fragment.
-    let path = after_scheme
-        .split(['?', '#'])
-        .next()
-        .unwrap_or(after_scheme);
-    let trimmed = path.trim_start_matches('/');
-    if trimmed.is_empty() {
-        "resource".to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
-/// The leading command word of a top-level (operator-free) `line`, with any `sudo` prefix stripped —
-/// for matching against installed grease prompts. `None` for a nested line (operators present).
-fn prompt_leading_word(line: &str) -> Option<String> {
-    let words = crate::ai::ask::dequote_words(line)?;
-    let first = words.first()?;
-    if first == "sudo" {
-        words.get(1).cloned()
-    } else {
-        Some(first.clone())
-    }
-}
-
-/// Parse an installed-package invocation line (`<name> --key value … [--model id]`) into its
-/// `(name, provided-args, model-override)`. Shared by `run_prompt` and `run_script`. The line is NOT
-/// `sudo`-prefixed here (the caller reaches this after the authz gate strips sudo). Returns a
-/// pre-built exit-2 `LineResult` on a parse error or a `--key` missing its value.
-#[allow(clippy::type_complexity)]
-fn parse_pkg_invocation(
-    line: &str,
-) -> Result<(String, Vec<(String, String)>, Option<String>), LineResult> {
-    let words = crate::ai::ask::dequote_words(line).ok_or_else(|| {
-        LineResult::from_outcome(Vec::new(), b"grease: parse error\n".to_vec(), 2)
-    })?;
-    let name = words[0].clone();
-    let mut provided: Vec<(String, String)> = Vec::new();
-    let mut model_override: Option<String> = None;
-    let mut iter = words[1..].iter();
-    while let Some(w) = iter.next() {
-        if let Some(key) = w.strip_prefix("--") {
-            let Some(val) = iter.next() else {
-                return Err(LineResult::from_outcome(
-                    Vec::new(),
-                    format!("{name}: --{key} needs a value\n").into_bytes(),
-                    2,
-                ));
-            };
-            if key == "model" {
-                model_override = Some(val.clone());
-            } else {
-                provided.push((key.to_string(), val.clone()));
-            }
-        }
-        // Bare positional words are ignored in v1 (args are named).
-    }
-    Ok((name, provided, model_override))
-}
-
-/// The parsed shape of an agent-executable line (everything after the command name).
-struct ParsedAgentLine {
-    constructor: Vec<(String, String)>,
-    method: String,
-    args: Vec<(String, String)>,
-    mode: crate::golem::agent::InvokeMode,
-    phantom: Option<String>,
-    /// `--revision <n>` if given (honest-stubbed — no wasm-rpc slot).
-    revision: Option<String>,
-}
-
-/// Parse an agent line: `[--<ctor> val] [<wrapper-flags>] <method|subcommand> [--] [--<arg> val]`.
-/// Wrapper flags (`--trigger`/`--schedule <iso>`/`--phantom <uuid>`/`--revision <n>`) are recognized
-/// before the method (README:823); a `--<flag>` matching a declared constructor param is a ctor flag;
-/// the first bare word is the method (or a reserved subcommand). An explicit `--` separates the method
-/// from its args.
-fn parse_agent_line(
-    words: &[String],
-    pkg: &crate::grease::pkg::AgentPackage,
-) -> Result<ParsedAgentLine, String> {
-    use crate::golem::agent::InvokeMode;
-    let is_ctor = |k: &str| pkg.constructor_params.iter().any(|p| p == k);
-    let mut constructor = Vec::new();
-    let mut method = String::new();
-    let mut args = Vec::new();
-    let mut mode = InvokeMode::Await;
-    let mut phantom = None;
-    let mut revision = None;
-    let mut i = 0;
-    // Phase 1: wrapper flags + constructor flags + the method word.
-    while i < words.len() {
-        let w = &words[i];
-        if w == "--" {
-            i += 1;
-            break;
-        }
-        if let Some(key) = w.strip_prefix("--") {
-            if method.is_empty() {
-                // Wrapper flags first (reserved; always before the method).
-                match key {
-                    "trigger" => {
-                        mode = InvokeMode::Trigger;
-                        i += 1;
-                        continue;
-                    }
-                    "schedule" => {
-                        let val = words
-                            .get(i + 1)
-                            .ok_or("--schedule needs an ISO-8601 time\n")?;
-                        mode = InvokeMode::Schedule(val.clone());
-                        i += 2;
-                        continue;
-                    }
-                    "phantom" => {
-                        let val = words.get(i + 1).ok_or("--phantom needs a UUID\n")?;
-                        phantom = Some(val.clone());
-                        i += 2;
-                        continue;
-                    }
-                    "revision" => {
-                        let val = words.get(i + 1).ok_or("--revision needs a number\n")?;
-                        revision = Some(val.clone());
-                        i += 2;
-                        continue;
-                    }
-                    _ if is_ctor(key) => {
-                        let val = words
-                            .get(i + 1)
-                            .ok_or_else(|| format!("--{key} needs a value\n"))?;
-                        constructor.push((key.to_string(), val.clone()));
-                        i += 2;
-                        continue;
-                    }
-                    _ => return Err(format!("unknown flag --{key} before the method\n")),
-                }
-            }
-            // After the method: a method arg.
-            let val = words
-                .get(i + 1)
-                .ok_or_else(|| format!("--{key} needs a value\n"))?;
-            args.push((key.to_string(), val.clone()));
-            i += 2;
-            continue;
-        }
-        // A bare word: the method (first).
-        if method.is_empty() {
-            method.clone_from(w);
-            i += 1;
-            break;
-        }
-        i += 1;
-    }
-    // Phase 2: remaining words are method args.
-    while i < words.len() {
-        let w = &words[i];
-        if w == "--" {
-            i += 1;
-            continue;
-        }
-        if let Some(key) = w.strip_prefix("--") {
-            let val = words
-                .get(i + 1)
-                .ok_or_else(|| format!("--{key} needs a value\n"))?;
-            args.push((key.to_string(), val.clone()));
-            i += 2;
-        } else {
-            i += 1;
-        }
-    }
-    Ok(ParsedAgentLine {
-        constructor,
-        method,
-        args,
-        mode,
-        phantom,
-        revision,
-    })
-}
-
-/// Persist an install marker to `<etc>/<name>.toml`. Returns a user-facing error string on failure.
-fn write_install_marker(
-    name: &str,
-    marker: &crate::grease::state::InstallMarker,
-) -> Result<(), String> {
-    let marker_toml = toml::to_string_pretty(marker)
-        .map_err(|e| format!("grease install: marker serialize error: {e}\n"))?;
-    let etc = crate::grease::config::etc_dir();
-    let _ = std::fs::create_dir_all(&etc);
-    std::fs::write(etc.join(format!("{name}.toml")), marker_toml)
-        .map_err(|e| format!("grease install: cannot write marker: {e}\n"))
-}
-
-/// `grease info <skill>` text: the skill is not a command, so we describe its envelope + the bundled
-/// documents/scripts rather than generated command help.
-fn skill_info_text(sk: &crate::grease::pkg::SkillPackage, columns: Option<usize>) -> String {
-    let mut out = format!("{} — {} [skill]\n", sk.name, sk.description);
-    if let Some(use_) = &sk.intended_use {
-        let _ = writeln!(out, "\nIntended use: {use_}");
-    }
-    if !sk.documents.is_empty() {
-        out.push_str("\nDocuments (under /usr/share/skills/");
-        out.push_str(&sk.name);
-        out.push_str("/):\n");
-        for d in &sk.documents {
-            let _ = writeln!(out, "  {}", d.path);
-        }
-    }
-    if !sk.scripts.is_empty() {
-        out.push_str("\nBundled scripts (on $PATH via /usr/share/skills/");
-        out.push_str(&sk.name);
-        out.push_str("/bin/):\n");
-        // Short script basenames read better filled horizontally (like `ls`) when a terminal is
-        // driving this (COLUMNS set → `Some`); non-interactive output stays one-per-line. Each row is
-        // indented by 2 to match the section, so pack to `width - 2`.
-        let names: Vec<&str> = sk.scripts.iter().map(|s| s.name.as_str()).collect();
-        match columns {
-            Some(w) => {
-                for line in
-                    crate::tools::coreutils::format_columns(&names, w.saturating_sub(2)).lines()
-                {
-                    let _ = writeln!(out, "  {line}");
-                }
-            }
-            None => {
-                for name in &names {
-                    let _ = writeln!(out, "  {name}");
-                }
-            }
-        }
-    }
-    out.push_str(
-        "\nA skill is a capability-context package, not a command; it is surfaced to the model \
-         when you run `ask`.\n",
-    );
-    out
-}
-
-/// `grease info <mcp-server>` text: the server endpoint, exposed artifact types, and the cached
-/// tool/prompt listings.
-fn mcp_info_text(m: &crate::grease::pkg::McpPackage) -> String {
-    let mut out = format!("{} — {} [mcp]\n", m.name, m.description);
-    let _ = writeln!(out, "\nServer: {}", m.url);
-    let mut kinds = Vec::new();
-    if m.artifacts.tools {
-        kinds.push("tools");
-    }
-    if m.artifacts.prompts {
-        kinds.push("prompts");
-    }
-    if m.artifacts.resources {
-        kinds.push("resources");
-    }
-    let _ = writeln!(out, "Artifacts: {}", kinds.join(", "));
-    if !m.tools.is_empty() {
-        let _ = writeln!(out, "\nTools (run as `{} <tool>`):", m.name);
-        for t in &m.tools {
-            let _ = writeln!(out, "  {} — {}", t.name, t.description);
-        }
-    }
-    if !m.prompts.is_empty() {
-        out.push_str("\nPrompts (installed as $PATH commands):\n");
-        for p in &m.prompts {
-            let _ = writeln!(out, "  {} — {}", p.name, p.description);
-        }
-    }
-    out
-}
-
-/// Whether `line` is a top-level `context summarize` (optionally `sudo`-prefixed) — the one context
-/// subcommand that needs the async LLM layer. False for any line with shell operators (`|&;<>` `$`),
-/// so `$(context summarize)` / `context summarize | …` fall through to Brush and hit the honest error
-/// in `apply_context` (the LLM can't run in Brush's nested runtime — the "Wall C" wall). Matches the
-/// operator-bail in [`crate::dispatch_context`].
-fn is_context_summarize(line: &str) -> bool {
-    if line.chars().any(|c| "|&;<>`$".contains(c)) {
-        return false;
-    }
-    let effective = strip_sudo_prefix(line);
-    let mut words = effective.split_whitespace();
-    words.next() == Some("context") && words.next() == Some("summarize") && words.next().is_none()
 }
 
 /// Whether `line` is a single simple command with no shell operators (pipes, redirects, lists,
@@ -2315,322 +1784,7 @@ fn is_plain_line(line: &str) -> bool {
     }
 }
 
-/// Reconstruct a top-level `ask` command line from parsed [`AskArgs`], for deferring an ask-tail
-/// pipeline's confirmation (the deferred path re-runs a line string). Flags come first, then the
-/// single-quoted prompt. The captured stdin travels separately via `next_ask_stdin`, so it is NOT
-/// embedded here. Single quotes in the prompt are escaped bash-style (`'\''`).
-fn ask_reconstruct(args: &crate::ai::ask::AskArgs) -> String {
-    let mut line = String::from("ask");
-    if args.fresh {
-        line.push_str(" --fresh");
-    }
-    if args.json {
-        line.push_str(" --json");
-    }
-    if let Some(m) = &args.model {
-        let _ = write!(line, " --model {m}");
-    }
-    let escaped = args.prompt.replace('\'', r"'\''");
-    let _ = write!(line, " '{escaped}'");
-    line
-}
-
-/// The most tool-calling turns the agentic `ask` loop will drive before giving up. Bounds runaway
-/// tool use; the loop exits 0 with whatever text it has plus a stderr notice on hitting the cap.
-const ASK_MAX_ITERATIONS: usize = 40;
-
-/// Per-stream byte cap on a tool result fed back to the model. Bounds context growth from a `cat` of a
-/// large file; the payload is truncated with a marker, the JSON envelope is not.
-const ASK_TOOL_RESULT_CAP: usize = 16 * 1024;
-
-/// Truncate a tool-output stream to [`ASK_TOOL_RESULT_CAP`] bytes (on a UTF-8 boundary), appending a
-/// marker when clipped. Returns a `String` (lossy) for JSON embedding.
-fn truncate_tool_output(bytes: &[u8]) -> String {
-    if bytes.len() <= ASK_TOOL_RESULT_CAP {
-        return String::from_utf8_lossy(bytes).into_owned();
-    }
-    // Lossy-decode the whole prefix, then clip to the cap on a char boundary of the resulting string.
-    let decoded = String::from_utf8_lossy(bytes);
-    let mut end = ASK_TOOL_RESULT_CAP.min(decoded.len());
-    while end > 0 && !decoded.is_char_boundary(end) {
-        end -= 1;
-    }
-    let mut s = decoded[..end].to_string();
-    s.push_str("…[truncated]");
-    s
-}
-
-/// Build an MCP `tools/call` arguments object from `--flag value` pairs, coercing each value per the
-/// tool's JSON inputSchema (integer/number → number, boolean → bool, array/object → parsed JSON, else
-/// string). Bare flags (`--verbose`) become `true`. Errors if a required property is missing.
-fn build_mcp_arguments(
-    schema: &serde_json::Value,
-    flags: &[(String, Option<String>)],
-) -> Result<serde_json::Value, String> {
-    use serde_json::Value;
-    let props = schema.get("properties").and_then(Value::as_object);
-    let mut obj = serde_json::Map::new();
-    for (key, value) in flags {
-        let ty = props
-            .and_then(|p| p.get(key))
-            .and_then(|s| s.get("type"))
-            .and_then(Value::as_str);
-        let coerced = match (ty, value) {
-            (Some("boolean"), Some(v)) => Value::Bool(v == "true" || v == "1" || v == "yes"),
-            (Some("integer" | "number"), Some(v)) => v
-                .parse::<f64>()
-                .map(|n| serde_json::json!(n))
-                .map_err(|_| format!("--{key}: '{v}' is not a number"))?,
-            (Some("array" | "object"), Some(v)) => {
-                serde_json::from_str(v).map_err(|e| format!("--{key}: expected JSON: {e}"))?
-            }
-            (_, Some(v)) => Value::String(v.clone()),
-            // A bare flag with no schema type: treat as a present boolean.
-            (_, None) => Value::Bool(true),
-        };
-        obj.insert(key.clone(), coerced);
-    }
-    // Check required properties are present.
-    if let Some(required) = schema.get("required").and_then(Value::as_array) {
-        let missing: Vec<String> = required
-            .iter()
-            .filter_map(Value::as_str)
-            .filter(|r| !obj.contains_key(*r))
-            .map(String::from)
-            .collect();
-        if !missing.is_empty() {
-            return Err(format!(
-                "missing required argument(s): {}",
-                missing.join(", ")
-            ));
-        }
-    }
-    Ok(Value::Object(obj))
-}
-
-/// The README's default `$PATH` — the resolution namespace clank's package layout installs into.
-/// Kept as the documented default and the drift-guard baseline; the value actually installed is
-/// [`effective_path`], which resolves the package dirs through their env-overridable config fns.
-// Referenced only by the drift-guard test (pins `effective_path()` == this with no overrides); kept
-// as the documented baseline, so it reads as dead outside `cfg(test)`.
-#[allow(dead_code)]
-const DEFAULT_PATH: &str =
-    "/usr/local/bin:/usr/bin:/usr/lib/mcp/bin:/usr/lib/agents/bin:/usr/lib/prompts/bin:/usr/share/skills/*/bin";
-
-/// The README `$PATH` with every package dir resolved through its env-overridable config fn, so a
-/// native session pointed at writable dirs (`CLANK_MCP_BIN=~/.clank/mcp-bin` etc. — required on
-/// macOS, where `/usr/lib/...` isn't writable) RESOLVES what it installs: before this, `mcp add`
-/// wrote its launcher into the override dir while `$PATH` kept the hardcoded default, so
-/// `which`/`type`/`ls /bin` never saw the installed command. With no overrides set this is
-/// byte-identical to [`DEFAULT_PATH`] (unit-pinned).
-fn effective_path() -> String {
-    format!(
-        "/usr/local/bin:{}:{}:{}:{}:{}/*/bin",
-        crate::grease::config::script_bin_dir().display(), // default /usr/bin
-        crate::mcp::config::bin_dir().display(),           // default /usr/lib/mcp/bin
-        crate::grease::config::agent_bin_dir().display(),  // default /usr/lib/agents/bin
-        crate::grease::config::bin_dir().display(),        // default /usr/lib/prompts/bin
-        crate::grease::config::skills_dir().display()      // default /usr/share/skills
-    )
-}
-
-/// The README's home directory. Seeded as `$HOME` on the agent (empty env) so `~` expansion and
-/// `~/.config/ask/ask.toml` resolve; native keeps the host's real `$HOME`.
-const DEFAULT_HOME: &str = "/home/user";
-
-/// One-time, best-effort filesystem layout at session start.
-///
-/// The agent's per-instance VFS starts EMPTY — before this, `/tmp` existed only if a uu builtin's
-/// capture path happened to run first, so a fresh agent's very first `curl -o /tmp/f` or
-/// `echo x > /tmp/f` failed with "No such file or directory (os error 44)" until someone typed
-/// `mkdir -p /tmp` (a live-demo gotcha). Create the whole README namespace up front. Idempotent
-/// (`create_dir_all`) and replay-safe on the durable agent — whole-state directory creation, not an
-/// append.
-///
-/// Native creates ONLY the clank-owned dirs the operator explicitly pointed somewhere writable via
-/// a `CLANK_*` env override — never absolute system paths on the host (`/usr/lib/...` on macOS is
-/// not clank's to create), and `/tmp` already exists on every host.
-fn ensure_fs_layout() {
-    #[cfg(target_arch = "wasm32")]
-    {
-        for d in ["/tmp", "/var/log", DEFAULT_HOME, "/usr/local/bin"] {
-            let _ = std::fs::create_dir_all(d);
-        }
-        for d in [
-            crate::mcp::config::etc_dir(),
-            crate::mcp::config::bin_dir(),
-            crate::grease::config::etc_dir(),
-            crate::grease::config::store_dir(),
-            crate::grease::config::bin_dir(),
-            crate::grease::config::script_bin_dir(),
-            crate::grease::config::skills_dir(),
-            crate::grease::config::agent_bin_dir(),
-        ] {
-            let _ = std::fs::create_dir_all(&d);
-        }
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        for (var, dir) in [
-            ("CLANK_MCP_ETC", crate::mcp::config::etc_dir()),
-            ("CLANK_MCP_BIN", crate::mcp::config::bin_dir()),
-            ("CLANK_GREASE_ETC", crate::grease::config::etc_dir()),
-            ("CLANK_GREASE_STORE", crate::grease::config::store_dir()),
-            ("CLANK_GREASE_BIN", crate::grease::config::bin_dir()),
-            (
-                "CLANK_GREASE_SCRIPT_BIN",
-                crate::grease::config::script_bin_dir(),
-            ),
-            ("CLANK_GREASE_SKILLS", crate::grease::config::skills_dir()),
-            (
-                "CLANK_GREASE_AGENT_BIN",
-                crate::grease::config::agent_bin_dir(),
-            ),
-        ] {
-            if std::env::var_os(var).is_some() {
-                let _ = std::fs::create_dir_all(&dir);
-            }
-        }
-    }
-}
-
-async fn build_shell() -> Result<Shell, brush_core::Error> {
-    // NB: clank's builtins are registered here AND their manifests in `registry::build()`; the two
-    // must stay in lockstep (the registry drift-guard test enforces it). Adding a builtin via
-    // `Shell::register_builtin` directly would bypass the manifest — don't.
-    let mut shell = Shell::builder()
-        .default_builtins(BuiltinSet::BashMode)
-        .builtins(crate::tools::coreutils::builtins())
-        .builtins(crate::tools::texttools::builtins())
-        .builtins(crate::runtime::ps::builtins())
-        .builtins(crate::tools::which::builtins())
-        .builtins(crate::tools::man::builtins())
-        .builtins(crate::tools::stat::builtins())
-        .builtins(crate::tools::find::builtins())
-        .builtins(crate::tools::xargs::builtins())
-        .builtins(crate::ai::model::builtins())
-        .builtins(crate::builtins::context::builtins())
-        .builtins(crate::builtins::interceptstub::builtins())
-        .build()
-        .await?;
-
-    // Set clank's `$PATH` explicitly, overriding whatever Brush's init seeded (empty on the wasm
-    // stub, the host's real PATH on native — both wrong for clank's virtual namespace). Read by
-    // `$PATH` expansion and by `type`/`which` path resolution alike.
-    shell.env_mut().set_global(
-        "PATH",
-        brush_core::variables::ShellVariable::new(effective_path()),
-    )?;
-
-    // Seed `$HOME` to the README layout (`/home/user`) only when unset — the agent's wasm env is
-    // empty, so `~` expansion and `~/.config/ask/ask.toml` need it; native keeps the host's real
-    // `$HOME` (ask.toml is a native location too, per the README).
-    if shell.env().get("HOME").is_none() {
-        shell.env_mut().set_global(
-            "HOME",
-            brush_core::variables::ShellVariable::new(DEFAULT_HOME),
-        )?;
-    }
-
-    Ok(shell)
-}
-
-/// Map a Brush result to line output, appending any shell error message to stderr.
-fn finish(
-    result: Result<brush_core::ExecutionResult, brush_core::Error>,
-    stdout: Vec<u8>,
-    mut stderr: Vec<u8>,
-) -> LineResult {
-    match result {
-        Ok(r) => LineResult {
-            stdout,
-            stderr,
-            exit_code: r.exit_code.into(),
-            flow: if matches!(r.next_control_flow, ExecutionControlFlow::ExitShell) {
-                Flow::Exit
-            } else {
-                Flow::Continue
-            },
-            pending_prompt: None,
-        },
-        Err(e) => {
-            let exit_code: u8 = brush_core::ExecutionExitCode::from(&e).into();
-            stderr.extend_from_slice(format!("clank: {e}\n").as_bytes());
-            LineResult {
-                stdout,
-                stderr,
-                exit_code,
-                flow: Flow::Continue,
-                pending_prompt: None,
-            }
-        }
-    }
-}
-
-/// An in-memory sink implementing `brush_core::openfiles::Stream` for wasm output capture. The
-/// fd-returning trait methods are `#[cfg(unix)]`, so on wasm only `Read`/`Write`/`clone_box` are needed.
-#[cfg(target_arch = "wasm32")]
-#[derive(Clone)]
-struct BufSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-
-#[cfg(target_arch = "wasm32")]
-impl std::io::Read for BufSink {
-    fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
-        Ok(0)
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-impl std::io::Write for BufSink {
-    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        self.0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .extend_from_slice(data);
-        Ok(data.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-impl brush_core::openfiles::Stream for BufSink {
-    fn clone_box(&self) -> Box<dyn brush_core::openfiles::Stream> {
-        Box::new(self.clone())
-    }
-}
-
-/// An in-memory source implementing `brush_core::openfiles::Stream` for wasm stdin injection —
-/// `BufSink`'s read-side sibling. Hands a Session-layer pipeline head's bytes (curl/wget output)
-/// to a Brush-run downstream as fd 0. Writes are no-ops, mirroring `BufSink`'s inert read side.
-#[cfg(target_arch = "wasm32")]
-#[derive(Clone)]
-struct BufSource(std::io::Cursor<Vec<u8>>);
-
-#[cfg(target_arch = "wasm32")]
-impl std::io::Read for BufSource {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        std::io::Read::read(&mut self.0, buf)
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-impl std::io::Write for BufSource {
-    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        Ok(data.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-impl brush_core::openfiles::Stream for BufSource {
-    fn clone_box(&self) -> Box<dyn brush_core::openfiles::Stream> {
-        Box::new(self.clone())
-    }
-}
+use crate::config::vfs::HOME as DEFAULT_HOME;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests;

@@ -29,7 +29,7 @@ pub(crate) struct KillArgs {
 
 /// Recognize a `kill` line. `None` when the line isn't a kill invocation; `Some(Err)` when it is
 /// but the arguments don't parse (usage error).
-pub(crate) fn classify(line: &str) -> Option<Result<KillArgs, String>> {
+pub(crate) fn classify(line: &str) -> Option<crate::error::Result<KillArgs>> {
     let tokens = tokenize_str(line).ok()?;
     let mut words = tokens.into_iter().filter_map(|t| match t {
         Token::Word(s, _) => Some(unquote_str(&s)),
@@ -41,18 +41,22 @@ pub(crate) fn classify(line: &str) -> Option<Result<KillArgs, String>> {
     Some(parse_args(words))
 }
 
-fn parse_args(words: impl Iterator<Item = String>) -> Result<KillArgs, String> {
+fn parse_args(words: impl Iterator<Item = String>) -> crate::error::Result<KillArgs> {
     let mut args = KillArgs::default();
     let mut words = words.peekable();
     while let Some(word) = words.next() {
         match word.as_str() {
             "-l" | "-L" | "--list" => {
-                return Err("signal listing is not supported (signals are not mapped)".into());
+                return Err(crate::ShellError::usage(
+                    "signal listing is not supported (signals are not mapped)",
+                ));
             }
             "-s" | "--signal" | "-n" => {
                 // Signal by name/number: accepted and ignored (synthetic kill).
                 if words.next().is_none() {
-                    return Err(format!("option '{word}' requires an argument"));
+                    return Err(crate::ShellError::usage(format!(
+                        "option '{word}' requires an argument"
+                    )));
                 }
             }
             w if w.starts_with('%') => args.targets.push(Target::Job(w.to_string())),
@@ -61,12 +65,18 @@ fn parse_args(words: impl Iterator<Item = String>) -> Result<KillArgs, String> {
             }
             w => match w.parse::<u32>() {
                 Ok(pid) => args.targets.push(Target::Pid(pid)),
-                Err(_) => return Err(format!("invalid pid or jobspec '{w}'")),
+                Err(_) => {
+                    return Err(crate::ShellError::usage(format!(
+                        "invalid pid or jobspec '{w}'"
+                    )))
+                }
             },
         }
     }
     if args.targets.is_empty() {
-        return Err("usage: kill [-s SIG | -SIG] (<pid> | %<jobspec>)...".into());
+        return Err(crate::ShellError::usage(
+            "usage: kill [-s SIG | -SIG] (<pid> | %<jobspec>)...",
+        ));
     }
     Ok(args)
 }
@@ -115,18 +125,25 @@ mod tests {
 
     #[test]
     fn errors_are_honest() {
-        assert!(classify("kill").unwrap().unwrap_err().contains("usage"));
+        assert!(classify("kill")
+            .unwrap()
+            .unwrap_err()
+            .to_string()
+            .contains("usage"));
         assert!(classify("kill -l")
             .unwrap()
             .unwrap_err()
+            .to_string()
             .contains("not supported"));
         assert!(classify("kill abc")
             .unwrap()
             .unwrap_err()
+            .to_string()
             .contains("invalid pid"));
         assert!(classify("kill -s")
             .unwrap()
             .unwrap_err()
+            .to_string()
             .contains("requires an argument"));
     }
 }

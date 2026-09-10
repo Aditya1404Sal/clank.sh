@@ -5,10 +5,10 @@
 use std::fmt::Write as _;
 
 use super::{
-    ask_reconstruct, authz, truncate_tool_output, AskLoopState, AskPause, AskPauseKind, Decision,
-    LineResult, PendingKind, PendingPrompt, ReplState, Resolution, Session, ToolStep, Transcript,
-    ASK_MAX_ITERATIONS, DEFAULT_HOME,
+    authz, strip_sudo_prefix, AskLoopState, AskPause, AskPauseKind, Decision, LineResult,
+    PendingKind, PendingPrompt, ReplState, Resolution, Session, ToolStep, Transcript, DEFAULT_HOME,
 };
+use crate::config::limits::{ASK_MAX_ITERATIONS, ASK_TOOL_RESULT_CAP};
 
 /// Read-only Brush builtins the model may call as tools even though clank keeps no manifest for them.
 /// They don't mutate parent-shell state, so the model-tool scope gate allows them explicitly rather
@@ -88,7 +88,13 @@ impl Session {
         // an error before any model call.
         let (model, model_warning) = match self.resolve_ask_model(args.model.as_deref()) {
             Ok(pair) => pair,
-            Err(msg) => return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 2),
+            Err(msg) => {
+                return LineResult::from_outcome(
+                    Vec::new(),
+                    msg.to_string().into_bytes(),
+                    msg.exit_code(),
+                )
+            }
         };
 
         let mut trace = Vec::new();
@@ -209,9 +215,14 @@ impl Session {
     ///
     /// # Panics
     /// Panics if the transcript mutex is poisoned (a thread panicked while holding it).
-    pub fn repl_start(&mut self, args: &crate::ai::ask::ReplArgs) -> Result<String, String> {
+    pub fn repl_start(
+        &mut self,
+        args: &crate::ai::ask::ReplArgs,
+    ) -> crate::ai::error::Result<String> {
         if self.ask_provider.is_none() {
-            return Err("ask repl: no model provider configured\n".to_string());
+            return Err(crate::ai::Error::NotConfigured(
+                "ask repl: no model provider configured\n".to_string(),
+            ));
         }
         let (model, _warning) = self.resolve_ask_model(args.model.as_deref())?;
         let transcript = match args.seed {
@@ -329,7 +340,13 @@ impl Session {
 
         let (model, _warning) = match self.resolve_ask_model(None) {
             Ok(pair) => pair,
-            Err(msg) => return LineResult::from_outcome(Vec::new(), msg.into_bytes(), 2),
+            Err(msg) => {
+                return LineResult::from_outcome(
+                    Vec::new(),
+                    msg.to_string().into_bytes(),
+                    msg.exit_code(),
+                )
+            }
         };
 
         match self.summarize_text(&rendered, &model).await {
@@ -363,7 +380,7 @@ impl Session {
         };
         let resp = provider
             .turn(
-                Some(crate::ai::ask::SUMMARIZE_SYSTEM_PROMPT),
+                Some(crate::ai::prompts::SUMMARIZE_SYSTEM_PROMPT),
                 &[AskTurn::User(text.to_string())],
                 &[],
                 model,
@@ -414,14 +431,14 @@ impl Session {
     }
 
     /// Resolve the model id `ask` should target: `--model` (if given) > the ask.toml default > the
-    /// built-in [`crate::ai::ask::DEFAULT_MODEL`]. Returns `(bare_model_id, optional_warning)` — the
+    /// built-in [`crate::config::model::DEFAULT_MODEL`]. Returns `(bare_model_id, optional_warning)` — the
     /// `anthropic/` prefix is stripped for the provider. An unknown `provider/` prefix is an `Err`
     /// (surfaced before any model call). An ask.toml parse error is a non-fatal warning that falls
     /// back to the built-in default.
     fn resolve_ask_model(
         &self,
         cli_model: Option<&str>,
-    ) -> Result<(String, Option<String>), String> {
+    ) -> crate::ai::error::Result<(String, Option<String>)> {
         let mut warning = None;
         let chosen = if let Some(m) = cli_model {
             m.to_string()
@@ -429,25 +446,26 @@ impl Session {
             let home = self.shell_home();
             match crate::ai::config::default_model(&home) {
                 Ok(Some(m)) => m,
-                Ok(None) => crate::ai::ask::DEFAULT_MODEL.to_string(),
+                Ok(None) => crate::config::model::DEFAULT_MODEL.to_string(),
                 Err(e) => {
                     warning = Some(format!("ask: {e}; using the built-in default\n"));
-                    crate::ai::ask::DEFAULT_MODEL.to_string()
+                    crate::config::model::DEFAULT_MODEL.to_string()
                 }
             }
         };
 
-        // Validate/strip the provider prefix. Only `anthropic/` is known; a bare id is anthropic.
-        let bare = match chosen.split_once('/') {
-            Some(("anthropic", model)) => model.to_string(),
-            Some((provider, _)) => {
-                return Err(format!(
-                    "ask: unknown provider '{provider}' (only anthropic is available)\n"
-                ))
+        // Validate the provider prefix against the known set and pass the id through UNCHANGED — the
+        // injected provider (native dispatcher or the durable agent dispatcher) splits `provider/model`
+        // and routes. A bare id (no prefix) stays bare; both dispatchers default it to anthropic.
+        if let Some((provider, _)) = chosen.split_once('/') {
+            if !crate::ai::model::is_known_provider(provider) {
+                return Err(crate::ai::Error::Model(format!(
+                    "ask: unknown provider '{provider}' (known: {})\n",
+                    crate::ai::model::PROVIDERS.join(", ")
+                )));
             }
-            None => chosen,
-        };
-        Ok((bare, warning))
+        }
+        Ok((chosen, warning))
     }
 
     /// The shell's `$HOME` (seeded to `/home/user` on the agent), for locating `~/.config/ask/ask.toml`.
@@ -620,7 +638,11 @@ impl Session {
                     );
                     return LineResult::from_outcome(Vec::new(), state.trace, 6);
                 }
-                return LineResult::from_outcome(Vec::new(), state.trace, 0);
+                // Exit 1, not 0. Hitting the cap means the model never reached a final answer — the
+                // work is INCOMPLETE, and reporting success for it misleads any non-interactive
+                // caller (a script, or an outer agent) that can only see the exit code. `--json`
+                // already got this right above; the plain path did not.
+                return LineResult::from_outcome(Vec::new(), state.trace, 1);
             }
 
             let resp = provider
@@ -925,7 +947,7 @@ impl Session {
         };
 
         // The `prompt_user` tool: pause and ask the human directly; the answer becomes the result.
-        if call.name == crate::ai::ask::PROMPT_USER_TOOL {
+        if call.name == crate::ai::prompts::PROMPT_USER_TOOL {
             let question = match serde_json::from_str::<serde_json::Value>(&call.arguments_json) {
                 Ok(v) => match v.get("question").and_then(|q| q.as_str()) {
                     Some(s) => s.to_string(),
@@ -989,7 +1011,7 @@ impl Session {
                 }
             }
             line
-        } else if call.name == crate::ai::ask::SHELL_TOOL {
+        } else if call.name == crate::ai::prompts::SHELL_TOOL {
             // Extract the `command` string from the tool arguments.
             match serde_json::from_str::<serde_json::Value>(&call.arguments_json) {
                 Ok(v) => match v.get("command").and_then(|c| c.as_str()) {
@@ -1279,6 +1301,57 @@ fn truncate_to(line: &str, width: usize) -> String {
         w += cw;
     }
     s.push('…');
+    s
+}
+
+/// Whether `line` is a top-level `context summarize` (optionally `sudo`-prefixed) — the one context
+/// subcommand that needs the async LLM layer. False for any line with shell operators (`|&;<>` `$`),
+/// so `$(context summarize)` / `context summarize | …` fall through to Brush and hit the honest error
+/// in `apply_context` (the LLM can't run in Brush's nested runtime — the "Wall C" wall). Matches the
+/// operator-bail in [`crate::dispatch_context`].
+pub(super) fn is_context_summarize(line: &str) -> bool {
+    if line.chars().any(|c| "|&;<>`$".contains(c)) {
+        return false;
+    }
+    let effective = strip_sudo_prefix(line);
+    let mut words = effective.split_whitespace();
+    words.next() == Some("context") && words.next() == Some("summarize") && words.next().is_none()
+}
+
+/// Reconstruct a top-level `ask` command line from parsed [`AskArgs`], for deferring an ask-tail
+/// pipeline's confirmation (the deferred path re-runs a line string). Flags come first, then the
+/// single-quoted prompt. The captured stdin travels separately via `next_ask_stdin`, so it is NOT
+/// embedded here. Single quotes in the prompt are escaped bash-style (`'\''`).
+pub(super) fn ask_reconstruct(args: &crate::ai::ask::AskArgs) -> String {
+    let mut line = String::from("ask");
+    if args.fresh {
+        line.push_str(" --fresh");
+    }
+    if args.json {
+        line.push_str(" --json");
+    }
+    if let Some(m) = &args.model {
+        let _ = write!(line, " --model {m}");
+    }
+    let escaped = args.prompt.replace('\'', r"'\''");
+    let _ = write!(line, " '{escaped}'");
+    line
+}
+
+/// Truncate a tool-output stream to [`ASK_TOOL_RESULT_CAP`] bytes (on a UTF-8 boundary), appending a
+/// marker when clipped. Returns a `String` (lossy) for JSON embedding.
+pub(super) fn truncate_tool_output(bytes: &[u8]) -> String {
+    if bytes.len() <= ASK_TOOL_RESULT_CAP {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    // Lossy-decode the whole prefix, then clip to the cap on a char boundary of the resulting string.
+    let decoded = String::from_utf8_lossy(bytes);
+    let mut end = ASK_TOOL_RESULT_CAP.min(decoded.len());
+    while end > 0 && !decoded.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut s = decoded[..end].to_string();
+    s.push_str("…[truncated]");
     s
 }
 

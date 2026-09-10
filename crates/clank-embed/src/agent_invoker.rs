@@ -4,7 +4,7 @@
 //! (in `clank-embed`, for any Golem agent embedding the shell) implements it with `golem-rust`'s
 //! generic `WasmRpc` host resource, which
 //! invokes an arbitrary agent type by name in the configured Golem cluster. Mirrors the
-//! `AskProvider`→`DurableAnthropicProvider` and `McpHttp`→`WstdMcpHttp` seams.
+//! `AskProvider`→`DurableAnthropicProvider` and `McpHttp`→`WasiFetchMcpHttp` seams.
 //!
 //! **Argument encoding (v1):** constructor + method arguments are CLI strings, packed positionally into
 //! a `SchemaValue::Record` and lowered with `encode_schema_value`. The value side carries no field
@@ -16,7 +16,10 @@
 //! The invocation is **await mode**: `invoke-and-await` blocks (under the Golem reactor) until the
 //! remote agent returns, and the result tree is rendered to text.
 
-use clank_core::golem::agent::{AgentInvocation, AgentInvoker, InvokeHandle, InvokeMode};
+use clank_core::golem::Error;
+use clank_core::golem::agent::{
+    AgentInvocation, AgentInvoker, InvokeHandle, InvokeMode, parse_epoch_secs,
+};
 use golem_rust::bindings::golem::agent::host::WasmRpc;
 use golem_rust::schema::wit::wire::{SchemaValueTree, Uuid};
 use golem_rust::{SchemaValue, decode_schema_value, encode_schema_value};
@@ -27,13 +30,14 @@ use golem_rust::{SchemaValue, decode_schema_value, encode_schema_value};
 /// Per-argument lowering is infallible (`SchemaValue::String` is a direct variant), so an argument can
 /// never be silently dropped — which would shift every later positional arg and call the remote agent
 /// with the wrong parameters. Only the single whole-tree encode can fail, and that error is propagated.
-fn encode_args(args: &[(String, String)]) -> Result<SchemaValueTree, String> {
+fn encode_args(args: &[(String, String)]) -> Result<SchemaValueTree, Error> {
     let fields = args
         .iter()
         .map(|(_name, value)| SchemaValue::String(value.clone()))
         .collect();
+    // `Invalid`: the request never left, and the caller can fix it.
     encode_schema_value(&SchemaValue::Record { fields })
-        .map_err(|e| format!("failed to encode agent arguments: {e:?}"))
+        .map_err(|e| Error::Invalid(format!("failed to encode agent arguments: {e:?}")))
 }
 
 /// Parse a `--phantom <uuid>` string into the WIT `uuid` (two u64 halves, `golem:core/types`).
@@ -55,7 +59,7 @@ fn parse_phantom(phantom: &Option<String>) -> Option<Uuid> {
 /// Build the `WasmRpc` client for an invocation (agent type + constructor tree + optional phantom).
 /// The constructor tree is passed **by value**: a value tree is affine (it can carry owned handles), so
 /// the host takes ownership rather than borrowing.
-fn build_client(inv: &AgentInvocation) -> Result<WasmRpc, String> {
+fn build_client(inv: &AgentInvocation) -> Result<WasmRpc, Error> {
     let ctor = encode_args(&inv.constructor)?;
     Ok(WasmRpc::new(
         &inv.agent_type,
@@ -71,14 +75,18 @@ fn build_client(inv: &AgentInvocation) -> Result<WasmRpc, String> {
 /// "the result is `none` for a `unit` output and `some(value)` for a `single` output"), so it renders
 /// empty. A `single` output is the **bare value**, NOT wrapped in a record (only inputs are): a string
 /// renders as itself, anything richer falls back to the debug form (honest, not lossy-silent).
-fn render_result(result: Option<SchemaValueTree>) -> Result<String, String> {
+fn render_result(result: Option<SchemaValueTree>) -> Result<String, Error> {
     let Some(tree) = result else {
         return Ok(String::new());
     };
     match decode_schema_value(tree) {
         Ok(SchemaValue::String(s)) => Ok(s),
         Ok(other) => Ok(format!("{other:?}")),
-        Err(e) => Err(format!("failed to decode the agent's result: {e:?}")),
+        // The remote ran and answered; we could not read what it said. That is a remote fault, not
+        // something the caller can correct by changing the request.
+        Err(e) => Err(Error::Remote(format!(
+            "failed to decode the agent's result: {e:?}"
+        ))),
     }
 }
 
@@ -87,7 +95,7 @@ pub struct WasmRpcInvoker;
 
 #[async_trait::async_trait(?Send)]
 impl AgentInvoker for WasmRpcInvoker {
-    async fn invoke(&self, inv: &AgentInvocation) -> Result<String, String> {
+    async fn invoke(&self, inv: &AgentInvocation) -> clank_core::golem::error::Result<String> {
         // Build the RPC client for the target agent type (the runtime upserts: finds-or-creates the
         // agent — README:803), then await the method result.
         let client = build_client(inv)?;
@@ -95,11 +103,16 @@ impl AgentInvoker for WasmRpcInvoker {
         // No scope card: the invocation runs with the caller's own authority.
         match client.invoke_and_await(&inv.method, input, None) {
             Ok(with_metadata) => render_result(with_metadata.result),
-            Err(e) => Err(format!("agent invocation failed: {e:?}")),
+            // The call reached the cluster and the remote failed — a trap, a panic, or a returned
+            // error. NOT retryable: a deterministic failure replays identically under Golem.
+            Err(e) => Err(Error::Remote(format!("agent invocation failed: {e:?}"))),
         }
     }
 
-    async fn invoke_async(&self, inv: &AgentInvocation) -> Result<InvokeHandle, String> {
+    async fn invoke_async(
+        &self,
+        inv: &AgentInvocation,
+    ) -> clank_core::golem::error::Result<InvokeHandle> {
         let client = build_client(inv)?;
         let input = encode_args(&inv.args)?;
         match &inv.mode {
@@ -108,7 +121,7 @@ impl AgentInvoker for WasmRpcInvoker {
                 // could be cancelled via async-invoke-and-await's future, but plain trigger has none).
                 client
                     .invoke(&inv.method, input, None)
-                    .map_err(|e| format!("trigger failed: {e:?}"))?;
+                    .map_err(|e| Error::Remote(format!("trigger failed: {e:?}")))?;
                 Ok(InvokeHandle {
                     cancel_token: None,
                     note: "triggered (fire-and-forget)".to_string(),
@@ -121,61 +134,36 @@ impl AgentInvoker for WasmRpcInvoker {
                 // invocations), so it can't be re-acquired for a later `kill` — the invocation IS
                 // scheduled, but cancel-after-return isn't supported (documented, honest handle).
                 let secs = parse_epoch_secs(when)?;
-                let seconds = i64::try_from(secs)
-                    .map_err(|_| format!("--schedule time '{when}' is out of range"))?;
+                let seconds = i64::try_from(secs).map_err(|_| {
+                    Error::Invalid(format!("--schedule time '{when}' is out of range"))
+                })?;
                 let dt = golem_rust::ScheduledTime {
                     seconds,
                     nanoseconds: 0,
                 };
                 let _receipt = client
                     .schedule_cancelable_invocation(dt, &inv.method, input, None)
-                    .map_err(|e| format!("schedule failed: {e:?}"))?;
+                    .map_err(|e| Error::Remote(format!("schedule failed: {e:?}")))?;
                 Ok(InvokeHandle {
                     cancel_token: None,
                     note: format!("scheduled for {when}"),
                 })
             }
-            InvokeMode::Await => Err("invoke_async called with Await mode".to_string()),
+            InvokeMode::Await => Err(Error::Invalid(
+                "invoke_async called with Await mode".to_string(),
+            )),
         }
     }
 
-    async fn cancel(&self, _token: &str) -> Result<bool, String> {
+    async fn cancel(&self, _token: &str) -> clank_core::golem::error::Result<bool> {
         // A scheduled invocation's cancellation-token is a host resource that doesn't survive across
         // the durable agent's serialized invocations, so we can't re-acquire it here to cancel. Honest:
         // cancel-after-return isn't supported on this SDK surface for scheduled invocations.
-        Err(
+        Err(Error::Unsupported(
             "cancel of a scheduled invocation is not supported across invocations on this build"
                 .to_string(),
-        )
+        ))
     }
-}
-
-/// Parse an ISO-8601 / RFC-3339 timestamp (e.g. `2026-06-01T09:00:00Z`) to Unix epoch seconds. A small
-/// dependency-free parser (clank-agent has no chrono): handles `YYYY-MM-DDThh:mm:ss[Z]`, UTC only.
-fn parse_epoch_secs(s: &str) -> Result<u64, String> {
-    let err = || format!("invalid --schedule time '{s}' (expected YYYY-MM-DDThh:mm:ssZ)");
-    let s = s.trim().trim_end_matches('Z');
-    let (date, time) = s.split_once('T').ok_or_else(err)?;
-    let mut d = date.split('-');
-    let year: i64 = d.next().ok_or_else(err)?.parse().map_err(|_| err())?;
-    let month: i64 = d.next().ok_or_else(err)?.parse().map_err(|_| err())?;
-    let day: i64 = d.next().ok_or_else(err)?.parse().map_err(|_| err())?;
-    let mut t = time.split(':');
-    let hh: i64 = t.next().ok_or_else(err)?.parse().map_err(|_| err())?;
-    let mm: i64 = t.next().ok_or_else(err)?.parse().map_err(|_| err())?;
-    let ss: i64 = t.next().unwrap_or("0").parse().map_err(|_| err())?;
-    // Days from the civil calendar (Howard Hinnant's days_from_civil).
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let doy = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146097 + doe - 719468;
-    let secs = days * 86400 + hh * 3600 + mm * 60 + ss;
-    if secs < 0 {
-        return Err("scheduled time is before the epoch".to_string());
-    }
-    Ok(secs as u64)
 }
 
 #[cfg(test)]
@@ -271,27 +259,6 @@ mod tests {
         assert!(
             parse_phantom(&Some("f".repeat(33))).is_none(),
             "too many hex digits"
-        );
-    }
-
-    #[test]
-    fn parse_epoch_secs_parses_an_iso_timestamp() {
-        // 2026-06-01T09:00:00Z — cross-checked against the Unix epoch.
-        assert_eq!(parse_epoch_secs("2026-06-01T09:00:00Z"), Ok(1_780_304_400));
-        // The epoch itself, and a Z-less form.
-        assert_eq!(parse_epoch_secs("1970-01-01T00:00:00Z"), Ok(0));
-        assert_eq!(parse_epoch_secs("1970-01-01T00:00:01"), Ok(1));
-    }
-
-    #[test]
-    fn parse_epoch_secs_rejects_garbage_and_pre_epoch() {
-        assert!(
-            parse_epoch_secs("tomorrow").is_err(),
-            "no date/time separator"
-        );
-        assert!(
-            parse_epoch_secs("1969-12-31T23:59:59Z").is_err(),
-            "before the epoch"
         );
     }
 }

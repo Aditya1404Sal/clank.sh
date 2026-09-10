@@ -666,7 +666,16 @@ fn list_lines(children: &[String], columns: Option<usize>) -> String {
 fn shell_columns<SE: ShellExtensions>(context: &ExecutionContext<'_, SE>) -> Option<usize> {
     let (_, var) = context.shell.env().get("COLUMNS")?;
     let value = var.value().to_cow_str(context.shell);
-    value.trim().parse::<usize>().ok().filter(|w| *w > 0)
+    // Reject an implausible width, not just a zero one. `format_columns` divides the width by the
+    // column stride and then iterates `0..cols`, so `COLUMNS=18446744073709551615` yielded a column
+    // count near `usize::MAX` — an effectively infinite layout loop (and an overflowing `c * rows`
+    // under debug assertions). Treating it as unset falls back to the 80-column default, which is
+    // the same thing an unparseable value already does. `render_ask_boxes` clamps for the same reason.
+    value
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|w| *w > 0 && *w <= crate::config::limits::MAX_COLUMNS)
 }
 
 /// Whether an `ls` argument already picks a layout/colour/width, so clank must not inject its
@@ -1055,6 +1064,15 @@ pub(crate) fn manifests() -> Vec<crate::manifest::Manifest> {
         Manifest::builtin(Sort::NAME, Sort::SYNOPSIS),
         Manifest::builtin(Mkdir::NAME, Mkdir::SYNOPSIS),
         // Destructive: sudo-only (README's authorization example table).
+        //
+        // `rm` is the only command in this tier, and that is narrower than the property the tier
+        // exists to protect: `mv`/`cp`/`tee` all destroy an existing file by overwriting it, and
+        // `> file` truncation is not gated at all. Widening by COMMAND NAME was tried and reverted —
+        // it gates `cp a b` where `b` does not exist (overwhelmingly the common case) as harshly as
+        // an overwrite, and it still would not cover the redirection hole, which never reaches a
+        // manifest. The criterion that matters is "this call would destroy existing data", which
+        // needs the path-aware policy this module's header already notes as future work. Recorded in
+        // docs/audit/ rather than half-applied here.
         Manifest::builtin(Rm::NAME, Rm::SYNOPSIS).with_policy(AuthorizationPolicy::SudoOnly),
         Manifest::builtin(Mv::NAME, Mv::SYNOPSIS),
         Manifest::builtin(Cp::NAME, Cp::SYNOPSIS),

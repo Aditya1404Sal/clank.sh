@@ -1,5 +1,6 @@
-//! The AI layer: the `ask` command + LLM seam ([`ask`]), the `~/.config/ask/ask.toml` model/provider
-//! config ([`config`]), and the `model` command ([`model`]).
+//! The AI layer: the `ask` command + LLM seam ([`ask`]), the text sent to the model ([`prompts`]),
+//! the `~/.config/ask/ask.toml` model/provider config ([`config`]), and the `model` command
+//! ([`model`]).
 //!
 //! The concrete LLM provider is injected into the `Session`: the durable provider lives in
 //! `clank-embed` (wasm) and calls Anthropic over WASI-HTTP (the Golem runtime records that HTTP call in
@@ -7,14 +8,33 @@
 //! [`anthropic_native`]. Both share the wire format in [`anthropic_wire`]. This crate owns the
 //! target-agnostic [`ask::AskProvider`] seam.
 
+pub mod error;
+
+pub use error::Error;
+
 pub mod ask;
-// The target-agnostic Anthropic Messages API wire format (request build + response parse). Both
-// providers below and the durable WASI-HTTP one in `clank-embed` share it, so the wire shape is defined
-// once and can't drift between native and agent.
+// The target-agnostic Anthropic Messages API wire format (request build + response parse). Both the
+// native reqwest provider below and the durable WASI-HTTP one in `clank-embed` share it, so the wire
+// shape is defined once and can't drift between native and agent.
 pub mod anthropic_wire;
-// The native (reqwest) Anthropic `ask` provider. wasm uses the injected durable provider from
-// `clank-agent`; this fills the same seam off-Golem. cfg-gated so `reqwest` never reaches wasm.
+// Every word clank says to a model: the system-prompt and tool-schema text `ask` assembles from (see
+// the module's own docs). Kept apart from the wire format above — this is prose content, that is
+// transport.
+pub mod prompts;
+// The native (reqwest) `ask` providers. wasm uses the injected durable provider from `clank-embed`
+// (`DurableAnthropicProvider`, built on `anthropic_wire` over `wasi-fetch`); these fill the same
+// seam off-Golem, cfg-gated so `reqwest` never reaches wasm. `anthropic_native` maps
+// Anthropic's Messages API (via `anthropic_wire`); `openai_native` maps the OpenAI Chat Completions API
+// (shared by openai/grok/openrouter/ollama); `llm_native` is the native provider-routing dispatcher.
+// All three are plain `reqwest`, so none of them touch `golem-ai-llm` — that crate hard-pins
+// `golem-rust = "=2.1.0"`, which cannot coexist with this branch's path dependency (see
+// clank-agent/Cargo.toml), so the *agent's* multi-provider routing is deferred: the agent keeps the
+// single-provider `DurableAnthropicProvider`, and only native `ask` is multi-provider today.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod anthropic_native;
 pub mod config;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod llm_native;
 pub(crate) mod model;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod openai_native;

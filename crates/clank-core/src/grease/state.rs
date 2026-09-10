@@ -136,14 +136,25 @@ pub struct GreaseState {
     /// Monotonic counter bumped on every mutation, so the `Session` can cache capability views
     /// (manifests / system prompt / resource index) and rebuild only when the package set changes.
     version: u64,
+    /// Markers that exist on disk but could not be loaded, as `(name, reason)`.
+    ///
+    /// A package whose marker survived but whose payload is missing or unparseable is a
+    /// **half-installed** package — exactly the state a crash between the two writes leaves behind.
+    /// These used to be dropped silently, which produced the worst possible symptom: the package was
+    /// invisible to `grease list`, so the obvious recovery (`grease remove`) answered "is not
+    /// installed" and the orphan marker stayed forever. Keeping them here lets `grease list` say so
+    /// and lets `grease remove` clean them up.
+    broken: Vec<(String, String)>,
 }
 
 impl GreaseState {
     /// Reconstruct the installed set by scanning the etc dir for `<name>.toml` markers and reading
-    /// each package's payload from the store per its kind. Corrupt/partial installs are skipped.
+    /// each package's payload from the store per its kind. Corrupt/partial installs are **recorded**
+    /// in [`Self::broken`], not skipped — an invisible broken package is unrecoverable.
     #[must_use]
     pub fn load() -> Self {
         let mut packages = Vec::new();
+        let mut broken = Vec::new();
         let etc = crate::grease::config::etc_dir();
         if let Ok(entries) = std::fs::read_dir(&etc) {
             for entry in entries.flatten() {
@@ -158,16 +169,32 @@ impl GreaseState {
                 if name == "registries" {
                     continue;
                 }
-                if let Some(p) = load_one(name) {
-                    packages.push(p);
+                match load_one(name) {
+                    Ok(p) => packages.push(p),
+                    Err(reason) => broken.push((name.to_string(), reason.to_string())),
                 }
             }
         }
         packages.sort_by(|a, b| a.name().cmp(b.name()));
+        broken.sort();
         Self {
             packages,
             version: 0,
+            broken,
         }
+    }
+
+    /// Markers present on disk that could not be loaded, as `(name, reason)`. See the `broken`
+    /// field docs — these are half-installed packages, not absent ones.
+    #[must_use]
+    pub fn broken(&self) -> &[(String, String)] {
+        &self.broken
+    }
+
+    /// Drop `name` from the broken set after its on-disk remnants have been cleaned up.
+    pub fn forget_broken(&mut self, name: &str) {
+        self.broken.retain(|(n, _)| n != name);
+        self.version += 1;
     }
 
     /// The mutation counter — see [`version`](Self::version)'s field docs. Any change to the package
@@ -606,50 +633,104 @@ fn fallback_synopsis(name: &str, description: &str, kind: &str) -> String {
 
 /// The integrity note used in help text: the sha256 status, the signer (when signed), and the
 /// transparency-log leaf index (when log-audited).
+/// The short display form of a package digest: the first 12 **characters**, not bytes.
+///
+/// Deliberately char-based. The digest is read back from a `<etc>/<name>.toml` marker — a file the
+/// shell itself can write — so it is not guaranteed to be ASCII hex. Byte-slicing it panicked on a
+/// multi-byte codepoint, and on the durable agent a panic traps the instance (Golem then retries the
+/// deterministic trap and parks the worker in `Failed`). For a well-formed digest this is identical
+/// to the old `&sha[..12]`.
+pub(crate) fn sha_prefix(sha: &str) -> String {
+    sha.chars().take(12).collect()
+}
+
 fn integrity_note(marker: &InstallMarker) -> String {
     let status = if marker.verified {
         "verified"
     } else {
         "unverified"
     };
-    let sha = format!(
-        "sha256 {} ({status})",
-        &marker.sha256[..marker.sha256.len().min(12)]
-    );
+    let sha = format!("sha256 {} ({status})", sha_prefix(&marker.sha256));
     let mut out = if marker.signature_verified {
         let signer = marker.signer.as_deref().unwrap_or("registry key");
         format!("{sha}, signed by {signer}")
     } else {
         format!("{sha}, unsigned")
     };
+    // The inclusion proof is verified and recorded, but it is NOT reported as an assurance — see
+    // `log_inclusion_note`.
     if marker.log_verified {
-        match marker.log_index {
-            Some(idx) => {
-                let _ = write!(out, ", in transparency log @{idx}");
-            }
-            None => out.push_str(", in transparency log"),
-        }
+        out.push_str(log_inclusion_note(marker.log_index).as_str());
     }
     out
 }
 
+/// How a verified inclusion proof is described to the user and the model.
+///
+/// It is deliberately **not** phrased as an assurance. The RFC-6962 verifier is correct (it has an
+/// independent-oracle test suite), but what it verifies is currently circular: the signature covers
+/// the payload body ONLY, so the index entry carrying `sha256`, `sig` and the whole `log` object is
+/// unauthenticated, and the authoring tool emits a single-leaf tree per package. The proof therefore
+/// reduces to `sha256(0x00 ‖ sha256_hex(payload)) == root` where `root` came from the same party as
+/// `payload` — trivially forgeable by anyone who controls the index.
+///
+/// Saying "in transparency log" for that overstates it to exactly the readers least able to check:
+/// the user skimming `grease info`, and the model reading it as context. The wording says what is
+/// true — a proof was present and checked — and nothing more.
+///
+/// Making it real needs the signature to cover a canonical `{name, kind, sha256, log-root,
+/// tree-size}`, a genuine append-only multi-leaf log with a signed tree head, and ideally external
+/// witnessing. The verifier is already built and tested for that day.
+fn log_inclusion_note(index: Option<u64>) -> String {
+    match index {
+        Some(idx) => format!(", log proof @{idx} (registry-asserted root)"),
+        None => ", log proof present (registry-asserted root)".to_string(),
+    }
+}
+
 /// Load one installed package (`<etc>/<name>.toml` marker + `<store>/<name>/<kind>.json` payload).
-/// `None` if either file is missing or unparseable. Dispatches on the marker's `kind`.
-fn load_one(name: &str) -> Option<InstalledPackage> {
+///
+/// Returns `Err(reason)` rather than `None` so [`GreaseState::load`] can REPORT a half-installed
+/// package instead of pretending it isn't there. Every failure here means the marker exists but the
+/// package is unusable — the state a crash between the marker write and the payload write leaves.
+fn load_one(name: &str) -> crate::grease::error::Result<InstalledPackage> {
     let marker_path = crate::grease::config::etc_dir().join(format!("{name}.toml"));
-    let marker: InstallMarker = toml::from_str(&std::fs::read_to_string(marker_path).ok()?).ok()?;
+    let marker_text = std::fs::read_to_string(&marker_path).map_err(|e| {
+        crate::grease::Error::Io(format!("cannot read marker {}: {e}", marker_path.display()))
+    })?;
+    let marker: InstallMarker = toml::from_str(&marker_text)
+        .map_err(|e| crate::grease::Error::Malformed(format!("marker is not valid TOML: {e}")))?;
     let payload_path = crate::grease::config::store_dir()
         .join(name)
         .join(marker.kind.payload_file());
-    let bytes = std::fs::read(payload_path).ok()?;
-    let payload = match marker.kind {
-        PackageKind::Prompt => Payload::Prompt(PromptPackage::from_json(&bytes).ok()?),
-        PackageKind::Script => Payload::Script(ScriptPackage::from_json(&bytes).ok()?),
-        PackageKind::Skill => Payload::Skill(SkillPackage::from_json(&bytes).ok()?),
-        PackageKind::Mcp => Payload::Mcp(McpPackage::from_json(&bytes).ok()?),
-        PackageKind::Agent => Payload::Agent(AgentPackage::from_json(&bytes).ok()?),
+    let bytes = std::fs::read(&payload_path).map_err(|e| {
+        crate::grease::Error::Io(format!(
+            "cannot read payload {}: {e}",
+            payload_path.display()
+        ))
+    })?;
+
+    // NOTE on `marker.sha256`: it is NOT a digest of this file and must not be compared against one.
+    // It records the hash of the artifact as FETCHED from the registry (that is what the install-time
+    // integrity check verifies against the index), whereas the store holds `payload.to_json()` — a
+    // re-serialization of the parsed package, with different bytes. Re-checking it here would fail
+    // every healthy install. Detecting on-disk tampering would need a second, separately recorded
+    // digest of the persisted file; until then, corruption is caught by the parse below, which
+    // rejects anything that no longer deserializes.
+    let bad = |e: crate::grease::Error| {
+        crate::grease::Error::Malformed(format!(
+            "payload is not a valid {} package: {e}",
+            marker.kind.label()
+        ))
     };
-    Some(InstalledPackage { marker, payload })
+    let payload = match marker.kind {
+        PackageKind::Prompt => Payload::Prompt(PromptPackage::from_json(&bytes).map_err(bad)?),
+        PackageKind::Script => Payload::Script(ScriptPackage::from_json(&bytes).map_err(bad)?),
+        PackageKind::Skill => Payload::Skill(SkillPackage::from_json(&bytes).map_err(bad)?),
+        PackageKind::Mcp => Payload::Mcp(McpPackage::from_json(&bytes).map_err(bad)?),
+        PackageKind::Agent => Payload::Agent(AgentPackage::from_json(&bytes).map_err(bad)?),
+    };
+    Ok(InstalledPackage { marker, payload })
 }
 
 #[cfg(test)]

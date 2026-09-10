@@ -72,6 +72,7 @@ name = "golem-schema-derive"
 expression = "BUSL-1.1"
 license-files = [{ path = "../LICENSE", hash = 0x3b72166b }]
 
+
 [bans]
 # A shell that vendors a large dependency tree should notice version drift and stray wildcards.
 multiple-versions = "warn"

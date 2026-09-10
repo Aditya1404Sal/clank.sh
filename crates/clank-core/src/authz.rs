@@ -112,6 +112,13 @@ pub fn resolve(
     let words = command_words(line);
     let elevated = words.first().is_some_and(|w| w == "sudo");
     let rest = if elevated { &words[1..] } else { &words[..] };
+    // See THROUGH a re-entering wrapper to the command it will actually run. `xargs` has no exec to
+    // spawn with, so it re-enters via `shell.run_string`, which goes straight into Brush and never
+    // passes back through this gate — `echo /path | xargs rm` therefore deleted the file at exit 0
+    // while bare `rm` (sudo-only) pauses. Gating the wrapper's payload HERE, rather than bolting a
+    // second gate inside the builtin, keeps one gate in one place and makes it work for every
+    // caller: the human path, the model path, and any future re-entering wrapper.
+    let rest = see_through_wrapper(rest);
     let command = rest.first().cloned();
     let subword = rest.get(1);
 
@@ -125,6 +132,43 @@ pub fn resolve(
                 .map_or(m.authorization_policy, |s| s.authorization_policy)
         });
     (policy, elevated, command)
+}
+
+/// If `words` starts with a wrapper that re-enters the shell, return the words of the command it
+/// will run; otherwise return `words` unchanged.
+///
+/// Only `xargs` today. Its own options are skipped so the payload is found: `-n`/`-I`/`-d` take a
+/// value (either as `-n5` or `-n 5`), everything else hyphen-prefixed is a lone flag. A wrapper with
+/// no payload runs `echo` by default, which needs no gating.
+///
+/// Deliberately NOT recursive-by-accident: `xargs xargs rm` resolves through both layers because the
+/// function re-applies itself, which is the behaviour you want — the innermost real command is what
+/// gets gated.
+fn see_through_wrapper(words: &[String]) -> &[String] {
+    const VALUE_FLAGS: &[&str] = &["-n", "-I", "-d"];
+    if words.first().map(String::as_str) != Some("xargs") {
+        return words;
+    }
+    let mut i = 1;
+    while i < words.len() {
+        let w = words[i].as_str();
+        if !w.starts_with('-') || w == "-" {
+            break;
+        }
+        // `-n 5` consumes the next word; `-n5` carries its value inline.
+        if VALUE_FLAGS.contains(&w) {
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    let payload = &words[i.min(words.len())..];
+    if payload.is_empty() {
+        // Bare `xargs` defaults to `echo` — nothing to gate.
+        words
+    } else {
+        see_through_wrapper(payload)
+    }
 }
 
 /// The dequoted `Word` tokens of `line` (operators dropped). Shared by [`resolve`] and

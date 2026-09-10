@@ -31,8 +31,7 @@ pub enum BinError {
     NotFound(String),
 }
 
-/// The virtual root prefix.
-const BIN_ROOT: &str = "/bin/";
+use crate::config::vfs::BIN_ROOT;
 
 /// The lazily-built static registry snapshot. Built once from [`crate::registry::build`], which is
 /// pure (no host/native-only calls) and therefore sound on wasm. Shared with `man` (same content

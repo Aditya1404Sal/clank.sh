@@ -14,21 +14,13 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// Default config directory (`registries.toml` + one `<name>.toml` per installed package).
-pub const DEFAULT_ETC: &str = "/etc/grease";
-/// Default payload store (`<store>/<name>/<kind>.json`), the source of truth for derived executables.
-pub const DEFAULT_STORE: &str = "/var/lib/grease";
-/// Default prompt bin directory (`/usr/lib/prompts/bin/<name>`), already on `$PATH`.
-pub const DEFAULT_BIN: &str = "/usr/lib/prompts/bin";
-/// Default script bin directory (`/usr/bin/<name>`), already on `$PATH`.
-pub const DEFAULT_SCRIPT_BIN: &str = "/usr/bin";
-/// Default skills directory (`/usr/share/skills/<name>/`), whose `*/bin` glob is already on `$PATH`.
-pub const DEFAULT_SKILLS: &str = "/usr/share/skills";
-/// Default MCP resource mount root (`/mnt/mcp/<server>/`) — where an MCP server's resources are
-/// materialized (static files) and its dynamic/template stubs are surfaced (README:669).
-pub const DEFAULT_MCP_MOUNT: &str = "/mnt/mcp";
-/// Default Golem-agent bin directory (`/usr/lib/agents/bin/<name>`), already on `$PATH` (README:671).
-pub const DEFAULT_AGENT_BIN: &str = "/usr/lib/agents/bin";
+/// Failures in this module are filesystem or serialization work on the grease store and registry
+/// state, so they all carry [`crate::grease::Error::Io`].
+fn io_err(msg: impl Into<String>) -> crate::grease::Error {
+    crate::grease::Error::Io(msg.into())
+}
+
+use crate::config::{env, vfs};
 
 /// The registry list — configured registry URLs `grease install`/`search` fetch from, in order.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,54 +48,51 @@ pub struct RegistryEntry {
 #[cfg(test)]
 pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// The config directory, honoring `$CLANK_GREASE_ETC`.
+/// Resolve one directory: the env override if set, else the default from [`crate::config::vfs`].
+fn resolve(var: &str, default: &str) -> PathBuf {
+    PathBuf::from(std::env::var(var).unwrap_or_else(|_| default.to_string()))
+}
+
+/// The config directory (`/etc/grease`), honoring `$CLANK_GREASE_ETC`.
 #[must_use]
 pub fn etc_dir() -> PathBuf {
-    PathBuf::from(std::env::var("CLANK_GREASE_ETC").unwrap_or_else(|_| DEFAULT_ETC.to_string()))
+    resolve(env::GREASE_ETC, vfs::GREASE_ETC)
 }
 
-/// The payload store directory, honoring `$CLANK_GREASE_STORE`.
+/// The payload store directory (`/var/lib/grease`), honoring `$CLANK_GREASE_STORE`.
 #[must_use]
 pub fn store_dir() -> PathBuf {
-    PathBuf::from(std::env::var("CLANK_GREASE_STORE").unwrap_or_else(|_| DEFAULT_STORE.to_string()))
+    resolve(env::GREASE_STORE, vfs::GREASE_STORE)
 }
 
-/// The prompt bin directory, honoring `$CLANK_GREASE_BIN`.
+/// The prompt bin directory (`/usr/lib/prompts/bin`), honoring `$CLANK_GREASE_BIN`.
 #[must_use]
 pub fn bin_dir() -> PathBuf {
-    PathBuf::from(std::env::var("CLANK_GREASE_BIN").unwrap_or_else(|_| DEFAULT_BIN.to_string()))
+    resolve(env::GREASE_BIN, vfs::PROMPT_BIN)
 }
 
 /// The script bin directory (`/usr/bin`), honoring `$CLANK_GREASE_SCRIPT_BIN`.
 #[must_use]
 pub fn script_bin_dir() -> PathBuf {
-    PathBuf::from(
-        std::env::var("CLANK_GREASE_SCRIPT_BIN").unwrap_or_else(|_| DEFAULT_SCRIPT_BIN.to_string()),
-    )
+    resolve(env::GREASE_SCRIPT_BIN, vfs::SCRIPT_BIN)
 }
 
 /// The skills directory (`/usr/share/skills`), honoring `$CLANK_GREASE_SKILLS`.
 #[must_use]
 pub fn skills_dir() -> PathBuf {
-    PathBuf::from(
-        std::env::var("CLANK_GREASE_SKILLS").unwrap_or_else(|_| DEFAULT_SKILLS.to_string()),
-    )
+    resolve(env::GREASE_SKILLS, vfs::SKILLS)
 }
 
 /// The MCP resource mount root (`/mnt/mcp`), honoring `$CLANK_GREASE_MCP_MOUNT`.
 #[must_use]
 pub fn mcp_mount_dir() -> PathBuf {
-    PathBuf::from(
-        std::env::var("CLANK_GREASE_MCP_MOUNT").unwrap_or_else(|_| DEFAULT_MCP_MOUNT.to_string()),
-    )
+    resolve(env::GREASE_MCP_MOUNT, vfs::MCP_MOUNT)
 }
 
 /// The Golem-agent bin directory (`/usr/lib/agents/bin`), honoring `$CLANK_GREASE_AGENT_BIN`.
 #[must_use]
 pub fn agent_bin_dir() -> PathBuf {
-    PathBuf::from(
-        std::env::var("CLANK_GREASE_AGENT_BIN").unwrap_or_else(|_| DEFAULT_AGENT_BIN.to_string()),
-    )
+    resolve(env::GREASE_AGENT_BIN, vfs::AGENT_BIN)
 }
 
 /// The `registries.toml` path.
@@ -127,20 +116,23 @@ pub fn is_valid_name(name: &str) -> bool {
 ///
 /// # Errors
 /// Returns `Err` if `registries.toml` exists but can't be read, or fails to parse as TOML.
-pub fn load_registries() -> Result<Registries, String> {
+pub fn load_registries() -> crate::grease::error::Result<Registries> {
     match std::fs::read_to_string(registries_path()) {
-        Ok(text) => toml::from_str(&text).map_err(|e| format!("registries.toml parse error: {e}")),
+        Ok(text) => {
+            toml::from_str(&text).map_err(|e| io_err(format!("registries.toml parse error: {e}")))
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Registries::default()),
-        Err(e) => Err(format!("registries.toml read error: {e}")),
+        Err(e) => Err(io_err(format!("registries.toml read error: {e}"))),
     }
 }
 
 /// Persist the registry list (creating `/etc/grease/` as needed).
-fn save_registries(regs: &Registries) -> Result<(), String> {
+fn save_registries(regs: &Registries) -> crate::grease::error::Result<()> {
     let dir = etc_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    let text = toml::to_string_pretty(regs).map_err(|e| format!("serialize error: {e}"))?;
-    std::fs::write(registries_path(), text).map_err(|e| format!("write error: {e}"))
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| io_err(format!("cannot create {}: {e}", dir.display())))?;
+    let text = toml::to_string_pretty(regs).map_err(|e| io_err(format!("serialize error: {e}")))?;
+    std::fs::write(registries_path(), text).map_err(|e| io_err(format!("write error: {e}")))
 }
 
 /// Add a registry URL with an optional trusted signing key (base64 ed25519 public key). Idempotent on
@@ -149,7 +141,7 @@ fn save_registries(regs: &Registries) -> Result<(), String> {
 ///
 /// # Errors
 /// Returns `Err` if the existing list can't be loaded, or the updated list can't be persisted.
-pub fn add_registry(url: &str, key: Option<&str>) -> Result<bool, String> {
+pub fn add_registry(url: &str, key: Option<&str>) -> crate::grease::error::Result<bool> {
     let mut regs = load_registries()?;
     if let Some(existing) = regs.registry.iter_mut().find(|r| r.url == url) {
         // Known URL: update the key if one was supplied and it differs; otherwise a no-op.
@@ -184,7 +176,7 @@ pub fn registry_key(url: &str) -> Option<String> {
 ///
 /// # Errors
 /// Returns `Err` if the existing list can't be loaded, or the updated list can't be persisted.
-pub fn remove_registry(url: &str) -> Result<bool, String> {
+pub fn remove_registry(url: &str) -> crate::grease::error::Result<bool> {
     let mut regs = load_registries()?;
     let before = regs.registry.len();
     regs.registry.retain(|r| r.url != url);
@@ -210,12 +202,18 @@ pub fn list_registries() -> Vec<String> {
 ///
 /// # Errors
 /// Returns `Err` if `dir` can't be created or the stub file can't be written.
-pub fn write_bin_stub(dir: &Path, name: &str, help: &str, label: &str) -> Result<(), String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+pub fn write_bin_stub(
+    dir: &Path,
+    name: &str,
+    help: &str,
+    label: &str,
+) -> crate::grease::error::Result<()> {
+    std::fs::create_dir_all(dir)
+        .map_err(|e| io_err(format!("cannot create {}: {e}", dir.display())))?;
     let content = format!(
         "# clank {label} (package: {name}, managed by `grease`; runs at the session layer)\n{help}"
     );
-    std::fs::write(dir.join(name), content).map_err(|e| format!("write stub error: {e}"))
+    std::fs::write(dir.join(name), content).map_err(|e| io_err(format!("write stub error: {e}")))
 }
 
 /// Materialize a skill's on-disk surface under `<skills>/<name>/`: write each reference document
@@ -227,9 +225,12 @@ pub fn write_bin_stub(dir: &Path, name: &str, help: &str, label: &str) -> Result
 /// # Errors
 /// Returns `Err` if the skill's root directory can't be created; document/script writes past that
 /// point are best-effort and don't fail the call.
-pub fn materialize_skill(sk: &crate::grease::pkg::SkillPackage) -> Result<(), String> {
+pub fn materialize_skill(
+    sk: &crate::grease::pkg::SkillPackage,
+) -> crate::grease::error::Result<()> {
     let root = skills_dir().join(&sk.name);
-    std::fs::create_dir_all(&root).map_err(|e| format!("cannot create {}: {e}", root.display()))?;
+    std::fs::create_dir_all(&root)
+        .map_err(|e| io_err(format!("cannot create {}: {e}", root.display())))?;
     for doc in &sk.documents {
         let Some(dest) = safe_join(&root, &doc.path) else {
             continue; // path escapes the skill dir — skip

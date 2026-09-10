@@ -188,6 +188,9 @@ fn run_jq(
     let ctx = Ctx::<JustLut<Val>>::new(&filter.lut, Vars::new([]));
     let pp = write::Pp::default();
 
+    // `Result<Val, String>` here is jaq's own iterator contract, not clank's error taxonomy —
+    // `read::parse_many` produces it and the interpreter consumes it. Wrapping it in a clank enum
+    // would mean converting in and back out at every step for no caller that could branch on it.
     let inputs: Box<dyn Iterator<Item = Result<Val, String>>> = if null_input {
         Box::new(std::iter::once(Ok(Val::Null)))
     } else if read_stdin {

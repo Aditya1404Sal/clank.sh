@@ -19,6 +19,25 @@ use sha2::{Digest, Sha256};
 
 use crate::manifest::{ParamSpec, ParamType};
 
+// Module-local constructors: this file's failures fall into four roles, and naming them at the
+// construction site keeps the taxonomy visible where the error is raised rather than at a boundary.
+/// A payload that will not parse (bad JSON, bad frontmatter, unknown kind).
+fn malformed(msg: impl Into<String>) -> crate::grease::Error {
+    crate::grease::Error::Malformed(msg.into())
+}
+/// A required package argument the caller did not supply.
+fn missing_arg(msg: impl Into<String>) -> crate::grease::Error {
+    crate::grease::Error::MissingArgument(msg.into())
+}
+/// An ed25519 signature or key that failed to verify — a supply-chain rejection.
+fn signature(msg: impl Into<String>) -> crate::grease::Error {
+    crate::grease::Error::Signature(msg.into())
+}
+/// A transparency-log inclusion proof that failed to verify — a supply-chain rejection.
+fn log_proof(msg: impl Into<String>) -> crate::grease::Error {
+    crate::grease::Error::LogProof(msg.into())
+}
+
 /// Which kind of package a registry entry / install marker describes. Declared by the registry
 /// (index `kind` field) and recorded in the install marker so `load` can dispatch to the right
 /// payload parser. Defaults to `Prompt` (kind-less markers written by grease v1 still load).
@@ -107,7 +126,7 @@ fn fill_body(
     body: &str,
     args: &[PackageArg],
     provided: &[(String, String)],
-) -> Result<String, String> {
+) -> crate::grease::error::Result<String> {
     let mut out = body.to_string();
     for arg in args {
         let value = provided
@@ -120,7 +139,10 @@ fn fill_body(
                 out = out.replace(&format!("{{{{{}}}}}", arg.name), &v);
             }
             None if arg.required => {
-                return Err(format!("missing required argument --{}", arg.name));
+                return Err(missing_arg(format!(
+                    "missing required argument --{}",
+                    arg.name
+                )));
             }
             None => {
                 out = out.replace(&format!("{{{{{}}}}}", arg.name), "");
@@ -175,7 +197,11 @@ fn unquote(s: &str) -> &str {
 /// default false on anything else); unknown keys are ignored (forgiving).
 // Uniform fallible signature keeps the `?` call sites in `from_markdown` consistent.
 #[allow(clippy::unnecessary_wraps)]
-fn apply_arg_field(arg: &mut PackageArg, key: &str, value: String) -> Result<(), String> {
+fn apply_arg_field(
+    arg: &mut PackageArg,
+    key: &str,
+    value: String,
+) -> crate::grease::error::Result<()> {
     match key {
         "name" => arg.name = value,
         "description" => arg.description = value,
@@ -210,8 +236,8 @@ impl PromptPackage {
     ///
     /// # Errors
     /// Returns `Err` if `bytes` is not valid JSON matching the package shape.
-    pub fn from_json(bytes: &[u8]) -> Result<Self, String> {
-        serde_json::from_slice(bytes).map_err(|e| format!("invalid package JSON: {e}"))
+    pub fn from_json(bytes: &[u8]) -> crate::grease::error::Result<Self> {
+        serde_json::from_slice(bytes).map_err(|e| malformed(format!("invalid package JSON: {e}")))
     }
 
     /// Parse a prompt authored as a Markdown file with a leading `---` YAML frontmatter block
@@ -228,11 +254,11 @@ impl PromptPackage {
     /// # Errors
     /// Returns `Err` if `bytes` isn't UTF-8, has no leading `---` frontmatter, contains a malformed
     /// frontmatter line, or is missing the required `name` (or an argument's `name`).
-    pub fn from_markdown(bytes: &[u8]) -> Result<Self, String> {
+    pub fn from_markdown(bytes: &[u8]) -> crate::grease::error::Result<Self> {
         let text =
-            std::str::from_utf8(bytes).map_err(|_| "prompt .md is not valid UTF-8".to_string())?;
+            std::str::from_utf8(bytes).map_err(|_| malformed("prompt .md is not valid UTF-8"))?;
         let (frontmatter, body) = split_frontmatter(text)
-            .ok_or_else(|| "prompt .md: missing leading `---` frontmatter block".to_string())?;
+            .ok_or_else(|| malformed("prompt .md: missing leading `---` frontmatter block"))?;
 
         let mut name = None;
         let mut description = String::new();
@@ -256,7 +282,9 @@ impl PromptPackage {
                 }
                 in_arguments = false;
                 let (key, value) = split_key_value(line).ok_or_else(|| {
-                    format!("prompt .md frontmatter: expected `key: value`, got `{line}`")
+                    malformed(format!(
+                        "prompt .md frontmatter: expected `key: value`, got `{line}`"
+                    ))
                 })?;
                 match key.as_str() {
                     "name" => name = Some(value),
@@ -269,9 +297,9 @@ impl PromptPackage {
             }
 
             if !in_arguments {
-                return Err(format!(
+                return Err(malformed(format!(
                     "prompt .md frontmatter: unexpected indented line `{line}`"
-                ));
+                )));
             }
 
             let stripped = line.trim_start();
@@ -290,7 +318,9 @@ impl PromptPackage {
                 let rest = rest.trim();
                 if !rest.is_empty() {
                     let (key, value) = split_key_value(rest).ok_or_else(|| {
-                        format!("prompt .md frontmatter: bad argument line `{line}`")
+                        malformed(format!(
+                            "prompt .md frontmatter: bad argument line `{line}`"
+                        ))
                     })?;
                     apply_arg_field(&mut arg, &key, value)?;
                 }
@@ -298,10 +328,14 @@ impl PromptPackage {
             } else {
                 // A continuation key of the current argument item.
                 let arg = current.as_mut().ok_or_else(|| {
-                    format!("prompt .md frontmatter: argument field before any `-`: `{line}`")
+                    malformed(format!(
+                        "prompt .md frontmatter: argument field before any `-`: `{line}`"
+                    ))
                 })?;
                 let (key, value) = split_key_value(stripped).ok_or_else(|| {
-                    format!("prompt .md frontmatter: bad argument field `{line}`")
+                    malformed(format!(
+                        "prompt .md frontmatter: bad argument field `{line}`"
+                    ))
                 })?;
                 apply_arg_field(arg, &key, value)?;
             }
@@ -311,10 +345,12 @@ impl PromptPackage {
         }
 
         let name =
-            name.ok_or_else(|| "prompt .md frontmatter: missing required `name`".to_string())?;
+            name.ok_or_else(|| malformed("prompt .md frontmatter: missing required `name`"))?;
         for arg in &arguments {
             if arg.name.is_empty() {
-                return Err("prompt .md frontmatter: an argument is missing its `name`".to_string());
+                return Err(malformed(
+                    "prompt .md frontmatter: an argument is missing its `name`".to_string(),
+                ));
             }
         }
 
@@ -343,7 +379,7 @@ impl PromptPackage {
     ///
     /// # Errors
     /// Returns `Err` if a required argument is neither provided nor defaulted.
-    pub fn fill(&self, provided: &[(String, String)]) -> Result<String, String> {
+    pub fn fill(&self, provided: &[(String, String)]) -> crate::grease::error::Result<String> {
         fill_body(&self.body, &self.arguments, provided)
     }
 }
@@ -369,8 +405,9 @@ impl ScriptPackage {
     ///
     /// # Errors
     /// Returns `Err` if `bytes` is not valid JSON matching the script-package shape.
-    pub fn from_json(bytes: &[u8]) -> Result<Self, String> {
-        serde_json::from_slice(bytes).map_err(|e| format!("invalid script package JSON: {e}"))
+    pub fn from_json(bytes: &[u8]) -> crate::grease::error::Result<Self> {
+        serde_json::from_slice(bytes)
+            .map_err(|e| malformed(format!("invalid script package JSON: {e}")))
     }
 
     /// Serialize the package to pretty JSON (for the store).
@@ -389,7 +426,7 @@ impl ScriptPackage {
     ///
     /// # Errors
     /// Returns `Err` if a required argument is neither provided nor defaulted.
-    pub fn fill(&self, provided: &[(String, String)]) -> Result<String, String> {
+    pub fn fill(&self, provided: &[(String, String)]) -> crate::grease::error::Result<String> {
         fill_body(&self.body, &self.arguments, provided)
     }
 }
@@ -440,8 +477,9 @@ impl SkillPackage {
     ///
     /// # Errors
     /// Returns `Err` if `bytes` is not valid JSON matching the skill-package shape.
-    pub fn from_json(bytes: &[u8]) -> Result<Self, String> {
-        serde_json::from_slice(bytes).map_err(|e| format!("invalid skill package JSON: {e}"))
+    pub fn from_json(bytes: &[u8]) -> crate::grease::error::Result<Self> {
+        serde_json::from_slice(bytes)
+            .map_err(|e| malformed(format!("invalid skill package JSON: {e}")))
     }
 
     /// Serialize the package to pretty JSON (for the store).
@@ -615,8 +653,9 @@ impl McpPackage {
     ///
     /// # Errors
     /// Returns `Err` if `bytes` is not valid JSON matching the MCP-package shape.
-    pub fn from_json(bytes: &[u8]) -> Result<Self, String> {
-        serde_json::from_slice(bytes).map_err(|e| format!("invalid mcp package JSON: {e}"))
+    pub fn from_json(bytes: &[u8]) -> crate::grease::error::Result<Self> {
+        serde_json::from_slice(bytes)
+            .map_err(|e| malformed(format!("invalid mcp package JSON: {e}")))
     }
 
     /// Serialize the package to pretty JSON (for the store).
@@ -670,8 +709,9 @@ impl AgentPackage {
     ///
     /// # Errors
     /// Returns `Err` if `bytes` is not valid JSON matching the agent-package shape.
-    pub fn from_json(bytes: &[u8]) -> Result<Self, String> {
-        serde_json::from_slice(bytes).map_err(|e| format!("invalid agent package JSON: {e}"))
+    pub fn from_json(bytes: &[u8]) -> crate::grease::error::Result<Self> {
+        serde_json::from_slice(bytes)
+            .map_err(|e| malformed(format!("invalid agent package JSON: {e}")))
     }
 
     /// Serialize the package to pretty JSON (for the store).
@@ -709,31 +749,39 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 /// # Errors
 /// Returns `Err` if the key or signature isn't valid base64 / the right length, the key isn't a valid
 /// ed25519 public key, or the signature doesn't verify over `body`.
-pub fn verify_signature(body: &[u8], sig_b64: &str, key_b64: &str) -> Result<(), String> {
+pub fn verify_signature(
+    body: &[u8],
+    sig_b64: &str,
+    key_b64: &str,
+) -> crate::grease::error::Result<()> {
     use base64::Engine;
     use ed25519_dalek::{Signature, VerifyingKey};
 
     let key_bytes = base64::engine::general_purpose::STANDARD
         .decode(key_b64.trim())
-        .map_err(|e| format!("invalid public key (base64): {e}"))?;
-    let key_arr: [u8; 32] = key_bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| format!("public key must be 32 bytes, got {}", key_bytes.len()))?;
+        .map_err(|e| signature(format!("invalid public key (base64): {e}")))?;
+    let key_arr: [u8; 32] = key_bytes.as_slice().try_into().map_err(|_| {
+        signature(format!(
+            "public key must be 32 bytes, got {}",
+            key_bytes.len()
+        ))
+    })?;
     let key = VerifyingKey::from_bytes(&key_arr)
-        .map_err(|e| format!("invalid ed25519 public key: {e}"))?;
+        .map_err(|e| signature(format!("invalid ed25519 public key: {e}")))?;
 
     let sig_bytes = base64::engine::general_purpose::STANDARD
         .decode(sig_b64.trim())
-        .map_err(|e| format!("invalid signature (base64): {e}"))?;
-    let sig_arr: [u8; 64] = sig_bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| format!("signature must be 64 bytes, got {}", sig_bytes.len()))?;
+        .map_err(|e| signature(format!("invalid signature (base64): {e}")))?;
+    let sig_arr: [u8; 64] = sig_bytes.as_slice().try_into().map_err(|_| {
+        signature(format!(
+            "signature must be 64 bytes, got {}",
+            sig_bytes.len()
+        ))
+    })?;
     let sig = Signature::from_bytes(&sig_arr);
 
     key.verify_strict(body, &sig)
-        .map_err(|_| "signature does not verify".to_string())
+        .map_err(|_| malformed("signature does not verify"))
 }
 
 /// Validate that `key_b64` decodes to a well-formed 32-byte ed25519 public key (so `grease registry
@@ -741,17 +789,18 @@ pub fn verify_signature(body: &[u8], sig_b64: &str, key_b64: &str) -> Result<(),
 ///
 /// # Errors
 /// Returns `Err` if `key_b64` isn't valid base64, isn't 32 bytes, or isn't a valid ed25519 key.
-pub fn validate_public_key(key_b64: &str) -> Result<(), String> {
+pub fn validate_public_key(key_b64: &str) -> crate::grease::error::Result<()> {
     use base64::Engine;
     use ed25519_dalek::VerifyingKey;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(key_b64.trim())
-        .map_err(|e| format!("invalid public key (base64): {e}"))?;
+        .map_err(|e| signature(format!("invalid public key (base64): {e}")))?;
     let arr: [u8; 32] = bytes
         .as_slice()
         .try_into()
-        .map_err(|_| format!("public key must be 32 bytes, got {}", bytes.len()))?;
-    VerifyingKey::from_bytes(&arr).map_err(|e| format!("invalid ed25519 public key: {e}"))?;
+        .map_err(|_| signature(format!("public key must be 32 bytes, got {}", bytes.len())))?;
+    VerifyingKey::from_bytes(&arr)
+        .map_err(|e| signature(format!("invalid ed25519 public key: {e}")))?;
     Ok(())
 }
 
@@ -790,17 +839,17 @@ pub fn verify_inclusion_proof(
     tree_size: u64,
     root_hash: &[u8],
     proof: &[Vec<u8>],
-) -> Result<(), String> {
+) -> crate::grease::error::Result<()> {
     if leaf_index >= tree_size {
-        return Err(format!(
+        return Err(log_proof(format!(
             "leaf index {leaf_index} out of range for tree size {tree_size}"
-        ));
+        )));
     }
     if root_hash.len() != 32 {
-        return Err(format!(
+        return Err(log_proof(format!(
             "root hash must be 32 bytes, got {}",
             root_hash.len()
-        ));
+        )));
     }
     // The canonical RFC-6962 §2.1.1 inclusion-proof walk (Trillian's `VerifyInclusion` shape):
     // fold the leaf hash up the tree, consuming one sibling per proof step. `fn` = index within the
@@ -810,10 +859,10 @@ pub fn verify_inclusion_proof(
     let mut snode = tree_size - 1;
     for sib in proof {
         if sib.len() != 32 {
-            return Err("proof node must be 32 bytes".to_string());
+            return Err(log_proof("proof node must be 32 bytes".to_string()));
         }
         if snode == 0 {
-            return Err("inclusion proof too long".to_string());
+            return Err(log_proof("inclusion proof too long".to_string()));
         }
         if fnode & 1 == 1 || fnode == snode {
             // Right child (or the last node at this level whose left sibling is in the proof).
@@ -831,12 +880,14 @@ pub fn verify_inclusion_proof(
         snode >>= 1;
     }
     if snode != 0 {
-        return Err("inclusion proof too short".to_string());
+        return Err(log_proof("inclusion proof too short".to_string()));
     }
     if hash.as_slice() == root_hash {
         Ok(())
     } else {
-        Err("inclusion proof does not verify against the advertised root".to_string())
+        Err(log_proof(
+            "inclusion proof does not verify against the advertised root".to_string(),
+        ))
     }
 }
 
@@ -846,16 +897,16 @@ pub fn verify_inclusion_proof(
 ///
 /// # Errors
 /// Returns `Err` if `bytes` isn't valid JSON, or its `kind` field is an unknown package kind.
-pub fn payload_kind(bytes: &[u8]) -> Result<PackageKind, String> {
-    let v: serde_json::Value =
-        serde_json::from_slice(bytes).map_err(|e| format!("invalid package JSON: {e}"))?;
+pub fn payload_kind(bytes: &[u8]) -> crate::grease::error::Result<PackageKind> {
+    let v: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|e| malformed(format!("invalid package JSON: {e}")))?;
     match v.get("kind").and_then(|k| k.as_str()) {
         None | Some("prompt") => Ok(PackageKind::Prompt),
         Some("script") => Ok(PackageKind::Script),
         Some("skill") => Ok(PackageKind::Skill),
         Some("mcp") => Ok(PackageKind::Mcp),
         Some("agent") => Ok(PackageKind::Agent),
-        Some(other) => Err(format!("unknown package kind '{other}'")),
+        Some(other) => Err(malformed(format!("unknown package kind '{other}'"))),
     }
 }
 
@@ -899,7 +950,7 @@ mod tests {
         assert_eq!(filled, "Summarize b.md at medium length.");
         // Missing required `file` errors.
         let err = p.fill(&[]).unwrap_err();
-        assert!(err.contains("missing required argument --file"));
+        assert!(err.to_string().contains("missing required argument --file"));
     }
 
     #[test]
@@ -964,14 +1015,16 @@ mod tests {
     #[test]
     fn markdown_missing_frontmatter_errors() {
         let err = PromptPackage::from_markdown(b"no fence here\njust body\n").unwrap_err();
-        assert!(err.contains("missing leading `---` frontmatter"));
+        assert!(err
+            .to_string()
+            .contains("missing leading `---` frontmatter"));
     }
 
     #[test]
     fn markdown_missing_name_errors() {
         let md = "---\ndescription: no name\n---\nbody\n";
         let err = PromptPackage::from_markdown(md.as_bytes()).unwrap_err();
-        assert!(err.contains("missing required `name`"));
+        assert!(err.to_string().contains("missing required `name`"));
     }
 
     #[test]
@@ -1157,6 +1210,7 @@ mod tests {
         assert!(s
             .fill(&[])
             .unwrap_err()
+            .to_string()
             .contains("missing required argument --who"));
         assert_eq!(s.param_specs().len(), 1);
         let back = ScriptPackage::from_json(s.to_json().as_bytes()).unwrap();

@@ -1,0 +1,84 @@
+# Absurd but well-formed input must be refused cheaply, not attempted.
+#
+# The companion to resilience-malformed-args.clank: there the input is malformed, here it
+# PARSES fine and asks for something ruinous. These are the shapes that turn into an
+# allocation the size of memory, a loop that never ends, or a stack overflow — and on the
+# agent all three are aborts, which wedge the durable instance rather than failing a command.
+#
+# Same contract throughout: nonzero exit, and the session survives to run the next line.
+# Each step here corresponds to a bound that exists in `clank_core::config::limits`; if one
+# of these ever passes with exit 0, a bound has been removed.
+
+# --- unbounded allocation from a format string ------------------------------------------
+# awk parsed printf's width as a bare usize and built a pad string exactly that long.
+
+run awk 'BEGIN{printf "%9999999999d", 1}'
+err~ field width exceeds
+exit nonzero
+
+run echo still-alive-1
+out still-alive-1
+
+run awk 'BEGIN{printf "%.9999999999f", 1}'
+err~ precision exceeds
+exit nonzero
+
+run echo still-alive-2
+out still-alive-2
+
+# A sane width still works — the bound must not have broken ordinary formatting.
+run awk 'BEGIN{printf "[%5d]", 42}'
+out~ [   42]
+
+# --- unbounded recursion ----------------------------------------------------------------
+# The recursive-descent cycle had no depth limit. A stack overflow ABORTS: unlike a panic it
+# cannot be caught, so there is no containment story at all — only refusing to descend works.
+
+run awk 'BEGIN{print ((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((1))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))}'
+err~ nested deeper than
+exit nonzero
+
+run echo still-alive-3
+out still-alive-3
+
+# Ordinary nesting is unaffected.
+run awk 'BEGIN{print ((((1+2))))}'
+out 3
+
+# --- an absurd terminal width -----------------------------------------------------------
+# COLUMNS is arbitrary text from the client (`agent shell` sends `export COLUMNS=<w>`), and
+# the column layout divides by it then iterates 0..cols. Out-of-range must read as unset,
+# not as a near-usize::MAX column count. This one HANGS rather than failing if unbounded.
+
+run export COLUMNS=18446744073709551615
+run ls /bin
+out~ curl
+
+run echo still-alive-4
+out still-alive-4
+
+run export COLUMNS=80
+
+# --- multibyte text through the tools ---------------------------------------------------
+# Byte-offset slicing on non-ASCII is the panic class that traps the agent. These run text
+# with multi-byte codepoints through the paths that truncate or slice.
+
+run echo "héllo — wörld ✅"
+out héllo — wörld ✅
+
+run echo "héllo — wörld ✅" | grep wörld
+out héllo — wörld ✅
+
+run echo "héllo — wörld ✅" | sed s/wörld/welt/
+out héllo — welt ✅
+
+run echo still-alive-5
+out still-alive-5
+
+# --- a very long single line ------------------------------------------------------------
+
+run awk 'BEGIN{s=""; printf "%s", "x"}'
+out~ x
+
+run echo survived
+out survived

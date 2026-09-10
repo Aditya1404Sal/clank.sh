@@ -20,6 +20,11 @@
 
 use brush_parser::{tokenize_str, unquote_str, Token};
 
+/// Every failure in this module is a mistyped `mcp` command line.
+fn usage(msg: impl Into<String>) -> crate::mcp::Error {
+    crate::mcp::Error::Usage(msg.into())
+}
+
 /// A parsed `mcp` command.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum McpCommand {
@@ -60,7 +65,7 @@ pub(crate) enum McpCommand {
 }
 
 /// Recognize an `mcp` line. `None` when it isn't one; `Some(Err)` when it is but doesn't parse.
-pub(crate) fn classify(line: &str) -> Option<Result<McpCommand, String>> {
+pub(crate) fn classify(line: &str) -> Option<crate::mcp::error::Result<McpCommand>> {
     let tokens = tokenize_str(line).ok()?;
     // If the line contains an operator (pipe/redirect/;), it isn't a bare `mcp` management command —
     // let it fall through to Brush (a stub handles nested contexts).
@@ -80,27 +85,33 @@ pub(crate) fn classify(line: &str) -> Option<Result<McpCommand, String>> {
     Some(parse(&words[1..]))
 }
 
-fn parse(args: &[String]) -> Result<McpCommand, String> {
+fn parse(args: &[String]) -> crate::mcp::error::Result<McpCommand> {
     let sub = args.first().map_or("list", String::as_str);
     match sub {
         "list" => Ok(McpCommand::List),
         "add" => parse_add(&args[1..]),
         "remove" | "rm" => {
-            let name = args.get(1).ok_or("mcp remove: needs a server name")?;
+            let name = args
+                .get(1)
+                .ok_or_else(|| usage("mcp remove: needs a server name"))?;
             Ok(McpCommand::Remove { name: name.clone() })
         }
         "reload" => Ok(McpCommand::Reload {
             name: args.get(1).cloned(),
         }),
         "tools" => {
-            let server = args.get(1).ok_or("mcp tools: needs a server name")?;
+            let server = args
+                .get(1)
+                .ok_or_else(|| usage("mcp tools: needs a server name"))?;
             Ok(McpCommand::Tools {
                 server: server.clone(),
             })
         }
         "session" => parse_session(&args[1..]),
         "watch" => {
-            let uri = args.get(1).ok_or("mcp watch: needs a resource uri")?;
+            let uri = args
+                .get(1)
+                .ok_or_else(|| usage("mcp watch: needs a resource uri"))?;
             Ok(McpCommand::Watch { uri: uri.clone() })
         }
         "resource" => {
@@ -109,23 +120,25 @@ fn parse(args: &[String]) -> Result<McpCommand, String> {
                 Some("info") => {
                     let path = args
                         .get(2)
-                        .ok_or("mcp resource info: needs a /mnt/mcp path")?;
+                        .ok_or_else(|| usage("mcp resource info: needs a /mnt/mcp path"))?;
                     Ok(McpCommand::ResourceInfo { path: path.clone() })
                 }
-                Some(other) => Err(format!(
+                Some(other) => Err(usage(format!(
                     "mcp resource: unknown subcommand '{other}' (try: info)"
+                ))),
+                None => Err(usage(
+                    "mcp resource: needs a subcommand (try: info)".to_string(),
                 )),
-                None => Err("mcp resource: needs a subcommand (try: info)".to_string()),
             }
         }
-        other => Err(format!(
+        other => Err(usage(format!(
             "mcp: unknown subcommand '{other}' \
              (try: list, add, remove, reload, tools, session, watch, resource)"
-        )),
+        ))),
     }
 }
 
-fn parse_add(args: &[String]) -> Result<McpCommand, String> {
+fn parse_add(args: &[String]) -> crate::mcp::error::Result<McpCommand> {
     let mut positional = Vec::new();
     let mut auth_env = None;
     let mut auth_header = None;
@@ -133,22 +146,33 @@ fn parse_add(args: &[String]) -> Result<McpCommand, String> {
     while let Some(a) = iter.next() {
         match a.as_str() {
             "--auth-env" => {
-                auth_env = Some(iter.next().ok_or("--auth-env needs a value")?.clone());
+                auth_env = Some(
+                    iter.next()
+                        .ok_or_else(|| usage("--auth-env needs a value"))?
+                        .clone(),
+                );
             }
             "--auth-header" => {
-                auth_header = Some(iter.next().ok_or("--auth-header needs a value")?.clone());
+                auth_header = Some(
+                    iter.next()
+                        .ok_or_else(|| usage("--auth-header needs a value"))?
+                        .clone(),
+                );
             }
             other if other.starts_with("--") => {
-                return Err(format!("mcp add: unknown flag '{other}'"));
+                return Err(usage(format!("mcp add: unknown flag '{other}'")));
             }
             other => positional.push(other.to_string()),
         }
     }
     let name = positional
         .first()
-        .ok_or("mcp add: needs <name> <url>")?
+        .ok_or_else(|| usage("mcp add: needs <name> <url>"))?
         .clone();
-    let url = positional.get(1).ok_or("mcp add: needs a <url>")?.clone();
+    let url = positional
+        .get(1)
+        .ok_or_else(|| usage("mcp add: needs a <url>"))?
+        .clone();
     Ok(McpCommand::Add {
         name,
         url,
@@ -157,26 +181,32 @@ fn parse_add(args: &[String]) -> Result<McpCommand, String> {
     })
 }
 
-fn parse_session(args: &[String]) -> Result<McpCommand, String> {
+fn parse_session(args: &[String]) -> crate::mcp::error::Result<McpCommand> {
     match args.first().map(String::as_str) {
         Some("list") | None => Ok(McpCommand::SessionList),
         Some("open") => {
-            let server = args.get(1).ok_or("mcp session open: needs a server name")?;
+            let server = args
+                .get(1)
+                .ok_or_else(|| usage("mcp session open: needs a server name"))?;
             Ok(McpCommand::SessionOpen {
                 server: server.clone(),
             })
         }
         Some("close") => {
-            let id = args.get(1).ok_or("mcp session close: needs a session id")?;
+            let id = args
+                .get(1)
+                .ok_or_else(|| usage("mcp session close: needs a session id"))?;
             Ok(McpCommand::SessionClose { id: id.clone() })
         }
         Some("info") => {
-            let id = args.get(1).ok_or("mcp session info: needs a session id")?;
+            let id = args
+                .get(1)
+                .ok_or_else(|| usage("mcp session info: needs a session id"))?;
             Ok(McpCommand::SessionInfo { id: id.clone() })
         }
-        Some(other) => Err(format!(
+        Some(other) => Err(usage(format!(
             "mcp session: unknown subcommand '{other}' (try: list, open, close, info)"
-        )),
+        ))),
     }
 }
 
@@ -197,7 +227,9 @@ pub(crate) struct ToolInvocation {
 
 /// Parse a line whose leading word is an installed server name into a [`ToolInvocation`]. The caller
 /// checks `is_server(leading)` first. Returns `Err` for a malformed invocation.
-pub(crate) fn parse_tool_invocation(line: &str) -> Option<Result<ToolInvocation, String>> {
+pub(crate) fn parse_tool_invocation(
+    line: &str,
+) -> Option<crate::mcp::error::Result<ToolInvocation>> {
     let tokens = tokenize_str(line).ok()?;
     if tokens.iter().any(|t| matches!(t, Token::Operator(_, _))) {
         return None; // operator-bearing lines fall through to Brush
@@ -236,14 +268,14 @@ pub(crate) fn parse_tool_invocation(line: &str) -> Option<Result<ToolInvocation,
                 i += 1;
                 match raw_words.get(i) {
                     Some(v) => inv.raw_args = Some(v.clone()),
-                    None => return Some(Err("--args needs a JSON value".into())),
+                    None => return Some(Err(usage("--args needs a JSON value"))),
                 }
             }
             "--session-id" => {
                 i += 1;
                 match words.get(i) {
                     Some(v) => inv.session_id = Some(v.clone()),
-                    None => return Some(Err("--session-id needs a value".into())),
+                    None => return Some(Err(usage("--session-id needs a value"))),
                 }
             }
             flag if flag.starts_with("--") => {
@@ -262,7 +294,7 @@ pub(crate) fn parse_tool_invocation(line: &str) -> Option<Result<ToolInvocation,
                 inv.tool = Some(other.to_string());
                 positional_seen = true;
             }
-            other => return Some(Err(format!("unexpected argument '{other}'"))),
+            other => return Some(Err(usage(format!("unexpected argument '{other}'")))),
         }
         i += 1;
     }

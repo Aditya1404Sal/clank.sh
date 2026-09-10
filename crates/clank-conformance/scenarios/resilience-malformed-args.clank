@@ -1,0 +1,85 @@
+# Malformed invocations must FAIL, not crash.
+#
+# clank is driven by a model, not only by a person: missing operands, unknown flags and
+# non-numeric values where a number belongs are routine LLM emissions, not rare typos. The
+# contract each step pins is deliberately narrow and target-independent:
+#
+#   nonzero exit  +  something legible on stderr  +  the session survives
+#
+# The last part is the point. On the agent a panic ABORTS the component (wasm32-wasip2 is an
+# abort target), which wedges the durable instance — so "the next command still runs" is the
+# difference between a bad command and a dead worker. Exact messages are NOT asserted: they
+# vary across the uu fork and the two targets, and pinning them here would make this a
+# brittle wording test instead of a survival test.
+
+# --- missing operands -------------------------------------------------------------------
+
+run sed
+err*
+exit nonzero
+
+run echo still-alive-1
+out still-alive-1
+
+run stat
+err*
+exit nonzero
+
+run echo still-alive-2
+out still-alive-2
+
+# --- unknown flags ----------------------------------------------------------------------
+
+run find ${TMP} -definitely-not-a-predicate
+err*
+exit nonzero
+
+run echo still-alive-3
+out still-alive-3
+
+run xargs --definitely-not-a-flag
+err*
+exit nonzero
+
+run echo still-alive-4
+out still-alive-4
+
+# --- non-numeric where a number belongs -------------------------------------------------
+
+run kill not-a-pid
+err*
+exit nonzero
+
+run echo still-alive-5
+out still-alive-5
+
+run find ${TMP} -maxdepth not-a-number
+err*
+exit nonzero
+
+run echo still-alive-6
+out still-alive-6
+
+# --- unknown commands and subcommands ---------------------------------------------------
+
+run clank-no-such-command-xyz
+err*
+exit nonzero
+
+run echo still-alive-7
+out still-alive-7
+
+run mcp definitely-not-a-subcommand
+err*
+exit nonzero
+
+run echo still-alive-8
+out still-alive-8
+
+run grease definitely-not-a-subcommand
+err*
+exit nonzero
+
+# The session is still healthy after every one of the above.
+run echo survived
+out survived

@@ -40,13 +40,17 @@ pub fn check(expect: &Expect, outcome: &Outcome) -> Vec<String> {
     check_stream("stdout", &expect.stdout, &outcome.stdout, &mut mismatches);
     check_stream("stderr", &expect.stderr, &outcome.stderr, &mut mismatches);
 
-    if let ExitExpect::Code(want) = expect.exit {
-        if outcome.exit_code != want {
+    match expect.exit {
+        ExitExpect::Code(want) if outcome.exit_code != want => {
             mismatches.push(format!(
                 "exit code: expected {want}, got {}",
                 outcome.exit_code
             ));
         }
+        ExitExpect::NonZero if outcome.exit_code == 0 => {
+            mismatches.push("exit code: expected non-zero, got 0".to_string());
+        }
+        _ => {}
     }
 
     match (&expect.prompt, &outcome.pending) {

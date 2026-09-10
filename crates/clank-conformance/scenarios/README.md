@@ -45,7 +45,7 @@ whose first non-space character is `#` are ignored.
 | `out~ <substr>` | stdout must contain the substring (repeatable) |
 | `out*` | stdout unasserted (may not combine with `out`/`out~`) |
 | `err` / `err~` / `err*` | same three forms for stderr |
-| `exit <n>` / `exit any` | expected exit code |
+| `exit <n>` / `exit any` / `exit nonzero` | expected exit code. `nonzero` asserts the command FAILED without pinning which code it chose — the right form for the `resilience-*` corpus, where `any` would also be satisfied by the command unexpectedly succeeding |
 | `prompt~ <substr>` | a prompt must be pending and its question contain the substring |
 | `choices <a,b,c>` | the pending prompt's choice list, exactly. Items are verbatim between commas (no trimming — `choices a, b` means `" b"`); a choice containing a comma is inexpressible |
 

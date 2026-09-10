@@ -34,6 +34,10 @@ pub struct Request {
     pub follow_redirects: bool,
     /// Cap on redirects when following, to bound a redirect loop.
     pub max_redirects: u32,
+    /// Cap on the response body clank will buffer, in bytes. The whole body is held in memory, so
+    /// this bounds peak allocation — which on the wasm agent (fixed linear memory) is the difference
+    /// between an error and a trap.
+    pub max_body: usize,
     /// Time budget for establishing the connection.
     pub connect_timeout: Option<Duration>,
     /// Overall time budget for the request (maps to reqwest's total timeout; on wasm, the
@@ -41,8 +45,21 @@ pub struct Request {
     pub timeout: Option<Duration>,
 }
 
+/// Default bound on establishing a connection, applied when the caller sets none.
+pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Default overall request budget, applied when the caller sets none. On wasm this maps to the
+/// first-byte timeout — the closest WASI-HTTP primitive to a total deadline.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_mins(5);
+
+/// Default cap on a buffered response body. Generous for API responses and ordinary downloads,
+/// while still bounding peak memory on an agent with fixed linear memory that never restarts.
+pub const DEFAULT_MAX_BODY: usize = 64 * 1024 * 1024;
+
 impl Request {
-    /// A plain `GET` with no redirect following and no timeouts — the base every client tweaks.
+    /// A plain `GET` with no redirect following and no explicit timeouts — the base every client
+    /// tweaks. `None` here means "use [`DEFAULT_CONNECT_TIMEOUT`] / [`DEFAULT_TIMEOUT`]", not
+    /// "unbounded"; [`fetch`] resolves them.
     pub fn new(method: Method, url: impl Into<String>) -> Self {
         Request {
             method,
@@ -51,6 +68,7 @@ impl Request {
             body: None,
             follow_redirects: false,
             max_redirects: 50,
+            max_body: DEFAULT_MAX_BODY,
             connect_timeout: None,
             timeout: None,
         }
@@ -91,6 +109,10 @@ pub enum Error {
     TooManyRedirects(u32),
     /// A `Location` header could not be resolved against the current URL.
     BadRedirect(String),
+    /// The response body exceeded `max_body`. Carries the cap, not the actual size — on the
+    /// streaming path the read is abandoned as soon as the cap is crossed, so the true size is
+    /// unknown (which is the point).
+    BodyTooLarge(usize),
 }
 
 impl std::fmt::Display for Error {
@@ -99,6 +121,7 @@ impl std::fmt::Display for Error {
             Error::Transport(m) => write!(f, "{m}"),
             Error::TooManyRedirects(n) => write!(f, "too many redirects (exceeded {n})"),
             Error::BadRedirect(loc) => write!(f, "could not resolve redirect to {loc}"),
+            Error::BodyTooLarge(cap) => write!(f, "response body exceeded {cap} bytes"),
         }
     }
 }
@@ -118,15 +141,27 @@ pub async fn fetch(req: &Request) -> Result<Response, Error> {
     let mut url = req.url.clone();
     let mut body = req.body.clone();
     let mut redirects = 0u32;
+    // Headers travel with the chain so credentials can be DROPPED at an origin change (below).
+    let mut headers = req.headers.clone();
+
+    // Resolve the timeout defaults ONCE, here, so BOTH targets get them. They used to be applied
+    // inside the native `fetch_once` only — which left the wasm path (the durable Golem agent)
+    // unbounded, i.e. the mitigation landed on the target that doesn't have the problem. A hung peer
+    // holds a durable invocation forever, and because Golem serializes invocations per instance it
+    // wedges everything queued behind it. Callers wanting a different bound (wcurl `-m`, waget `-T`)
+    // still override by setting the fields.
+    let connect_timeout = req.connect_timeout.or(Some(DEFAULT_CONNECT_TIMEOUT));
+    let timeout = req.timeout.or(Some(DEFAULT_TIMEOUT));
 
     loop {
         let resp = fetch_once(
             &method,
             &url,
-            &req.headers,
+            &headers,
             body.clone(),
-            req.connect_timeout,
-            req.timeout,
+            connect_timeout,
+            timeout,
+            req.max_body,
         )
         .await?;
 
@@ -138,6 +173,15 @@ pub async fn fetch(req: &Request) -> Result<Response, Error> {
                 redirects += 1;
                 let next = resolve_url(&url, location)
                     .ok_or_else(|| Error::BadRedirect(location.to_string()))?;
+                // Drop credentials when the redirect leaves the origin. Headers used to be re-sent
+                // verbatim on every hop, so `curl -u user:pass -L http://attacker/x` handed the
+                // Basic credential synthesized by wcurl straight to whatever host the 302 named.
+                // Real curl requires `--location-trusted` for exactly this, and reqwest's own
+                // `remove_sensitive_headers` never runs here because redirects are followed by this
+                // loop rather than by reqwest.
+                if !same_origin(&url, &next) {
+                    headers.retain(|(name, _)| !is_credential_header(name));
+                }
                 (method, body) = redirect_method(&method, resp.status, body);
                 url = next;
                 continue;
@@ -177,6 +221,55 @@ fn redirect_method(
     }
 }
 
+/// Whether a header carries a credential that must not follow a redirect off-origin — and, for
+/// callers that display request headers, must not be shown verbatim.
+///
+/// Matched case-insensitively (HTTP field names are case-insensitive). `Cookie` is included because
+/// a cookie is a bearer credential in practice, whatever its scoping rules say.
+///
+/// Public so `wcurl -v` masks exactly the same set the redirect logic drops; two lists that must
+/// agree are a list that eventually won't.
+#[must_use]
+pub fn is_credential_header(name: &str) -> bool {
+    const CREDENTIAL_HEADERS: &[&str] = &["authorization", "cookie", "proxy-authorization"];
+    CREDENTIAL_HEADERS
+        .iter()
+        .any(|c| name.eq_ignore_ascii_case(c))
+}
+
+/// The `scheme://host:port` origin of an absolute URL, lowercased. `None` if it will not parse.
+fn origin_of(url: &str) -> Option<(String, String, Option<u16>)> {
+    use iri_string::types::UriAbsoluteStr;
+    let uri = UriAbsoluteStr::new(url.split('#').next().unwrap_or(url)).ok()?;
+    let authority = uri.authority_components()?;
+    Some((
+        uri.scheme_str().to_ascii_lowercase(),
+        authority.host().to_ascii_lowercase(),
+        authority.port().and_then(|p| p.parse().ok()),
+    ))
+}
+
+/// Whether two URLs share a scheme, host and port.
+///
+/// An unparseable URL on either side answers `false` — the conservative direction, since the caller
+/// uses this to decide whether to KEEP credentials.
+fn same_origin(a: &str, b: &str) -> bool {
+    /// The port a scheme implies when the URL omits one.
+    fn effective_port(scheme: &str, port: Option<u16>) -> Option<u16> {
+        port.or(match scheme {
+            "http" => Some(80),
+            "https" => Some(443),
+            _ => None,
+        })
+    }
+    match (origin_of(a), origin_of(b)) {
+        (Some((sa, ha, pa)), Some((sb, hb, pb))) => {
+            sa == sb && ha == hb && effective_port(&sa, pa) == effective_port(&sb, pb)
+        }
+        _ => false,
+    }
+}
+
 /// Resolve a `Location` value (absolute, network-path, absolute-path, or relative) against the
 /// current absolute URL — RFC 3986 §5 reference resolution, via `iri-string` (pure-Rust, no
 /// `idna`/`icu`, wasm-clean). Returns `None` if the base isn't a valid absolute URI or the location
@@ -210,6 +303,7 @@ async fn fetch_once(
     body: Option<Vec<u8>>,
     connect_timeout: Option<Duration>,
     timeout: Option<Duration>,
+    max_body: usize,
 ) -> Result<Response, Error> {
     // `redirect_limit(0)` is load-bearing, exactly as `redirect(none)` is on the native arm: the
     // shared loop above is the single source of redirect behavior across both targets.
@@ -250,7 +344,34 @@ async fn fetch_once(
     let bytes = if is_bodyless(method, status) {
         Vec::new()
     } else {
-        response.into_body().bytes().await.to_vec()
+        // Reject on the advertised length BEFORE reading, so an honest oversized response never gets
+        // allocated at all.
+        // (Nested rather than a let-chain: this crate is on the workspace's 2021 edition.)
+        if let Some(len) = response
+            .headers()
+            .get(http::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+        {
+            if len > max_body as u64 {
+                return Err(Error::BodyTooLarge(max_body));
+            }
+        }
+        // A chunked response advertises no length, so stream it and stop the moment the cap is
+        // crossed. main's wstd arm documented this as a residual gap — its `contents()` was
+        // all-or-nothing, so a Content-Length-less body was fully buffered before the post-hoc check
+        // could fire, which bounded the returned value but not peak allocation. `wasi-fetch`'s
+        // `Body::chunk` reads incrementally, so nothing past the cap is ever held: the gap main had
+        // to accept on wstd is closed here rather than inherited.
+        let mut body = response.into_body();
+        let mut acc: Vec<u8> = Vec::new();
+        while let Some(chunk) = body.chunk().await {
+            if acc.len() + chunk.len() > max_body {
+                return Err(Error::BodyTooLarge(max_body));
+            }
+            acc.extend_from_slice(&chunk);
+        }
+        acc
     };
     Ok(Response {
         status,
@@ -268,16 +389,12 @@ async fn fetch_once(
     body: Option<Vec<u8>>,
     connect_timeout: Option<Duration>,
     timeout: Option<Duration>,
+    max_body: usize,
 ) -> Result<Response, Error> {
     // `redirect(none)` is load-bearing: the shared loop above is the single source of redirect
     // behavior across both targets, so reqwest's default auto-follow must be off.
     let mut cb = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
-    // Apply a DEFAULT bound when the caller passed none. An unbounded outbound request is a real
-    // hazard for a long-lived/durable host: a hung peer holds the connection forever, and because a
-    // durable agent serializes invocations, it wedges every request queued behind it (audit P2-4).
-    // Callers that want a different bound (wcurl `-m`, waget `-T`) still override these.
-    let connect_timeout = connect_timeout.or(Some(Duration::from_secs(30)));
-    let timeout = timeout.or(Some(Duration::from_mins(5)));
+    // Defaults are resolved by the caller (`fetch`) so both targets share them.
     if let Some(d) = connect_timeout {
         cb = cb.connect_timeout(d);
     }
@@ -295,7 +412,7 @@ async fn fetch_once(
     if let Some(bytes) = body {
         builder = builder.body(bytes);
     }
-    let response = builder
+    let mut response = builder
         .send()
         .await
         .map_err(|e| Error::Transport(format!("request failed: {e}")))?;
@@ -306,11 +423,27 @@ async fn fetch_once(
     let bytes = if is_bodyless(method, status) {
         Vec::new()
     } else {
-        response
-            .bytes()
+        // Reject on the advertised length first, then STREAM with a running bound so a server that
+        // lies about (or omits) Content-Length still cannot make us allocate past the cap. This is
+        // the property `.bytes()` could not give: it reads to EOF, so a post-hoc length check
+        // happens only after the memory is already committed.
+        if let Some(len) = response.content_length() {
+            if len > max_body as u64 {
+                return Err(Error::BodyTooLarge(max_body));
+            }
+        }
+        let mut buf: Vec<u8> = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
             .await
             .map_err(|e| Error::Transport(format!("reading response failed: {e}")))?
-            .to_vec()
+        {
+            if buf.len() + chunk.len() > max_body {
+                return Err(Error::BodyTooLarge(max_body));
+            }
+            buf.extend_from_slice(&chunk);
+        }
+        buf
     };
     Ok(Response {
         status,
@@ -495,6 +628,126 @@ mod transport_tests {
             }
         });
         base
+    }
+
+    /// A server that OMITS `Content-Length` and streams until it is cut off — the shape that defeats
+    /// a pre-check, so only a running bound during the read can stop it.
+    fn lengthless_server(total: usize) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n");
+                let chunk = vec![b'x'; 64 * 1024];
+                let mut sent = 0usize;
+                while sent < total && stream.write_all(&chunk).is_ok() {
+                    sent += chunk.len();
+                }
+                let _ = stream.flush();
+            }
+        });
+        base
+    }
+
+    /// A server that echoes the request head it received as the response body, so a test can assert
+    /// on which headers actually went out on a given hop.
+    fn header_echo_server(replies: Vec<(u16, Vec<(String, String)>)>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let base_for_thread = base.clone();
+        std::thread::spawn(move || {
+            for (status, headers) in replies {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap_or(0);
+                let body = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let mut head = format!("HTTP/1.1 {status} X\r\nContent-Length: {}\r\n", body.len());
+                for (k, v) in headers {
+                    let v = v.replace("${BASE}", &base_for_thread);
+                    let _ = write!(head, "{k}: {v}\r\n");
+                }
+                head.push_str("Connection: close\r\n\r\n");
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(body.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        base
+    }
+
+    #[tokio::test]
+    async fn credentials_are_dropped_when_a_redirect_leaves_the_origin() {
+        // Two DIFFERENT servers: the first 302s to the second, which echoes what it received.
+        let victim = header_echo_server(vec![(200, vec![])]);
+        let attacker = scripted_server(vec![reply(
+            302,
+            &[("Location", &format!("{victim}/collect"))],
+            "go",
+        )]);
+
+        let mut req = Request::new(Method::GET, attacker);
+        req.follow_redirects = true;
+        req.headers = vec![
+            ("Authorization".into(), "Basic c2VjcmV0".into()),
+            ("Cookie".into(), "session=abc".into()),
+            ("X-Harmless".into(), "keep-me".into()),
+        ];
+        let resp = fetch(&req).await.unwrap();
+        let echoed = String::from_utf8_lossy(&resp.body).to_ascii_lowercase();
+
+        assert!(
+            !echoed.contains("c2VjcmV0".to_ascii_lowercase().as_str()),
+            "the Basic credential must not reach the redirect target:\n{echoed}"
+        );
+        assert!(
+            !echoed.contains("session=abc"),
+            "the cookie must not reach the redirect target:\n{echoed}"
+        );
+        assert!(
+            echoed.contains("keep-me"),
+            "non-credential headers still travel:\n{echoed}"
+        );
+    }
+
+    #[tokio::test]
+    async fn credentials_survive_a_same_origin_redirect() {
+        // Same server, so the same origin: this is the case curl -L is normally used for.
+        let base = header_echo_server(vec![
+            (302, vec![("Location".into(), "/next".into())]),
+            (200, vec![]),
+        ]);
+        let mut req = Request::new(Method::GET, base);
+        req.follow_redirects = true;
+        req.headers = vec![("Authorization".into(), "Basic c2VjcmV0".into())];
+        let resp = fetch(&req).await.unwrap();
+        let echoed = String::from_utf8_lossy(&resp.body);
+        assert!(
+            echoed.contains("c2VjcmV0"),
+            "a same-origin redirect must not strip credentials:\n{echoed}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_advertised_oversize_body_is_refused_before_it_is_read() {
+        let base = scripted_server(vec![reply(200, &[], &"x".repeat(4096))]);
+        let mut req = Request::new(Method::GET, base);
+        req.max_body = 100;
+        assert_eq!(fetch(&req).await.unwrap_err(), Error::BodyTooLarge(100));
+    }
+
+    #[tokio::test]
+    async fn a_body_without_content_length_is_still_bounded_while_reading() {
+        // Regression: the read used to be `.bytes()` (to EOF), so a peer that advertises no length
+        // could commit unbounded memory before any check ran. The cap must hold during the read.
+        let cap = 256 * 1024;
+        let base = lengthless_server(8 * 1024 * 1024);
+        let mut req = Request::new(Method::GET, base);
+        req.max_body = cap;
+        assert_eq!(fetch(&req).await.unwrap_err(), Error::BodyTooLarge(cap));
     }
 
     fn reply(status: u16, headers: &[(&str, &str)], body: &str) -> Reply {
