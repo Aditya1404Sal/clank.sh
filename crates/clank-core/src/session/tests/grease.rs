@@ -498,7 +498,7 @@ fn grease_install_a_skill_materializes_and_surfaces_it() {
         assert!(!session.grease.is_script("code-review"));
         assert!(!session.grease.is_prompt("code-review"));
         assert!(session.grease.manifest_for("code-review").is_none());
-        assert!(session.grease.ask_tool_definitions().is_empty());
+        assert!(crate::ai::ask::grease_ask_tool_definitions(&session.grease).is_empty());
 
         // `grease info` describes the envelope + bundles.
         let info =

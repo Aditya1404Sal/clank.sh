@@ -101,7 +101,7 @@ pub fn build_system_prompt_with_capabilities(
 ) -> String {
     let mut out = build_system_prompt(registry);
     append_mcp_tools(&mut out, mcp);
-    let prompt_tools = grease.ask_tool_definitions();
+    let prompt_tools = grease_ask_tool_definitions(grease);
     if !prompt_tools.is_empty() {
         out.push_str(prompts::PROMPT_TOOLS_HEADER);
         for t in &prompt_tools {
@@ -164,6 +164,50 @@ pub(crate) fn mcp_ask_tool_definitions(mcp: &crate::mcp::state::McpState) -> Vec
         }
     }
     tools
+}
+
+/// Every installed grease prompt as an [`AskTool`], so the model can invoke prompts as tools. The
+/// tool name is namespaced `prompt__<name>` (mirroring `mcp__<server>__<tool>`; the executor decodes
+/// it back to a `<name> --arg value …` line). **Scripts and skills are excluded** — scripts run local
+/// shell and are reachable via the plain `shell` tool; skills are context, not tools.
+///
+/// Lives here rather than as a method on [`crate::grease::state::GreaseState`] (where it used to be),
+/// for the same reason as [`mcp_ask_tool_definitions`] above: `grease` returning `ai`'s own
+/// [`AskTool`] was the last place the `grease` directory named an `ai` type, purely to serve `ai`.
+#[must_use]
+pub(crate) fn grease_ask_tool_definitions(
+    grease: &crate::grease::state::GreaseState,
+) -> Vec<AskTool> {
+    grease
+        .prompts()
+        .into_iter()
+        .map(|p| {
+            let props: serde_json::Map<String, serde_json::Value> = p
+                .arguments
+                .iter()
+                .map(|a| {
+                    (
+                        a.name.clone(),
+                        serde_json::json!({ "type": "string", "description": a.description }),
+                    )
+                })
+                .collect();
+            let required: Vec<&str> = p
+                .arguments
+                .iter()
+                .filter(|a| a.required)
+                .map(|a| a.name.as_str())
+                .collect();
+            let schema = serde_json::json!({
+                "type": "object", "properties": props, "required": required
+            });
+            AskTool {
+                name: format!("prompt__{}", p.name),
+                description: format!("[prompt] {}", p.description),
+                parameters_schema: schema.to_string(),
+            }
+        })
+        .collect()
 }
 
 /// One tool the model may call, rendered from the manifest registry. The clank-neutral mirror of

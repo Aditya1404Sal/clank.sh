@@ -108,7 +108,7 @@ impl Session {
         // `grease install`/`mcp add` thus expands what `ask` can do (README).
         let mut tools = crate::ai::ask::build_ask_tools(&self.registry);
         tools.extend(crate::ai::ask::mcp_ask_tool_definitions(&self.mcp));
-        tools.extend(self.grease.ask_tool_definitions());
+        tools.extend(crate::ai::ask::grease_ask_tool_definitions(&self.grease));
 
         let system = crate::ai::ask::with_json_addendum(
             crate::ai::ask::build_system_prompt_with_capabilities(

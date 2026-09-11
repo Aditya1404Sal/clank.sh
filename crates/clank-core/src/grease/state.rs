@@ -461,44 +461,15 @@ impl GreaseState {
             .collect()
     }
 
-    /// Installed prompts (and only prompts) as [`crate::ai::ask::AskTool`]s, so the model can invoke
-    /// prompts as tools. The tool name is namespaced `prompt__<name>` (mirroring `mcp__<server>__<tool>`;
-    /// the executor decodes it back to a `<name> --arg value …` line). **Scripts and skills are
-    /// excluded** — scripts run local shell and are reachable via the plain `shell` tool; skills are
-    /// context, not tools.
+    /// All installed prompts (mirrors [`skills`](Self::skills)). The `ai` layer turns these into its
+    /// own tool definitions — see `ai::ask::grease_ask_tool_definitions`.
     #[must_use]
-    pub fn ask_tool_definitions(&self) -> Vec<crate::ai::ask::AskTool> {
+    pub fn prompts(&self) -> Vec<&PromptPackage> {
         self.packages
             .iter()
-            .filter_map(|pkg| match &pkg.payload {
+            .filter_map(|p| match &p.payload {
                 Payload::Prompt(p) => Some(p),
                 _ => None,
-            })
-            .map(|p| {
-                let props: serde_json::Map<String, serde_json::Value> = p
-                    .arguments
-                    .iter()
-                    .map(|a| {
-                        (
-                            a.name.clone(),
-                            serde_json::json!({ "type": "string", "description": a.description }),
-                        )
-                    })
-                    .collect();
-                let required: Vec<&str> = p
-                    .arguments
-                    .iter()
-                    .filter(|a| a.required)
-                    .map(|a| a.name.as_str())
-                    .collect();
-                let schema = serde_json::json!({
-                    "type": "object", "properties": props, "required": required
-                });
-                crate::ai::ask::AskTool {
-                    name: format!("prompt__{}", p.name),
-                    description: format!("[prompt] {}", p.description),
-                    parameters_schema: schema.to_string(),
-                }
             })
             .collect()
     }
@@ -783,7 +754,7 @@ mod tests {
         assert_eq!(m.input_schema.len(), 1);
         assert_eq!(m.input_schema[0].name, "file");
 
-        let tools = state.ask_tool_definitions();
+        let tools = crate::ai::ask::grease_ask_tool_definitions(&state);
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "prompt__summarize");
         assert!(tools[0].parameters_schema.contains("file"));
@@ -837,7 +808,7 @@ mod tests {
         assert_eq!(m.execution_scope, ExecutionScope::Subprocess);
 
         // A script is NOT surfaced as a `prompt__` ask tool.
-        assert!(state.ask_tool_definitions().is_empty());
+        assert!(crate::ai::ask::grease_ask_tool_definitions(&state).is_empty());
         // Its manifest IS registered dynamically (so `type`/authz see it).
         assert_eq!(state.all_manifests().len(), 1);
 
@@ -862,7 +833,7 @@ mod tests {
         // A skill is NOT a command: no manifest, no ask tool.
         assert!(state.manifest_for("code-review").is_none());
         assert!(state.all_manifests().is_empty());
-        assert!(state.ask_tool_definitions().is_empty());
+        assert!(crate::ai::ask::grease_ask_tool_definitions(&state).is_empty());
         assert!(state.pkg_help("code-review").is_none());
         // But it IS listed as a skill for the system prompt.
         let skills = state.skills();
