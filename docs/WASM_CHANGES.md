@@ -75,6 +75,14 @@ to build on the target at all. The fork adds:
 - an **empty-argv guard** in `uucore`, and
 - a **`set_permissions` skip under wasi** in `uu_cp` (wasip2 has no POSIX mode bits to copy).
 
+**One fix that is not a wasip2 gap:** `printf` padding above `u16::MAX` (`9001a0b`). Since Rust 1.88
+`core::fmt` stores widths as `u16`, and uucore fed pad widths straight into it, so every width from
+65,536 up to its 1,000,000 memory guard panicked. On wasip2 that panic is an abort that wedges the
+durable agent; natively it hung any pipeline it was in (see
+[`dev-docs/issues/open/native-run-uu-panic-leaks-stdio.md`](../dev-docs/issues/open/native-run-uu-panic-leaks-stdio.md)).
+Nothing about it is fork-specific, so it is the strongest candidate to upstream — see
+[`dev-docs/research/coreutils-printf-width-panic.md`](../dev-docs/research/coreutils-printf-width-panic.md).
+
 **WHY every `uu_*` crate must be patched, not just `uucore`** (the rationale is spelled out in the
 `Cargo.toml` comment above the `[patch]` block): the published `uu_*` command crates only *share* the patched
 `uucore` transitively. A fix that lives **inside a command crate** (e.g. the `uu_cp` `set_permissions`

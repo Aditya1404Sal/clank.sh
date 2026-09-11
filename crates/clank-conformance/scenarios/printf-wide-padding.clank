@@ -1,0 +1,65 @@
+# printf with a field width above u16::MAX (65,535) must pad, not panic.
+#
+# Rust >= 1.88 stores `core::fmt` dynamic widths as a u16. uucore padded by feeding the width
+# straight into `write!(w, "{: >w$}", "")`, so every width from 65,536 up to its 1,000,000 memory
+# guard passed that guard and then panicked inside the formatter. On the agent a panic is an
+# abort: it traps the guest and wedges the durable instance for every later invocation.
+#
+# GNU printf pads these widths happily, so the contract here is SUCCESS — the opposite of
+# resilience-hostile-input.clank, where absurd input must be refused. The refusal still exists,
+# just higher up: past 1,000,000 the memory guard answers (see the last section).
+#
+# The fix lives in the coreutils fork (fork/coreutils, branch wasip2-oscompat); the diagnosis is
+# dev-docs/research/coreutils-printf-width-panic.md.
+
+# --- the exact threshold -----------------------------------------------------------------
+# 65,535 always worked; 65,536 is the first width the formatter rejected.
+
+run printf '%65535s' '' | wc -c
+out 65535
+
+run printf '%65536s' '' | wc -c
+out 65536
+
+# --- string padding (format/spec.rs) — the path the e2e's eviction setup hit ------------
+
+run printf '%150000s' '' | wc -c
+out 150000
+
+# Right-aligned by default: the text lands at the END of the field.
+run printf '%70000s|\n' x | tail -c 3
+out x|
+
+# Left-aligned with '-': the text lands at the START.
+run printf '%-70000s|\n' x | cut -c1
+out x
+
+# --- numeric padding (format/num_format.rs) — the same bug on four more paths ------------
+
+run printf '%100000d' 7 | wc -c
+out 100000
+
+run printf '%-100000d|\n' 7 | cut -c1
+out 7
+
+run printf '%0100000d\n' 7 | tail -c 4
+out 007
+
+run printf '%+100000d\n' 7 | tail -c 3
+out +7
+
+# --- the memory guard still refuses what it always refused -------------------------------
+# Past MAX_FORMAT_WIDTH (1,000,000) the width is refused before any padding is attempted — the
+# same contract upstream's test_large_width_format pins at 10M-20M.
+
+run printf '%2000000s' x
+err~ write error
+exit nonzero
+
+# --- the session survives, and ordinary formatting is untouched -------------------------
+
+run printf '[%5d]\n' 42
+out [   42]
+
+run echo still-alive
+out still-alive

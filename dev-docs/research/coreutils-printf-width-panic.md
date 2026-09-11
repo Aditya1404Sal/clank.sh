@@ -6,9 +6,29 @@ author: agent
 
 # `printf` width padding panics above `u16::MAX`
 
-Investigation for `workspace-cohesion` ticket 6. The fix belongs in
-`github.com/Aditya1404Sal/coreutils` (Aditya's fork), which this agent cannot push to — so the
-diagnosis and the patch are recorded here ready to apply.
+Investigation for `workspace-cohesion` ticket 6.
+
+> **Status: applied 2026-09-11** as `9001a0b` on the fork's `wasip2-oscompat` branch, consumed via
+> the `fork/coreutils` submodule. **Not yet pushed:** until `9001a0b` exists on
+> `github.com/Aditya1404Sal/coreutils`, CI and fresh clones cannot fetch the submodule commit.
+>
+> The applied fix goes further than the patch sketched below. All six sites route through one
+> helper, `format::write_fill`, instead of a spaces-only helper local to `spec.rs`, and `num_format`'s
+> four sites go through `pad_to`, which counts `char`s exactly as `core::fmt` did. An oracle test keeps
+> the old `core::fmt` code verbatim and asserts byte-identical output below the ceiling. Results:
+> uucore `--features format` 176 passed, upstream `tests/by-util/test_printf.rs` 128 passed, and
+> clank's `printf-wide-padding.clank` passes natively and on a deployed agent.
+>
+> **Two findings this investigation did not anticipate:**
+> - **Natively, the bug was a hang, not a crash.** With the unpatched fork, clank's native
+>   conformance tier sat on `printf '%65536s' '' | wc -c` for 10 min 37 s at 0% CPU. The cause is in
+>   clank, not the fork — `run_uu` does not restore stdio when a builtin panics — and is recorded in
+>   [`dev-docs/issues/open/native-run-uu-panic-leaks-stdio.md`](../issues/open/native-run-uu-panic-leaks-stdio.md).
+> - **The threshold is exact:** 65,535 always worked and 65,536 is the first failing width. The
+>   scenario pins both.
+>
+> The body below is the investigation as written before the fix, including its plan to bump a `rev`.
+> The submodule replaced that plan; the rest stands.
 
 ## Symptom
 

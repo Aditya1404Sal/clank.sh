@@ -409,12 +409,13 @@ expect_contains "env lists variables"        'env'                              
 # The oversized entry becomes the oldest and is dropped behind a marker while the newest survives.
 run_line 'context clear' >/dev/null
 # printf a ~160KB blob (≈40000 est. tokens) as one recorded entry — comfortably over the 24000 cap.
-# Three conversions rather than one `%160000s`: Rust ≥1.88 stores `core::fmt` widths as u16, so a
-# single width above 65535 panics inside uucore's `write_padded` (`Argument::from_usize`), which
-# traps the durable agent and wedges the instance for every later invocation. The fork's printf
-# needs its own fix for that; the e2e only needs the entry to be oversized. (main still carries the
-# single-conversion form; restore it here once the fork is patched — workspace-cohesion ticket 6.)
-run_line "printf '%60000s%60000s%40000s' '' '' ''" >/dev/null
+# ONE conversion, deliberately: this line doubles as the live regression test for the fork's printf
+# width fix. Rust ≥1.88 stores `core::fmt` widths as u16, and uucore used to feed the pad width
+# straight into the formatter, so any width above 65535 panicked — trapping the durable agent and
+# wedging the instance for every later invocation (every assertion below would then read empty).
+# Fixed in fork/coreutils (dev-docs/research/coreutils-printf-width-panic.md); the conformance
+# scenario printf-wide-padding.clank pins every padding path on both targets.
+run_line "printf '%160000s' ''" >/dev/null
 run_line 'echo alpha' >/dev/null
 run_line 'echo bravo' >/dev/null
 run_line 'echo charlie' >/dev/null

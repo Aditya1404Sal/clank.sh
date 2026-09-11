@@ -45,7 +45,7 @@ Redirected by `path` into a directory that is a **git submodule** of this repo. 
 
 - **Repository:** https://github.com/Aditya1404Sal/coreutils
 - **Tracking branch:** `wasip2-oscompat` — steers `git submodule update --remote` only; it is not the pin.
-- **Pinned commit (gitlink):** `35ecf24d7caa2202940a18ef61be5037776ecd36`
+- **Pinned commit (gitlink):** `9001a0b059ead0e140ba8cef5c9e15b76e2480fe`
 - **Redirects `19` crates:**
 
 | Crate | Path |

@@ -4,15 +4,17 @@ date: 2026-09-11
 author: agent
 issue: dev-docs/issues/closed/workspace-cohesion.md
 design: dev-docs/designs/approved/workspace-cohesion.md
-status: executed 2026-09-11 — 12 of 13 tickets landed; ticket 6 blocked externally
+status: executed 2026-09-11 — all 13 tickets landed; ticket 6's fork commit is not yet pushed
 ---
 
 # Workspace Cohesion - Implementation Plan
 
-> **Status: executed 2026-09-11.** Twelve of thirteen tickets landed on `main-rc-1`. **Ticket 6 is
-> the exception and cannot land from this repository** — the `printf` width-panic fix belongs in the
-> `Aditya1404Sal/coreutils` fork and needs a rev bump here afterwards. The diagnosis and the patch
-> are complete in [`dev-docs/research/coreutils-printf-width-panic.md`](../../research/coreutils-printf-width-panic.md).
+> **Status: executed 2026-09-11.** All thirteen tickets landed on `main-rc-1`. **Ticket 6 landed
+> last, and not the way it was planned:** the fork was cloned into a `fork/coreutils` submodule and
+> the fix committed there (`9001a0b`), instead of being pushed and pulled in by a rev bump. **That
+> commit is not yet on GitHub**, so until it is pushed, CI and fresh clones cannot fetch the
+> submodule. See the ticket-6 deviation record below and
+> [`dev-docs/research/coreutils-printf-width-panic.md`](../../research/coreutils-printf-width-panic.md).
 >
 > Tickets 11 and 13 were re-scoped during execution, and several tickets were wrong in ways worth
 > knowing about. Read [Deviations noted during implementation](#deviations-noted-during-implementation)
@@ -700,11 +702,22 @@ variants are constructed from curated human-written messages at the boundary, so
 forwarding to `Display` would be ceremony. `logging::redact_url` already covers the one real leak
 shape. The trait earns its place the day a raw transport error becomes a variant payload.
 
-### Ticket 6 — blocked on the maintainer, not on this plan
+### Ticket 6 — landed through a submodule instead of a rev bump
 
-The diagnosis and the patch are complete in `dev-docs/research/coreutils-printf-width-panic.md`:
-`MAX_FORMAT_WIDTH = 1_000_000` guards a limit that Rust ≥1.88 `core::fmt` no longer has — widths are
-`u16` there, so anything in 65,536..1,000,000 passes the guard and then aborts. Six affected sites.
-`num_format::zero_pad_to` already documents this exact bug for the *precision* path, which is the
-strongest evidence the fix is right. It cannot land from here: the fix belongs in
-`Aditya1404Sal/coreutils` and needs a rev bump in this tree.
+The plan assumed the fix would be pushed to `Aditya1404Sal/coreutils` and pulled in by bumping the
+`rev` on 20 `[patch.crates-io]` entries, which is why it sat as "blocked on the maintainer". Aditya
+chose to change how the fork is consumed instead: it is now a git submodule at `fork/coreutils`
+(`d6f9a78`), the fix is a commit inside it (`9001a0b`), and the gitlink is the pin. The switch was
+proven behaviour-neutral on its own before the fix went in (668/0, identical resolved package set).
+
+The applied fix went wider than the six-site patch in the research doc — one shared `write_fill`
+helper, with an oracle test pinning byte-identical output below the ceiling — and the regression
+scenario was watched failing against the unpatched fork before the fix was applied.
+
+**What the plan missed entirely: natively, the bug was a hang, not a crash.** With the unpatched
+fork the native conformance tier stalled for 10 min 37 s at 0% CPU. The cause is in clank's own
+`run_uu`, which does not restore stdio when a builtin panics; the printf fix removes one panic
+source, not that defect. It is recorded as `dev-docs/issues/open/native-run-uu-panic-leaks-stdio.md`.
+
+**Outstanding: `9001a0b` is not pushed.** Until it is on GitHub, CI and fresh clones cannot fetch
+the submodule — the one risk a gitlink has that a rev pin did not (see `docs/WASM_CHANGES.md` §6).
