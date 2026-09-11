@@ -93,5 +93,5 @@ dependency vanish" case rather than a fork or a workaround.
 The concrete list of every forked/patched crate — exact repository, pin kind, resolved revision, and
 which packages arrive only transitively — is generated, not hand-maintained, and lives in
 [`docs/FORKS.md`](../FORKS.md) (`dev-tools/fork-inventory`, regenerated and CI-gated). The vendored
-native-only forks (`reedline-fork`, `crossterm-fork`) are unrelated to wasip2 — they exist for a native
+native-only forks (`fork/reedline`, `fork/crossterm`) are unrelated to wasip2 — they exist for a native
 terminal-latency reason and never enter the wasm build at all; see `docs/FORKS.md` §3.

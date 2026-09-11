@@ -1,7 +1,7 @@
 # Vendored fork of crossterm 0.28.1 (the published crates.io source) carrying ONE clank change:
 # the DSR round-trip timeouts in src/cursor/sys/unix.rs and src/terminal/sys/unix.rs are cut from
 # 2000ms to 250ms so a terminal that answers late (e.g. right after `ask`'s output burst) fails
-# fast instead of stalling the prompt ~1-2s. Pairs with the reedline-fork tolerant-fallback patch.
+# fast instead of stalling the prompt ~1-2s. Pairs with the tolerant-fallback patch in fork/reedline.
 # Trimmed to the buildable crate: examples/, docs/, and dev-dependencies (used only by those) are
 # removed, and auto-discovery is turned off so cargo does not look for the deleted files.
 [package]

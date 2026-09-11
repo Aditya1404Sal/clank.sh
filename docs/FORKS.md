@@ -76,8 +76,8 @@ Not git dependencies — the fork's source is committed in-tree, and `[patch.cra
 
 | Crate | Vendored at | Why (native-only) |
 |---|---|---|
-| `reedline` | `reedline-fork/` | native REPL line editor; one-line patch makes `initialize_prompt_position`'s `cursor::position()` timeout tolerant (falls back to col 0, bottom row) instead of aborting `read_line` when a terminal answers the DSR query late — which is exactly what happens right after `ask` dumps a burst of output. |
-| `crossterm` | `crossterm-fork/` | terminal backend paired with the `reedline` fork above; cuts two DSR-reply timeouts from 2000ms to 250ms so a slow-to-answer terminal fails the query fast instead of blocking ~1s at every prompt. Only crossterm 0.28 (reedline's) is patched — brush's crossterm 0.25 is a distinct resolved version, untouched. |
+| `reedline` | `fork/reedline/` | native REPL line editor; one-line patch makes `initialize_prompt_position`'s `cursor::position()` timeout tolerant (falls back to col 0, bottom row) instead of aborting `read_line` when a terminal answers the DSR query late — which is exactly what happens right after `ask` dumps a burst of output. |
+| `crossterm` | `fork/crossterm/` | terminal backend paired with the `reedline` fork above; cuts two DSR-reply timeouts from 2000ms to 250ms so a slow-to-answer terminal fails the query fast instead of blocking ~1s at every prompt. Only crossterm 0.28 (reedline's) is patched — brush's crossterm 0.25 is a distinct resolved version, untouched. |
 
 ## Not covered by this table
 

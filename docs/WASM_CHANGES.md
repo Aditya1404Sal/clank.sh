@@ -294,7 +294,7 @@ against a remote that has never heard of it. What closes it is ordering, not too
 branch before pushing the clank commit that moves the gitlink ([§8](#8-maintenance-checklist)).
 CI's checkout catches a violation, but only after the fact.
 
-The two vendored forks (`reedline-fork/`, `crossterm-fork/`) have none of this exposure — the source
+The two vendored forks (`fork/reedline/`, `fork/crossterm/`) have none of this exposure — the source
 is in-tree and committed. Their cost is the opposite: nothing tells you when upstream moves, so they
 go stale silently.
 

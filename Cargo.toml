@@ -96,20 +96,20 @@ expect_used = "warn"
 # fallback. The fork makes that one call tolerant — fall back to (col 0, bottom row), which is
 # correct because clank always ends output in a newline. Vendored (not a git dep) because it is the
 # exact published 0.38.0 source plus a one-line patch; native-only, never in the wasm build. See
-# reedline-fork/src/painting/painter.rs. To productionize, push it as a github fork and swap to a
-# `git`+`rev` pin like the coreutils/brush entries below.
-reedline = { path = "reedline-fork" }
+# fork/reedline/src/painting/painter.rs. To productionize, push it as a github fork and consume it
+# the way coreutils is below (a submodule under fork/) or brush is (a `git` + `rev` pin).
+reedline = { path = "fork/reedline" }
 
 # crossterm forked for ONE fix, paired with the reedline fork above. crossterm's cursor::position()
 # (which reedline calls in initialize_prompt_position) and its keyboard-enhancement probe poll for a
 # terminal DSR reply with a 2000ms ceiling — a terminal that answers late (right after `ask` dumps a
 # burst of output) makes that query block ~1s every prompt. The fork cuts both ceilings to 250ms so
-# the query fails fast; reedline-fork then falls back to (col 0, bottom row) immediately instead of
-# stalling. A responsive terminal replies in <10ms, far inside the window, so it is unaffected.
-# Vendored (published 0.28.1 source + two one-line timeout changes), native-only, never in the wasm
-# build. Only affects crossterm 0.28 (reedline's); brush's crossterm 0.25 is a different version and
-# is left untouched. See crossterm-fork/src/cursor/sys/unix.rs + terminal/sys/unix.rs.
-crossterm = { path = "crossterm-fork" }
+# the query fails fast; the reedline fork then falls back to (col 0, bottom row) immediately
+# instead of stalling. A responsive terminal replies in <10ms, far inside the window, so it is
+# unaffected. Vendored (published 0.28.1 source + two one-line timeout changes), native-only, never
+# in the wasm build. Only affects crossterm 0.28 (reedline's); brush's crossterm 0.25 is a different
+# version and is left untouched. See fork/crossterm/src/cursor/sys/unix.rs + terminal/sys/unix.rs.
+crossterm = { path = "fork/crossterm" }
 
 # The coreutils fork carries wasip2 fixes: a stable OsStr encoded-bytes shim + empty-argv guard in
 # uucore, and a wasi `set_permissions` skip in uu_cp. Patch uucore AND every uu_* command crate

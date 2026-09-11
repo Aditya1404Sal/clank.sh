@@ -785,10 +785,10 @@ mod tests {
 
     #[test]
     fn parses_a_vendored_path_patch_entry() {
-        let entry = parse_patch_entry_line(r#"reedline = { path = "reedline-fork" }"#)
+        let entry = parse_patch_entry_line(r#"reedline = { path = "fork/reedline" }"#)
             .expect("should parse");
         assert_eq!(entry.crate_name, "reedline");
-        assert_eq!(entry.path.as_deref(), Some("reedline-fork"));
+        assert_eq!(entry.path.as_deref(), Some("fork/reedline"));
         assert_eq!(entry.git, None);
         assert_eq!(entry.pin_kind, None);
     }
@@ -969,7 +969,7 @@ mod tests {
         let patches = vec![PatchEntry {
             crate_name: "reedline".to_string(),
             git: None,
-            path: Some("reedline-fork".to_string()),
+            path: Some("fork/reedline".to_string()),
             pin_kind: None,
             pin_value: None,
         }];
