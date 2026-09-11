@@ -615,7 +615,7 @@ dependencies = [
  "http",
  "serde",
  "tokio",
- "wasi-fetch",
+ "whttp",
 ]
 
 [[package]]
@@ -634,6 +634,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "whttp",
 ]
 
 [[package]]

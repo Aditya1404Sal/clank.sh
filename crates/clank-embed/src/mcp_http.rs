@@ -2,19 +2,24 @@
 //!
 //! `clank-core` defines the [`McpHttp`](clank_core::mcp::client::McpHttp) seam but is dual-target and
 //! can't link a Golem-host-only HTTP client. This module (in `clank-embed`, for any Golem agent
-//! embedding the shell) implements it with `wasi-fetch` over the wasip3 WASI-HTTP bindings,
-//! mirroring `wcurl`'s wasm `fetch` and additionally collecting response headers (MCP needs the
-//! `Mcp-Session-Id`). The Golem runtime records the HTTP call in the oplog and replays it on
-//! recovery, so the `mcp add`/`tools/list` install flow is durable and replay-deterministic.
+//! embedding the shell) implements it over [`whttp`] — the same shared transport `wcurl`/`waget` use
+//! on both targets, and (post-consolidation) `clank-native`'s five reqwest-backed providers too.
+//! `whttp` already does everything this transport needs — redirect policy, timeouts, and a body cap
+//! that rejects an advertised-oversize response before it's read and stops a streamed one the
+//! instant the cap is crossed — so this module is now just: build a [`whttp::Request`], call
+//! [`whttp::fetch`], map the result onto [`HttpResponse`]. On wasm `whttp` is itself backed by
+//! `wasi-fetch` over the wasip3 WASI-HTTP bindings, mirroring `wcurl`'s transport. The Golem runtime
+//! records the HTTP call in the oplog and replays it on recovery, so the `mcp add`/`tools/list`
+//! install flow is durable and replay-deterministic.
 //!
 //! A response `Content-Type: text/event-stream` (SSE) body is read to EOF like any other — MCP-lite
 //! issues one request/response per call (no subscriptions), so the server closes the stream after
-//! answering. A body cap bounds a misbehaving server.
+//! answering. `whttp`'s body cap bounds a misbehaving server.
 
 use clank_core::config::limits::MAX_HTTP_BODY as MAX_BODY;
 use clank_core::mcp::client::{HttpResponse, McpHttp};
 
-/// An [`McpHttp`] backed by the durable `wasi-fetch` client.
+/// An [`McpHttp`] backed by the durable `whttp` transport (`wasi-fetch` under the hood on wasm).
 pub(crate) struct WasiFetchMcpHttp;
 
 /// Every failure this transport can diagnose is a transport failure — it either could not send the
@@ -22,6 +27,16 @@ pub(crate) struct WasiFetchMcpHttp;
 /// is the MCP client's to classify (`Protocol`), not ours.
 fn transport(msg: impl Into<String>) -> clank_core::mcp::Error {
     clank_core::mcp::Error::transport(msg.into())
+}
+
+/// Map a [`whttp::Error`] onto this module's error type, preserving the DISTINCTION its `Display`
+/// already carries: `whttp::Error::BodyTooLarge` renders as "response body exceeded N bytes" (a
+/// body-cap rejection), never folded into the generic "request failed: …" wording a real transport
+/// failure gets. Collapsing both into one phrasing would lose exactly the information a caller — or
+/// a human reading `http.log` — needs to tell a hung/unreachable server from one that answered
+/// honestly with too much data, so this just carries whttp's own wording over unchanged.
+fn map_err(e: &whttp::Error) -> clank_core::mcp::Error {
+    transport(e.to_string())
 }
 
 #[async_trait::async_trait(?Send)]
@@ -36,78 +51,38 @@ impl McpHttp for WasiFetchMcpHttp {
         let parsed = method
             .parse::<http::Method>()
             .map_err(|e| transport(format!("bad method '{method}': {e}")))?;
+
+        let mut req = whttp::Request::new(parsed, url);
+        req.headers = headers.to_vec();
+        req.body = body;
         // MCP speaks to one endpoint and expects to see a 3xx itself (the caller decides what a
-        // redirect means for a session); the previous transport followed none, so neither does this.
-        let mut builder = wasi_fetch::Client::new()
-            .request(parsed, url)
-            .redirect_limit(0);
-        // Build the header parts explicitly: `wasi-fetch` SILENTLY DROPS a header whose name or
-        // value does not parse, which for MCP would mean quietly omitting the session id or the
-        // auth header and getting an opaque 4xx back. Reject it with a real message instead.
-        for (k, v) in headers {
-            let name = http::HeaderName::try_from(k.as_str())
-                .map_err(|e| transport(format!("bad request header '{k}': {e}")))?;
-            let value = http::HeaderValue::try_from(v.as_str())
-                .map_err(|e| transport(format!("bad value for request header '{k}': {e}")))?;
-            builder = builder.header(name, value);
-        }
-        if let Some(bytes) = body {
-            builder = builder.body(bytes);
-        }
+        // redirect means for a session) — whttp's default is already no-follow; set it explicitly
+        // so the intent is visible here too, not just three modules away.
+        req.follow_redirects = false;
+        // MCP replies are JSON-RPC envelopes destined for a model's context, held to a tighter bound
+        // than an ordinary curl/wget fetch (whttp's own `DEFAULT_MAX_BODY` is far larger).
+        req.max_body = MAX_BODY;
         // Bound the exchange. Without this an MCP server that accepts the connection and never
         // answers parks the invocation forever — and Golem serializes invocations per instance, so
-        // everything queued behind it is stuck too. This client exposes ONE deadline covering both
-        // connect and first-byte, so the request budget is the one to spend it on.
-        builder = builder.timeout(clank_core::config::net::REQUEST_TIMEOUT);
+        // everything queued behind it is stuck too.
+        req.timeout = Some(clank_core::config::net::REQUEST_TIMEOUT);
 
-        let response = builder
-            .send()
-            .await
-            .map_err(|e| transport(format!("request failed: {e}")))?;
-
-        let status = response.status().as_u16();
-        let resp_headers: Vec<(String, String)> = response
-            .headers()
-            .iter()
-            .map(|(k, v)| {
-                (
-                    k.as_str().to_ascii_lowercase(),
-                    String::from_utf8_lossy(v.as_bytes()).into_owned(),
-                )
-            })
-            .collect();
-        // Reject on the advertised length BEFORE reading. A post-read check alone bounds the value
-        // returned but not peak allocation, so a hostile or misconfigured server could OOM the
-        // durable worker before the cap was ever consulted (audit P1-4).
-        if let Some(len) = resp_headers
-            .iter()
-            .find(|(k, _)| k == "content-length")
-            .and_then(|(_, v)| v.trim().parse::<usize>().ok())
-            && len > MAX_BODY
-        {
-            return Err(transport(format!(
-                "response Content-Length {len} exceeds {MAX_BODY} bytes"
-            )));
-        }
-        // A chunked response advertises no length, so stream it and stop the moment the cap is
-        // crossed. main's wstd arm had to document this as a residual — its `contents()` was
-        // all-or-nothing, so such a body was fully buffered before the post-read check could fire.
-        // `wasi-fetch`'s `Body::chunk` reads incrementally, so nothing past the cap is ever held.
-        let mut stream = response.into_body();
-        let mut bytes: Vec<u8> = Vec::new();
-        while let Some(chunk) = stream.chunk().await {
-            if bytes.len() + chunk.len() > MAX_BODY {
-                return Err(transport(format!(
-                    "response body exceeded {MAX_BODY} bytes"
-                )));
-            }
-            bytes.extend_from_slice(&chunk);
-        }
+        let resp = whttp::fetch(&req).await.map_err(|e| map_err(&e))?;
 
         Ok(HttpResponse {
-            status,
-            headers: resp_headers,
-            body: bytes,
+            status: resp.status,
+            // `whttp::Response::headers` are ALREADY lowercased in practice: both its transports
+            // build them from `http::HeaderName`, which the `http` crate normalizes to lowercase on
+            // construction (`HeaderName::as_str` "will always be lower case"). Normalizing again
+            // here is belt-and-suspenders — it keeps `HttpResponse`'s documented "names lowercased"
+            // contract enforced by THIS module, rather than resting on an upstream implementation
+            // detail this module doesn't own and whttp makes no API promise about.
+            headers: resp
+                .headers
+                .into_iter()
+                .map(|(k, v)| (k.to_ascii_lowercase(), v))
+                .collect(),
+            body: resp.body,
         })
     }
 }

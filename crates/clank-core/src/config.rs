@@ -13,10 +13,13 @@ use std::time::Duration;
 
 /// Outbound HTTP deadlines.
 ///
-/// These apply to the transports that do **not** go through `whttp` (which carries its own matching
-/// defaults): the LLM providers, the MCP clients, and the Golem REST client. Every one of them
-/// previously built a `reqwest`/`wstd` client with no timeout at all, so a black-holing endpoint
-/// parked the invocation forever.
+/// Every clank-originated HTTP call applies one of these EXCEPT `curl`/`wget`, which read `whttp`'s
+/// own matching defaults (or a user's `-m`/`-T`/`--connect-timeout` override) instead. The native
+/// LLM/MCP/Golem-REST clients apply them per-request atop a shared `whttp::client()` (which bakes in
+/// only the connect timeout, since the overall budget differs by workload); the two durable Golem
+/// providers (`clank-embed`'s MCP transport and `ask` provider) set them on a `whttp::Request` before
+/// calling `whttp::fetch`. Every one of these previously built a `reqwest`/`wasi-fetch`/`wstd` client
+/// with no timeout at all, so a black-holing endpoint parked the invocation forever.
 pub mod net {
     use super::Duration;
 

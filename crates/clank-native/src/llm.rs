@@ -32,11 +32,9 @@ impl NativeLlmProvider {
     pub fn new() -> Self {
         Self {
             anthropic: ReqwestAnthropicProvider::new(),
-            client: reqwest::Client::builder()
-                .connect_timeout(clank_core::config::net::CONNECT_TIMEOUT)
-                .timeout(clank_core::config::net::LLM_TIMEOUT)
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
+            // `whttp::client()` bakes in only the connect timeout; the overall per-call budget
+            // (LLM_TIMEOUT) is applied per-request in `openai::turn`.
+            client: whttp::client(),
         }
     }
 

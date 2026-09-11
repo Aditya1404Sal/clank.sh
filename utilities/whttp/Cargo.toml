@@ -35,7 +35,7 @@ iri-string = "0.7"
 # both the agent's executor and the standalone bins'. Pinned exactly, as upstream golem pins it in
 # its own agent components and in the app template the CLI generates.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasi-fetch = "=0.2.0"
+wasi-fetch = { workspace = true }
 
 # native: reqwest with pure-Rust rustls TLS (no system libcurl/OpenSSL). Auto-redirect is disabled
 # in code so this crate's shared loop is the single source of redirect behavior on both targets.

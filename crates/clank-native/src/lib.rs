@@ -7,7 +7,7 @@
 //! | | wasm / Golem agent | native |
 //! |---|---|---|
 //! | crate | `clank-embed` | **this crate** |
-//! | transport | `wasi-fetch` over wasip3 WASI-HTTP | `reqwest` + rustls |
+//! | transport | `whttp` (wasm arm: `wasi-fetch` over wasip3 WASI-HTTP) | `whttp::client()` (`reqwest` + rustls) |
 //! | entry point | `EmbeddedShell::with_default_golem_providers` | [`inject_native_providers`] |
 //!
 //! Before this crate existed the wasm half lived in `clank-embed` while the native half sat inside

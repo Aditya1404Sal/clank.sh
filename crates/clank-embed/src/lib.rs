@@ -30,7 +30,7 @@
 //!
 //! #[agent_implementation]
 //! impl MyAgent for MyAgentImpl {
-//!     fn new(name: String) -> Self { Self { shell: EmbeddedShell::with_durable_log_sink() } }
+//!     fn new(name: String) -> Self { Self { shell: EmbeddedShell::new() } }
 //!     async fn eval(&mut self, cmd: String) -> EvalResult { self.shell.eval(&cmd).await }
 //!     async fn answer_prompt(&mut self, r: String) -> EvalResult { self.shell.answer(Some(r)).await }
 //!     async fn abort_prompt(&mut self) -> EvalResult { self.shell.answer(None).await }
@@ -67,11 +67,11 @@ pub mod agent_invoker;
 #[cfg(all(feature = "providers", target_arch = "wasm32"))]
 pub mod golem_cluster;
 
-// These two additionally require `target_arch = "wasm32"`, because they link `wasi-fetch` — a
-// wasip3 WASI-HTTP client with no host implementation. The dependency is target-gated in
-// Cargo.toml, so the modules must be too; gating by feature alone let
-// `cargo build -p clank-embed --features providers` succeed natively while linking a wasm-only
-// client into a host build.
+// These two additionally require `target_arch = "wasm32"`, because they go through `whttp`'s wasm
+// arm (`wasi-fetch`, a wasip3 WASI-HTTP client with no host implementation). This crate's own
+// `whttp` dependency is target-gated in Cargo.toml for exactly that reason, so the modules must be
+// too; gating by feature alone let `cargo build -p clank-embed --features providers` succeed
+// natively while linking a wasm-only client into a host build.
 #[cfg(all(feature = "providers", target_arch = "wasm32"))]
 pub mod ask_provider;
 #[cfg(all(feature = "providers", target_arch = "wasm32"))]

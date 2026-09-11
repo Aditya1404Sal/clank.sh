@@ -20,16 +20,14 @@ pub struct ReqwestMcpHttp {
 }
 
 impl ReqwestMcpHttp {
-    /// Build the transport with a default rustls-backed client. Falls back to `Client::new()` if the
-    /// builder somehow fails (it does not, in practice — there is nothing to configure).
+    /// Build the transport with a default rustls-backed client (`whttp::client()`). The overall
+    /// per-call budget (`REQUEST_TIMEOUT`) is applied per-request in [`Self::request`] below, since
+    /// the shared constructor only bakes in the connect timeout.
     #[must_use]
     pub fn new() -> Self {
-        let client = reqwest::Client::builder()
-            .connect_timeout(clank_core::config::net::CONNECT_TIMEOUT)
-            .timeout(clank_core::config::net::REQUEST_TIMEOUT)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
-        Self { client }
+        Self {
+            client: whttp::client(),
+        }
     }
 }
 
@@ -52,7 +50,10 @@ impl McpHttp for ReqwestMcpHttp {
             clank_core::mcp::Error::transport(format!("bad method '{method}': {e}"))
         })?;
 
-        let mut builder = self.client.request(method, url);
+        let mut builder = self
+            .client
+            .request(method, url)
+            .timeout(clank_core::config::net::REQUEST_TIMEOUT);
         for (k, v) in headers {
             builder = builder.header(k.as_str(), v.as_str());
         }

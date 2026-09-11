@@ -23,7 +23,7 @@ pub mod anthropic_wire;
 pub mod prompts;
 // The native (reqwest) `ask` providers now live in the separate `clank-native` crate (mirroring how
 // the durable provider lives in `clank-embed`), not here. wasm uses the injected durable provider from
-// `clank-embed` (`DurableAnthropicProvider`, built on `anthropic_wire` over `wasi-fetch`);
+// `clank-embed` (`DurableAnthropicProvider`, built on `anthropic_wire` over `whttp`);
 // `clank-native`'s providers fill the same seam off-Golem, so `reqwest` never reaches wasm.
 // `clank-native::anthropic` maps Anthropic's Messages API (via `anthropic_wire`); `clank-native::openai`
 // maps the OpenAI Chat Completions API (shared by openai/grok/openrouter/ollama); `clank-native::llm`

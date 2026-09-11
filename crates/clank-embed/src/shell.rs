@@ -98,8 +98,8 @@ impl EmbeddedShell {
     /// provider, the WASI-HTTP MCP transport, the `WasmRpc` agent invoker, the `golem:api` cluster
     /// interface, and the replay-safe log sink.
     ///
-    /// wasm-only: two of the five providers link `wasi-fetch`, which has no host implementation.
-    /// A native embedder wants [`Self::with_setup`] and its own transports.
+    /// wasm-only: two of the five providers go through `whttp`'s wasm arm (`wasi-fetch`), which has
+    /// no host implementation. A native embedder wants [`Self::with_setup`] and its own transports.
     #[cfg(all(feature = "providers", target_arch = "wasm32"))]
     #[must_use]
     pub fn with_default_golem_providers() -> Self {

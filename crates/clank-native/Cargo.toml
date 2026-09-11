@@ -33,6 +33,11 @@ async-trait = { workspace = true }
 # The native HTTP transport for every provider seam here, with pure-Rust rustls (no system
 # libcurl/OpenSSL). Same crate + features `wcurl`/`waget` use, so the workspace resolves one reqwest.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# The shared `client()` constructor (rustls builder + fallback) behind the four `reqwest::Client`s
+# in this crate — see `whttp::client`'s docs for why sharing it matters. Also the transport `wcurl`/
+# `waget` use, and (on wasm) `clank-embed`'s durable providers, so this crate's HTTP resolves to the
+# same one reqwest/rustls stack as the rest of the workspace.
+whttp = { path = "../../utilities/whttp" }
 
 # The interactive REPL's line editor and terminal control. Both are VENDORED FORKS (see
 # `[patch.crates-io]` in the root manifest): reedline tolerates a late cursor-position reply instead

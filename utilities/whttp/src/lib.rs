@@ -291,6 +291,40 @@ fn resolve_url(base: &str, location: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------------------------
+// A shared client constructor for NATIVE callers that build their own request (not [`fetch`]) but
+// still want the connection-pooled, correctly-configured base client this crate already needs.
+// ---------------------------------------------------------------------------------------------
+
+/// Build a native `reqwest::Client` with clank's shared defaults: pure-Rust rustls TLS (this
+/// crate's own `reqwest` feature selection — see Cargo.toml) and a bounded connect timeout. Falls
+/// back to `Client::new()` if the builder somehow fails, which in practice it never does here:
+/// nothing about this configuration is environment-dependent.
+///
+/// This deliberately does NOT disable reqwest's default auto-redirect or set an overall request
+/// timeout, unlike [`fetch`]'s own internal client (which rebuilds per call so it can honor a
+/// caller-supplied, possibly-varying `connect_timeout`/`timeout` from [`Request`], and always
+/// disables auto-redirect so this crate's shared redirect loop stays the only one). Callers of
+/// `client()` are long-lived structs that build their OWN request per call and want ONE pooled
+/// connection reused across many of them; each applies its own overall deadline with
+/// `RequestBuilder::timeout` on the request it builds (reqwest has no per-request override for
+/// `connect_timeout`, which is why that one bound — and only that one — is baked in here: it is
+/// also the one value every current caller already agreed on).
+///
+/// Four call sites in `clank-native` (the Anthropic provider, the OpenAI-family dispatcher, the MCP
+/// transport, and the Golem REST client) used to hand-roll this exact
+/// `builder()....build().unwrap_or_else(...)` idiom independently. Four copies of a client builder
+/// are four places that can forget a timeout or drift on a TLS setting; this is the one place to
+/// get it right.
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub fn client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(DEFAULT_CONNECT_TIMEOUT)
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+// ---------------------------------------------------------------------------------------------
 // The cfg-gated transport: a SINGLE request/response, no redirect handling (the loop above owns
 // that). Returns a `Response` whose `final_url` the caller overwrites after the loop settles.
 // ---------------------------------------------------------------------------------------------

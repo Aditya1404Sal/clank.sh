@@ -34,13 +34,11 @@ impl ReqwestAnthropicProvider {
     /// Construct a native provider with a default `reqwest` client (rustls TLS).
     #[must_use]
     pub fn new() -> Self {
-        let client = reqwest::Client::builder()
-            .connect_timeout(clank_core::config::net::CONNECT_TIMEOUT)
-            .timeout(clank_core::config::net::LLM_TIMEOUT)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
-            client,
+            // `whttp::client()` bakes in only the connect timeout every native HTTP seam shares;
+            // the overall per-call budget (LLM_TIMEOUT — longer than a plain request, a large
+            // completion legitimately takes minutes) is applied per-request in `turn()` below.
+            client: whttp::client(),
             endpoint: MESSAGES_URL.to_string(),
         }
     }
@@ -100,6 +98,7 @@ impl AskProvider for ReqwestAnthropicProvider {
             .header("x-api-key", api_key)
             .header("anthropic-version", ANTHROPIC_VERSION)
             .header("content-type", "application/json")
+            .timeout(clank_core::config::net::LLM_TIMEOUT)
             .json(&body)
             .send()
             .await;

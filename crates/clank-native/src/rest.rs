@@ -27,15 +27,6 @@ use serde_json::{json, Value};
 /// The agent-native invoke endpoint path (Golem worker-service `AgentsApi`).
 const INVOKE_PATH: &str = "/v1/agents/invoke-agent";
 
-/// Shared builder for a `reqwest` client used by both the invoker and the cluster.
-fn client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .connect_timeout(clank_core::config::net::CONNECT_TIMEOUT)
-        .timeout(clank_core::config::net::REQUEST_TIMEOUT)
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new())
-}
-
 /// Encode CLI `(name, value)` string args as a JSON array of the string values, in order (Golem's
 /// agent identity + method args are positional). String-only in v1 (see module docs).
 fn encode_params(args: &[(String, String)]) -> Value {
@@ -101,7 +92,7 @@ impl NativeHttpAgentInvoker {
     pub fn new(cfg: ClusterConfig) -> Self {
         let endpoint = format!("{}{INVOKE_PATH}", cfg.url);
         Self {
-            client: client(),
+            client: whttp::client(),
             cfg,
             endpoint,
         }
@@ -110,7 +101,7 @@ impl NativeHttpAgentInvoker {
     #[cfg(test)]
     fn with_endpoint(cfg: ClusterConfig, endpoint: impl Into<String>) -> Self {
         Self {
-            client: client(),
+            client: whttp::client(),
             cfg,
             endpoint: endpoint.into(),
         }
@@ -127,7 +118,10 @@ impl NativeHttpAgentInvoker {
         let mut req = self
             .client
             .post(&self.endpoint)
-            .header("content-type", "application/json");
+            .header("content-type", "application/json")
+            // `whttp::client()` bakes in only the connect timeout; the overall per-call budget is
+            // applied here, per-request.
+            .timeout(clank_core::config::net::REQUEST_TIMEOUT);
         if let Some(token) = &self.cfg.token {
             req = req.bearer_auth(token);
         }
@@ -224,7 +218,7 @@ impl NativeHttpGolemCluster {
     #[must_use]
     pub fn new(cfg: ClusterConfig) -> Self {
         Self {
-            client: client(),
+            client: whttp::client(),
             cfg,
         }
     }

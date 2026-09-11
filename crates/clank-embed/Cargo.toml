@@ -21,12 +21,13 @@ workspace = true
 
 [features]
 default = []
-# The full Golem provider set (ask/mcp/agent-invoker/cluster). ask+mcp need the WASI-HTTP client;
-# the invoker+cluster use only ungated golem-rust surface, but ship under the same umbrella so an
-# embedder makes ONE decision: bare exploration shell vs the full clank command surface.
+# The full Golem provider set (ask/mcp/agent-invoker/cluster). ask+mcp need `whttp` (the shared HTTP
+# transport `wcurl`/`waget` and, natively, `clank-native`'s providers also use); the invoker+cluster
+# use only ungated golem-rust surface, but ship under the same umbrella so an embedder makes ONE
+# decision: bare exploration shell vs the full clank command surface.
 # The replay-safe log sink is NOT gated: it is std-only and every Golem embed needs it (the default
 # append sink duplicates /var/log lines under oplog replay).
-providers = ["dep:wasi-fetch", "dep:http", "dep:async-trait"]
+providers = ["dep:whttp", "dep:http", "dep:async-trait"]
 
 [dependencies]
 # The shell core. default-features=false drops `repl-driver`, so this links as a plain rlib WITHOUT
@@ -45,19 +46,24 @@ serde = { workspace = true }
 http = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
 
-# Behind `providers`, and wasm-ONLY: `wasi-fetch` is the durable HTTP client for ask+mcp — a
-# reqwest-shaped client over the wasip3 WASI-HTTP bindings, pinned exactly as upstream golem pins it
-# in its own agent components. It replaced wstd, whose client panics under this SDK: wstd resolves
-# its reactor from a thread-local only `wstd::block_on` installs, and golem-rust now drives agent
-# methods with wit-bindgen's async runtime instead.
+# Behind `providers`, and wasm-ONLY: `whttp` is the shared HTTP transport for ask+mcp — the same
+# one `wcurl`/`waget` use, and (natively) `clank-native`'s five provider implementations too. On
+# THIS target it is backed by `wasi-fetch`, a reqwest-shaped client over the wasip3 WASI-HTTP
+# bindings, pinned exactly as upstream golem pins it in its own agent components. `wasi-fetch`
+# replaced wstd, whose client panics under this SDK: wstd resolves its reactor from a thread-local
+# only `wstd::block_on` installs, and golem-rust now drives agent methods with wit-bindgen's async
+# runtime instead.
 #
-# The TARGET table is the point. This was gated by the Cargo FEATURE alone, unlike every other
-# wasm/native HTTP split in the workspace (clank-core, whttp, wcurl, waget all use a target table).
-# `cargo build -p clank-embed --features providers` therefore succeeded NATIVELY, linking a
-# wasip3-only client into a host build — harmless only because nothing links that combination into
-# a native binary today. A convention Cargo does not enforce is not a boundary.
+# The TARGET table is the point. This dependency was gated by the Cargo FEATURE alone before ask+mcp
+# routed through `whttp` here too, unlike every other wasm/native HTTP split in the workspace
+# (clank-core, whttp itself, wcurl, waget all use a target table). `cargo build -p clank-embed
+# --features providers` therefore used to succeed NATIVELY while linking a wasm-only client into a
+# host build — harmless only because nothing linked that combination into a native binary. A
+# convention Cargo does not enforce is not a boundary; `whttp` is itself dual-target (native reqwest
+# / wasm wasi-fetch), so restricting it to this table here is deliberate, not incidental — this
+# crate only ever needs whttp's wasm arm (clank-native owns the native-arm call sites).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasi-fetch = { workspace = true, optional = true }
+whttp = { path = "../../utilities/whttp", optional = true }
 
 [dev-dependencies]
 # Native test harness: a current-thread runtime to drive the async Session, mirroring how the

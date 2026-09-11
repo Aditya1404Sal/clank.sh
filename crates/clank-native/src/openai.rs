@@ -98,6 +98,9 @@ pub(crate) async fn turn(
     let mut req = client
         .post(&url)
         .header("content-type", "application/json")
+        // The shared client (`whttp::client()`, built by each caller) bakes in only the connect
+        // timeout; every provider through this one wire mapping gets the same LLM budget here.
+        .timeout(clank_core::config::net::LLM_TIMEOUT)
         .json(&body);
     if let Some(key) = api_key {
         req = req.header("authorization", format!("Bearer {key}"));
