@@ -75,7 +75,7 @@ to build on the target at all. The fork adds:
 - an **empty-argv guard** in `uucore`, and
 - a **`set_permissions` skip under wasi** in `uu_cp` (wasip2 has no POSIX mode bits to copy).
 
-**One fix that is not a wasip2 gap:** `printf` padding above `u16::MAX` (`9001a0b`). Since Rust 1.88
+**One fix that is not a wasip2 gap:** `printf` padding above `u16::MAX` (`381968e`). Since Rust 1.88
 `core::fmt` stores widths as `u16`, and uucore fed pad widths straight into it, so every width from
 65,536 up to its 1,000,000 memory guard panicked. On wasip2 that panic is an abort that wedges the
 durable agent; natively it hung any pipeline it was in (see

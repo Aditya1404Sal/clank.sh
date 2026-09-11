@@ -4,16 +4,15 @@ date: 2026-09-11
 author: agent
 issue: dev-docs/issues/closed/workspace-cohesion.md
 design: dev-docs/designs/approved/workspace-cohesion.md
-status: executed 2026-09-11 — all 13 tickets landed; ticket 6's fork commit is not yet pushed
+status: executed 2026-09-11 — all 13 tickets landed
 ---
 
 # Workspace Cohesion - Implementation Plan
 
 > **Status: executed 2026-09-11.** All thirteen tickets landed on `main-rc-1`. **Ticket 6 landed
 > last, and not the way it was planned:** the fork was cloned into a `fork/coreutils` submodule and
-> the fix committed there (`9001a0b`), instead of being pushed and pulled in by a rev bump. **That
-> commit is not yet on GitHub**, so until it is pushed, CI and fresh clones cannot fetch the
-> submodule. See the ticket-6 deviation record below and
+> the fix committed there (`381968e`, pushed), instead of being pushed and pulled in by a rev bump.
+> See the ticket-6 deviation record below and
 > [`dev-docs/research/coreutils-printf-width-panic.md`](../../research/coreutils-printf-width-panic.md).
 >
 > Tickets 11 and 13 were re-scoped during execution, and several tickets were wrong in ways worth
@@ -707,7 +706,7 @@ shape. The trait earns its place the day a raw transport error becomes a variant
 The plan assumed the fix would be pushed to `Aditya1404Sal/coreutils` and pulled in by bumping the
 `rev` on 20 `[patch.crates-io]` entries, which is why it sat as "blocked on the maintainer". Aditya
 chose to change how the fork is consumed instead: it is now a git submodule at `fork/coreutils`
-(`d6f9a78`), the fix is a commit inside it (`9001a0b`), and the gitlink is the pin. The switch was
+(`d6f9a78`), the fix is a commit inside it (`381968e`), and the gitlink is the pin. The switch was
 proven behaviour-neutral on its own before the fix went in (668/0, identical resolved package set).
 
 The applied fix went wider than the six-site patch in the research doc — one shared `write_fill`
@@ -719,5 +718,9 @@ fork the native conformance tier stalled for 10 min 37 s at 0% CPU. The cause is
 `run_uu`, which does not restore stdio when a builtin panics; the printf fix removes one panic
 source, not that defect. It is recorded as `dev-docs/issues/open/native-run-uu-panic-leaks-stdio.md`.
 
-**Outstanding: `9001a0b` is not pushed.** Until it is on GitHub, CI and fresh clones cannot fetch
-the submodule — the one risk a gitlink has that a rev pin did not (see `docs/WASM_CHANGES.md` §6).
+**Pushed the same day.** The fork commit was first made as `9001a0b` with a Claude co-author
+trailer; before pushing, its message was amended to drop the trailer — the fork's own commits carry
+none — which gave it the hash `381968e`. The tree is byte-identical, so every result recorded
+against `9001a0b` (including in `550f61b`'s commit message) applies unchanged. Pushing the fork
+before publishing any clank commit that names it is the one ordering rule a gitlink needs that a rev
+pin did not (see `docs/WASM_CHANGES.md` §6).

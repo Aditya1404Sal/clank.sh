@@ -8,9 +8,9 @@ author: agent
 
 Investigation for `workspace-cohesion` ticket 6.
 
-> **Status: applied 2026-09-11** as `9001a0b` on the fork's `wasip2-oscompat` branch, consumed via
-> the `fork/coreutils` submodule. **Not yet pushed:** until `9001a0b` exists on
-> `github.com/Aditya1404Sal/coreutils`, CI and fresh clones cannot fetch the submodule commit.
+> **Status: applied 2026-09-11** as `381968e` on the fork's `wasip2-oscompat` branch — pushed to
+> `github.com/Aditya1404Sal/coreutils` the same day — and consumed via the `fork/coreutils`
+> submodule.
 >
 > The applied fix goes further than the patch sketched below. All six sites route through one
 > helper, `format::write_fill`, instead of a spaces-only helper local to `spec.rs`, and `num_format`'s
