@@ -44,17 +44,26 @@ use clank_core::config::limits::MAX_LOG_BYTES;
 
 /// A replay-safe log sink: buffers each log file's recent lines in memory (bounded, rolling) and rewrites
 /// the whole file on every append via idempotent `std::fs::write`.
-pub(crate) struct DurableLogSink {
+pub struct DurableLogSink {
     /// Per-file accumulated contents (filename → bounded recent text). `RefCell` because `LogSink::append`
     /// takes `&self`; the agent is single-threaded (wasip2), so there is no cross-thread contention.
     buffers: RefCell<HashMap<&'static str, String>>,
 }
 
 impl DurableLogSink {
-    pub(crate) fn new() -> Self {
+    /// A sink with empty buffers — the state a fresh agent instance starts from, and the state a
+    /// replay reconstructs by re-running the same appends.
+    #[must_use]
+    pub fn new() -> Self {
         Self {
             buffers: RefCell::new(HashMap::new()),
         }
+    }
+}
+
+impl Default for DurableLogSink {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

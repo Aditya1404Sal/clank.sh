@@ -62,7 +62,10 @@ impl GreeterAgent for GreeterAgentImpl {
     fn new(name: String) -> Self {
         Self {
             name,
-            shell: EmbeddedShell::with_durable_log_sink(),
+            // `new()` installs the replay-safe log sink, as every constructor now does — this used
+            // to need the explicit `with_durable_log_sink()`, which is the point of the change:
+            // the correct sink is no longer something an embedder has to know to ask for.
+            shell: EmbeddedShell::new(),
         }
     }
 

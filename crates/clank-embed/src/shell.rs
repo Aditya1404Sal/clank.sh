@@ -5,6 +5,21 @@ use clank_core::session::{LineResult, Session};
 
 use crate::wire::{EvalResult, PendingPromptView};
 
+/// Install the replay-safe `/var/log` sink on a Session.
+///
+/// This is not a convenience — it is a correctness default. `LogSink` is the one injected seam that
+/// is NOT an `Option`: it is always populated, and `clank-core`'s fallback appends. On a durable
+/// agent an append DUPLICATES every `/var/log` line each time the oplog replays, because the
+/// filesystem is re-run guest code rather than a restored snapshot (see [`crate::log_sink`]). So
+/// the wrong sink fails silently and permanently, where the other four seams would have reported
+/// "not configured" and stopped. Installing it in every constructor is what makes "forgot to think
+/// about logging" a non-event for an embedder.
+fn install_durable_log_sink(s: &mut Session) {
+    // `set_log_sink` takes `Arc`; the sink is `?Send`+`?Sync` and the agent is single-threaded.
+    #[allow(clippy::arc_with_non_send_sync)]
+    s.set_log_sink(std::sync::Arc::new(crate::log_sink::DurableLogSink::new()));
+}
+
 /// A shell session embedded in a Golem agent instance.
 ///
 /// Construction is cheap and sync (agent constructors are sync); the async [`Session::new`] runs
@@ -29,41 +44,52 @@ pub struct EmbeddedShell {
 
 impl EmbeddedShell {
     /// A bare shell: the full command surface over this agent's own filesystem; `ask`/`mcp`/cluster
-    /// commands degrade to honest errors. NOTE: on Golem prefer [`Self::with_durable_log_sink`] —
-    /// the default log sink appends, which duplicates `/var/log` lines under oplog replay.
+    /// commands degrade to honest errors.
+    ///
+    /// The replay-safe [`DurableLogSink`](crate::DurableLogSink) is installed — see
+    /// [`install_durable_log_sink`]. Every constructor here does that, including this one.
     pub fn new() -> Self {
-        Self {
-            session: None,
-            setup: None,
-        }
+        Self::with_setup(|_| {})
     }
 
     /// A shell with a deferred setup hook: `setup` runs against the `Session` when it is first
     /// built (lazily, inside the first `eval`/`answer`). This is the one extension point — install
     /// any mix of providers via the `Session::set_*` seams:
     ///
-    /// ```ignore
-    /// EmbeddedShell::with_setup(|s| {
-    ///     s.set_log_sink(std::sync::Arc::new(clank_embed::log_sink::DurableLogSink::new()));
-    ///     s.set_ask_provider(Box::new(MyProvider));
-    /// })
+    /// ```no_run
+    /// use clank_embed::{DurableLogSink, EmbeddedShell};
+    ///
+    /// let shell = EmbeddedShell::with_setup(|s| {
+    ///     // The durable sink is already installed before this runs; naming it is only needed to
+    ///     // re-install or wrap it. This line is also the compile-time guard that it stays public:
+    ///     // it was `pub(crate)`, and this very example was `ignore`d and did not compile.
+    ///     s.set_log_sink(std::sync::Arc::new(DurableLogSink::new()));
+    ///     s.set_columns(100);
+    /// });
     /// ```
+    ///
+    /// The replay-safe log sink is installed *before* `setup` runs, so a caller that wants a
+    /// different sink can simply set one — and a caller that does not think about logging at all
+    /// still gets the correct one.
     pub fn with_setup(setup: impl FnOnce(&mut Session) + 'static) -> Self {
         Self {
             session: None,
-            setup: Some(Box::new(setup)),
+            setup: Some(Box::new(move |s| {
+                install_durable_log_sink(s);
+                setup(s);
+            })),
         }
     }
 
-    /// The minimal *correct* Golem embed: a bare shell plus the replay-safe `/var/log` sink (an
-    /// idempotent whole-file writer — the default sink's raw appends duplicate lines when the oplog
-    /// replays; see [`crate::log_sink`]).
+    /// The minimal *correct* Golem embed.
+    ///
+    /// Equivalent to [`Self::new`] since every constructor now installs the replay-safe sink; kept
+    /// so existing embedders (and `greeter-agent`) keep compiling.
+    #[deprecated(
+        note = "every EmbeddedShell constructor now installs the durable log sink; use `new()`"
+    )]
     pub fn with_durable_log_sink() -> Self {
-        Self::with_setup(|s| {
-            // `set_log_sink` takes `Arc`; the sink is `?Send`+`?Sync` and the agent is single-threaded.
-            #[allow(clippy::arc_with_non_send_sync)]
-            s.set_log_sink(std::sync::Arc::new(crate::log_sink::DurableLogSink::new()));
-        })
+        Self::new()
     }
 
     /// The full clank provider set — what `clank:agent` itself runs: the durable Anthropic `ask`

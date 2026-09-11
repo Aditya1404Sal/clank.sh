@@ -66,6 +66,11 @@ pub mod mcp_http;
 pub use shell::EmbeddedShell;
 pub use wire::{EvalResult, PendingPromptView};
 
+// The replay-safe `/var/log` sink. Re-exported because an embedder combining it with a hand-picked
+// provider mix must be able to NAME it — it was `pub(crate)`, so the documented `with_setup`
+// example demonstrating exactly that could not compile for any external caller.
+pub use log_sink::DurableLogSink;
+
 // Re-exported so an embedder can name `Session` in a `with_setup` closure (or implement the
 // provider seam traits) without adding its own clank-core dependency line.
 pub use clank_core;
