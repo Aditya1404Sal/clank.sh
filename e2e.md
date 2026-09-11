@@ -87,7 +87,7 @@ export DEVGOLEM=~/Desktop/clank.sh/golem-stuff/golem/target/debug
 export PATH="$DEVGOLEM:$PATH"                                   # dev golem for the agent layers
 
 # 1 · native unit/integration tests (the engine)         → 599 passed; 0 failed; 44 ignored
-cargo test --workspace -- --test-threads=1
+cargo test -- --test-threads=1
 
 # 2 · component builds compile for wasm                   → Finished (exit 0)
 cargo build -p clank-agent -p greeter-agent --target wasm32-wasip2
@@ -111,7 +111,7 @@ cargo clippy --workspace --all-targets
 cd ~/Desktop/clank.sh
 # golem = the 1.5.1 on PATH; no DEVGOLEM, no golem clone needed.
 
-cargo test --workspace -- --test-threads=1                     # → 589 passed; 0 failed; 42 ignored
+cargo test -- --test-threads=1                     # → 589 passed; 0 failed; 42 ignored
 cargo build -p clank-agent -p greeter-agent --target wasm32-wasip2
 cargo test -p clank-conformance --test native                  # → 34 passed; 4 ignored
 scripts/conformance-golem.sh --takeover                         # golem tier (uses PATH golem)
@@ -128,7 +128,7 @@ grease-tool, `clank-embed` (rc-1), and the conformance harness's own unit tests.
 network, no key.
 
 ```bash
-cargo test --workspace -- --test-threads=1
+cargo test -- --test-threads=1
 ```
 
 Expected (as of 2026-07-23):
@@ -138,7 +138,9 @@ Expected (as of 2026-07-23):
 | `main-rc-1` | **599** | 0 | 44 |
 | `main` | **589** | 0 | 42 |
 
-- The **`--test-threads=1` is load-bearing** — see [§8, the SIGPIPE flake](#8-the-sigpipe-flake-why---test-threads1). Plain `cargo test --workspace` intermittently dies with exit 101 / `SIGPIPE`. It is **not** a product bug.
+- The **`--test-threads=1` is load-bearing** — see [§8, the SIGPIPE flake](#8-the-sigpipe-flake-why---test-threads1). Plain `cargo test` intermittently dies with exit 101 / `SIGPIPE`. It is **not** a product bug.
+- Use `cargo test`, **not** `cargo test --workspace`. `--workspace` pulls in `clank-agent` and `greeter-agent`, whose cdylibs link only for `wasm32-wasip2` — `default-members` exists to exclude exactly those. It appeared to work only while nothing in them was target-specific enough to fail compiling natively.
+- `clank-embed` needs a second run for its provider seams: `cargo test -p clank-embed --features providers -- --test-threads=1`. 8 of its 13 tests are behind that non-default feature, so neither `cargo test` nor `--workspace` reaches them.
 - `clank-agent` and `greeter-agent` are in `--workspace` but are wasm-only cdylibs; natively they link a test harness with **0 tests** (they don't fail the native run, they just contribute nothing).
 - The **44/42 ignored** are the golem-tier conformance scenarios (run separately in Layer 3) plus a few platform/network-gated unit tests.
 - Redirect to a file, never a pipe: `cargo test … > /tmp/t.log 2>&1`. Piping the harness's stdout into another process can itself trigger the same SIGPIPE in the fd-swap tests.
@@ -293,7 +295,7 @@ POSIX semantics (so `yes | head` terminates correctly). Consequently a write to 
 has already closed **kills the whole test process with signal 13** (`SIGPIPE: write on a pipe with
 no one to read`, cargo reports exit 101) instead of returning `EPIPE`.
 
-Under libtest's default thread-pool these tests race each other, so plain `cargo test --workspace`
+Under libtest's default thread-pool these tests race each other, so plain `cargo test`
 fails **intermittently** — and it reproduces even for a single crate (`cargo test -p clank-core`),
 which proves it's an **intra-binary** thread race, not the cross-crate cwd collision older notes
 described. Serializing with `--test-threads=1` removes the race entirely and is **deterministically

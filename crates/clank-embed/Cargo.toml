@@ -8,6 +8,15 @@ repository.workspace = true
 # the crate is shaped for publication once the SDK releases.
 publish = false
 
+# Opt in to the workspace lints. Cargo's lint-table inheritance is per-package and opt-in, so
+# without this stanza the crate silently ran WITHOUT `unreachable_pub`, `missing_docs`,
+# `unwrap_used`, `expect_used` or `clippy::pedantic` — while CI still reported it as covered by
+# `-p clank-embed ... -D warnings`. It was the only member of ten missing it, which is how the
+# `pub(crate)` log-sink and the uncompilable doc example survived in exactly the crate whose job is
+# to present a clean contract to embedders.
+[lints]
+workspace = true
+
 # Plain rlib — this crate is a library other agent components link, never a component itself.
 
 [features]
@@ -28,18 +37,27 @@ clank-core = { path = "../clank-core", default-features = false }
 # types resolve through golem-rust's re-export). Deliberately NOT `export_golem_agentic` — that
 # feature compiles the SDK's own `Component` export into the build; the EMBEDDING agent crate is
 # the one that must enable it, exactly once, on its own golem-rust dependency.
-golem-rust = { path = "/Users/adityasalunkhe/Desktop/clank.sh/golem-stuff/golem/sdks/rust/golem-rust" }
-serde = { version = "1", features = ["derive"] }
+golem-rust = { workspace = true }
+serde = { workspace = true }
 
-# Behind `providers`: `wasi-fetch` is the durable HTTP client for ask+mcp — a reqwest-shaped client
-# over the wasip3 WASI-HTTP bindings, pinned exactly as upstream golem pins it in its own agent
-# components. It replaced wstd, whose client panics under this SDK: wstd resolves its reactor from
-# a thread-local only `wstd::block_on` installs, and golem-rust now drives agent methods with
-# wit-bindgen's async runtime instead. `http` types the headers these providers build; async-trait
-# implements the ?Send seam traits.
-wasi-fetch = { version = "=0.2.0", optional = true }
-http = { version = "1", optional = true }
-async-trait = { version = "0.1", optional = true }
+# Behind `providers`: `http` types the headers these providers build; async-trait implements the
+# ?Send seam traits. Both are target-agnostic, so they sit here.
+http = { workspace = true, optional = true }
+async-trait = { workspace = true, optional = true }
+
+# Behind `providers`, and wasm-ONLY: `wasi-fetch` is the durable HTTP client for ask+mcp — a
+# reqwest-shaped client over the wasip3 WASI-HTTP bindings, pinned exactly as upstream golem pins it
+# in its own agent components. It replaced wstd, whose client panics under this SDK: wstd resolves
+# its reactor from a thread-local only `wstd::block_on` installs, and golem-rust now drives agent
+# methods with wit-bindgen's async runtime instead.
+#
+# The TARGET table is the point. This was gated by the Cargo FEATURE alone, unlike every other
+# wasm/native HTTP split in the workspace (clank-core, whttp, wcurl, waget all use a target table).
+# `cargo build -p clank-embed --features providers` therefore succeeded NATIVELY, linking a
+# wasip3-only client into a host build — harmless only because nothing links that combination into
+# a native binary today. A convention Cargo does not enforce is not a boundary.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasi-fetch = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Native test harness: a current-thread runtime to drive the async Session, mirroring how the

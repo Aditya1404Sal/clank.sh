@@ -119,7 +119,7 @@ The model runs real shell commands in your shell and answers from the output. Ev
 
 ```bash
 cd ~/Desktop/clank-spike
-cargo test --workspace -- --test-threads=1
+cargo test -- --test-threads=1
 ```
 
 Expect **599 passed; 0 failed; 44 ignored** (the 44 ignored are the golem-tier conformance scenarios,
@@ -129,7 +129,7 @@ which only run against a live server — see [e2e.md](e2e.md)).
 > `pipeline-exit-codes`, the redirect/`$(...)` tests). Brush resets `SIGPIPE` to `SIG_DFL` for POSIX
 > shell semantics, so a write to a pipe whose reader has already closed **kills the whole test
 > process with signal 13** instead of returning `EPIPE`. Under libtest's default parallelism these
-> tests race each other, and the plain `cargo test --workspace` intermittently dies with
+> tests race each other, and the plain `cargo test` intermittently dies with
 > `SIGPIPE: write on a pipe with no one to read` (exit 101) — it reproduces even for a single crate
 > (`cargo test -p clank-core`). Serializing with `--test-threads=1` removes the race and is
 > deterministically green. This is a test-harness artifact, not a product bug — the same pipelines

@@ -42,9 +42,11 @@ fn encode_args(args: &[(String, String)]) -> Result<SchemaValueTree, Error> {
 
 /// Parse a `--phantom <uuid>` string into the WIT `uuid` (two u64 halves, `golem:core/types`).
 /// Best-effort: on a malformed UUID we return `None` (the canonical, non-phantom instance).
+// Signature mirrors the caller's `phantom: Option<String>` field, borrowed as `&inv.phantom`.
+#[allow(clippy::ref_option)]
 fn parse_phantom(phantom: &Option<String>) -> Option<Uuid> {
     let s = phantom.as_ref()?;
-    let hex: String = s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+    let hex: String = s.chars().filter(char::is_ascii_hexdigit).collect();
     if hex.len() != 32 {
         return None;
     }
@@ -245,8 +247,8 @@ mod tests {
     fn parse_phantom_accepts_a_canonical_uuid() {
         let uuid = parse_phantom(&Some("936DA01F-9ABD-4D9D-80C7-02AF85C822A8".to_string()))
             .expect("a canonical uuid parses");
-        assert_eq!(uuid.high_bits, 0x936DA01F9ABD4D9D);
-        assert_eq!(uuid.low_bits, 0x80C702AF85C822A8);
+        assert_eq!(uuid.high_bits, 0x936D_A01F_9ABD_4D9D);
+        assert_eq!(uuid.low_bits, 0x80C7_02AF_85C8_22A8);
     }
 
     #[test]

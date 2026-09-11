@@ -41,6 +41,28 @@ wasip3 = "0.7"
 wit-bindgen = { version = "0.57", default-features = false, features = ["async"] }
 futures = "0.3"
 
+# The dev golem SDK. Declared ONCE here because it was previously copy-pasted into three manifests
+# (clank-agent, clank-embed, greeter-agent) and a path that appears three times is a path that gets
+# updated twice.
+#
+# The path stays ABSOLUTE, deliberately. `~/Desktop/clank-spike` is a git worktree, and mixing
+# relative and absolute path-dep forms across a worktree has produced a cargo "package collision in
+# the lockfile". Making this relocatable is a separate change that needs verifying on a fresh clone;
+# the defect fixed here is the repetition, not the absoluteness.
+#
+# Feature note: `export_golem_agentic` is NOT enabled here. It compiles the SDK's own `Component`
+# export, which exactly one crate in a component may do — so the two leaf agent crates add it
+# themselves and clank-embed (a library) must not.
+golem-rust = { path = "/Users/adityasalunkhe/Desktop/clank.sh/golem-stuff/golem/sdks/rust/golem-rust" }
+
+# Shared across three or more members. `http` and `serde` in particular were drifting toward
+# per-crate version strings; one entry is one place to change them.
+http = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1"
+wasi-fetch = "=0.2.0"
+
 # Workspace-wide lints (audit C1, full set). Every member opts in via `[lints] workspace = true`.
 # Warn-level only: these surface debt on every build without breaking it; burn down over time.
 [workspace.lints.rust]

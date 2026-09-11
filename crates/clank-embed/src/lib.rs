@@ -54,13 +54,27 @@ mod wire;
 
 pub mod log_sink;
 
+// `agent_invoker` is feature-gated only, NOT target-gated: it compiles natively, and its unit tests
+// (argument encoding, result rendering, phantom-UUID parsing) are pure logic worth running on the
+// host. Keeping it host-compilable is what lets CI execute those 8 tests at all.
 #[cfg(feature = "providers")]
 pub mod agent_invoker;
-#[cfg(feature = "providers")]
-pub mod ask_provider;
-#[cfg(feature = "providers")]
+
+// `golem_cluster` is target-gated with the two below. Unlike agent_invoker it is ALL host calls
+// (`get_self_metadata`, `fork`) with no host-testable logic and no tests, so compiling it natively
+// buys nothing — and once `with_default_golem_providers` became wasm-only, nothing constructed it
+// on the host, which `dead_code` correctly flagged.
+#[cfg(all(feature = "providers", target_arch = "wasm32"))]
 pub mod golem_cluster;
-#[cfg(feature = "providers")]
+
+// These two additionally require `target_arch = "wasm32"`, because they link `wasi-fetch` — a
+// wasip3 WASI-HTTP client with no host implementation. The dependency is target-gated in
+// Cargo.toml, so the modules must be too; gating by feature alone let
+// `cargo build -p clank-embed --features providers` succeed natively while linking a wasm-only
+// client into a host build.
+#[cfg(all(feature = "providers", target_arch = "wasm32"))]
+pub mod ask_provider;
+#[cfg(all(feature = "providers", target_arch = "wasm32"))]
 pub mod mcp_http;
 
 pub use shell::EmbeddedShell;

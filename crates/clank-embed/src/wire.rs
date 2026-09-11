@@ -4,8 +4,9 @@
 //! live in the type graph, not the value, and every decoder (`#[derive(FromSchema)]` in golem-cli's
 //! `agent shell`, out-of-band JSON readers like clank's golem-e2e) matches fields **by declaration
 //! order**. Reordering fields here silently mis-assigns values in every consumer — it is not a
-//! compile error anywhere. See clank's DEV_SDK_CHANGES.md ("the value-model break reaches the test
-//! harness") for the incident that taught this.
+//! compile error anywhere. See clank's `DEV_SDK_CHANGES.md` ("the value-model break reaches the test
+//! harness") for the incident that taught this. (`agent shell` is the golem CLI's interactive
+//! client.)
 
 use golem_rust::Schema;
 use serde::{Deserialize, Serialize};
@@ -18,8 +19,11 @@ use serde::{Deserialize, Serialize};
 /// still decodes cleanly (see golem-cli's `extract_cwd`).
 #[derive(Clone, Debug, Schema, Serialize, Deserialize)]
 pub struct EvalResult {
+    /// Everything the command wrote to standard output.
     pub stdout: String,
+    /// Everything the command wrote to standard error, including clank's own honest errors.
     pub stderr: String,
+    /// The command's exit status (`0` success; the shell's documented non-zero codes otherwise).
     pub exit_code: u8,
     /// Set when this call surfaced a `prompt-user` question the shell is now awaiting a response
     /// to. The caller must collect a human answer and deliver it via `answer_prompt` — the shell

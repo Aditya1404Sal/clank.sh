@@ -48,6 +48,7 @@ impl EmbeddedShell {
     ///
     /// The replay-safe [`DurableLogSink`](crate::DurableLogSink) is installed — see
     /// [`install_durable_log_sink`]. Every constructor here does that, including this one.
+    #[must_use]
     pub fn new() -> Self {
         Self::with_setup(|_| {})
     }
@@ -88,14 +89,19 @@ impl EmbeddedShell {
     #[deprecated(
         note = "every EmbeddedShell constructor now installs the durable log sink; use `new()`"
     )]
+    #[must_use]
     pub fn with_durable_log_sink() -> Self {
         Self::new()
     }
 
     /// The full clank provider set — what `clank:agent` itself runs: the durable Anthropic `ask`
-    /// provider, the WASI-HTTP MCP transport, the WasmRpc agent invoker, the `golem:api` cluster
+    /// provider, the WASI-HTTP MCP transport, the `WasmRpc` agent invoker, the `golem:api` cluster
     /// interface, and the replay-safe log sink.
-    #[cfg(feature = "providers")]
+    ///
+    /// wasm-only: two of the five providers link `wasi-fetch`, which has no host implementation.
+    /// A native embedder wants [`Self::with_setup`] and its own transports.
+    #[cfg(all(feature = "providers", target_arch = "wasm32"))]
+    #[must_use]
     pub fn with_default_golem_providers() -> Self {
         Self::with_setup(|s| {
             // The durable Anthropic provider so `ask` can reach the model (reads ANTHROPIC_API_KEY
@@ -164,7 +170,21 @@ impl EmbeddedShell {
                 }
             }
         }
-        Ok(self.session.as_mut().unwrap())
+        // The block above either populated `session` or returned, so `None` here is unreachable by
+        // construction. Reported as a well-formed failure rather than an `unwrap`/`expect`: this is
+        // an agent's request path, where a panic traps the guest and wedges the durable instance for
+        // every later invocation — the one place a "cannot happen" must still not abort.
+        match self.session.as_mut() {
+            Some(session) => Ok(session),
+            None => Err(Box::new(EvalResult {
+                stdout: String::new(),
+                stderr: "clank: internal error: the shell session went missing after startup\n"
+                    .to_string(),
+                exit_code: 1,
+                pending_prompt: None,
+                cwd: String::new(),
+            })),
+        }
     }
 }
 
@@ -293,7 +313,7 @@ mod tests {
             assert_eq!(surfaced.exit_code, 0, "stderr: {}", surfaced.stderr);
             let p = surfaced.pending_prompt.expect("question surfaced");
             assert_eq!(p.question, "Which env?");
-            assert_eq!(p.choices.as_deref().map(|c| c.len()), Some(2));
+            assert_eq!(p.choices.as_deref().map(<[String]>::len), Some(2));
 
             let aborted = shell.answer(None).await;
             assert_eq!(
