@@ -10,6 +10,10 @@ same command surface a human does.
 This document is a practical, code-grounded reference to **every** command and subsystem. Flags and
 subcommands here are drawn directly from the dispatch ladder in
 `crates/clank-core/src/session/mod.rs` and the per-command classifier modules — nothing is invented.
+For the pitch, the philosophy, the glossary, and the architecture summary, see the top of
+[`README.md`](../README.md); for the mechanisms behind four cross-cutting constraints (why async work
+runs where it does, why filesystem writes must be whole-file, what wasip2 forces, and how command/path
+resolution splits across namespaces), see [`docs/architecture/`](architecture/).
 
 > **Environment note.** clank runs as a single WebAssembly component. There is no `fork`, no `exec`,
 > no real OS processes, and no Unix signal kernel. PIDs are synthetic handles on internal async work
@@ -140,6 +144,8 @@ one. Quit with `exit`, `:q`, or Ctrl-D.
 12. [Filesystem layout](#12-filesystem-layout)
 13. [Authorization model](#13-authorization-model)
 14. [Exit codes & shell language](#14-exit-codes--shell-language)
+15. [TTY and terminal](#15-tty-and-terminal)
+16. [Compatibility & feature reference](#16-compatibility--feature-reference)
 
 ---
 
@@ -149,10 +155,13 @@ one. Quit with `exit`, `:q`, or Ctrl-D.
 model's context** (the exact bytes `context show` renders — "the AI reads exactly what you see")
 plus your prompt to an LLM, runs an agentic tool-calling loop, and prints the reply.
 
-`ask` is an **outbound-HTTP** command, so its policy is `confirm`: a bare `ask` pauses for your
-approval (using the same mechanism as `prompt-user`); `sudo ask` pre-approves it *and* pre-approves
-the `[confirm]`-tier shell commands the model calls during the loop. `sudo` never satisfies a
-`sudo-only` command — destructive tool calls still refuse. (README `### ask`.)
+`ask` is a subprocess: it cannot mutate parent shell state (no change to cwd, parent env vars, or `$?`
+beyond its own exit code). If the model invokes `context` from inside `ask`, it operates on `ask`'s own
+copy of the transcript — the parent transcript is unaffected, the same way a subprocess gets its own
+working directory. `ask` is an **outbound-HTTP** command, so its policy is `confirm`: a bare `ask`
+pauses for your approval (using the same mechanism as `prompt-user`); `sudo ask` pre-approves it *and*
+pre-approves the `[confirm]`-tier shell commands the model calls during the loop. `sudo` never satisfies
+a `sudo-only` command — destructive tool calls still refuse.
 
 ```
 ask [--fresh|--no-transcript] [--inherit] [--json] [--model <id>] <prompt>
@@ -188,7 +197,7 @@ ask --model claude-sonnet-4-5 "review the diff for correctness bugs"
 the first user message as a supplementary block *after* the transcript and prompt. Only a literal
 `|` counts — `||`, `;`, `&&` do **not** make `ask` a pipe tail. The LLM call can't run inside
 Brush's pipeline machinery, so the session pre-extracts the upstream, runs it, and dispatches the
-`ask` tail at the session layer.
+`ask` tail at the session layer (see [`docs/architecture/wall-c.md`](architecture/wall-c.md)).
 
 ```sh
 cat error.log | ask "what is the root cause?"
@@ -204,8 +213,9 @@ ask repl [--fresh|--inherit] [--model <id>]
 
 Starts an interactive AI session with its **own isolated transcript** (separate from the main shell
 transcript). `--fresh` (default) seeds an empty transcript; `--inherit` copies the current shell
-transcript in as the starting context. Inside the REPL, lines starting with `:` are meta-commands;
-everything else is a prompt sent to the model (conversational — no shell tools in the REPL loop):
+transcript in as the starting context — there is no third, "summary of the parent transcript"
+seeding mode. Inside the REPL, lines starting with `:` are meta-commands; everything else is a prompt
+sent to the model (conversational — no shell tools in the REPL loop):
 
 | Meta-command | Effect |
 |---|---|
@@ -217,16 +227,37 @@ everything else is a prompt sent to the model (conversational — no shell tools
 ask repl --inherit --model claude-sonnet-4-5
 ```
 
+When the REPL exits, it prints its session content to stdout like any other subprocess; the parent
+shell captures that through normal terminal rendering, entering the parent transcript once, as
+rendered output, with no duplication.
+
 > **On the durable agent, `ask repl` is an honest stub.** An interactive REPL needs a terminal and a
 > blocking read loop, which the durable agent cannot own (Golem serializes invocations per agent — it
 > can't park mid-loop waiting for a human). Running `ask repl` on the agent returns a pointer telling
 > you to drive a conversation with repeated `ask` calls (each call is one turn). The interactive REPL
-> is a native-terminal feature. (README `### ask repl`.)
+> is a native-terminal feature.
 
 **Notes.** If no model provider is configured (e.g. the native build), `ask` returns exit **4**
 ("no model provider configured"). The model's tool surface grows automatically: every `grease
 install` (prompts) and `mcp add` (tools) adds tools the model can call — see the system prompt live
 at `/proc/clank/system-prompt`.
+
+### Tool surface available to `ask`
+
+Every model turn is offered two built-in tools — `shell` (run a command in the clank session; pipes,
+redirects, and `$(...)` come free) and `prompt_user` (the model→human back-channel) — plus one tool per
+`subprocess`-scoped command in the registry: installed scripts, installed prompts, MCP tool
+executables, MCP resource-template executables, and Golem agent executables. `shell-internal` and
+`parent-shell` commands (`cd`, `export`, `context`, `type`, …) are excluded from the tool surface,
+because they mutate shell state a subprocess cannot reach — **except** `prompt_user`, which is
+`shell-internal` but is explicitly exposed anyway, since it's the model's only channel back to the
+human. Each `shell` tool call is **re-gated** through the same authorization machinery a typed command
+would hit, plus a scope check that refuses command substitution (`$(...)`, backticks, `<(...)`,
+`>(...)`) outright on that path — the tool runs against the *shared* live `Session`, so an un-gated
+call would mutate the real shell, and a substitution could smuggle an inner command past the
+per-segment authz gate. Every `grease install` (prompts, scripts, MCP artifacts, agents) and `mcp add`
+automatically expands what the model can do next turn; nothing needs to be told about a new
+capability separately.
 
 ---
 
@@ -260,8 +291,18 @@ context summarize            # top-level only; confirms unless run with sudo
 `context summarize` is **inspection-only**: it prints a summary but never mutates or records the
 transcript. It requires the model, so it can only run as a **top-level** command — inside `$(...)`,
 a pipe, `xargs`, or `eval` it returns an honest pointer error instead of a summary (the LLM call
-can't run in Brush's nested runtime). Because it's outbound HTTP it is `confirm`-gated; `sudo
-context summarize` pre-approves.
+can't run in Brush's nested runtime; see [`docs/architecture/wall-c.md`](architecture/wall-c.md)).
+Because it's outbound HTTP it is `confirm`-gated; `sudo context summarize` pre-approves.
+
+Manual compaction composes from the existing primitives without any special verb:
+
+```bash
+SUMMARY=$(context summarize) && context clear && echo "$SUMMARY"
+```
+
+Note the `$(context summarize)` form above only works when this whole line is itself run at the top
+level — `context summarize` inside a command substitution that is *itself* nested further (e.g. inside
+another pipeline stage) hits the same top-level-only restriction.
 
 ### Auto-compaction
 
@@ -269,13 +310,18 @@ When recording a new line pushes the window past its **safety cap** (an estimate
 evicts the oldest entries and asynchronously replaces the leading "dropped count" marker with a
 **model-generated summary block** rendered as `[summary of N earlier entries] …`. This keeps the
 context legible instead of just truncating. It is a no-op when nothing was dropped or when no provider
-is configured. (README `### context builtin`.)
+is configured.
 
 The cap is a fixed safety limit, not a runtime knob — there is **no `context budget` command**. Its
 value comes from the `CLANK_CONTEXT_CAP_TOKENS` environment variable, which the durable agent receives
 from `golem.yaml` (`components.clank:agent.env`) — edit that value to tune it. Unset or non-positive
 falls back to the built-in default (24000 estimated tokens). Natively it is an ordinary environment
 variable.
+
+Redaction rules apply at all times: anything governed by a command's `redaction-rules` (e.g.
+`export --secret`, `prompt-user --secret`) never enters the transcript, not through direct output and
+not through summarization. This covers shell-managed channels only — a command that deliberately
+echoes a sensitive value on its own is outside the scope of automatic redaction.
 
 ---
 
@@ -295,30 +341,37 @@ model list | default <id> | info [<id>] | add <provider> [--key K] | remove <pro
 | `list` (default) | Print the built-in catalog; the current default is marked `*`. |
 | `default <id>` | Set the default model (writes `ask.toml`). Bare ids get the `anthropic/` prefix; an unknown provider prefix is rejected. Off-catalog ids warn but are still saved and passed through. |
 | `info [<id>]` | Show provider / catalog-membership / default status for a model (or the current default). |
-| `add <provider>` | **Honest stub.** Provider keys are never stored — points you at `ANTHROPIC_API_KEY`. |
-| `remove <provider>` | **Honest stub.** `anthropic` is built in and cannot be removed. |
+| `add <provider>` | **Native:** with `--key <k>`, stores the key in `~/.config/ask/ask.toml`; without it, errors and points at the provider's env var. **On the agent (wasm):** always an honest stub — keys are never written to the durable filesystem; use the provider's env var (delivered via `golem.yaml`/Golem secrets) instead. |
+| `remove <provider>` | **Native:** clears a previously-stored key from `ask.toml` (auth then falls back to the env var); errors if none was stored. **On the agent:** an honest no-op — keys are never stored there to begin with. `anthropic` itself is always built in and can't be un-registered as a provider — only its *stored key*, if any, is what "remove" clears. |
 
 Built-in catalog: `anthropic/claude-haiku-4-5-20251001` (default), `anthropic/claude-sonnet-4-5`,
-`anthropic/claude-opus-4-8`. The catalog is a curated subset — the provider accepts other ids,
-passed through as-is.
+`anthropic/claude-opus-4-8`, plus a few OpenAI/Grok/Ollama entries. The catalog is a curated subset —
+the provider accepts other ids, passed through as-is. On native, `ask` can additionally route to
+`openai`/`grok`/`openrouter`/`ollama` (OpenAI-compatible Chat Completions) beyond the built-in-Anthropic
+agent path; `bedrock` is agent-only.
 
 ```sh
 model list
 model default claude-sonnet-4-5      # canonicalizes to anthropic/claude-sonnet-4-5
 model info                           # details for the current default
-model add anthropic --key sk-...     # error: keys come from the environment, never echoed
+model add anthropic --key sk-...     # native: stores the key in ask.toml; never echoed
+model add anthropic --key sk-...     # on the agent: honest stub — keys aren't stored there
 ```
 
-> **Keys are never stored.** `anthropic` is built in; the agent reads `ANTHROPIC_API_KEY` from its
-> environment (delivered via `golem.yaml` / Golem secrets). `model add --key …` never echoes the key
-> value, even on the error path. (README `### Models and providers`.)
+> **Keys are never echoed, and never stored on the agent.** `anthropic` is always built in; the agent
+> reads `ANTHROPIC_API_KEY` from its environment (delivered via `golem.yaml` / Golem secrets) and never
+> persists a key to its filesystem. On native, `model add --key …` *does* write the key to
+> `~/.config/ask/ask.toml` — but never echoes the value, even on the error path.
 
 ---
 
 ## 4. `prompt-user` — human-in-the-loop
 
 `prompt-user` pauses the current process, presents a question to the human, and returns their reply
-on stdout. It is the model→human back-channel and the human-confirmation primitive.
+on stdout. It is the model→human back-channel and the human-confirmation primitive — clank's answer
+to MCP elicitation (a shell-native mechanism that composes with pipelines rather than a protocol-level
+negotiation; see [§5](#5-mcp--mcp-servers-tools-sessions-resources) for where MCP's own elicitation/
+sampling stand).
 
 ```
 prompt-user <question> [--choices a,b,c] [--confirm] [--secret]
@@ -331,7 +384,9 @@ prompt-user <question> [--choices a,b,c] [--confirm] [--secret]
 | `--secret` | Mark the response as secret (not echoed). |
 
 Exactly one non-flag word is the question (quote it — every real question has spaces). Markdown piped
-on stdin is prepended to the question verbatim before it's shown.
+on stdin is prepended to the question verbatim before it's shown — a model can pipe a diff, a summary
+table, or a formatted report so the human sees exactly what they need to decide, and a future GUI/web/
+mobile front end can render the same Markdown more richly with no protocol change.
 
 ```sh
 prompt-user "Which environment?" --choices staging,production,development
@@ -344,7 +399,7 @@ echo "# Deploy report\n\nAll checks passed." | prompt-user "Proceed?"
 > prompt, flips the process to the **`P`** (paused) state, and returns immediately — surfacing the
 > question to whoever invoked the session (the native REPL, the AI via `ask`, an external Golem
 > caller). That caller delivers the answer on the *next* eval call. Exit **0** on an answer, exit
-> **130** on abort (the Ctrl-C convention). (README `### prompt-user`.)
+> **130** on abort (the Ctrl-C convention).
 
 Inside `ask`, the model reaches the human via the built-in `prompt_user` **tool**, not a
 `prompt-user` shell line.
@@ -354,8 +409,18 @@ Inside `ask`, the model reaches the human via the built-in `prompt_user` **tool*
 ## 5. `mcp` — MCP servers, tools, sessions, resources
 
 `mcp` manages [Model Context Protocol](https://modelcontextprotocol.io/) servers. Its
-network-touching subcommands run at the session layer under the live WASI-HTTP reactor. MCP-lite
-targets HTTPS servers.
+network-touching subcommands run at the session layer under the live WASI-HTTP reactor
+(see [`docs/architecture/wall-c.md`](architecture/wall-c.md)). MCP-lite targets HTTPS servers only —
+this is a deliberate product decision, not a gap to be closed: it keeps the native and Golem targets
+behaving identically, and wasm cannot spawn a process to speak stdio to anyway. There are no local MCP
+servers and no stdio transports in clank.
+
+**Authentication today is API-key-shaped only:** `--auth-env`/`--auth-header` on `mcp add` reads a
+bearer token from an environment variable (or, on the agent, Golem's secrets) and sends it in a named
+header. **OIDC/OAuth flows are not implemented on either target** — this is deferred, not merely
+"needs external configuration." MCP *sampling* is likewise unaddressed; MCP *elicitation* is the one
+protocol feature clank does cover, via `prompt-user` (see [§4](#4-prompt-user--human-in-the-loop))
+rather than a protocol-level negotiation.
 
 ```
 mcp list
@@ -391,6 +456,11 @@ mcp watch "github://repo/issues" # bounded poll
 mcp resource info /mnt/mcp/github/repo/README.md
 ```
 
+`mcp session close` sends an HTTP `DELETE` to the server's MCP endpoint carrying the `Mcp-Session-Id`
+header, per the MCP spec. A `405` response means the server refuses explicit session close; clank
+reports that refusal as a clear error (exit 1) rather than pretending the session closed. Sessions are
+not processes and never appear in the process table.
+
 ### How installed MCP artifacts appear
 
 Installing an MCP server (via `mcp add`, or `grease install` for a grease-packaged one) surfaces up
@@ -414,12 +484,20 @@ to three artifact types into the ordinary command surface:
 - **Resources** mount at `/mnt/mcp/<server>/` as a virtual read-only filesystem: static files
   (`cat`/`grep`/`ls` them), **dynamic** resources fetched live on a top-level `cat`, and **resource
   templates** exposed as executables that substitute their arguments into a URI template and read the
-  constructed resource.
+  constructed resource. See [`docs/architecture/resolution-surface.md`](architecture/resolution-surface.md)
+  for how these three flavors are actually resolved.
   ```sh
   ls /mnt/mcp/github/repo
   cat /mnt/mcp/github/repo/README.md          # static
   cat /mnt/mcp/metrics/current/cpu-usage      # dynamic (fetched live at top level)
   ```
+
+MCP resources carry annotations (`lastModified`, audience, priority, static-vs-dynamic). Surfacing
+those through `stat` on the mounted path — mapping `lastModified` to mtime and resource type to the
+file mode, the way real Unix metadata would read — is on the roadmap but **not implemented yet**;
+`stat` on an MCP-mounted path today reports the same honest wasm-subset fields it reports everywhere
+else (see [`docs/architecture/wasip2-constraints.md`](architecture/wasip2-constraints.md)). `mcp
+resource info <path>` is the one command that already exposes the full MCP-specific annotation set.
 
 ---
 
@@ -456,15 +534,25 @@ grease registry add https://reg.example --key BASE64ED25519PUBKEY
 grease search review
 grease install code-review           # kind declared by the registry
 grease install github --tools --resources
+grease install golem:shopping-cart   # an agent package — "golem:" here is just a registry naming
+                                      # convention; the installed kind comes from the registry's
+                                      # declared metadata either way, not from parsing the name
 grease info code-review
 grease list
 grease update
 ```
 
+Every executable `grease` generates uses **kebab-case**, matching Linux CLI convention, independent
+of how the upstream system names things internally. Each package *kind* installs to its own
+designated directory (see [§12](#12-filesystem-layout)); installing two packages of the *same kind*
+under the *same name* is an install-time error. Shadowing **across** directories via `$PATH` priority
+(e.g. a `/usr/bin/foo` script shadowing an MCP-installed `foo` stub) is not an error — it's the normal,
+user-configurable Unix convention (`~/.profile` controls it, same as `/usr/local/bin` shadowing
+`/usr/bin`).
+
 ### The six package kinds
 
-The registry declares each package's kind; `grease` installs it accordingly (README `### Package
-taxonomy`):
+The registry declares each package's kind; `grease` installs it accordingly:
 
 1. **prompt** — installs as an executable on `$PATH` (`/usr/lib/prompts/bin/<name>`). Running it
    fills the stored prompt body from its arguments and sends it through the model (like `ask`).
@@ -475,7 +563,13 @@ taxonomy`):
 4. **script** — a shell script executable at `/usr/bin/<name>` that runs local shell source.
 5. **skill** — a capability-context package under `/usr/share/skills/<name>/` (documents + bundled
    `$PATH` scripts). A skill is **not itself a callable command** — it's context the model consults.
-6. **+wRPC** — reserved on the roadmap (README only); not yet an installable kind.
+6. **+wRPC** — reserved on the roadmap; not yet an installable kind.
+
+Installed payloads and manifests live in a versioned internal store (`/var/lib/grease/`, written as a
+single whole-file `std::fs::write` per package — see
+[`docs/architecture/replay-safety.md`](architecture/replay-safety.md)); the executables/stubs under
+`/usr/bin`, `/usr/lib/*/bin`, and `/usr/share/skills` are always regenerated *from* that store, never
+hand-edited as the source of truth.
 
 ### Integrity: signing, content-addressing, transparency log
 
@@ -484,21 +578,48 @@ with `--key` has its packages' signatures verified against that trusted key. cla
 verifies **RFC-6962 transparency-log inclusion proofs**, so a signed package is provably present in
 the registry's append-only log. (All hand-rolled on `sha2`; no external crypto dependency.)
 
-### Authoring a prompt as YAML-frontmatter `.md`
+### Prompt packages
 
-A registry can serve a prompt as a `<name>.md` file with a `---` YAML frontmatter block (metadata:
-name, description, authorization, etc.) followed by the Markdown prompt body. `grease` converts the
-verified `.md` into an installed prompt command. This is the human-friendly authoring form for
-prompt packages.
+A registry can serve a prompt as a `<name>.md` file: optional YAML frontmatter (metadata — name,
+description, authorization, and for a **parameterized** prompt, typed `arguments`) followed by the
+Markdown prompt body. `grease` converts the verified `.md` into an installed prompt command — this is
+the human-friendly authoring form for prompt packages, and it's also exactly the shape of a standalone
+(non-registry) prompt file.
+
+A **non-parameterized** prompt needs no frontmatter at all and is installed as a shebang executable:
+
+```bash
+#!/usr/bin/env ask
+Summarize the contents of this transcript clearly and concisely.
+```
+
+A **parameterized** prompt declares its arguments:
 
 ```markdown
 ---
-name: standup
-description: Draft a standup update from the transcript
+name: summarize
+description: Summarize a file with configurable output length
 authorization: confirm
+arguments:
+  - name: file
+    description: Path to the file to summarize
+    required: true
+  - name: length
+    description: "short | medium | long"
+    required: false
+    default: medium
 ---
-Summarize what I did in this session as a three-bullet standup update.
+Please summarize the contents of {{file}}.
+Target length: {{length}}.
 ```
+
+For a parameterized prompt, `grease install` generates a small shell script in
+`/usr/lib/prompts/bin/` — rather than installing the raw `.md` as the executable — that parses
+arguments (`getopts` or equivalent), validates required ones, and invokes `ask` with the assembled
+prompt; the script is plain, inspectable, and user-modifiable, not a black box. This is an ergonomic
+enhancement, not a requirement: `ask`'s system prompt already equips the model to recognize an unfilled
+`{{variable}}` token in a prompt body and collect it interactively via `prompt-user`, so a
+parameterized prompt works correctly even invoked directly with missing arguments.
 
 ---
 
@@ -527,7 +648,7 @@ golem fork
 | `agent status --type <t> …` | allow | An agent's status/metadata. |
 | `agent interrupt <pid>` | — | **Honest stub** — no guest host binding for this control-plane op. |
 | `agent resume <pid>` | — | **Honest stub** — same reason. |
-| `connect <identity>` | allow | Inspect a running agent by identity (oplog/files/status). |
+| `connect <identity>` | allow | Inspect a running agent by identity (oplog/files/status) — inspection only, not method invocation (that's the installed agent executable's job, [§8](#8-golem-agent-executables)). |
 | `oplog` | allow | The shell instance's own oplog. |
 | `rollback` | confirm | Rewind the shell instance's state. |
 | `fork` | confirm | Fork the current shell instance. |
@@ -541,8 +662,11 @@ golem oplog
 ```
 
 > `golem agent interrupt` / `resume` are distinct from `kill` — they act on the remote agent
-> instance, not on invocations of it. Both are v1 honest stubs (no host primitive). (README `### The
-> golem command`.)
+> instance, not on invocations of it. Both are v1 honest stubs (no host primitive). There is
+> deliberately no `golem agent new` on this command: creating an agent explicitly happens by invoking
+> the installed agent executable ([§8](#8-golem-agent-executables)), whose upsert semantics create it
+> transparently on first call — `golem agent` is read/control-plane operations only, not another way
+> to construct one.
 
 ---
 
@@ -551,6 +675,15 @@ golem oplog
 A grease-installed Golem **agent** package becomes an executable at `/usr/lib/agents/bin/<name>`.
 Running it builds an invocation and dispatches it through the injected wRPC invoker in the selected
 mode. Constructor parameters are flags; methods are subcommands.
+
+Agent identity in Golem is the tuple **(type, ordered constructor parameters, optional phantom
+UUID)**. Invoking a method either finds the existing agent with that identity or creates it
+transparently on first call — this **upsert** model is the *only* invocation model the installed
+executable exposes; there is no separate `new` subcommand, so the model never has to reason about
+lifecycle before acting. Ephemerality is a property of the agent *type*, not of the call: for an
+ephemeral type, each invocation simply runs on a fresh instance with the identical CLI grammar, and
+the reserved state-oriented subcommands (`oplog`, `status`) are rejected at call time rather than ever
+being meaningful for it.
 
 ```
 <agent> [--<ctor> value ...] [--trigger | --schedule <iso8601> | --phantom <uuid> | --revision <n>] <method> [-- --<arg> value ...]
@@ -567,12 +700,13 @@ separates the method from its `--<arg> value` arguments. Constructor and argumen
 | `--trigger` | **fire-and-forget** — returns a handle + a PID row; `kill <pid>` cancels it if still queued. |
 | `--schedule <iso8601>` | **deferred** — run at a future ISO-8601 time; returns a cancelable handle + PID row. |
 | `--phantom <uuid>` | Address a phantom instance by UUID. |
-| `--revision <n>` | **Honest stub** — component-revision targeting is a `golem:api` concern with no wasm-rpc slot; returns exit 2. The invocation always targets the running revision. |
+| `--revision <n>` | **Honest stub** — component-revision targeting is a `golem:api` concern with no wasm-rpc slot; returns exit 2. The invocation always targets the running revision — there is no separate version-resolution or compatibility-mismatch logic beyond that today. |
 
 **Reserved subcommands** (cannot be method names):
 
-- `oplog`, `status` — routed through the cluster seam (need a configured cluster). Not available for
-  an *ephemeral* agent type (exit 2).
+- `oplog`, `status` — routed through the cluster seam (need a configured cluster). Rejected with an
+  explicit error for an *ephemeral* agent type (exit 2) — ephemeral types are checked at call time,
+  not hidden from the generated `--help`.
 - `stream`, `repl` — long-lived/interactive; **honest stub** on the durable agent (Golem serializes
   invocations, can't park on a stream/REPL). Use await/`--trigger`/`--schedule` instead.
 
@@ -600,8 +734,7 @@ mode, phantom UUID) to `/var/log/mcp.log`. `/proc/<pid>/status` exposes `agent-t
 `agent-params`, `agent-revision`, `phantom-uuid`, and `idempotency-key` for a live invocation.
 
 > **Constructor parameters must never carry secrets** — they are permanently visible in `cmdline`,
-> logs, and provider manifests. Secrets belong in Golem's secrets API. (README `### Executable CLI
-> grammar`.)
+> logs, and provider manifests. Secrets belong in Golem's secrets API.
 
 ---
 
@@ -639,7 +772,9 @@ kill -9 12345        # the -9 is ignored; still a synthetic terminate
 
 `curl` and `wget` are real outbound-HTTP commands (dispatched to the `wcurl`/`waget` crates so the
 request runs under the live WASI-HTTP reactor). They are `confirm`-gated. Only a small, deliberate
-flag set is supported — **unknown flags are an error** so a typo isn't swallowed as a URL.
+flag set is supported — **unknown flags are an error** so a typo isn't swallowed as a URL. They work
+as a **pipeline HEAD** (`curl -s URL | jq .x`) but nowhere else in a pipeline or substitution — see
+[`docs/architecture/wall-c.md`](architecture/wall-c.md) for why.
 
 ### `curl`
 
@@ -689,7 +824,23 @@ wget -q -O out.bin https://example.com/blob
 ## 11. Registered builtins
 
 clank registers its own builtins beside Brush's defaults. Each has a manifest, `--help`, an
-authorization policy, and composes via pipes. `type` is the authoritative resolver.
+authorization policy, and composes via pipes. `type` is the authoritative resolver for every command
+clank intercepts before Brush ever sees it (`prompt-user`, `curl`, `wget`, `context`, `ask`, `kill`,
+`mcp`, `grease`, `golem`); `which` finds file-backed `$PATH` commands only. See
+[`docs/architecture/resolution-surface.md`](architecture/resolution-surface.md) for the full mechanism
+and why the two cannot simply be merged into one resolver.
+
+### Execution scope
+
+Every command's manifest carries an `execution-scope`, which decides whether it can run as an `ask`
+tool call and (for the Brush-native builtins below) is metadata only — Brush still executes them
+unchanged:
+
+| Scope | Meaning | Commands |
+|---|---|---|
+| `parent-shell` | Mutates shell state directly (cwd, env, control flow); cannot be overridden or run as a subprocess | `cd`, `export`, `exec`, `exit`, `source`, `unset` |
+| `shell-internal` | Operates on shell-internal tables (jobs, aliases, history, the transcript); cannot run as a subprocess | `alias`, `command`, `context`, `fg`, `bg`, `history`, `jobs`, `prompt-user`, `read`, `type`, `wait`, `which` |
+| `subprocess` | Runs isolated, no parent-shell-state access — the only scope eligible for the `ask` tool surface | everything else: coreutils, text tools, `ask`, `mcp`, `grease`, `golem`, agent/prompt/script executables, … |
 
 ### Coreutils (uutils-backed)
 
@@ -721,6 +872,13 @@ sudo rm stale.tmp          # rm is sudo-only
 printf '%s=%d\n' count 42
 ```
 
+Note that authorization policy here is purely **per-command** (or per-subcommand, for commands like
+`mcp`/`grease`/`golem` that carry subcommand-level policies) — it is not path- or destination-aware.
+`mv`/`cp`/`mkdir`/`touch` all default to `allow` regardless of whether the target is `/tmp`, `~`, or
+`/etc`; the sandbox does not currently distinguish "writing to your home directory" from "writing to
+`/tmp`" the way a finer-grained policy might. If a command needs stricter handling it is marked
+`confirm` or `sudo-only` outright — `rm` is the sandbox's example of that. See [§13](#13-authorization-model).
+
 ### Text tools
 
 | Command | Synopsis |
@@ -743,10 +901,11 @@ diff old.txt new.txt | patch old.txt
 
 | Command | Synopsis / usage |
 |---|---|
+| `type` | authoritative command resolver — reports every clank-intercepted command Brush's own `type` cannot see (`curl`, `wget`, `ask`, `context`, `prompt-user`, `kill`, `mcp`, `grease`, `golem`), and defers to Brush's own `type` for everything else. `-t` prints only the bare kind word. |
 | `ps` | report process status. `ps aux` / `ps -ef` give standard columns incl. PPID; `%CPU`/`%MEM` show `-` (not available in WASM). |
 | `which` | locate a file-backed command on `$PATH` (file-backed only — use `type` for everything). |
 | `man` | display command documentation (renders a command's manifest help). |
-| `stat` | display file status. `-c FORMAT` directives: `%n` name, `%s` size, `%F` type, `%y/%Y` mtime, `%x/%X` atime, `%w/%W` birth, `%%` literal; unknown → `?`. Virtual paths (`/bin`, `/proc`) report as read-only virtual entries. |
+| `stat` | display file status. `-c FORMAT` directives: `%n` name, `%s` size, `%F` type, `%y/%Y` mtime, `%x/%X` atime, `%w/%W` birth, `%%` literal; unknown → `?`. Virtual paths (`/bin`, `/proc`) report as read-only virtual entries; wasm-unknowable fields (inode, uid/gid, mode bits) report `-` rather than an invented value. |
 | `find` | `find [PATH...] [-name GLOB] [-iname GLOB] [-path GLOB] [-type f\|d] [-maxdepth N] [-mindepth N]` — implicit `-print`; predicates AND together. **No `-exec`** — pipe into `xargs`. |
 | `xargs` | `xargs [-n MAX-ARGS] [-I REPLACE] [-d DELIM] [COMMAND [ARG...]]` — read tokens from stdin and run COMMAND (default `echo`) in batches; `-I` runs once per token with REPLACE substituted. Runs commands as in-shell builtins (no exec). |
 
@@ -761,6 +920,10 @@ find . -name '*.txt' | xargs wc -l
 find . -name '*.log' | xargs -I{} sh -c 'echo {}'
 ```
 
+`chmod`, `chown`, and Unix permission (rwx) bits are **not implemented** — there is no permission
+system to enforce them against; `sudo`/authorization policy is the sandbox's actual access-control
+layer (see [§13](#13-authorization-model)).
+
 ---
 
 ## 12. Filesystem layout
@@ -769,6 +932,7 @@ A virtual, LLM-legible directory structure. Package bin directories are already 
 
 | Path | Contents |
 |---|---|
+| `/bin/` | virtual read-only namespace listing every clank-intercepted/registered command (`ls /bin`, `cat /bin/<name>` for its help). Not file-backed, not on `$PATH` — `type` resolves it, not `which`. |
 | `/usr/lib/prompts/bin/<name>` | grease-installed **prompt** command stubs. |
 | `/usr/lib/mcp/bin/<server>` | generated **MCP server** command stubs. |
 | `/usr/lib/agents/bin/<name>` | grease-installed **Golem agent** executables. |
@@ -778,14 +942,23 @@ A virtual, LLM-legible directory structure. Package bin directories are already 
 | `/proc/` | virtual read-only process namespace (not file-backed). |
 | `/proc/<pid>/` | `cmdline`, `status`, `environ` per process. Agent invocations add `agent-type`, `agent-params`, `agent-revision`, `phantom-uuid`, `idempotency-key` to `status`. |
 | `/proc/clank/system-prompt` | the current system prompt as it would be sent to the model on the next `ask` — computed on read from installed tools/skills/config. `cat`-able, `grep`-able. |
+| `/dev/null`, `/dev/stdin`, `/dev/stdout`, `/dev/stderr` | emulated device files (redirects handle them at the shell layer). |
+| `/tmp/` | scratch space. |
 | `/var/log/shell.log` | executed shell lines. |
 | `/var/log/http.log` | outbound HTTP (curl/wget/LLM turns — model + tool count + outcome, never bodies). |
 | `/var/log/mcp.log` | MCP tool calls + Golem agent-invoke audit events. |
 | `/var/log/ops.log` | destructive/`sudo-only` operation attempts with authorization outcome (recorded even when denied). |
-| `/var/lib/grease/` | the versioned grease payload store. |
+| `/var/lib/grease/` | the versioned grease payload store — the source of truth the installed executables/stubs are always regenerated from. |
 | `/etc/grease/` | `registries.toml` + one `<name>.toml` per installed package. |
 | `/etc/mcp/` | per-server MCP config. |
-| `~/.config/ask/ask.toml` | the default-model config (`model` writes it, `ask` reads it). |
+| `~/.config/ask/ask.toml` | the default-model config (`model` writes it, `ask` reads it). Native only — provider keys live here too when stored via `model add --key`. |
+| `~/.local/share/clank/` | native-only shell history and local session state. |
+
+Default `$PATH`:
+
+```
+/usr/local/bin:/usr/bin:/usr/lib/mcp/bin:/usr/lib/agents/bin:/usr/lib/prompts/bin:/usr/share/skills/*/bin
+```
 
 ```sh
 cat /proc/clank/system-prompt | grep -i mcp
@@ -797,21 +970,51 @@ ls /mnt/mcp
 Most of these honor `$CLANK_*` env overrides (e.g. `$CLANK_LOG_DIR`, `$CLANK_GREASE_ETC`,
 `$CLANK_MCP_BIN`) so native tests are hermetic; the agent uses the defaults above.
 
+### Logging
+
+Three distinct layers, not to be confused with each other:
+
+- **Human-readable process logs**, in `/var/log/` (the table above) — every builtin and installed
+  package executable emits at minimum a start event, end event, exit code, any authorization pause,
+  and (for Golem invocations) agent identity/revision.
+- **Structured audit events** — the same information as the human-readable logs, but machine-readable
+  and addressable by PID/PPID; Golem invocation entries additionally carry agent type, parameters,
+  revision, phantom UUID, and idempotency key.
+- **The Golem oplog** — Golem's own persistent operation journal, entirely separate from `/var/log/`
+  and not a log file at all. `golem oplog` reads the shell instance's own oplog. A *Golem agent's* own
+  oplog (for an agent installed via `grease install golem:...`) is reachable directly through its
+  installed executable's reserved `oplog` subcommand:
+  ```sh
+  shopping-cart --userid "jdegoes" oplog -n 100
+  ```
+
 ---
 
 ## 13. Authorization model
 
-Every command carries an **authorization policy** in its manifest, enforced at a gate before it runs
-(README `### Policy model`). A compound line is gated on its **strictest top-level command** — the
-line is split on `;` / `&&` / `||` / `|` / `&`, so `echo hi && rm -rf /x` gates on `rm`, not the
-leading `echo`. Approving runs the whole line; denying refuses all of it. (A command hidden inside a
-`$(...)` substitution is not yet split out — the one remaining gap.)
+Every command carries an **authorization policy** in its manifest, enforced at a gate *before* it
+reaches Brush at all (Brush's extension API offers no per-command dispatch hook, so this is the only
+place clank can enforce it — see
+[`docs/architecture/resolution-surface.md`](architecture/resolution-surface.md)). A compound line is
+gated on its **strictest top-level command** — the line is split on `;` / `&&` / `||` / `|` / `&`, so
+`echo hi && rm -rf /x` gates on `rm`, not the leading `echo`. Approving runs the whole line; denying
+refuses all of it. (A command hidden inside a `$(...)` substitution is not yet split out — the one
+remaining gap.)
 
 | Policy | Behavior |
 |---|---|
 | `allow` | Runs immediately (read-only / low-risk: `ls`, `cat`, `grep`, `context show`, `mcp list`, `grease list`, `golem oplog`, …). |
 | `confirm` | Pauses for the human's approval before running (outbound HTTP and state-changing ops: `ask`, `curl`, `wget`, `mcp add`, `grease install`, MCP tool calls, agent invocations, `golem rollback`/`fork`, …). Reuses the `prompt-user` mechanism. |
 | `sudo-only` | Refused unless invoked with `sudo` (destructive: `rm`, overwrites). |
+
+**The policy is attached to the command (or subcommand), not to the destination path or argument
+values.** There is no separate rule that makes, say, writing under `~` stricter than writing under
+`/tmp`, or modifying `/etc/` stricter than modifying an arbitrary file — a command's policy is fixed
+once in its manifest and applies uniformly regardless of what it's pointed at. `rm` is `sudo-only`
+everywhere it's invoked; `mv`/`cp`/`touch`/`mkdir` are `allow` everywhere they're invoked. Commands
+with subcommands (`mcp`, `grease`, `golem`) are the one form of finer granularity that exists: they're
+gated **per-subcommand**, so the top level is `allow` and only the mutating subcommands carry
+`confirm`.
 
 **`sudo` = human authorization**, not a real executable. A `sudo` token is stripped before dispatch;
 it marks the command it prefixes as human-authorized. Elevation is **per-segment** — `sudo` authorizes
@@ -821,9 +1024,6 @@ the command it leads, not a downstream one (`sudo echo && rm x` still prompts fo
 - `sudo ask "…"` additionally grants the agentic loop **blanket confirm-tier** authorization — the
   model's `[confirm]` tool calls run without a per-call pause. It never satisfies `sudo-only` (the
   model still can't `rm` without an explicit `sudo` in the tool call).
-
-Commands with subcommands (`mcp`, `grease`, `golem`) are gated **per-subcommand** — the top level is
-`allow` and only the mutating subcommands carry `confirm`.
 
 A `confirm` that isn't pre-authorized surfaces a confirmation and moves the process to the **`P`
 (paused)** state — first-class and visible in `ps`, `jobs`, and `/proc/<pid>/status` — until you
@@ -838,17 +1038,21 @@ ask "clean the repo"     # pauses for confirmation (outbound HTTP)
 sudo ask "clean the repo"  # pre-approves ask + its [confirm] tool calls (not sudo-only ones)
 ```
 
+On Golem, filesystem-affecting mistakes have a safety net rollback doesn't extend to everything: a
+Golem instance can be rewound (`golem rollback`) to undo state, which bounds the blast radius of a
+filesystem operation gone wrong, but outbound HTTP calls and MCP tool invocations already happened in
+the outside world and are **not** undone by a rollback.
+
+WASI file permission bits (`chmod`, `chown`, rwx) are not implemented — see [§11](#11-registered-builtins).
+
 > Sensitive environment variables must not be exposed; agent constructor parameters must never be
-> secret-bearing (they're permanently visible). Secrets live in Golem's secrets API. (README `###
-> Sensitive environment variables`.)
+> secret-bearing (they're permanently visible). Secrets live in Golem's secrets API.
 
 ---
 
 ## 14. Exit codes & shell language
 
 ### Exit codes
-
-From README `### Exit codes`:
 
 | Code | Meaning |
 |---|---|
@@ -872,17 +1076,24 @@ The scripting language is **bash-compatible**, derived from Brush's POSIX/bash i
 - Pipes (`|`), command substitution (`$(...)` and backticks), redirections (`>`, `>>`, `<`, `2>`,
   `&>`, `2>&1`).
 - Logical operators `&&` / `||`, sequencing `;`.
-- Here-documents: `<<EOF` (expansion active), `<<'EOF'` (literal), `<<-EOF` (strips leading tabs).
 - Variables, `export`, `cd`, functions, globbing, quoting.
+- History recall (`!!`, `!n`); aliases, persisted to `~/.profile`.
+- Tab completion for every command, installed prompt, MCP tool, and agent method/constructor parameter.
 - Synthetic **job control** over clank processes: `&`, `jobs`, `fg`, `bg`, `wait`, `kill`.
 
-**Known gaps.** Brush upstream limitations (README `### Known scripting gaps`): `coproc`, `select`,
-`ERR` traps, and some `set`/`shopt` flag behavior. Plus one wasm-specific gap: **process substitution**
-(`<(...)`, `>(...)`) is not supported on the agent — it needs a concurrent producer/consumer connected
-by an OS pipe exposed as a `/dev/fd` path, which wasip2 lacks (unlike pipes, `$(...)`, and here-docs,
-whose sequential shape maps onto clank's in-memory stream). Scripts relying on any of these need
-adaptation. There is also no POSIX process model — no `fork`/`exec`, no real OS processes, no Unix
-signals.
+**Quoting.** `'...'` is literal — no expansion at all. `"..."` expands `$VAR` and `$(cmd)` but does no
+word splitting. `\` escapes the next character.
+
+**Here-documents.** `<<EOF` keeps variable/command substitution active; `<<'EOF'` is literal (no
+expansion); `<<-EOF` strips leading tabs. Particularly useful for multiline prompts:
+
+```sh
+ask <<EOF
+You are reviewing this config file:
+$(cat config.toml)
+Identify any security issues.
+EOF
+```
 
 ```sh
 for f in $(find . -name '*.rs'); do wc -l "$f"; done
@@ -893,9 +1104,80 @@ EOF
 sleep 30 & jobs; wait
 ```
 
+**Known gaps.** Brush upstream limitations: `coproc`, `select`, `ERR` traps, and some `set`/`shopt`
+flag behavior. Plus one wasm-specific gap: **process substitution** (`<(...)`, `>(...)`) is not
+supported on the agent — it needs a concurrent producer/consumer connected by an OS pipe exposed as a
+`/dev/fd` path, which wasip2 lacks (unlike pipes, `$(...)`, and here-docs, whose sequential shape maps
+onto clank's in-memory stream — see
+[`docs/architecture/wasip2-constraints.md`](architecture/wasip2-constraints.md)). Scripts relying on
+any of these need adaptation. There is also no POSIX process model — no `fork`/`exec`, no real OS
+processes, no Unix signals.
+
 ---
 
-*Cross-references point at section headings in `README.md`. Flags and subcommands in this document
-are sourced from `crates/clank-core/src/session/mod.rs` (the `run_command` dispatch ladder) and the
-per-command `cmd.rs`/`classify` modules (`mcp/`, `grease/`, `golem/`, `ai/`, `tools/`, `builtins/`),
-plus `utilities/wcurl` and `utilities/waget` for HTTP.*
+## 15. TTY and terminal
+
+WASI has limited terminal support. clank uses stdin/stdout as the baseline everywhere; on native, an
+interactive terminal additionally gets a richer line-editing/history TUI (the native REPL). On wasm,
+that richer layer degrades to plain stdin/stdout until Golem adds host-side terminal extensions —
+`Ctrl-Z`/`SIGTSTP` and real terminal process-group behavior are therefore native-only in v1 (see
+[§16](#16-compatibility--feature-reference)). The native implementation is the target experience the
+wasm side is expected to eventually match, not a special case.
+
+---
+
+## 16. Compatibility & feature reference
+
+### By environment
+
+| Feature | Native, no cluster | Native + cluster | Inside Golem |
+|---|---|---|---|
+| Filesystem, env, pipes, redirections | done | done | done |
+| `ask`, `ask repl`, `context` | done | done | done (`ask repl` is a stub on the agent — see §1) |
+| Durable | no | no | done |
+| MCP server tools (HTTPS only) | done | done | done |
+| MCP OIDC auth | not implemented | not implemented | not implemented |
+| `grease install` (any registry URL) | done | done | done |
+| Golem agent executables | no | done | done |
+| `golem` command | no | done | done |
+| `rollback`, `golem fork` | no | no | done |
+| `golem oplog` (shell instance) | no | no | done |
+| Full TUI / `Ctrl-Z` | native terminal | native terminal | pending TTY host extensions |
+
+### By feature shape
+
+| Feature | Classification |
+|---|---|
+| `ls`, `cd`, `pwd`, `cat`, `grep`, etc. | Unix-like — faithful |
+| Pipes, redirections, `$?`, `&&`, `\|\|` | Unix-like — faithful |
+| `/proc/`, `ps aux`, `/dev/null` | Synthetic but familiar |
+| `%CPU`, `%MEM` in `ps` | Subset — shown as `-` |
+| Job control (`&`, `jobs`, `fg`, `bg`) | Synthetic — over internal processes |
+| `kill` | Subset — cancels/terminates; signal numbers not mapped |
+| `Ctrl-Z`, process groups | Native-only in v1 |
+| `sudo` | Synthetic — human authorization intent, not Unix credentials |
+| `chmod`, `chown`, rwx bits | Unsupported |
+| `rollback`, `golem fork` | Golem-only |
+| Golem agent executables | clank-specific — no Unix analog |
+| `ask`, `ask repl`, `context` | clank-specific — no Unix analog |
+| `prompt-user` | clank-specific — no Unix analog |
+| `/bin/` | Virtual read-only namespace — not file-backed |
+| `/proc/clank/system-prompt` | clank-specific — virtual file, computed on read |
+| MCP stdio transports | Unsupported — deliberate product decision |
+| MCP OIDC/OAuth | Not implemented (either target) |
+| MCP resources as filesystem | clank-specific — virtual FS driver, no FUSE |
+| MCP elicitation | Addressed by `prompt-user` |
+| MCP sampling | Not addressed |
+| MCP resource metadata via `stat` | Roadmap — not implemented yet |
+| `coproc`, `select`, `ERR` traps | Not supported — Brush upstream gaps |
+| Process substitution (`<(...)`, `>(...)`) | Not supported on wasm — needs concurrent OS pipes |
+
+---
+
+*Flags and subcommands in this document are sourced from `crates/clank-core/src/session/mod.rs` (the
+`run_command`/`classify_command` dispatch ladder) and the per-command `cmd.rs`/`classify` modules
+(`mcp/`, `grease/`, `golem/`, `ai/`, `tools/`, `builtins/`), plus `utilities/wcurl` and
+`utilities/waget` for HTTP. The pitch, philosophy, glossary, and architecture summary live in
+[`README.md`](../README.md); the mechanisms behind the cross-cutting constraints referenced throughout
+(Wall C, replay safety, wasip2's missing primitives, the resolution surface) are in
+[`docs/architecture/`](architecture/).*

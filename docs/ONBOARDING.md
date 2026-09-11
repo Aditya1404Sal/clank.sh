@@ -57,7 +57,9 @@ Inside `clank-core/src`, the code is grouped by concern: `session/` (the core, s
 files), `ai/` (ask + LLM), `mcp/`, `grease/`, `golem/` (cluster + agent RPC), `tools/` (coreutils
 wrappers), `builtins/` (clank's own builtins like `kill`, `secretenv`), `runtime/` (proc table,
 secret slot, procfs), plus top-level `authz.rs`, `manifest.rs`, `registry.rs`, `logging.rs`,
-`native.rs` (the native REPL), and `lib.rs` (the `Transcript` + wasm entry).
+`helpshim.rs`, and `lib.rs` (the `Transcript`, shared by both targets). The native REPL loop and every
+`reqwest`-backed provider live outside `clank-core` entirely, in the separate `clank-native` crate
+(§5).
 
 ---
 
@@ -93,9 +95,10 @@ One continuous walk, in the order things actually happen. This is the native pat
 identical from step 2 on (§6 covers how it gets here). The entry is
 [`Session::eval_line`](../crates/clank-core/src/session/mod.rs) → `eval_line_inner`.
 
-**Stage 0 — the driver reads a line.** Native: `main.rs` → [`native::run`](../crates/clank-core/src/native.rs)
-is a classic read/eval/print loop over blocking `std::io`. It handles `ask repl` and PS2 continuation
-(typing a multi-line heredoc) itself, because it owns the terminal, then calls `eval_line`.
+**Stage 0 — the driver reads a line.** Native: `clank-cli`'s `main.rs` →
+[`clank_native::run`](../crates/clank-native/src/run.rs) is a classic read/eval/print loop over
+blocking `std::io`. It handles `ask repl` and PS2 continuation (typing a multi-line heredoc) itself,
+because it owns the terminal, then calls `eval_line`.
 
 **Stage 1 — logging brackets the line.** `eval_line` installs the session's log sink, emits a `start`
 event to `shell.log`, runs the inner logic, then emits the outcome. Every log line first passes
@@ -127,9 +130,13 @@ segments and resolves each segment's command against its `Manifest`. The line is
 **Brush's extension API offers no per-command dispatch hook**, so clank cannot intercept execution
 *inside* Brush — the clank layer is the only enforcement point. (`authz.rs`.)
 
-**Stage 6 — interception vs. Brush.** clank classifies the line. If it is one of clank's own commands
-— `ask`, `grease`, `mcp`, `golem`, a coreutils tool, `curl`/`wget` — clank runs it directly (these
-are the subsystems in §8). Otherwise the line goes to the Brush engine, which does the real parsing,
+**Stage 6 — interception vs. Brush.** clank
+[`classifies`](../crates/clank-core/src/session/mod.rs) the line — literally `Session::classify_line`,
+then, after the authz gate resolves, `classify_command`; the match on each result is a documented
+first-match-wins behavioural contract, not just a style choice (see the `LineRoute`/`CommandRoute` doc
+comments). If it is one of clank's own commands — `ask`, `grease`, `mcp`, `golem`, a coreutils tool,
+`curl`/`wget` — clank runs it directly (these are the subsystems in §7). Otherwise the line goes to
+the Brush engine, which does the real parsing,
 expansion, and execution. Intercepted or not, output is captured, the transcript and proc row are
 updated, and a `LineResult` comes back.
 
@@ -160,10 +167,11 @@ flowchart TB
     S --> B["Brush engine + clank interception"]
 ```
 
-**How each world injects providers.** Native: [`native::inject_native_providers`](../crates/clank-core/src/native.rs)
-installs `reqwest`/`rustls` shims for the LLM, MCP HTTP, and (if a cluster is configured) Golem. The
-agent: `ClankAgent::new` builds an `EmbeddedShell::with_default_golem_providers()`, whose `Session`
-gets durable `wasi-fetch`/`golem-rust` implementations. Same four `Option<Box<dyn …>>` fields on `Session`;
+**How each world injects providers.** Native:
+[`clank_native::inject_native_providers`](../crates/clank-native/src/run.rs) installs `reqwest`/
+`rustls` shims for the LLM, MCP HTTP, and (if a cluster is configured) Golem. The agent: `ClankAgent::new`
+builds an `EmbeddedShell::with_default_golem_providers()`, whose `Session` gets durable
+`wasi-fetch`/`golem-rust` implementations. Same four `Option<Box<dyn …>>` fields on `Session`;
 different boxes.
 
 **What "durable" buys and demands.** On Golem, `ClankAgent::eval` is an *exported component function*.
@@ -224,7 +232,7 @@ on a `Pending` and returns; the human answers via `answer_prompt`, which resumes
 This durable mid-loop pause is only possible because of the non-blocking prompt model.
 
 **`grease` — the package manager** ([`session/grease.rs`](../crates/clank-core/src/session/grease.rs),
-[`grease/pkg.rs`](../crates/clank-core/src/grease/pkg.rs)). `grease install <name>` fetches a package
+[`grease-pkg`](../crates/grease-pkg/src/lib.rs)). `grease install <name>` fetches a package
 from a registry and installs it as one of five kinds: a **prompt** (becomes an `ask` command), a
 **script** (shell source run as a synthetic process), a **skill** (context + `$PATH` scripts), an
 **mcp** server, or an **agent** (a Golem agent invoked over RPC). Integrity is layered and
@@ -328,11 +336,41 @@ Things a reader should not take from this document as settled:
 
 **Read in full while writing this:** `clank-agent/src/clank_agent.rs`; `greeter-agent/src/lib.rs`;
 `clank-embed/src/shell.rs`; `session/mod.rs` (`eval_line` + `eval_line_inner` lifecycle, the `Session`
-struct); `authz.rs`; `native.rs`; and — during the audit that preceded this — `ai/ask.rs`,
-`session/ask.rs`, `grease/pkg.rs`, `session/grease.rs`, `tools/coreutils.rs`, `whttp/src/lib.rs`, all
-10 `Cargo.toml`s.
+struct); `authz.rs`; the native driver (then still `native.rs` inside `clank-core`, since relocated to
+`clank-native/src/run.rs`); and — during the audit that preceded this — `ai/ask.rs`,
+`session/ask.rs`, `grease/pkg.rs` (since relocated to `grease-pkg/src/lib.rs`), `session/grease.rs`,
+`tools/coreutils.rs`, `whttp/src/lib.rs`, all 10 `Cargo.toml`s.
 **Skimmed / read by search:** `manifest.rs`, `registry.rs`, `runtime/proctable.rs`, `mcp/`, `golem/`,
 `grease/state.rs`, `logging.rs`.
 **Not opened:** most of `builtins/` and the rest of `tools/` beyond coreutils; the Brush fork's
 internals; the vendored `golem-stuff/golem` SDK. Treat statements about those as inference from their
 seams, not from their source.
+
+---
+
+## 13. Architecture deep-dives
+
+Four cross-cutting constraints get their own pages under [`docs/architecture/`](architecture/) —
+gathered from the module headers and inline comments scattered across the tree into one canonical
+statement each, rather than left as eight partial explanations that individually undersell how much
+they actually govern:
+
+- **[`wall-c.md`](architecture/wall-c.md)** — the constraint behind §5's two Wall C boundary notes and
+  Stage 4's pipeline head-split/`ask`-tail pre-extraction: why async work (HTTP, the LLM call, MCP,
+  agent invocation) can only run as a single top-level `Session`-layer stage per line, never nested
+  inside `$(...)`, a non-head pipeline stage, `xargs`, or `eval`.
+- **[`replay-safety.md`](architecture/replay-safety.md)** — why the durable log sink and the grease
+  payload store both use whole-file `std::fs::write` instead of `append`: an append duplicates under
+  Golem oplog replay, because the agent filesystem is re-run guest code, not a restored snapshot.
+- **[`wasip2-constraints.md`](architecture/wasip2-constraints.md)** — a table from each missing wasip2
+  primitive (process spawn, `pipe(2)`, threads, `dup2`, blocking stdin, `stat(2)`, `nix`) to the
+  specific design choice it forced elsewhere in this document (the Brush/coreutils forks, the
+  in-memory pipe, the current-thread runtime, `__wasilibc_fd_renumber`, and so on).
+- **[`resolution-surface.md`](architecture/resolution-surface.md)** — how `/bin`, `/proc`, `/mnt/mcp`,
+  and the real grease-managed `$PATH` directories differ in backing (virtual/computed vs. real files),
+  and why command resolution itself splits between `type` (authoritative for the commands Stage 6
+  intercepts before Brush) and `which` (file-backed `$PATH` entries only).
+
+Each page leads with the one-paragraph statement of its constraint, then why it's shaped that way,
+then the concrete consequences with file references — read them before touching code near any of the
+four topics; this document's own treatment of them (§4, §5) is the short version.

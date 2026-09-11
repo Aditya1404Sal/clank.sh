@@ -158,26 +158,36 @@ nested `rt.block_on` (the "Wall C" shape); a WASI-HTTP future polled by that tok
 woken, because nothing there performs the component-model wait. Awaiting these one level under the
 Golem SDK's own executor is what makes them complete.
 
-### 3d. `wasi:cli/run` p3 entrypoint vs native blocking split
+### 3d. Native entrypoint vs. the wasm component export
 
-- **`crates/clank-core/src/lib.rs`** — `mod wasm` is `#[cfg(all(target_arch = "wasm32", feature =
-  "repl-driver"))]` (lib.rs:61); `pub mod native` is `#[cfg(not(target_arch = "wasm32"))]`
-  (lib.rs:64).
-- **`crates/clank-core/src/wasm.rs`** — exports the `wasi:cli/run` component
-  (`wasip3::cli::command::export!`, wasm.rs:17). The CLI world bindings are p3/0.3-async: root
-  `Cargo.toml` pulls `wasip3 = "0.7"` and `wit-bindgen 0.57` with the `async` feature (lines 11–12),
-  gated wasm-only-and-optional in `clank-core/Cargo.toml` lines 90–93 behind the `repl-driver`
-  feature (lines 87). stdout is a concurrent writer future joined via `futures::join!` (kept over
-  `wit_bindgen::spawn`, which has no join handle — wasm.rs:9–11).
-- **`crates/clank-core/src/main.rs`** — native `main` builds `Runtime::new()` and blocks on
-  `native::run()`; wasm `main` is empty (main.rs:26) because the wasm entrypoint is the exported
-  component, and the canonical wasm build is `--lib`.
-- **`crates/clank-core/src/native.rs`** — the blocking `std::io` REPL loop (`native::run`,
-  native.rs:10). Also hosts `ask repl`, which is native-only (the durable agent cannot block on human
-  input between turns).
-- **The Golem agent** (`crates/clank-agent`) links `clank-core` with `default-features = false`
-  (`clank-agent/Cargo.toml:23`) to **drop** `repl-driver`, so the agent's `golem:agent` world does
-  not clash with a second `wasi:cli/run` export (comment at `clank-core/Cargo.toml:82–86`).
+**Updated 2026-09-11 — the `wasi:cli/run` p3 driver described in earlier revisions of this section is
+gone, not just relocated.** Recorded here for anyone who finds a stale reference to `wasm.rs` or the
+`repl-driver` feature in git history, an older doc, or a code comment written before this date.
+
+- **What used to exist, and was removed as dead.** `crates/clank-core/src/wasm.rs` used to export a
+  standalone `wasi:cli/run` component (p3/0.3-async CLI-world bindings, gated behind a `repl-driver`
+  Cargo feature and a `mod wasm` in `lib.rs`). It was deleted outright: every crate in the workspace
+  that depends on `clank-core` (`clank-cli`, `clank-embed`, `clank-conformance`, `grease-tool`) builds
+  it with `default-features = false`, so no crate in the workspace ever enabled `repl-driver` or
+  linked the artifact it built. It was also latently broken — it discarded `pending_prompt`, so a
+  confirm-gated command would have printed its question and then wedged the session had the driver
+  ever been revived as-is. `clank-core`'s `[lib]` is now a plain `crate-type = ["rlib"]` (see the
+  comment in `clank-core/Cargo.toml`); consult git history to resurrect either if a real use case
+  appears.
+- **The two entrypoints that actually exist today are elsewhere.** The **native** binary is
+  `crates/clank-cli/src/main.rs` — it builds a multi-thread tokio `Runtime` and blocks on
+  `clank_native::run()`. The **wasm** artifact is the separate `clank-agent` crate
+  (`crates/clank-agent`), a `cdylib` that exports the Golem `golem:agent` world via `golem-rust`'s
+  `export_golem_agentic` feature (enabled only on that leaf crate, since a component must carry
+  exactly one such export). `clank-agent` was never the `wasi:cli/run` export `wasm.rs` used to build,
+  and dropping `wasm.rs` changed nothing about how `clank-agent` is exported — the two were always
+  independent, which is exactly why the workspace could delete one without touching the other.
+- **`crates/clank-native/src/run.rs`** — the native REPL loop (`clank_native::run`, dispatching to
+  `run_interactive`/`run_plain`), `inject_native_providers`, and `run_repl` (`ask repl`, native-only —
+  the durable agent cannot block on human input between turns). This is where `clank-core`'s old
+  `native.rs` moved *to*, in full, along with every `reqwest`-backed provider implementation
+  (Anthropic, the OpenAI-compatible family, MCP HTTP, the Golem cluster REST client) — `clank-core`
+  itself now carries no `reqwest`/`reedline`/`crossterm`/`nu-ansi-term` dependency at all (see §6).
 
 ---
 
