@@ -220,6 +220,29 @@ guard fires and rebuilds.
 **Done when:** three scripts share one decoder; `clank-repl.sh` works; a stale artifact is
 detected and remedied rather than deployed.
 
+**DONE 2026-09-11 (`c99cba6`).** Deviations from the plan as written:
+
+- **The library also serves `conformance-golem.sh`** (four harnesses, not three). That script has
+  no decoder of its own — the Rust backend decodes — but it deploys, so it needs the freshness
+  check. The ticket missed it.
+- **The remedy is deletion, not `cargo clean`.** The plan prescribed
+  `cargo clean -p clank-core -p clank-agent --target wasm32-wasip2`; that removes 1,357 files /
+  1.5 GB and forces a long rebuild. Deleting the staged artifacts is sufficient and far cheaper:
+  it forces `golem build` to re-invoke cargo, and cargo then rebuilds exactly what changed —
+  cargo tracks path deps correctly, the gap is only whether it is invoked at all. **Both** the
+  `golem-temp/` copy and cargo's `target/` copy must go; removing only the former lets `golem build`
+  re-stage the same stale wasm without running cargo.
+- **Shell-portability details worth keeping:** enumerate with `find`, not a glob (unmatched globs
+  behave differently across shells, and a missing `golem-temp/` must be a silent no-op rather than
+  an error), and use `find -newer` rather than `stat(1)`, whose mtime flag differs between BSD and
+  GNU.
+- **`golem-e2e.sh`'s header was also wrong** and is corrected: it claimed to exit on the first
+  failed assertion; it aggregates and exits at the end.
+
+Verified both branches of the guard — a touch on `crates/clank-core/src/lib.rs` (a path dep
+`golem build` does not track) is detected and cleared; a tree with nothing to check is silent.
+Full e2e with both changes wired: **274 passed, 0 failed.**
+
 ---
 
 ### 5. Reproducible dependencies
