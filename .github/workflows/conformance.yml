@@ -28,12 +28,26 @@ jobs:
       # The library suites — the bulk of the repo's tests (ed25519/Merkle vectors, redirect
       # policy, the session suite). Enumerated with `-p` rather than `--workspace` because the
       # wasm cdylib crates (clank-agent, greeter-agent) don't link natively.
+      #
+      # `--test-threads=1` is load-bearing, not caution. Brush resets SIGPIPE to SIG_DFL for POSIX
+      # pipe semantics, so under libtest's default thread pool one test's broken-pipe write can kill
+      # the whole process with signal 13 — an intra-binary race that reproduces for a single crate.
+      # `coreutils.rs` re-asserts SIG_IGN after every `uumain()` to stop one tool leaving SIGPIPE
+      # flipped for a later test, but serialisation is still the documented requirement (e2e.md §8).
+      # The suites run in well under a second, so this costs nothing.
       - name: Unit tests (library crates)
         run: >-
           cargo test
           -p clank-core -p clank-cli -p whttp -p wcurl -p waget -p grease-tool
+          -- --test-threads=1
+      # clank-embed needs its own step: 8 of its 13 tests live behind the non-default `providers`
+      # feature (the wRPC argument encoding, result rendering, phantom-UUID parsing). Neither a
+      # plain `-p clank-embed` nor `cargo test --workspace` enables a non-default feature, so
+      # those 8 ran nowhere at all until this step existed.
+      - name: Unit tests (clank-embed, incl. the provider seams)
+        run: cargo test -p clank-embed --features providers -- --test-threads=1
       - name: Unit tests (parser, matcher, wire contracts)
-        run: cargo test -p clank-conformance --lib
+        run: cargo test -p clank-conformance --lib -- --test-threads=1
       - name: Native conformance tier
         run: cargo test -p clank-conformance --test native
 
@@ -83,3 +97,33 @@ jobs:
           golem --version
       - name: Golem conformance tier (throwaway server + deploy)
         run: scripts/conformance-golem.sh
+
+  e2e:
+    # The full agent end-to-end suite: ~274 assertions against a real deployed clank, and the ONLY
+    # automated coverage of `ask`, `grease`, `mcp`, the `golem` cluster surface and the greeter-agent
+    # wRPC round-trip — none of which the conformance corpus can reach (it runs one fresh instance
+    # per scenario, offline by default). Until this job existed it ran only when a human typed it.
+    #
+    # Nightly rather than per-push: it builds a ~318 MB debug wasm, stands up a server and deploys,
+    # which is minutes, not seconds. Nightly is worse than per-push and far better than never.
+    #
+    # KNOWN LIMITATION on main-rc-1: this branch's golem.yaml is `manifestVersion: 1.6.0`, which the
+    # pinned 1.5.1 binary below refuses to parse — so this job (like the `golem` job above) cannot
+    # pass here until a 1.6 CLI is released. Point GOLEM_BIN at a 1.6 binary to run it locally:
+    #   GOLEM_BIN=/path/to/dev/golem scripts/golem-e2e.sh --takeover
+    # The live-model / live-registry / live-MCP assertions stay off: they need real credentials and
+    # bill real money. This runs the ~264 unconditional ones.
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Install the pinned golem release binary
+        run: |
+          curl -fsSL -o /usr/local/bin/golem \
+            https://github.com/golemcloud/golem/releases/download/v1.5.1/golem-x86_64-unknown-linux-gnu
+          chmod +x /usr/local/bin/golem
+          golem --version
+      - name: Agent e2e (throwaway server + deploy + ~274 assertions)
+        run: scripts/golem-e2e.sh --takeover

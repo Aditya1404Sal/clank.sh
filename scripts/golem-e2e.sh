@@ -99,6 +99,10 @@ DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/clank-golem-e2e.XXXXXX")"
 PORTS_FILE="$DATA_DIR/ports.json"
 SERVER_LOG="$DATA_DIR/server.log"
 SERVER_PID=""
+# The golem binary to drive. Overridable because this branch's `manifestVersion: 1.6.0` needs a 1.6
+# CLI, while a released 1.5.x binary (what CI pins) refuses to parse it — same `GOLEM_BIN` knob
+# conformance-golem.sh already exposes.
+GOLEM="${GOLEM_BIN:-golem}"
 # The shared invoke-JSON decoder + the artifact-freshness check.
 GOLEM_JSON_LOG="$SERVER_LOG"
 # shellcheck source=lib/golem-json.sh
@@ -245,7 +249,7 @@ step "Building the wasm component (golem build)"
 golem_assert_fresh_artifact
 # -Y auto-confirms the AGENTS.md manifest-section update (fails otherwise in a non-interactive
 # shell); we restore AGENTS.md in teardown so the tree isn't left dirty.
-if ! golem -Y build 2>&1 | tail -4; then
+if ! "$GOLEM" -Y build 2>&1 | tail -4; then
   echo "${c_red}golem build failed${c_rst}" >&2
   exit 1
 fi
@@ -275,7 +279,7 @@ if [[ -n "$existing" ]]; then
 fi
 
 step "Starting throwaway golem server (data dir: $DATA_DIR)"
-golem -Y server run --clean --router-port "$ROUTER_PORT" --data-dir "$DATA_DIR" --ports-file "$PORTS_FILE" \
+"$GOLEM" -Y server run --clean --router-port "$ROUTER_PORT" --data-dir "$DATA_DIR" --ports-file "$PORTS_FILE" \
   >"$SERVER_LOG" 2>&1 &
 SERVER_PID=$!
 note "server pid $SERVER_PID"
@@ -284,7 +288,7 @@ note "server pid $SERVER_PID"
 note "waiting for server to come up..."
 for i in $(seq 1 60); do
   kill -0 "$SERVER_PID" 2>/dev/null || { echo "${c_red}server exited early — see $SERVER_LOG${c_rst}" >&2; tail -20 "$SERVER_LOG" >&2; exit 1; }
-  if [[ -f "$PORTS_FILE" ]] && golem component list >/dev/null 2>&1; then
+  if [[ -f "$PORTS_FILE" ]] && "$GOLEM" component list >/dev/null 2>&1; then
     note "server ready after ${i}s"
     break
   fi
@@ -329,7 +333,7 @@ if [[ $WITH_GREASE -eq 1 ]]; then
 fi
 
 step "Deploying clank:agent (golem deploy)"
-if ! golem -Y deploy 2>&1 | tail -5; then
+if ! "$GOLEM" -Y deploy 2>&1 | tail -5; then
   echo "${c_red}golem deploy failed${c_rst}" >&2
   exit 1
 fi

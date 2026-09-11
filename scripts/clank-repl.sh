@@ -61,7 +61,11 @@ note() { echo "${c_dim}·· $*${c_rst}"; }
 step() { echo; echo "▸ $*"; }
 warn() { echo "${c_red}$*${c_rst}" >&2; }
 
-command -v golem >/dev/null 2>&1 || { warn "golem CLI not found (need >=1.5)"; exit 1; }
+# The golem binary to drive — same `GOLEM_BIN` knob as the other harnesses. Every invocation below
+# must go through it: a half-parameterised script "works" only while the right binary happens to be
+# on PATH, and fails in a way that looks like a broken server rather than a missing binary.
+GOLEM="${GOLEM_BIN:-golem}"
+command -v "$GOLEM" >/dev/null 2>&1 || { warn "golem CLI not found (need >=1.5)"; exit 1; }
 command -v jq    >/dev/null 2>&1 || { warn "jq not found (needed to parse agent results)"; exit 1; }
 
 # Where `golem agent invoke` stderr (invocation markers, agent-side panics/tracing) is captured, so
@@ -133,16 +137,16 @@ if [[ $DEPLOY_MODE -eq 1 ]]; then
   # See golem-json.sh: `golem build` misses path-dependency edits, so this can otherwise hand you a
   # REPL against a binary that predates your change.
   golem_assert_fresh_artifact
-  golem -Y build 2>&1 | tail -4 || { warn "golem build failed"; exit 1; }
+  "$GOLEM" -Y build 2>&1 | tail -4 || { warn "golem build failed"; exit 1; }
 
   step "Starting throwaway golem server (data dir: $DATA_DIR)"
-  golem server run --clean --router-port "$ROUTER_PORT" --data-dir "$DATA_DIR" --ports-file "$DATA_DIR/ports.json" \
+  "$GOLEM" -Y server run --clean --router-port "$ROUTER_PORT" --data-dir "$DATA_DIR" --ports-file "$DATA_DIR/ports.json" \
     >"$SESSION_LOG" 2>&1 &
   SERVER_PID=$!
   note "server pid $SERVER_PID — waiting for it to come up..."
   for i in $(seq 1 60); do
     kill -0 "$SERVER_PID" 2>/dev/null || { warn "server exited early — see $SESSION_LOG"; tail -20 "$SESSION_LOG" >&2; exit 1; }
-    if [[ -f "$DATA_DIR/ports.json" ]] && golem component list >/dev/null 2>&1; then note "server ready after ${i}s"; break; fi
+    if [[ -f "$DATA_DIR/ports.json" ]] && "$GOLEM" component list >/dev/null 2>&1; then note "server ready after ${i}s"; break; fi
     sleep 1
     [[ $i -eq 60 ]] && { warn "server did not become ready in 60s"; tail -20 "$SESSION_LOG" >&2; exit 1; }
   done
@@ -151,7 +155,7 @@ if [[ $DEPLOY_MODE -eq 1 ]]; then
   golem -Y deploy 2>&1 | tail -5 || { warn "golem deploy failed"; exit 1; }
 else
   # Attach mode: verify a server is actually reachable before we start the loop.
-  if ! golem component list >/dev/null 2>&1; then
+  if ! "$GOLEM" component list >/dev/null 2>&1; then
     warn "No golem server reachable on port $ROUTER_PORT."
     echo "  Start one and deploy clank first (see docs/USAGE.md 'Running clank on a Golem agent'):" >&2
     echo "    golem -Y build && golem server run &        # then, once it is ready:" >&2
