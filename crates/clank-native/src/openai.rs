@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 
 use clank_core::ai::ask::{AskResponse, AskToolCall};
 use clank_core::ai::ask::{AskTool, AskTurn};
+use clank_core::ai::error::Error;
 
 use clank_core::config::model::MAX_TOKENS;
 
@@ -108,12 +109,25 @@ pub(crate) async fn turn(
 
     let response = match req.send().await {
         Ok(r) => r,
-        Err(e) => return AskResponse::error(format!("ask: model call failed: {e}\n")),
+        Err(e) => {
+            return AskResponse::error(Error::Request(format!("ask: model call failed: {e}\n")))
+        }
     };
     let status = response.status();
+    // Read BEFORE `.text()` consumes `response` — the only point the headers are still reachable. A
+    // bare delay-seconds `Retry-After` is the common case; an HTTP-date form is left unparsed (`None`).
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok());
     let text = match response.text().await {
         Ok(t) => t,
-        Err(e) => return AskResponse::error(format!("ask: reading model response failed: {e}\n")),
+        Err(e) => {
+            return AskResponse::error(Error::Request(format!(
+                "ask: reading model response failed: {e}\n"
+            )))
+        }
     };
     if !status.is_success() {
         // OpenAI-style error bodies are `{"error":{"message":...}}`; surface the message, else the raw
@@ -122,14 +136,24 @@ pub(crate) async fn turn(
             .ok()
             .and_then(|v| v["error"]["message"].as_str().map(str::to_string))
             .unwrap_or_else(|| text.chars().take(300).collect());
-        return AskResponse::error(format!(
+        let message = format!(
             "ask: model call failed: HTTP {} — {detail}\n",
             status.as_u16()
-        ));
+        );
+        return AskResponse::error(match status.as_u16() {
+            401 | 403 => Error::Unauthorized(message),
+            429 => Error::RateLimited {
+                message,
+                retry_after,
+            },
+            _ => Error::Request(message),
+        });
     }
     match serde_json::from_str::<Value>(&text) {
         Ok(v) => parse_response(&v),
-        Err(e) => AskResponse::error(format!("ask: malformed model response: {e}\n")),
+        Err(e) => AskResponse::error(Error::Request(format!(
+            "ask: malformed model response: {e}\n"
+        ))),
     }
 }
 

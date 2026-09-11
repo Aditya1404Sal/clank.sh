@@ -236,8 +236,15 @@ pub struct AskResponse {
     pub tool_calls: Vec<AskToolCall>,
     /// Whether the finish reason was `ToolCalls` (informational; the loop drives off `tool_calls`).
     pub finished_for_tools: bool,
-    /// Set on a transport error ⇒ the loop aborts with a `remote_error` outcome.
-    pub error: Option<String>,
+    /// Set on a failed turn ⇒ the loop aborts, surfacing [`crate::ai::error::Error::exit_code`] instead
+    /// of a hardcoded one. Typed (not a bare `String`) so a caller can branch on *kind* — retryable vs.
+    /// not ([`crate::ai::error::Error::is_retryable`]), and back off using
+    /// [`crate::ai::error::Error::retry_after`] on a 429 — none of which a flattened string could
+    /// express. Every [`AskProvider`] impl picks the variant that matches what actually happened
+    /// (missing key ⇒ `NotConfigured`, an unusable provider/model id ⇒ `Model`, HTTP 401/403 ⇒
+    /// `Unauthorized`, HTTP 429 ⇒ `RateLimited`, everything else (transport, 5xx, malformed response)
+    /// ⇒ `Request`) rather than defaulting everything to one shape.
+    pub error: Option<crate::ai::error::Error>,
 }
 
 impl AskResponse {
@@ -251,13 +258,16 @@ impl AskResponse {
         }
     }
 
-    /// A transport-failure response: the loop aborts and maps this to `AskOutcome::remote_error`.
-    pub fn error(message: impl Into<String>) -> Self {
+    /// A failed-turn response: the loop aborts and maps this to `AskOutcome::remote_error`. Takes the
+    /// already-classified [`crate::ai::error::Error`] rather than a bare message — see the `error`
+    /// field's doc for why the caller (not this constructor) must pick the variant.
+    #[must_use]
+    pub fn error(err: crate::ai::error::Error) -> Self {
         Self {
             text: String::new(),
             tool_calls: Vec::new(),
             finished_for_tools: false,
-            error: Some(message.into()),
+            error: Some(err),
         }
     }
 }
@@ -357,7 +367,7 @@ impl AskProvider for LoggingAskProvider {
             .field("model", model)
             .field("tools", tools.len().to_string());
         let rec = match &resp.error {
-            Some(e) => rec.field("status", "error").field("error", e),
+            Some(e) => rec.field("status", "error").field("error", e.to_string()),
             None => rec.field("status", "ok"),
         };
         rec.emit(crate::logging::LogFile::Http);

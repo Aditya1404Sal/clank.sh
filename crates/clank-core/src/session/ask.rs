@@ -60,10 +60,11 @@ impl Session {
         }
 
         if self.ask_provider.is_none() {
+            let err = crate::ai::Error::not_configured("ask");
             return LineResult::from_outcome(
                 Vec::new(),
-                b"ask: no model provider configured (available on the Golem agent)\n".to_vec(),
-                4,
+                err.to_string().into_bytes(),
+                err.exit_code(),
             );
         }
 
@@ -220,9 +221,7 @@ impl Session {
         args: &crate::ai::ask::ReplArgs,
     ) -> crate::ai::error::Result<String> {
         if self.ask_provider.is_none() {
-            return Err(crate::ai::Error::NotConfigured(
-                "ask repl: no model provider configured\n".to_string(),
-            ));
+            return Err(crate::ai::Error::not_configured("ask repl"));
         }
         let (model, _warning) = self.resolve_ask_model(args.model.as_deref())?;
         let transcript = match args.seed {
@@ -350,12 +349,10 @@ impl Session {
         };
 
         match self.summarize_text(&rendered, &model).await {
-            Ok(None) => LineResult::from_outcome(
-                Vec::new(),
-                b"context summarize: no model provider configured (available on the Golem agent)\n"
-                    .to_vec(),
-                4,
-            ),
+            Ok(None) => {
+                let err = crate::ai::Error::not_configured("context summarize");
+                LineResult::from_outcome(Vec::new(), err.to_string().into_bytes(), err.exit_code())
+            }
             Ok(Some(summary)) => {
                 let mut text = summary.into_bytes();
                 if !text.ends_with(b"\n") {
@@ -363,7 +360,13 @@ impl Session {
                 }
                 LineResult::from_outcome(text, Vec::new(), 0)
             }
-            Err(err) => LineResult::from_outcome(Vec::new(), err.into_bytes(), 4),
+            // `exit_code()` rather than a hardcoded 4: today every reachable variant here still maps
+            // to 4 (NotConfigured/Unauthorized/RateLimited/Request all do), but a provider that hits
+            // `Error::Model` (e.g. a default model whose provider prefix this transport can't serve)
+            // now correctly reports 2, the same "caller can fix this" code `ask` itself uses.
+            Err(err) => {
+                LineResult::from_outcome(Vec::new(), err.to_string().into_bytes(), err.exit_code())
+            }
         }
     }
 
@@ -372,7 +375,11 @@ impl Session {
     /// `context summarize` and the auto-compaction step: render/text is prepared by the caller (so the
     /// transcript lock is never held across the await), the provider is `take()`n and restored, and a
     /// single `SUMMARIZE_SYSTEM_PROMPT` turn is sent with no tools.
-    async fn summarize_text(&mut self, text: &str, model: &str) -> Result<Option<String>, String> {
+    async fn summarize_text(
+        &mut self,
+        text: &str,
+        model: &str,
+    ) -> crate::ai::error::Result<Option<String>> {
         use crate::ai::ask::AskTurn;
 
         let Some(provider) = self.ask_provider.take() else {
@@ -597,10 +604,11 @@ impl Session {
         use crate::ai::ask::AskTurn;
 
         let Some(mut provider) = self.ask_provider.take() else {
+            let err = crate::ai::Error::not_configured("ask");
             return LineResult::from_outcome(
                 Vec::new(),
-                b"ask: no model provider configured (available on the Golem agent)\n".to_vec(),
-                4,
+                err.to_string().into_bytes(),
+                err.exit_code(),
             );
         };
 
@@ -663,8 +671,12 @@ impl Session {
                         .complete(pid);
                 }
                 let mut stderr = state.trace;
-                stderr.extend_from_slice(err.as_bytes());
-                return LineResult::from_outcome(Vec::new(), stderr, 4);
+                stderr.extend_from_slice(err.to_string().as_bytes());
+                // `exit_code()` rather than a hardcoded 4: no provider can currently reach a
+                // non-4 variant from mid-loop (a bad model id is caught earlier, at model
+                // resolution), but the loop should report whatever the provider now tells it
+                // rather than re-flattening every failure to the same code.
+                return LineResult::from_outcome(Vec::new(), stderr, err.exit_code());
             }
             if resp.tool_calls.is_empty() {
                 final_text = resp.text;

@@ -24,6 +24,7 @@ use clank_core::ai::anthropic_wire::{
     serialize_request,
 };
 use clank_core::ai::ask::{AskProvider, AskResponse, AskTool, AskTurn};
+use clank_core::ai::error::Error;
 
 /// Cap on a single response body (bounds a runaway/held-open server). An `ask` reply is at most a few
 /// hundred KB of JSON; 8 MiB is generous headroom.
@@ -54,13 +55,16 @@ impl AskProvider for DurableAnthropicProvider {
         // and cannot be linked on this SDK track. Say so, rather than posting an openai model id to
         // Anthropic and surfacing whatever HTTP error comes back.
         if provider != clank_core::config::model::DEFAULT_PROVIDER {
-            return AskResponse::error(format!(
+            // Not a transport failure — the model id names a provider this transport plain cannot
+            // serve. Same bucket `resolve_ask_model` uses for an unknown provider prefix: the caller
+            // can fix it by picking a different model.
+            return AskResponse::error(Error::Model(format!(
                 "ask: provider '{provider}' is not available on this agent build (only \
                  '{}' is); choose an {} model, or run `ask` natively where every provider is \
                  wired\n",
                 clank_core::config::model::DEFAULT_PROVIDER,
                 clank_core::config::model::DEFAULT_PROVIDER,
-            ));
+            )));
         }
 
         // The API key comes from ANTHROPIC_API_KEY in the agent environment (golem.yaml). Empty/unset ⇒
@@ -68,10 +72,11 @@ impl AskProvider for DurableAnthropicProvider {
         let api_key = match std::env::var("ANTHROPIC_API_KEY") {
             Ok(k) if !k.is_empty() => k,
             _ => {
-                return AskResponse::error(
+                return AskResponse::error(Error::NotConfigured(
                     "ask: model provider not configured: set ANTHROPIC_API_KEY in the agent \
-                     environment (golem.yaml passes it through at deploy time)\n",
-                );
+                     environment (golem.yaml passes it through at deploy time)\n"
+                        .to_string(),
+                ));
             }
         };
 
@@ -79,11 +84,31 @@ impl AskProvider for DurableAnthropicProvider {
 
         match send(&api_key, body_bytes).await {
             Ok((status, text)) if (200..300).contains(&status) => parse_response_body(&text),
-            Ok((status, text)) => AskResponse::error(format!(
-                "ask: model call failed: HTTP {status} — {}\n",
-                parse_error(&text)
-            )),
-            Err(e) => AskResponse::error(format!("ask: model call failed: {e}\n")),
+            Ok((status, text)) => {
+                let message = format!(
+                    "ask: model call failed: HTTP {status} — {}\n",
+                    parse_error(&text)
+                );
+                // `send` returns only `(status, body)` — `whttp::Response`'s headers are discarded
+                // before they reach `turn`, so a `Retry-After` value is not reachable here without
+                // widening `send`'s return type. `retry_after: None` is honest about that, not a
+                // guess; native's reqwest-based providers DO thread it through, since their headers
+                // are still in scope at this point (see `clank-native::anthropic`/`openai`).
+                match status {
+                    401 | 403 => AskResponse::error(Error::Unauthorized(message)),
+                    429 => AskResponse::error(Error::RateLimited {
+                        message,
+                        retry_after: None,
+                    }),
+                    _ => AskResponse::error(Error::Request(message)),
+                }
+            }
+            // Folds a real transport failure together with `send`'s own pre-flight rejection (an
+            // `ANTHROPIC_API_KEY` value that isn't a legal header value) — both arrive here as one
+            // flat `String` with nothing to branch on, so both land in the catch-all bucket. The
+            // header-value case is arguably closer to `NotConfigured`, but splitting it out would mean
+            // giving `send` a structured error type for one caller; not done here.
+            Err(e) => AskResponse::error(Error::Request(format!("ask: model call failed: {e}\n"))),
         }
     }
 }

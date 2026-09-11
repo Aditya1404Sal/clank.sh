@@ -17,6 +17,7 @@
 use crate::anthropic::ReqwestAnthropicProvider;
 use crate::openai::{self, Descriptor, GROK, OLLAMA, OPENAI, OPENROUTER};
 use clank_core::ai::ask::{AskProvider, AskResponse, AskTool, AskTurn};
+use clank_core::ai::error::Error;
 
 /// A native [`AskProvider`] that routes each turn to the transport for the model's `provider/` prefix.
 pub struct NativeLlmProvider {
@@ -49,11 +50,11 @@ impl NativeLlmProvider {
     ) -> AskResponse {
         let key = resolve_provider_key(desc.provider, desc.key_env);
         if desc.requires_key && key.is_none() {
-            return AskResponse::error(format!(
+            return AskResponse::error(Error::NotConfigured(format!(
                 "ask: {} provider not configured: set {} in the environment or run \
                  `model add {} --key <key>` (stores it in ~/.config/ask/ask.toml)\n",
                 desc.provider, desc.key_env, desc.provider
-            ));
+            )));
         }
         openai::turn(
             &self.client,
@@ -107,11 +108,17 @@ impl AskProvider for NativeLlmProvider {
                 self.openai_family(&OLLAMA, system, history, tools, bare)
                     .await
             }
-            "bedrock" => AskResponse::error(
+            // Both arms below are a provider/model CHOICE the caller can fix (pick a different
+            // provider), not a transport fault — same bucket `resolve_ask_model` uses for an unknown
+            // provider prefix.
+            "bedrock" => AskResponse::error(Error::Model(
                 "ask: provider 'bedrock' requires the Golem agent (AWS SigV4 signing isn't \
-                 available in native ask); use the agent, which reaches Bedrock via golem-ai-llm\n",
-            ),
-            other => AskResponse::error(format!("ask: unknown model provider '{other}'\n")),
+                 available in native ask); use the agent, which reaches Bedrock via golem-ai-llm\n"
+                    .to_string(),
+            )),
+            other => AskResponse::error(Error::Model(format!(
+                "ask: unknown model provider '{other}'\n"
+            ))),
         }
     }
 }
@@ -152,8 +159,13 @@ mod tests {
             .await;
         let err = resp.error.expect("bedrock must error on native");
         assert!(
-            err.contains("bedrock") && err.contains("agent"),
-            "got: {err}"
+            matches!(err, Error::Model(_)),
+            "bedrock is a fixable provider choice, not a transport fault: {err:?}"
+        );
+        let text = err.to_string();
+        assert!(
+            text.contains("bedrock") && text.contains("agent"),
+            "got: {text}"
         );
     }
 
@@ -163,6 +175,8 @@ mod tests {
         let resp = p
             .turn(None, &[AskTurn::User("hi".into())], &[], "frobnicate/x")
             .await;
-        assert!(resp.error.unwrap().contains("unknown model provider"));
+        let err = resp.error.unwrap();
+        assert!(matches!(err, Error::Model(_)), "got: {err:?}");
+        assert!(err.to_string().contains("unknown model provider"));
     }
 }

@@ -10,6 +10,7 @@
 use serde_json::{json, Value};
 
 use crate::ai::ask::{AskResponse, AskTool, AskToolCall, AskTurn};
+use crate::ai::error::Error;
 
 /// The Anthropic Messages API endpoint.
 pub const MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -168,7 +169,12 @@ pub fn serialize_request(body: &Value) -> Vec<u8> {
 pub fn parse_response_body(text: &str) -> AskResponse {
     match serde_json::from_str::<Value>(text) {
         Ok(v) => parse_response(&v),
-        Err(e) => AskResponse::error(format!("ask: malformed model response: {e}\n")),
+        // A malformed body from an otherwise-successful call is bucketed with transport/5xx: the
+        // caller's request was fine, so a retry (possibly hitting a different upstream replica) could
+        // plausibly get a well-formed body next time.
+        Err(e) => AskResponse::error(Error::Request(format!(
+            "ask: malformed model response: {e}\n"
+        ))),
     }
 }
 

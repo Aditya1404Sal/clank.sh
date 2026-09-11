@@ -76,6 +76,26 @@ impl Error {
             _ => None,
         }
     }
+
+    /// The shared "no model provider is installed for this session" message — the ONE condition
+    /// `ask`, `ask repl`, and `context summarize` all degrade to when no
+    /// [`crate::ai::ask::AskProvider`] was ever injected (native with none set, or an embed that
+    /// skips a `with_default_golem_providers`-style setup). Before this existed, each call site hand-
+    /// wrote its own wording and drifted (`ask repl`'s lost the "(available on the Golem agent)"
+    /// aside that the other two carried). `command` is the invoking command's display prefix
+    /// (`"ask"`, `"ask repl"`, `"context summarize"`) — the one part that legitimately varies, so a
+    /// single frozen `&str` constant can't serve every call site; a function can.
+    ///
+    /// Distinct from a provider being installed but unable to authenticate (missing API key) — that
+    /// condition is also [`Error::NotConfigured`], but the remediation text differs per provider (which
+    /// env var, which `model add` invocation) and is constructed at each provider's own call site
+    /// instead.
+    #[must_use]
+    pub fn not_configured(command: &str) -> Self {
+        Error::NotConfigured(format!(
+            "{command}: no model provider configured (available on the Golem agent)\n"
+        ))
+    }
 }
 
 /// An `ai` operation's result.
@@ -109,5 +129,36 @@ mod tests {
         assert_eq!(Error::Config("cannot write ask.toml".into()).exit_code(), 1);
         assert_eq!(Error::NotConfigured("no key".into()).exit_code(), 4);
         assert_eq!(Error::Request("500".into()).exit_code(), 4);
+    }
+
+    #[test]
+    fn not_configured_varies_only_the_command_prefix() {
+        // The one difference between call sites is the leading command name; the rest of the
+        // wording (and the NotConfigured variant, hence exit code 4) is shared.
+        let ask = Error::not_configured("ask");
+        assert_eq!(
+            ask.to_string(),
+            "ask: no model provider configured (available on the Golem agent)\n"
+        );
+        assert_eq!(ask.exit_code(), 4);
+
+        let repl = Error::not_configured("ask repl");
+        assert_eq!(
+            repl.to_string(),
+            "ask repl: no model provider configured (available on the Golem agent)\n"
+        );
+
+        let summarize = Error::not_configured("context summarize");
+        assert!(summarize.to_string().starts_with("context summarize: "));
+        // Same suffix every time — only the prefix moves.
+        assert!(ask
+            .to_string()
+            .ends_with("no model provider configured (available on the Golem agent)\n"));
+        assert!(repl
+            .to_string()
+            .ends_with("no model provider configured (available on the Golem agent)\n"));
+        assert!(summarize
+            .to_string()
+            .ends_with("no model provider configured (available on the Golem agent)\n"));
     }
 }

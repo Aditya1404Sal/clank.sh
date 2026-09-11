@@ -18,6 +18,7 @@ use clank_core::ai::anthropic_wire::{
     build_request, parse_error, parse_response, ANTHROPIC_VERSION, MESSAGES_URL,
 };
 use clank_core::ai::ask::{AskProvider, AskResponse, AskTool, AskTurn};
+use clank_core::ai::error::Error;
 
 /// The provider name under which the key is stored in `ask.toml`.
 const PROVIDER: &str = "anthropic";
@@ -84,10 +85,11 @@ impl AskProvider for ReqwestAnthropicProvider {
         model: &str,
     ) -> AskResponse {
         let Some(api_key) = resolve_api_key() else {
-            return AskResponse::error(
+            return AskResponse::error(Error::NotConfigured(
                 "ask: model provider not configured: set ANTHROPIC_API_KEY in the environment \
-                 or run `model add anthropic --key <key>` (stores it in ~/.config/ask/ask.toml)\n",
-            );
+                 or run `model add anthropic --key <key>` (stores it in ~/.config/ask/ask.toml)\n"
+                    .to_string(),
+            ));
         };
 
         let body = build_request(system, history, tools, model);
@@ -105,28 +107,50 @@ impl AskProvider for ReqwestAnthropicProvider {
 
         let response = match response {
             Ok(r) => r,
-            Err(e) => return AskResponse::error(format!("ask: model call failed: {e}\n")),
+            Err(e) => {
+                return AskResponse::error(Error::Request(format!("ask: model call failed: {e}\n")))
+            }
         };
 
         let status = response.status();
+        // Read BEFORE `.text()` consumes `response` — the only point at which the headers are still
+        // reachable. A bare delay-seconds `Retry-After` is the common case across providers; an
+        // HTTP-date form is left unparsed (`None`) rather than adding a date parser for this.
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse::<u64>().ok());
         let text = match response.text().await {
             Ok(t) => t,
             Err(e) => {
-                return AskResponse::error(format!("ask: reading model response failed: {e}\n"))
+                return AskResponse::error(Error::Request(format!(
+                    "ask: reading model response failed: {e}\n"
+                )))
             }
         };
 
         if !status.is_success() {
-            return AskResponse::error(format!(
+            let message = format!(
                 "ask: model call failed: HTTP {} — {}\n",
                 status.as_u16(),
                 parse_error(&text)
-            ));
+            );
+            return AskResponse::error(match status.as_u16() {
+                401 | 403 => Error::Unauthorized(message),
+                429 => Error::RateLimited {
+                    message,
+                    retry_after,
+                },
+                _ => Error::Request(message),
+            });
         }
 
         match serde_json::from_str::<Value>(&text) {
             Ok(v) => parse_response(&v),
-            Err(e) => AskResponse::error(format!("ask: malformed model response: {e}\n")),
+            Err(e) => AskResponse::error(Error::Request(format!(
+                "ask: malformed model response: {e}\n"
+            ))),
         }
     }
 }
@@ -217,6 +241,8 @@ mod tests {
             None => std::env::remove_var("HOME"),
         }
         assert!(resp.error.is_some());
-        assert!(resp.error.unwrap().contains("not configured"));
+        let err = resp.error.unwrap();
+        assert!(matches!(err, Error::NotConfigured(_)), "got: {err:?}");
+        assert!(err.to_string().contains("not configured"));
     }
 }
