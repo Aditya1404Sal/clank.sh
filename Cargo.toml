@@ -17,7 +17,10 @@ members = [
 ]
 # main-rc-1: exclude the vendored golem clone so its crates (golem-schema, etc.) resolve their
 # `{ workspace = true }` deps against THEIR OWN workspace (golem-stuff/golem/), not clank's root.
-exclude = ["golem-stuff"]
+# `fork/coreutils` for the same reason: it is uutils' own workspace (a git submodule), and its
+# crates inherit `version`/`edition`/deps from ITS root. Without this, cargo would also claim them
+# as members here — every path dependency inside a workspace's directory becomes one implicitly.
+exclude = ["golem-stuff", "fork/coreutils"]
 # default-members excludes the two wasm-only component crates, so a bare native `cargo build`
 # is green: greeter-agent is an e2e fixture (the second implementer of the embed surface), and
 # clank-agent's cdylib links only for wasm32-wasip2 (its golem/wasi host imports are undefined
@@ -112,28 +115,32 @@ crossterm = { path = "crossterm-fork" }
 # uucore, and a wasi `set_permissions` skip in uu_cp. Patch uucore AND every uu_* command crate
 # clank registers — the published uu_* crates only share the patched `uucore`, so a fix inside a
 # command crate (e.g. cp) is only picked up when that command crate itself comes from the fork.
-# Pinned to an exact REV (not the `wasip2-oscompat` branch) so the build is reproducible from source
-# control alone — a branch pin silently advances to branch-tip on a fresh resolve (audit P2-7). Bump
-# deliberately when the fork moves; mirror the fork so a delete/force-push can't break the build.
-uucore = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
-uu_cat = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
-uu_ls = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
-uu_wc = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
-uu_head = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
-uu_sort = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
-uu_mkdir = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
-uu_rm = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
-uu_mv = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
-uu_cp = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
-uu_env = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
-uu_cut = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
-uu_tr = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
-uu_uniq = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
-uu_tail = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
-uu_tee = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
-uu_touch = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
-uu_sleep = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
-uu_printf = { git = "https://github.com/Aditya1404Sal/coreutils", rev = "35ecf24" }
+#
+# Consumed by PATH from `fork/coreutils`, a git submodule tracking the fork's `wasip2-oscompat`
+# branch — not as a `git` + `rev` dependency. The pin did not go away, it moved: the superproject's
+# gitlink records the exact fork commit, so the build is still reproducible from source control
+# alone (audit P2-7), and a fork fix is now an edit + commit in place instead of a push + rev-bump
+# round-trip. Clone with `--recurse-submodules` (or run `git submodule update --init` afterwards).
+# The gitlink must name a commit that exists on GitHub before CI or a fresh clone can fetch it.
+uucore = { path = "fork/coreutils/src/uucore" }
+uu_cat = { path = "fork/coreutils/src/uu/cat" }
+uu_ls = { path = "fork/coreutils/src/uu/ls" }
+uu_wc = { path = "fork/coreutils/src/uu/wc" }
+uu_head = { path = "fork/coreutils/src/uu/head" }
+uu_sort = { path = "fork/coreutils/src/uu/sort" }
+uu_mkdir = { path = "fork/coreutils/src/uu/mkdir" }
+uu_rm = { path = "fork/coreutils/src/uu/rm" }
+uu_mv = { path = "fork/coreutils/src/uu/mv" }
+uu_cp = { path = "fork/coreutils/src/uu/cp" }
+uu_env = { path = "fork/coreutils/src/uu/env" }
+uu_cut = { path = "fork/coreutils/src/uu/cut" }
+uu_tr = { path = "fork/coreutils/src/uu/tr" }
+uu_uniq = { path = "fork/coreutils/src/uu/uniq" }
+uu_tail = { path = "fork/coreutils/src/uu/tail" }
+uu_tee = { path = "fork/coreutils/src/uu/tee" }
+uu_touch = { path = "fork/coreutils/src/uu/touch" }
+uu_sleep = { path = "fork/coreutils/src/uu/sleep" }
+uu_printf = { path = "fork/coreutils/src/uu/printf" }
 # Published brush-core 0.5.0 stores redirect targets as `OpenFile::File(std::fs::File)` and clones
 # them via `File::try_clone()`, which is Unsupported on wasm32-wasip2 — so `echo > file` silently
 # discards the write. Upstream `main` refactored `OpenFile::File` to `Arc<File>` (clone = `Arc::clone`,

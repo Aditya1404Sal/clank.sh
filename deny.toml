@@ -79,13 +79,15 @@ multiple-versions = "warn"
 wildcards = "warn"
 
 [sources]
-# Only crates.io and the two known, deliberately-pinned forks are allowed. Any OTHER git source is a
-# hard fail — this is the enforcement mechanism behind P2-7: pulling in a fork must be an explicit,
-# reviewed decision, not something a stray dependency edit can do silently.
+# Only crates.io and the known, deliberately-pinned git forks below are allowed. Any OTHER git source
+# is a hard fail — this is the enforcement mechanism behind P2-7: pulling in a fork must be an
+# explicit, reviewed decision, not something a stray dependency edit can do silently.
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-git = [
-    "https://github.com/Aditya1404Sal/coreutils",
+    # The coreutils fork is deliberately NOT listed. It is consumed by path from the `fork/coreutils`
+    # submodule (pinned by the superproject's gitlink), so to cargo it is not a git source at all.
+    # Keeping it here would let a stray `git = ".../coreutils"` dependency slip back in unreviewed.
     "https://github.com/Aditya1404Sal/brush",
     # main-rc-1 only: the golemcloud wit-bindgen fork the DEV golem-rust SDK pins for agent codegen.
     "https://github.com/golemcloud/wit-bindgen",

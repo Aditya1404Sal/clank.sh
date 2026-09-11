@@ -1,0 +1,4 @@
+[submodule "fork/coreutils"]
+	path = fork/coreutils
+	url = https://github.com/Aditya1404Sal/coreutils
+	branch = wasip2-oscompat

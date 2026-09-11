@@ -23,6 +23,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true # fork/coreutils — the uutils fork, consumed by path (see Cargo.toml)
       # rustup picks up rust-toolchain.toml (stable + wasm32-wasip2) automatically.
       - uses: Swatinem/rust-cache@v2
       # The library suites — the bulk of the repo's tests (ed25519/Merkle vectors, redirect
@@ -61,6 +63,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true # fork/coreutils — the uutils fork, consumed by path (see Cargo.toml)
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
@@ -94,6 +98,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true # fork/coreutils — the uutils fork, consumed by path (see Cargo.toml)
       - uses: Swatinem/rust-cache@v2
       - name: Install the pinned golem release binary
         # The full `golem` binary (includes the local server) — NOT the client-only
@@ -127,6 +133,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true # fork/coreutils — the uutils fork, consumed by path (see Cargo.toml)
       - uses: Swatinem/rust-cache@v2
       - name: Install the pinned golem release binary
         run: |

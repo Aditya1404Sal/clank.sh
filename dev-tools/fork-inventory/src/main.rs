@@ -51,6 +51,23 @@ struct LockGitPackage {
     resolved_rev: String,
 }
 
+/// One `[submodule]` declared in `.gitmodules`, with the commit this repo pins it to.
+///
+/// A `[patch.crates-io]` entry can redirect a crate by `path` into a submodule's checkout. Cargo
+/// then knows nothing about git — there is no `source` line in `Cargo.lock` — so the pin lives
+/// entirely in git: the superproject's gitlink for the submodule path.
+struct Submodule {
+    /// The checkout path relative to the repo root, e.g. `fork/coreutils`.
+    path: String,
+    url: String,
+    /// The `branch = …` key, if declared. Informational only: it steers `git submodule update
+    /// --remote` and never an ordinary checkout, so it is NOT the pin.
+    branch: Option<String>,
+    /// The full commit hash the superproject's index records for `path`. This IS the pin — what a
+    /// fresh `git submodule update --init` checks out.
+    pinned: String,
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(summary) => {
@@ -82,20 +99,144 @@ fn run() -> Result<String, String> {
                 .to_string(),
         );
     }
+    let submodules = read_submodules(&root)?;
 
-    let markdown = render_markdown(&patches, &lock_pkgs);
+    let markdown = render_markdown(&patches, &lock_pkgs, &submodules);
     fs::write(&forks_md_path, &markdown)
         .map_err(|e| format!("failed to write {}: {e}", forks_md_path.display()))?;
 
     let git_count = patches.iter().filter(|p| p.git.is_some()).count();
-    let path_count = patches.iter().filter(|p| p.path.is_some()).count();
+    let (in_submodule, vendored) = partition_path_entries(&patches, &submodules);
     Ok(format!(
-        "wrote {} — {} [patch.crates-io] entries ({git_count} git-pinned, {path_count} vendored \
-         path), {} git+ packages resolved in Cargo.lock",
+        "wrote {} — {} [patch.crates-io] entries ({git_count} git-pinned, {} in a submodule, {} \
+         vendored path), {} git+ packages resolved in Cargo.lock",
         forks_md_path.display(),
         patches.len(),
+        in_submodule.len(),
+        vendored.len(),
         lock_pkgs.len(),
     ))
+}
+
+/// Every submodule declared in `.gitmodules`, each with the commit this repo pins it to. A missing
+/// `.gitmodules` is not an error: a branch with no submodules simply has none to report.
+fn read_submodules(root: &Path) -> Result<Vec<Submodule>, String> {
+    let gitmodules_path = root.join(".gitmodules");
+    let text = match fs::read_to_string(&gitmodules_path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("failed to read {}: {e}", gitmodules_path.display())),
+    };
+    parse_gitmodules(&text)?
+        .into_iter()
+        .map(|(path, url, branch)| {
+            let pinned = gitlink_commit(root, &path)?;
+            Ok(Submodule {
+                path,
+                url,
+                branch,
+                pinned,
+            })
+        })
+        .collect()
+}
+
+/// Parses `.gitmodules` into `(path, url, branch)`, one per `[submodule "…"]` section.
+///
+/// A section missing `path` or `url` is an error rather than skipped: git itself rejects such a
+/// section, and a silently dropped submodule is exactly the kind of hole this tool exists to close.
+fn parse_gitmodules(text: &str) -> Result<Vec<(String, String, Option<String>)>, String> {
+    #[derive(Default)]
+    struct Section {
+        path: Option<String>,
+        url: Option<String>,
+        branch: Option<String>,
+    }
+
+    let mut sections: Vec<Section> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with("[submodule") {
+            sections.push(Section::default());
+            continue;
+        }
+        // A blank line, a `#`/`;` comment, or a key appearing before any section header.
+        let (Some(section), Some((key, value))) = (sections.last_mut(), line.split_once('='))
+        else {
+            continue;
+        };
+        let value = Some(value.trim().to_string());
+        match key.trim() {
+            "path" => section.path = value,
+            "url" => section.url = value,
+            "branch" => section.branch = value,
+            _ => {}
+        }
+    }
+    sections
+        .into_iter()
+        .map(|s| match (s.path, s.url) {
+            (Some(path), Some(url)) => Ok((path, url, s.branch)),
+            _ => Err("a [submodule] section in .gitmodules is missing `path` or `url`".to_string()),
+        })
+        .collect()
+}
+
+/// The commit the superproject's index records for the submodule at `path` — its gitlink, and so
+/// the actual pin. Read from the index rather than `HEAD` so a regenerated table matches what is
+/// about to be committed; in CI the two are the same thing.
+///
+/// Shells out to `git`: the index is a binary format, and hand-parsing it to avoid a subprocess
+/// would be the wrong trade for a CI helper that only ever runs where git already is.
+fn gitlink_commit(root: &Path, path: &str) -> Result<String, String> {
+    let out = std::process::Command::new("git")
+        .args(["ls-files", "--stage", "--", path])
+        .current_dir(root)
+        .output()
+        .map_err(|e| format!("failed to run `git ls-files` for submodule {path}: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "`git ls-files --stage -- {path}` failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let listing = String::from_utf8_lossy(&out.stdout);
+    parse_gitlink(&listing).ok_or_else(|| {
+        format!(
+            "{path} is declared in .gitmodules but the index holds no gitlink for it \
+             (`git ls-files --stage` printed {listing:?})"
+        )
+    })
+}
+
+/// The hash from a `git ls-files --stage` line, but only for a gitlink (mode `160000`). An ordinary
+/// file or tree at that path means the "submodule" is not one.
+fn parse_gitlink(listing: &str) -> Option<String> {
+    let mut fields = listing.lines().next()?.split_whitespace();
+    let (mode, hash) = (fields.next()?, fields.next()?);
+    (mode == "160000").then(|| hash.to_string())
+}
+
+/// Splits the `path`-redirected `[patch.crates-io]` entries into those pointing inside a declared
+/// submodule (pinned by its gitlink) and the rest (vendored: source committed in-tree).
+fn partition_path_entries<'a>(
+    patches: &'a [PatchEntry],
+    submodules: &[Submodule],
+) -> (Vec<&'a PatchEntry>, Vec<&'a PatchEntry>) {
+    patches
+        .iter()
+        .filter(|p| p.path.is_some())
+        .partition(|p| submodule_for(p, submodules).is_some())
+}
+
+/// The submodule whose checkout contains `entry`'s path, if any. Matches whole path components, so
+/// `fork/coreutils-old/src` is NOT inside `fork/coreutils`.
+fn submodule_for<'s>(entry: &PatchEntry, submodules: &'s [Submodule]) -> Option<&'s Submodule> {
+    let path = entry.path.as_deref()?;
+    submodules.iter().find(|s| {
+        path.strip_prefix(s.path.as_str())
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    })
 }
 
 /// `dev-tools/fork-inventory` -> `dev-tools` -> the workspace root. `CARGO_MANIFEST_DIR` is a
@@ -271,14 +412,19 @@ fn parse_git_source(source: &str, name: &str, version: &str) -> Option<LockGitPa
     })
 }
 
-/// Renders the full `docs/FORKS.md` content. Pure function of its inputs — same `patches` and
-/// `lock_pkgs`, same output, every time; that is what makes the `check-forks` CI step meaningful.
-/// Split into one render function per section (each well under clippy's line-count ceiling)
-/// rather than one long function — the sections don't share intermediate state worth threading
-/// through as anything more than the slices/maps each one actually needs.
-fn render_markdown(patches: &[PatchEntry], lock_pkgs: &[LockGitPackage]) -> String {
+/// Renders the full `docs/FORKS.md` content. Pure function of its inputs — same `patches`,
+/// `lock_pkgs` and `submodules`, same output, every time; that is what makes the `check-forks` CI
+/// step meaningful. (The one input that is not a file, each submodule's gitlink, is read by [`run`]
+/// and passed in here as plain data.) Split into one render function per section (each well under
+/// clippy's line-count ceiling) rather than one long function — the sections don't share
+/// intermediate state worth threading through as anything more than the slices/maps each needs.
+fn render_markdown(
+    patches: &[PatchEntry],
+    lock_pkgs: &[LockGitPackage],
+    submodules: &[Submodule],
+) -> String {
     let git_entries: Vec<&PatchEntry> = patches.iter().filter(|p| p.git.is_some()).collect();
-    let path_entries: Vec<&PatchEntry> = patches.iter().filter(|p| p.path.is_some()).collect();
+    let (submodule_entries, vendored_entries) = partition_path_entries(patches, submodules);
     let declared: HashSet<&str> = patches.iter().map(|p| p.crate_name.as_str()).collect();
     let resolved_by_name: HashMap<&str, &LockGitPackage> =
         lock_pkgs.iter().map(|p| (p.name.as_str(), p)).collect();
@@ -288,13 +434,15 @@ fn render_markdown(patches: &[PatchEntry], lock_pkgs: &[LockGitPackage]) -> Stri
     l.extend(render_summary(
         patches.len(),
         &git_entries,
-        &path_entries,
+        &submodule_entries,
+        &vendored_entries,
         lock_pkgs,
         &declared,
     ));
     l.extend(render_table1(&git_entries, &resolved_by_name));
     l.extend(render_table2(lock_pkgs, &declared));
-    l.extend(render_table3(&path_entries));
+    l.extend(render_table3_submodules(&submodule_entries, submodules));
+    l.extend(render_table4_vendored(&vendored_entries));
     l.extend(render_not_covered());
     format!("{}\n", l.join("\n"))
 }
@@ -314,20 +462,21 @@ fn render_header() -> Vec<String> {
         "This file answers one narrow question: **what is patched, how is each pin anchored, and \
          does it survive a fresh `cargo update`.** For *why* a fork exists — the upstream bug or \
          missing wasip2 primitive that forced it — see [`docs/WASM_CHANGES.md`](WASM_CHANGES.md) \
-         for the Brush and coreutils forks, and [§3](#3-vendored-path-forks) below for the two \
+         for the Brush and coreutils forks, and [§4](#4-vendored-path-forks) below for the \
          native-only vendored ones."
             .to_string(),
         String::new(),
     ]
 }
 
-/// `total_patches` is passed separately from `git_entries`/`path_entries` rather than derived as
-/// their sum: every entry seen in this repo so far has exactly one of `git`/`path` set, but that
-/// is a fact about the data, not a fact this function should assume.
+/// `total_patches` is passed separately rather than derived as the sum of the three entry lists:
+/// every entry seen in this repo so far has exactly one of `git`/`path` set, but that is a fact
+/// about the data, not a fact this function should assume.
 fn render_summary(
     total_patches: usize,
     git_entries: &[&PatchEntry],
-    path_entries: &[&PatchEntry],
+    submodule_entries: &[&PatchEntry],
+    vendored_entries: &[&PatchEntry],
     lock_pkgs: &[LockGitPackage],
     declared: &HashSet<&str>,
 ) -> Vec<String> {
@@ -352,10 +501,20 @@ fn render_summary(
     let mut l = vec!["## Summary".to_string(), String::new()];
     l.push(format!(
         "- `{total_patches}` `[patch.crates-io]` entries in root `Cargo.toml`: `{}` git-pinned, \
-         `{}` vendored path (no git URL).",
+         `{}` redirected into a git submodule, `{}` vendored path (no git URL).",
         git_entries.len(),
-        path_entries.len(),
+        submodule_entries.len(),
+        vendored_entries.len(),
     ));
+    if !submodule_entries.is_empty() {
+        l.push(
+            "- Submodule-backed entries are pinned by this repo's **gitlink** for the submodule, \
+             not by anything in `Cargo.toml` — reproducible from source control alone, *provided \
+             the pinned commit has been pushed* to the submodule's remote. See \
+             [§3](#3-submodule-path-forks)."
+                .to_string(),
+        );
+    }
     if branch_pinned_patch.is_empty() {
         l.push(
             "- All git-pinned `[patch.crates-io]` entries are **rev**-pinned — reproducible from \
@@ -414,7 +573,8 @@ fn render_table1(
         String::new(),
         "Every `[patch.crates-io]` entry that redirects crates.io to a git repository, with the \
          rev actually resolved into `Cargo.lock` alongside the short form written in \
-         `Cargo.toml`. The vendored path-forks (no git URL) are [§3](#3-vendored-path-forks)."
+         `Cargo.toml`. Entries redirected by `path` are in [§3](#3-submodule-path-forks) (into a \
+         git submodule) and [§4](#4-vendored-path-forks) (vendored in-tree)."
             .to_string(),
         String::new(),
         "| Crate | Fork repository | Pin kind | Pinned value | Resolved rev (Cargo.lock) |"
@@ -470,9 +630,61 @@ fn render_table2(lock_pkgs: &[LockGitPackage], declared: &HashSet<&str>) -> Vec<
     l
 }
 
-fn render_table3(path_entries: &[&PatchEntry]) -> Vec<String> {
+fn render_table3_submodules(entries: &[&PatchEntry], submodules: &[Submodule]) -> Vec<String> {
     let mut l = vec![
-        "## 3. Vendored path-forks".to_string(),
+        "## 3. Submodule path-forks".to_string(),
+        String::new(),
+        "Redirected by `path` into a directory that is a **git submodule** of this repo. Cargo \
+         sees only a local path, so there is no `source` line in `Cargo.lock`; the pin is this \
+         repo's **gitlink** for the submodule — the commit recorded in its own tree, read here \
+         from the index. A fresh `git submodule update --init` checks out exactly that commit, \
+         which makes it as reproducible as a `rev` pin, but only once the commit has been pushed \
+         to the submodule's remote: until then every local build passes while CI and fresh clones \
+         cannot fetch it. The submodule's own workspace may also resolve further crates from the \
+         same checkout transitively (a proc-macro the patched crates depend on, say); those are \
+         path packages too and ride the same pin."
+            .to_string(),
+        String::new(),
+    ];
+    if entries.is_empty() {
+        l.push("No `[patch.crates-io]` entry points into a git submodule.".to_string());
+        l.push(String::new());
+        return l;
+    }
+    for sub in submodules {
+        let crates: Vec<&&PatchEntry> = entries
+            .iter()
+            .filter(|e| submodule_for(e, submodules).is_some_and(|s| s.path == sub.path))
+            .collect();
+        if crates.is_empty() {
+            continue;
+        }
+        l.push(format!("### `{}`", sub.path));
+        l.push(String::new());
+        l.push(format!("- **Repository:** {}", sub.url));
+        if let Some(branch) = &sub.branch {
+            l.push(format!(
+                "- **Tracking branch:** `{branch}` — steers `git submodule update --remote` only; \
+                 it is not the pin."
+            ));
+        }
+        l.push(format!("- **Pinned commit (gitlink):** `{}`", sub.pinned));
+        l.push(format!("- **Redirects `{}` crates:**", crates.len()));
+        l.push(String::new());
+        l.push("| Crate | Path |".to_string());
+        l.push("|---|---|".to_string());
+        for entry in crates {
+            let path = entry.path.as_deref().unwrap_or("?");
+            l.push(format!("| `{}` | `{path}` |", entry.crate_name));
+        }
+        l.push(String::new());
+    }
+    l
+}
+
+fn render_table4_vendored(path_entries: &[&PatchEntry]) -> Vec<String> {
+    let mut l = vec![
+        "## 4. Vendored path-forks".to_string(),
         String::new(),
         "Not git dependencies — the fork's source is committed in-tree, and \
          `[patch.crates-io]` points crates.io lookups at a local path instead of a registry or \
@@ -658,10 +870,98 @@ mod tests {
                 resolved_rev: "4407232ead86d9bcbd06cbebd790a52120a4087a".to_string(),
             },
         ];
-        let md = render_markdown(&patches, &lock_pkgs);
+        let md = render_markdown(&patches, &lock_pkgs, &[]);
         assert!(md.contains("`wit-bindgen`"));
         assert!(md.contains("**No**"));
         assert!(md.contains("Branch-pinned in `Cargo.lock`"));
+    }
+
+    #[test]
+    fn parse_gitmodules_reads_path_url_and_branch() {
+        let parsed = parse_gitmodules(
+            "[submodule \"fork/coreutils\"]\n\
+             \tpath = fork/coreutils\n\
+             \turl = https://github.com/Aditya1404Sal/coreutils\n\
+             \tbranch = wasip2-oscompat\n\
+             [submodule \"other\"]\n\
+             \tpath = other\n\
+             \turl = https://example.com/other\n",
+        )
+        .expect("should parse");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].0, "fork/coreutils");
+        assert_eq!(parsed[0].1, "https://github.com/Aditya1404Sal/coreutils");
+        assert_eq!(parsed[0].2.as_deref(), Some("wasip2-oscompat"));
+        assert_eq!(parsed[1].2, None);
+    }
+
+    #[test]
+    fn parse_gitmodules_rejects_a_section_missing_its_url() {
+        assert!(parse_gitmodules("[submodule \"x\"]\n\tpath = x\n").is_err());
+    }
+
+    #[test]
+    fn parse_gitlink_accepts_only_a_gitlink() {
+        let hash = "35ecf24d7caa2202940a18ef61be5037776ecd36";
+        assert_eq!(
+            parse_gitlink(&format!("160000 {hash} 0\tfork/coreutils\n")).as_deref(),
+            Some(hash)
+        );
+        // An ordinary file at the path means it is not a submodule at all.
+        assert_eq!(
+            parse_gitlink(&format!("100644 {hash} 0\tfork/coreutils\n")),
+            None
+        );
+        assert_eq!(parse_gitlink(""), None);
+    }
+
+    fn coreutils_submodule() -> Submodule {
+        Submodule {
+            path: "fork/coreutils".to_string(),
+            url: "https://github.com/Aditya1404Sal/coreutils".to_string(),
+            branch: Some("wasip2-oscompat".to_string()),
+            pinned: "35ecf24d7caa2202940a18ef61be5037776ecd36".to_string(),
+        }
+    }
+
+    fn path_patch(crate_name: &str, path: &str) -> PatchEntry {
+        PatchEntry {
+            crate_name: crate_name.to_string(),
+            git: None,
+            path: Some(path.to_string()),
+            pin_kind: None,
+            pin_value: None,
+        }
+    }
+
+    #[test]
+    fn submodule_for_matches_whole_path_components_only() {
+        let subs = [coreutils_submodule()];
+        assert!(submodule_for(&path_patch("uucore", "fork/coreutils/src/uucore"), &subs).is_some());
+        assert!(submodule_for(&path_patch("x", "fork/coreutils"), &subs).is_some());
+        // A sibling that merely shares the prefix is NOT inside the submodule.
+        assert!(submodule_for(&path_patch("x", "fork/coreutils-old/src"), &subs).is_none());
+        assert!(submodule_for(&path_patch("reedline", "fork/reedline"), &subs).is_none());
+    }
+
+    #[test]
+    fn render_puts_submodule_entries_in_section_3_with_their_gitlink() {
+        let patches = vec![
+            path_patch("uucore", "fork/coreutils/src/uucore"),
+            path_patch("reedline", "fork/reedline"),
+        ];
+        let md = render_markdown(&patches, &[], &[coreutils_submodule()]);
+        assert!(md.contains("`1` redirected into a git submodule, `1` vendored path"));
+        assert!(
+            md.contains("**Pinned commit (gitlink):** `35ecf24d7caa2202940a18ef61be5037776ecd36`")
+        );
+        assert!(md.contains("| `uucore` | `fork/coreutils/src/uucore` |"));
+        // The vendored fork lands in §4, not in the submodule section.
+        let section_4 = md
+            .split("## 4. Vendored path-forks")
+            .nth(1)
+            .expect("§4 is rendered");
+        assert!(section_4.contains("| `reedline` | `fork/reedline/` |"));
     }
 
     #[test]
@@ -681,8 +981,9 @@ mod tests {
             pin_value: "35ecf24".to_string(),
             resolved_rev: "35ecf24d7caa2202940a18ef61be5037776ecd36".to_string(),
         }];
-        let first = render_markdown(&patches, &lock_pkgs);
-        let second = render_markdown(&patches, &lock_pkgs);
+        let subs = [coreutils_submodule()];
+        let first = render_markdown(&patches, &lock_pkgs, &subs);
+        let second = render_markdown(&patches, &lock_pkgs, &subs);
         assert_eq!(first, second);
     }
 }

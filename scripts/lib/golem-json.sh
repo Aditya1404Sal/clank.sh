@@ -98,7 +98,9 @@ golem_assert_fresh_artifact() {
   # missing golem-temp/ must be a silent no-op, not an error. Likewise `find -newer` rather than
   # stat(1), whose mtime flag differs between BSD and GNU.
   while IFS= read -r wasm; do
-    newer="$(find crates utilities \( -name '*.rs' -o -name '*.toml' \) \
+    # `fork` too: the coreutils submodule is a path dependency compiled into the agent, so an edit
+    # there changes the component while leaving every file under crates/ untouched.
+    newer="$(find crates utilities fork \( -name '*.rs' -o -name '*.toml' \) \
                -newer "$wasm" -print -quit 2>/dev/null)"
     [[ -n "$newer" ]] || continue
     stale+=("$wasm")

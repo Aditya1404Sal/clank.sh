@@ -4231,7 +4231,6 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 [[package]]
 name = "uu_cat"
 version = "0.9.0"
-source = "git+https://github.com/Aditya1404Sal/coreutils?rev=35ecf24#35ecf24d7caa2202940a18ef61be5037776ecd36"
 dependencies = [
  "clap",
  "fluent",
@@ -4246,7 +4245,6 @@ dependencies = [
 [[package]]
 name = "uu_cp"
 version = "0.9.0"
-source = "git+https://github.com/Aditya1404Sal/coreutils?rev=35ecf24#35ecf24d7caa2202940a18ef61be5037776ecd36"
 dependencies = [
  "clap",
  "filetime",
@@ -4264,7 +4262,6 @@ dependencies = [
 [[package]]
 name = "uu_cut"
 version = "0.9.0"
-source = "git+https://github.com/Aditya1404Sal/coreutils?rev=35ecf24#35ecf24d7caa2202940a18ef61be5037776ecd36"
 dependencies = [
  "bstr",
  "clap",
@@ -4276,7 +4273,6 @@ dependencies = [
 [[package]]
 name = "uu_env"
 version = "0.9.0"
-source = "git+https://github.com/Aditya1404Sal/coreutils?rev=35ecf24#35ecf24d7caa2202940a18ef61be5037776ecd36"
 dependencies = [
  "clap",
  "fluent",
@@ -4289,7 +4285,6 @@ dependencies = [
 [[package]]
 name = "uu_head"
 version = "0.9.0"
-source = "git+https://github.com/Aditya1404Sal/coreutils?rev=35ecf24#35ecf24d7caa2202940a18ef61be5037776ecd36"
 dependencies = [
  "clap",
  "fluent",
@@ -4301,7 +4296,6 @@ dependencies = [
 [[package]]
 name = "uu_ls"
 version = "0.9.0"
-source = "git+https://github.com/Aditya1404Sal/coreutils?rev=35ecf24#35ecf24d7caa2202940a18ef61be5037776ecd36"
 dependencies = [
  "ansi-width",
  "clap",
@@ -4319,7 +4313,6 @@ dependencies = [
 [[package]]
 name = "uu_mkdir"
 version = "0.9.0"
-source = "git+https://github.com/Aditya1404Sal/coreutils?rev=35ecf24#35ecf24d7caa2202940a18ef61be5037776ecd36"
 dependencies = [
  "clap",
  "fluent",
@@ -4330,7 +4323,6 @@ dependencies = [
 [[package]]
 name = "uu_mv"
 version = "0.9.0"
-source = "git+https://github.com/Aditya1404Sal/coreutils?rev=35ecf24#35ecf24d7caa2202940a18ef61be5037776ecd36"
 dependencies = [
  "clap",
  "fluent",
@@ -4348,7 +4340,6 @@ dependencies = [
 [[package]]
 name = "uu_printf"
 version = "0.9.0"
-source = "git+https://github.com/Aditya1404Sal/coreutils?rev=35ecf24#35ecf24d7caa2202940a18ef61be5037776ecd36"
 dependencies = [
  "clap",
  "fluent",
@@ -4358,7 +4349,6 @@ dependencies = [
 [[package]]
 name = "uu_rm"
 version = "0.9.0"
-source = "git+https://github.com/Aditya1404Sal/coreutils?rev=35ecf24#35ecf24d7caa2202940a18ef61be5037776ecd36"
 dependencies = [
  "clap",
  "fluent",
@@ -4372,7 +4362,6 @@ dependencies = [
 [[package]]
 name = "uu_sleep"
 version = "0.9.0"
-source = "git+https://github.com/Aditya1404Sal/coreutils?rev=35ecf24#35ecf24d7caa2202940a18ef61be5037776ecd36"
 dependencies = [
  "clap",
  "fluent",
@@ -4382,7 +4371,6 @@ dependencies = [
 [[package]]
 name = "uu_sort"
 version = "0.9.0"
-source = "git+https://github.com/Aditya1404Sal/coreutils?rev=35ecf24#35ecf24d7caa2202940a18ef61be5037776ecd36"
 dependencies = [
  "bigdecimal",
  "binary-heap-plus",
@@ -4406,7 +4394,6 @@ dependencies = [
 [[package]]
 name = "uu_tail"
 version = "0.9.0"
-source = "git+https://github.com/Aditya1404Sal/coreutils?rev=35ecf24#35ecf24d7caa2202940a18ef61be5037776ecd36"
 dependencies = [
  "clap",
  "fluent",
@@ -4422,7 +4409,6 @@ dependencies = [
 [[package]]
 name = "uu_tee"
 version = "0.9.0"
-source = "git+https://github.com/Aditya1404Sal/coreutils?rev=35ecf24#35ecf24d7caa2202940a18ef61be5037776ecd36"
 dependencies = [
  "clap",
  "fluent",
@@ -4433,7 +4419,6 @@ dependencies = [
 [[package]]
 name = "uu_touch"
 version = "0.9.0"
-source = "git+https://github.com/Aditya1404Sal/coreutils?rev=35ecf24#35ecf24d7caa2202940a18ef61be5037776ecd36"
 dependencies = [
  "clap",
  "filetime",
@@ -4450,7 +4435,6 @@ dependencies = [
 [[package]]
 name = "uu_tr"
 version = "0.9.0"
-source = "git+https://github.com/Aditya1404Sal/coreutils?rev=35ecf24#35ecf24d7caa2202940a18ef61be5037776ecd36"
 dependencies = [
  "bytecount",
  "clap",
@@ -4462,7 +4446,6 @@ dependencies = [
 [[package]]
 name = "uu_uniq"
 version = "0.9.0"
-source = "git+https://github.com/Aditya1404Sal/coreutils?rev=35ecf24#35ecf24d7caa2202940a18ef61be5037776ecd36"
 dependencies = [
  "clap",
  "fluent",
@@ -4472,7 +4455,6 @@ dependencies = [
 [[package]]
 name = "uu_wc"
 version = "0.9.0"
-source = "git+https://github.com/Aditya1404Sal/coreutils?rev=35ecf24#35ecf24d7caa2202940a18ef61be5037776ecd36"
 dependencies = [
  "bytecount",
  "clap",
@@ -4512,7 +4494,6 @@ dependencies = [
 [[package]]
 name = "uucore"
 version = "0.9.0"
-source = "git+https://github.com/Aditya1404Sal/coreutils?rev=35ecf24#35ecf24d7caa2202940a18ef61be5037776ecd36"
 dependencies = [
  "bigdecimal",
  "bstr",
@@ -4561,7 +4542,6 @@ dependencies = [
 [[package]]
 name = "uucore_procs"
 version = "0.9.0"
-source = "git+https://github.com/Aditya1404Sal/coreutils?rev=35ecf24#35ecf24d7caa2202940a18ef61be5037776ecd36"
 dependencies = [
  "proc-macro2",
  "quote",

@@ -58,11 +58,16 @@ gives the reader a clean EOF. No OS pipes, no task spawning. Native behavior is 
 **WHAT:** `uucore` plus all 18 `uu_*` command crates clank registers as builtins
 (`cat ls wc head sort mkdir rm mv cp env cut tr uniq tail tee touch sleep printf`).
 
-**WHERE:** the **only** `[patch.crates-io]` block in root `Cargo.toml` — see
-[`docs/FORKS.md`](FORKS.md) for the exact pin and resolved rev. The block names 19 crates (`uucore`
-+ the 18 `uu_*`), but `Cargo.lock` resolves a 20th `git+` package from the same fork — `uucore_procs`,
-pulled in transitively because `uucore` itself depends on it. The `clank-core` `Cargo.toml` still
-*names* the plain `"0.9"` versions; the workspace `[patch]` transparently redirects them to the fork.
+**WHERE:** `fork/coreutils`, a git **submodule** tracking the fork's `wasip2-oscompat` branch, and
+the root `Cargo.toml`'s `[patch.crates-io]` block, which redirects 19 crates (`uucore` + the 18
+`uu_*`) to **paths** inside it. [`docs/FORKS.md`](FORKS.md) reports the commit the superproject pins
+it to. A 20th crate, `uucore_procs`, comes from the same checkout transitively (`uucore` depends on
+it); as a path package it carries no `source` line in `Cargo.lock` at all. The `clank-core`
+`Cargo.toml` still *names* the plain `"0.9"` versions; the workspace `[patch]` redirects them.
+
+Until 2026-09-11 the fork was a `git` + `rev` dependency. It moved to a submodule so that a fork fix
+is an edit and a commit in place, rather than a push and a rev bump before clank can even build it.
+That changes the release order — see [§8](#8-maintenance-checklist).
 
 **WHY wasip2 forced it:** upstream `uucore 0.9` uses the **unstable `wasip2` std feature** and fails
 to build on the target at all. The fork adds:
@@ -71,7 +76,7 @@ to build on the target at all. The fork adds:
 - a **`set_permissions` skip under wasi** in `uu_cp` (wasip2 has no POSIX mode bits to copy).
 
 **WHY every `uu_*` crate must be patched, not just `uucore`** (the rationale is spelled out in the
-`Cargo.toml` comment, lines 19–22): the published `uu_*` command crates only *share* the patched
+`Cargo.toml` comment above the `[patch]` block): the published `uu_*` command crates only *share* the patched
 `uucore` transitively. A fix that lives **inside a command crate** (e.g. the `uu_cp` `set_permissions`
 skip) is only picked up when that command crate *itself* is sourced from the fork. Patching only
 `uucore` would leave `cp` on the crates.io copy without the wasi fix. So each of the 18 command
@@ -253,22 +258,33 @@ For completeness, so a maintainer doesn't go hunting for phantom patches:
 
 **The coreutils and brush forks live in a single maintainer's personal GitHub account**
 (`Aditya1404Sal/coreutils`, `Aditya1404Sal/brush`). A delete, a rename, a force-push that drops the
-pinned object, or an account change breaks **every build of clank on every machine without a warm git
-cache** — CI, a fresh clone, a `golem deploy`. Cargo fails to resolve; it does not fall back.
+pinned object, or an account change breaks **every build of clank on every machine that does not
+already hold the source** — CI, a fresh clone, a `golem deploy`. For brush, cargo fails to resolve;
+for coreutils, `git submodule update` fails to fetch. Neither falls back.
 
 Two things reduce that today, and one does not:
 
-- **Reduces it:** both are pinned to an exact `rev`, not a branch. A branch pin silently advances to
-  branch-tip on a fresh resolve (audit P2-7); a rev pin is reproducible from source control alone,
-  and a force-push that *keeps* the object still resolves. ([`docs/FORKS.md`](FORKS.md) now reports
-  pin kind per crate, so a branch pin cannot hide — it currently flags four, all `wit-bindgen`,
-  arriving transitively through the dev SDK.)
-- **Reduces it:** `Cargo.lock` records the full 40-char hash, so the exact object is named even where
-  `Cargo.toml` abbreviates.
-- **Does NOT reduce it:** nothing mirrors these repositories. The `Cargo.toml` comment says "mirror
-  the fork so a delete/force-push can't break the build" — an instruction that has not been carried
-  out. **This is the single highest-leverage supply-chain fix available to this project**, and it
-  costs one `git push --mirror` per fork to an org-owned remote plus a one-line URL change.
+- **Reduces it:** both are pinned to an exact commit, not a branch — brush by a `rev` in
+  `Cargo.toml`, coreutils by the superproject's gitlink for the `fork/coreutils` submodule. A branch
+  pin silently advances to branch-tip on a fresh resolve (audit P2-7); an exact pin is reproducible
+  from source control alone, and a force-push that *keeps* the object still resolves.
+  ([`docs/FORKS.md`](FORKS.md) reports pin kind per crate, so a branch pin cannot hide — it
+  currently flags four, all `wit-bindgen`, arriving transitively through the dev SDK.)
+- **Reduces it:** both pins name the full 40-char hash — brush's in `Cargo.lock`, coreutils' in the
+  gitlink — so the exact object is named even where `Cargo.toml` abbreviates.
+- **Does NOT reduce it:** nothing mirrors these repositories. The `Cargo.toml` comment used to say
+  "mirror the fork so a delete/force-push can't break the build" — an instruction that was never
+  carried out. **This is the single highest-leverage supply-chain fix available to this project**,
+  and it costs one `git push --mirror` per fork to an org-owned remote plus a one-line URL change
+  (brush's `git =` URL in `Cargo.toml`, coreutils' `url` in `.gitmodules`).
+
+**One risk the submodule adds.** A `git` + `rev` dependency cannot name a commit that is not on
+GitHub: cargo fails to fetch it on the author's own machine, immediately. A gitlink *can* — the
+submodule's working tree already holds the commit locally, so every local build and test passes, and
+the failure only appears later and remotely, when CI or a fresh clone runs `git submodule update`
+against a remote that has never heard of it. What closes it is ordering, not tooling: push the fork
+branch before pushing the clank commit that moves the gitlink ([§8](#8-maintenance-checklist)).
+CI's checkout catches a violation, but only after the fact.
 
 The two vendored forks (`reedline-fork/`, `crossterm-fork/`) have none of this exposure — the source
 is in-tree and committed. Their cost is the opposite: nothing tells you when upstream moves, so they
@@ -320,8 +336,14 @@ git push --force-with-lease origin clank-connect-patch     # origin ONLY, never 
 
 When bumping any fork:
 
-1. **Bump the `rev`, never point at a branch** (audit P2-7). `check-forks` reports pin kind, so a
+1. **Pin an exact commit, never a branch** (audit P2-7). `check-forks` reports pin kind, so a
    branch pin is visible in review rather than buried in `Cargo.lock`.
+   - **brush** (a `git` dependency): bump the `rev` in root `Cargo.toml`.
+   - **coreutils** (the `fork/coreutils` submodule): commit inside `fork/coreutils`, **push the fork
+     branch first**, then `git add fork/coreutils` in clank to move the gitlink, and commit that.
+     Pushing clank first leaves a gitlink naming a commit GitHub does not have — every local build
+     passes, while CI and every fresh clone fail to fetch it
+     ([§6](#6-the-supply-chain-risk-that-applies-to-every-git-fork)).
 2. Regenerate the inventory: `cargo run -p fork-inventory` (CI's `check-forks` fails otherwise), and
    update the *rationale* here if the reason for the fork changed.
 3. `cargo clean` first if `target/` holds wasm artifacts — a stale one produces "failed to parse
