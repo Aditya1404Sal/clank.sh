@@ -64,6 +64,10 @@ DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/clank-golem-probe.XXXXXX")"
 PORTS_FILE="$DATA_DIR/ports.json"
 SERVER_LOG="$DATA_DIR/server.log"
 SERVER_PID=""
+# The shared invoke-JSON decoder + the artifact-freshness check.
+GOLEM_JSON_LOG="$SERVER_LOG"
+# shellcheck source=lib/golem-json.sh
+. "$SCRIPT_DIR/lib/golem-json.sh"
 
 c_grn=$'\033[32m'; c_red=$'\033[31m'; c_dim=$'\033[2m'; c_cyn=$'\033[36m'; c_rst=$'\033[0m'
 note() { echo "${c_dim}··${c_rst} $*"; }
@@ -115,6 +119,9 @@ if [[ -n "$existing" ]]; then
 fi
 
 step "Building the wasm component (golem build)"
+# See golem-json.sh: `golem build` misses path-dependency edits, so a probe can otherwise interrogate
+# a binary that predates the change you are probing for.
+golem_assert_fresh_artifact
 if ! golem -Y build 2>&1 | tail -4; then
   echo "${c_red}golem build failed${c_rst}" >&2
   exit 1
@@ -143,30 +150,16 @@ if ! golem -Y deploy 2>&1 | tail -5; then
   exit 1
 fi
 
-# Under `golem:agent@2.0.0` the CLI's JSON key is `resultJson` (not `result_json`) and the record
-# arrives as a POSITIONAL schema-value-tree — field names live in the type graph, not the value, so
-# `.value.stdout` does not exist. Fields come back in declaration order as tagged `{kind, value}`
-# nodes: [0]=stdout [1]=stderr [2]=exit_code. Both mismatches fail SILENTLY (the grep matches no
-# line, jq finds no path), so every command reads back an empty string and the agent looks dead
-# when it is fine — which is exactly how this script misreported a healthy agent. Declaration order
-# in `clank_agent.rs`'s `EvalResult` is load-bearing here, as it is in golem-e2e.sh.
-EVAL_REMAP='.resultJson.value.value.fields as $f
-  | { stdout: $f[0].value, stderr: $f[1].value, exit_code: $f[2].value }'
-
 # --- invoke `eval` for a command and print its stdout+stderr merged as text (the agent's single
-#     entry point; this flattens the structured EvalResult to what a terminal would show) ---
-run_line() {
-  local cmd="$1"
-  golem agent invoke -q --format json "$AGENT_ID" eval "\"${cmd//\"/\\\"}\"" 2>>"$SERVER_LOG" \
-    | grep '"resultJson"' | tail -1 \
-    | jq -r "$EVAL_REMAP | (.stdout // \"\") + (.stderr // \"\")" 2>/dev/null
-}
+#     entry point; this flattens the structured EvalResult to what a terminal would show). The
+#     decode lives in `scripts/lib/golem-json.sh` — this script carried its own copy and was found
+#     reading the wrong wire shape, printing blank for a perfectly healthy agent. ---
+run_line() { golem_run_line "$@"; }
 
 # --- invoke eval for a command and return the structured EvalResult JSON (stdout/stderr/exit split) ---
 eval_json() {
   local cmd="$1"
-  golem agent invoke -q --format json "$AGENT_ID" eval "\"${cmd//\"/\\\"}\"" 2>>"$SERVER_LOG" \
-    | grep '"resultJson"' | tail -1 | jq -c "$EVAL_REMAP" 2>/dev/null
+  golem_eval_json eval "\"${cmd//\"/\\\"}\""
 }
 
 step "Probing ${#CMDS[@]} command(s) on agent $AGENT_ID"

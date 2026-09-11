@@ -93,6 +93,13 @@ trap 'exit 143' TERM
 trap cleanup EXIT
 
 step "Building the wasm component (golem build)"
+# See scripts/lib/golem-json.sh: `golem build` tracks the component directory, not its path
+# dependencies, so an edit to clank-core/clank-embed would otherwise run the whole corpus against a
+# wasm that predates it. (Only the freshness check is needed here — the decode is the Rust
+# backend's, in clank-conformance/src/backend/golem.rs.)
+# shellcheck source=lib/golem-json.sh
+. "$SCRIPT_DIR/lib/golem-json.sh"
+golem_assert_fresh_artifact
 "$GOLEM" -Y build 2>&1 | tail -4 || { warn "golem build failed"; exit 1; }
 
 port_pids() { lsof -tiTCP:"$ROUTER_PORT" -sTCP:LISTEN 2>/dev/null; }

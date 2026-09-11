@@ -5,7 +5,8 @@
 # Starts a throwaway local Golem server, builds and deploys the `clank:agent`
 # component, invokes `eval` for the README file-management command set,
 # asserts each returns the expected output, then tears the server down and
-# wipes its data dir. Exits non-zero on the first failed assertion.
+# wipes its data dir. Every assertion runs; the script exits non-zero at the end
+# if any of them failed (an early exit would hide the rest of the surface).
 #
 # Usage:   scripts/golem-e2e.sh [--keep] [--takeover] [--with-llm] [--with-grease] [--with-mcp]
 #   --keep         leave the server running and the data dir on disk after the run
@@ -98,6 +99,10 @@ DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/clank-golem-e2e.XXXXXX")"
 PORTS_FILE="$DATA_DIR/ports.json"
 SERVER_LOG="$DATA_DIR/server.log"
 SERVER_PID=""
+# The shared invoke-JSON decoder + the artifact-freshness check.
+GOLEM_JSON_LOG="$SERVER_LOG"
+# shellcheck source=lib/golem-json.sh
+. "$SCRIPT_DIR/lib/golem-json.sh"
 # The local grease fixture registry (only started under --with-grease). The agent reaches it over
 # host localhost.
 FIXTURE_PID=""
@@ -165,20 +170,10 @@ trap cleanup EXIT INT TERM
 # that to `stdout + stderr` — exactly what the old `run_line` method used to return directly — so every
 # text-comparison assertion below is unchanged.
 # `golem agent invoke --format json` prints invocation markers + any agent STDERR stream lines to
-# stdout FIRST, then the result document as the final line, so we keep only the line carrying
-# `resultJson`, take the last, and concatenate the two streams straight into jq (never `echo`ing the
-# payload, which would let a shell re-interpret the `\n` escapes in the JSON and corrupt it).
-#
-# SPIKE (spike/dev-golem-sdk): reads the POSITIONAL record — [0]=stdout [1]=stderr — under the
-# camelCase `resultJson` key. Same break as `eval_json` below; see the long note there.
-run_line() {
-  local cmd="$1"
-  # ONE positional per function arg; the arg is a WIT string literal → wrap in quotes.
-  golem agent invoke -q --format json "$AGENT_ID" eval "\"${cmd//\"/\\\"}\"" 2>>"$SERVER_LOG" \
-    | grep '"resultJson"' \
-    | tail -1 \
-    | jq -r '.resultJson.value.value.fields as $f | ($f[0].value // "") + ($f[1].value // "")' 2>/dev/null
-}
+# stdout FIRST, then the result document as the final line — so the shared decoder keeps only the
+# result-bearing line, takes the last, and pipes it straight into jq (never `echo`ing the payload,
+# which would let a shell re-interpret the `\n` escapes in the JSON and corrupt it).
+run_line() { golem_run_line "$@"; }
 
 expect() {
   local desc="$1" cmd="$2" want="$3"
@@ -200,34 +195,10 @@ expect() {
 # (so callers can pull .stdout / .exit_code / .pending_prompt with jq).
 # `$1` = method, remaining args = WIT arg literals.
 #
-# SPIKE (spike/dev-golem-sdk): two things changed under `golem:agent@2.0.0` and BOTH had to move here,
-# or every single assertion reads back an empty string (see DEV_SDK_CHANGES.md §3):
-#
-#   1. The CLI's JSON key is now `resultJson`, not `result_json`. The old `grep '"result_json"'`
-#      matched no line at all, so this function returned nothing for every call.
-#   2. The record arrives as a POSITIONAL schema-value-tree: field names live in the type graph, not
-#      the value, so `.value.stdout` does not exist. Fields come back in declaration order as tagged
-#      `{kind, value}` nodes — [0]=stdout [1]=stderr [2]=exit_code [3]=pending_prompt — which we remap
-#      back to names here. Declaration order in `clank_agent.rs`'s `EvalResult` / `PendingPromptView`
-#      is therefore load-bearing for this script.
-EVAL_REMAP='.resultJson.value.value.fields as $f
-  | { stdout: $f[0].value,
-      stderr: $f[1].value,
-      exit_code: $f[2].value,
-      pending_prompt:
-        (if $f[3].value.inner == null then null
-         else ($f[3].value.inner.value.fields as $p
-               | { question: $p[0].value,
-                   choices: (if $p[1].value.inner == null then null
-                             else [ $p[1].value.inner.value.elements[].value ] end) })
-         end) }'
-eval_json() {
-  local method="$1"; shift
-  golem agent invoke -q --format json "$AGENT_ID" "$method" "$@" 2>>"$SERVER_LOG" \
-    | grep '"resultJson"' \
-    | tail -1 \
-    | jq -c "$EVAL_REMAP" 2>/dev/null
-}
+# The decode itself lives in `scripts/lib/golem-json.sh` — one implementation, shared with
+# golem-probe.sh and clank-repl.sh, accepting both the released and dev-SDK wire shapes. It used to
+# be copy-pasted here and drifted in every copy; see that file's header for what that cost.
+eval_json() { golem_eval_json "$@"; }
 
 # Assert a jq filter over an EvalResult JSON object yields the expected value.
 #   expect_eval <desc> <result-json> <jq-filter> <want>
@@ -268,6 +239,10 @@ expect_contains() {
 # 1. Build + start the server
 # ============================================================================
 step "Building the wasm component (golem build)"
+# `golem build` tracks the component DIRECTORY, not its path dependencies, so an edit to clank-core
+# or clank-embed leaves it reporting [UP-TO-DATE] while deploying a stale wasm — and every assertion
+# below would then describe code that was never compiled. Drop a stale artifact first.
+golem_assert_fresh_artifact
 # -Y auto-confirms the AGENTS.md manifest-section update (fails otherwise in a non-interactive
 # shell); we restore AGENTS.md in teardown so the tree isn't left dirty.
 if ! golem -Y build 2>&1 | tail -4; then

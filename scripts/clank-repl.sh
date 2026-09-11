@@ -74,6 +74,9 @@ if [[ $DEPLOY_MODE -eq 1 ]]; then
 else
   SESSION_LOG="$(mktemp "${TMPDIR:-/tmp}/clank-repl-log.XXXXXX")"
 fi
+# The shared invoke-JSON decoder + the artifact-freshness check.
+# shellcheck source=lib/golem-json.sh
+. "$SCRIPT_DIR/lib/golem-json.sh"
 
 # --- teardown: tear down the throwaway server (deploy mode) / clean the temp log (attach mode) ---
 AGENTS_BACKUP=""
@@ -127,6 +130,9 @@ if [[ $DEPLOY_MODE -eq 1 ]]; then
   fi
 
   step "Building the wasm component (golem build)"
+  # See golem-json.sh: `golem build` misses path-dependency edits, so this can otherwise hand you a
+  # REPL against a binary that predates your change.
+  golem_assert_fresh_artifact
   golem -Y build 2>&1 | tail -4 || { warn "golem build failed"; exit 1; }
 
   step "Starting throwaway golem server (data dir: $DATA_DIR)"
@@ -161,12 +167,14 @@ fi
 # Render a bash string as a WIT string literal argument (escape embedded quotes, like the e2e/probe).
 wit_str() { printf '"%s"' "${1//\"/\\\"}"; }
 
-# Invoke an agent method and echo the structured EvalResult object (.result_json.value). The JSON
-# result document is the LAST result_json line (invocation markers/log lines print first).
+# Invoke an agent method and echo the structured EvalResult object.
+#
+# The decode lives in `scripts/lib/golem-json.sh`. This function used to carry its own copy, reading
+# ONLY the released CLI's `result_json` + named-field shape — so against the dev CLI it matched
+# nothing, returned empty for every line, and printed "no result from the agent — is clank deployed?"
+# at a perfectly healthy agent. The shared decoder accepts both shapes.
 invoke() {
-  local method="$1"; shift
-  golem agent invoke -q --format json "$AGENT_ID" "$method" "$@" 2>>"$SESSION_LOG" \
-    | grep '"result_json"' | tail -1 | jq -c '.result_json.value // empty' 2>/dev/null
+  GOLEM_JSON_LOG="$SESSION_LOG" golem_eval_json "$@"
 }
 
 # Print an EvalResult's stdout/stderr, and surface a non-zero exit. stdout is emitted verbatim (it
