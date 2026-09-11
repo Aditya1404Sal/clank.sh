@@ -99,9 +99,12 @@ golem_assert_fresh_artifact() {
   # stat(1), whose mtime flag differs between BSD and GNU.
   while IFS= read -r wasm; do
     # `fork` too: the coreutils submodule is a path dependency compiled into the agent, so an edit
-    # there changes the component while leaving every file under crates/ untouched.
-    newer="$(find crates utilities fork \( -name '*.rs' -o -name '*.toml' \) \
-               -newer "$wasm" -print -quit 2>/dev/null)"
+    # there changes the component while leaving every file under crates/ untouched. `target` dirs
+    # are pruned: the fork is its own cargo workspace, and building ITS tests writes generated
+    # sources under fork/coreutils/target/ that postdate any agent wasm — which would condemn a
+    # perfectly fresh artifact every time someone ran them.
+    newer="$(find crates utilities fork -path '*/target' -prune -o \
+               \( -name '*.rs' -o -name '*.toml' \) -newer "$wasm" -print -quit 2>/dev/null)"
     [[ -n "$newer" ]] || continue
     stale+=("$wasm")
     [[ -n "$culprit" ]] || culprit="$newer"
