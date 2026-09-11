@@ -1,10 +1,9 @@
 //! The replay-safe `/var/log` sink for the Golem agent.
 //!
 //! `clank-core` defines the [`LogSink`](clank_core::logging::LogSink) seam and a default sink that
-//! **appends** directly to the log file. Appends are correct on native but NOT on the Golem agent: the
-//! worker filesystem is ephemeral local disk rebuilt from the Initial File System, and Golem replays the
-//! durable oplog by *re-running the guest code* — a raw `std::fs` append is a local side effect Golem
-//! neither records nor skips, so a crash-then-recovery would re-run the append and duplicate the line.
+//! **appends** directly to the log file. Appends are correct on native but NOT on the Golem agent,
+//! where replay re-runs the guest code and so re-runs the append, duplicating the line. See
+//! `docs/architecture/replay-safety.md` for why the filesystem behaves that way.
 //!
 //! This sink is replay-safe by using **idempotent whole-file writes** instead of appends (the mitigation
 //! the durability model recommends for raw side effects). The sink lives on the durable `Session` and

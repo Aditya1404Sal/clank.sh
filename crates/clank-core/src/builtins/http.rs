@@ -1,12 +1,10 @@
 //! `curl`/`wget`: outbound-HTTP shell commands, backed by the [`wcurl`]/[`waget`] crates.
 //!
-//! Unlike file/text builtins, these are NOT Brush `SimpleCommand`s. Their HTTP is async and — on the
-//! Golem agent — a WASI-HTTP future only completes under the executor that performs the
-//! component-model wait for it (the one golem-rust drives agent methods with). Inside a Brush
-//! builtin, execution is nested under clank's own tokio `rt.block_on` (in `Session::execute`);
-//! tokio would poll such a future once and then park on its own reactor, which never wakes it —
-//! the "Wall C" shape. So HTTP must be `.await`-ed at the `Session` layer, one level under the
-//! SDK's executor.
+//! Unlike file/text builtins, these are NOT Brush `SimpleCommand`s. Their HTTP is async, and a
+//! WASI-HTTP future polled inside a Brush builtin — nested under clank's own tokio `rt.block_on` —
+//! is never woken, because nothing there performs the component-model wait. So HTTP must be
+//! `.await`-ed at the `Session` layer, one level under the SDK's executor. This is "Wall C"; see
+//! `docs/architecture/wall-c.md` for the full shape and its consequences for pipelines.
 //!
 //! They are therefore dispatched from `Session::run_command` (the shared execution choke point,
 //! reached by both the direct-allow path and the post-authorization-approval path). This module owns

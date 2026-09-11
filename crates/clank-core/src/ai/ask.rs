@@ -7,7 +7,8 @@
 //!
 //! Like `curl`/`wget`, `ask` is NOT a Brush `SimpleCommand`: its LLM call must run at the `Session`
 //! layer where the Golem durable-execution context is live (a Brush builtin runs under clank's nested
-//! `rt.block_on`, the "Wall C" shape). So `ask` is intercepted in `Session::eval_line`/`run_command`.
+//! `rt.block_on`, the "Wall C" shape — `docs/architecture/wall-c.md`). So `ask` is intercepted in
+//! `Session::eval_line`/`run_command`, and works as a pipeline TAIL only.
 //!
 //! The LLM transport is a Golem host dependency (`golem-ai-llm-anthropic`, which links only in the
 //! wasm/agent build), but `clank-core` is dual-target (native + wasm) and must not pull it in. So

@@ -13,6 +13,9 @@
 //! owned-shell builtins), so a tokio runtime is required to run it at all — `wit_bindgen::spawn`
 //! cannot substitute for that. Pipelines and `$(...)` DO work on wasm: the Brush fork replaces the
 //! OS-pipe + spawn model with an in-memory `OpenFile::Stream` pipe run inline-sequentially ("Wall C").
+//! That nested runtime is also why async work is dispatched from `run_command` rather than from a
+//! Brush builtin — see `docs/architecture/wall-c.md`. The virtual `/bin`, `/proc` and `/mnt/mcp`
+//! namespaces this dispatch resolves against are `docs/architecture/resolution-surface.md`.
 
 use crate::builtins::{promptuser, typecmd};
 use crate::{dispatch_context, Flow, Transcript};

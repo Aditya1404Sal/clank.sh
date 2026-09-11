@@ -10,6 +10,9 @@
 //! supported on this platform". These stubs replace that with the README's honest-constraints
 //! answer: a clear message naming the actual limitation and exit 1. (On native they also shadow
 //! Brush's unix `kill` builtin, keeping kill semantics synthetic and identical on both targets.)
+//!
+//! Which shapes DO work — curl/wget as pipeline head, `ask` as pipeline tail — and why only those:
+//! `docs/architecture/wall-c.md`.
 
 use std::io::Write;
 

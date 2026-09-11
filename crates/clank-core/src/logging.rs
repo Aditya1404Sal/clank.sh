@@ -8,21 +8,17 @@
 //!
 //! ## Replay safety — why writes go through a [`LogSink`] seam
 //!
-//! A file **append** is NOT replay-safe on a Golem agent. The worker filesystem is ephemeral local disk
-//! rebuilt from the Initial File System on every start; Golem replays the durable oplog by **re-running
-//! the guest code**, and a raw `std::fs` append is a local side effect that Golem neither records to the
-//! oplog nor skips on replay — so a crash-then-recovery would re-run the append and **duplicate the
-//! line**. (Whole-file `std::fs::write`, as grease uses for its store, is idempotent and therefore safe;
-//! only append is the hazard. See [[golem-fs-append-replay-unsafe]].)
+//! A file **append** is NOT replay-safe on a Golem agent: the oplog is replayed by re-running the
+//! guest code, so a crash-then-recovery re-runs the append and **duplicates the line**. Whole-file
+//! `std::fs::write` is idempotent and therefore safe. Full explanation, including why the agent's
+//! sink rewrites rather than gating on live-vs-replay: `docs/architecture/replay-safety.md` (and
+//! [[golem-fs-append-replay-unsafe]]).
 //!
 //! So writes route through a [`LogSink`] installed per-line (the thread-local pattern used by
-//! `proctable`/`sysprompt`). On native there is no replay, so the [default sink](DefaultLogSink) appends
-//! directly via [`write_line`]. On the Golem agent, `clank-agent` injects a `DurableLogSink` that
-//! accumulates each log in an in-memory buffer (deterministically rebuilt by replay, never seeded from
-//! disk) and rewrites the whole file with an **idempotent `std::fs::write`** — so replay converges to the
-//! identical file with no duplicated lines. (golem-rust does not expose the durable-execution `is-live`
-//! bit publicly, so the whole-file-rewrite approach is used rather than a live-vs-replay gate.) If no
-//! sink is installed (off-session reads), writes are dropped.
+//! `proctable`/`sysprompt`). On native there is no replay, so the [default sink](DefaultLogSink)
+//! appends directly via [`write_line`]. On the Golem agent, `clank-agent` injects a `DurableLogSink`
+//! that buffers in memory and rewrites the whole file. If no sink is installed (off-session reads),
+//! writes are dropped.
 //!
 //! The log directory is overridable via `CLANK_LOG_DIR` (mirrors the `CLANK_GREASE_*` seams) so tests
 //! can assert on a temp dir.

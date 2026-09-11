@@ -1,8 +1,9 @@
 //! Native `clank` binary entrypoint.
 //!
 //! On native targets this drives the async `std::io` shell loop (Brush is async) on a tokio
-//! runtime. On wasm the entrypoint is the exported `wasi:cli/run` (see `lib.rs`/`wasm.rs`),
-//! not `main`, so `main` is empty there; the canonical wasm build is `--lib`.
+//! runtime, via `clank_native::run`. There is no wasm counterpart to this binary: the agent is a
+//! component (`crates/clank-agent`) whose entrypoints are its exported agent methods, not a
+//! `wasi:cli/run` command. `main` is empty on wasm purely so the crate still builds there.
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() {

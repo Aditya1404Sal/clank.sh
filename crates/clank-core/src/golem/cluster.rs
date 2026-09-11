@@ -120,8 +120,10 @@ fn parse_agent(args: &[String]) -> crate::golem::error::Result<GolemCommand> {
             Ok(GolemCommand::AgentStatus { agent_type, ctor })
         }
         Some(other) => Err(invalid(format!(
+            // `new` is deliberately NOT listed: there is no arm for it below, so listing it made
+            // `golem agent new` fail with a hint suggesting the exact word just typed.
             "golem agent: unknown subcommand '{other}' \
-             (try: list, new, oplog, status, interrupt, resume)"
+             (try: list, oplog, status, interrupt, resume)"
         ))),
         None => Err(invalid("golem agent: needs a subcommand".to_string())),
     }

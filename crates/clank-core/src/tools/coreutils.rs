@@ -9,7 +9,10 @@
 //! `__wasilibc_fd_renumber` to staging/capture files (stdin staged in, stdout and stderr captured
 //! to separate files and replayed into Brush's stdout/stderr so the streams stay distinct).
 //!
-//! `uucore` is patched for `wasm32-wasip2` via `[patch.crates-io]` in the workspace root.
+//! `uucore` is patched for `wasm32-wasip2` via `[patch.crates-io]` in the workspace root. Why the
+//! commands are compiled in at all, and why fds are rebound rather than `dup2`'d, both follow from
+//! the platform: see `docs/architecture/wasip2-constraints.md`. The patch set itself is inventoried
+//! in `docs/FORKS.md` (generated — see `dev-tools/fork-inventory`).
 
 #![allow(clippy::similar_names)] // argv/args/arg-style locals are inherent to arg parsing here
 
