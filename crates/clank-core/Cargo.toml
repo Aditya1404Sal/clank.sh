@@ -13,7 +13,8 @@ workspace = true
 # Pure rlib (R1): the native `clank` binary lives in clank-cli, and the wasm component is
 # clank-agent — nothing consumed a cdylib artifact from this crate (verified against golem.yaml,
 # scripts, and CI), so the standalone `wasi:cli/run` REPL component artifact is retired with it.
-# The `repl-driver` feature and `mod wasm` remain for a dependent that wants to export the driver.
+# The driver itself (`mod wasm`, gated behind a `repl-driver` feature no crate in the workspace
+# enabled) was deleted with it — see git history to resurrect it.
 crate-type = ["rlib"]
 
 # All-target deps: Brush (the shell interpreter) now runs on both native and wasm. `nix` is
@@ -95,20 +96,6 @@ sha2 = "0.11.0"
 ed25519-dalek = { version = "2", default-features = false }
 # base64 decoding for the signature + public key (already a transitive dep; pure Rust, dual-target).
 base64 = "0.22"
-
-[features]
-# The `wasi:cli/run` REPL driver (`mod wasm` + its p3 bindings). On by default so the native
-# binary and the standalone wasm REPL component build unchanged. Dependents that only need the
-# `Session` core (the Golem agent) turn it off with `default-features = false`, so this crate links
-# as a plain rlib without exporting `wasi:cli/run`.
-default = ["repl-driver"]
-repl-driver = ["dep:wasip3", "dep:wit-bindgen", "dep:futures"]
-
-# Wasm-only: the p3 component bindings and stream I/O. Optional — only pulled in by `repl-driver`.
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-wasip3 = { workspace = true, optional = true }
-wit-bindgen = { workspace = true, optional = true }
-futures = { workspace = true, optional = true }
 
 # Native-only: a multi-thread tokio runtime (Runtime::new) and temp-file output capture.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

@@ -97,7 +97,7 @@ session_stub!(GolemStub, "golem");
 pub(crate) fn builtins<SE: ShellExtensions>() -> Vec<(String, Registration<SE>)> {
     // The help shim makes a nested `$(curl --help)` print the manifest help (exit 0) instead of
     // the stub's not-usable-here error — help never depends on where it's asked from.
-    use crate::builtins::helpshim::simple_builtin_with_help;
+    use crate::helpshim::simple_builtin_with_help;
     vec![
         ("curl".into(), simple_builtin_with_help::<CurlStub, SE>()),
         ("wget".into(), simple_builtin_with_help::<WgetStub, SE>()),

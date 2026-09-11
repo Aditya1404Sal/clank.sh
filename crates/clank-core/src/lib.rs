@@ -2,7 +2,10 @@
 //!
 //! A long-running, terminal-like read/eval/print loop that runs on two targets:
 //!
-//! - **wasm32** — a `wasi:cli/run` component (WASI 0.3, async p3 streams). See [`wasm`].
+//! - **wasm32** — the Golem agent (`clank-agent`) drives [`session::Session`] directly over its own
+//!   `golem:agent` export; there is no standalone `wasi:cli/run` component built from this crate
+//!   (that REPL driver was retired — see the crate's git history — since nothing in the workspace
+//!   built or linked it).
 //! - **native** — an ordinary executable over blocking `std::io`. This crate stays target-agnostic
 //!   for that platform too: the REPL loop and every `reqwest`-backed provider live in the separate
 //!   `clank-native` crate, which injects them into [`session::Session`].
@@ -27,6 +30,10 @@ pub mod golem;
 
 pub use error::ShellError;
 pub mod grease;
+// The `--help` shim for hand-rolled Brush `SimpleCommand`s ([`helpshim::WithHelp`]). Generic
+// registration plumbing consumed from `tools`, `runtime`, `ai`, and `builtins` alike, not a builtin
+// itself — kept crate-private, alongside `registry`, rather than under any one of those.
+mod helpshim;
 pub mod logging;
 pub mod manifest;
 pub mod mcp;
@@ -34,12 +41,6 @@ pub mod registry;
 pub mod runtime;
 pub mod session;
 mod tools;
-
-// The `wasi:cli/run` REPL driver. Gated behind the `repl-driver` feature so that dependents which
-// only want the shared `Session` core (e.g. the Golem agent crate, which exports its own
-// `golem:agent` world) can link this crate without re-emitting a clashing `wasi:cli/run` export.
-#[cfg(all(target_arch = "wasm32", feature = "repl-driver"))]
-mod wasm;
 
 /// The interactive prompt written before each line is read.
 pub const PROMPT: &[u8] = b"clank$ ";

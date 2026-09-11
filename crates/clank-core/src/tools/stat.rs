@@ -307,7 +307,7 @@ impl SimpleCommand for Stat {
 }
 
 pub(crate) fn builtins<SE: ShellExtensions>() -> Vec<(String, Registration<SE>)> {
-    use crate::builtins::helpshim::simple_builtin_with_help;
+    use crate::helpshim::simple_builtin_with_help;
     vec![("stat".into(), simple_builtin_with_help::<Stat, SE>())]
 }
 

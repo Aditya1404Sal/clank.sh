@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use crate::authz::{self, AuthzState, Decision};
 use crate::builtins::promptuser::{AnswerInput, PendingPrompt, Resolution};
 use crate::registry::CommandRegistry;
-use crate::runtime::process::ProcessKind;
+use crate::runtime::proctable::ProcessKind;
 use crate::runtime::proctable::ProcessTable;
 
 type BoxError = Box<dyn std::error::Error>;
@@ -321,6 +321,94 @@ pub struct Session {
     rt: tokio::runtime::Runtime,
 }
 
+/// What [`Session::classify_line`] decided a line is: which rung of the historical interception
+/// ladder it matches, resolved AFTER the guard clauses in `eval_line_inner` that must run
+/// unconditionally (or mutate a `Session` field directly, which a `&self` classifier can't do) —
+/// see that function's doc for the split.
+///
+/// **This order is a behavioural contract, not a style choice.** `classify_line` tests these in the
+/// exact order the ladder always has, and `eval_line_inner`'s `match` on the result must keep that
+/// order — reordering either changes what the shell does. Concretely: `Help` must resolve before
+/// `ContextSummarize`/`Brush` (the authz gate) so `<cmd> --help` never triggers a confirmation;
+/// `ContextSummarize` must resolve before `ContextDispatch` so `context summarize` routes to the
+/// model instead of `context`'s "unknown subcommand"; every variant here must resolve before
+/// `Brush` so inspecting/help-ing a command never confirms it.
+enum LineRoute {
+    /// Syntactically incomplete input (an unterminated heredoc/quote/substitution).
+    IncompleteInput,
+    /// `<cmd> --help` for a clank-intercepted command; carries the rendered help text.
+    Help(String),
+    /// A top-level `context summarize` — needs the model, so it's routed through the authz gate to
+    /// the async `run_context_summarize` instead of the sync `context` engine.
+    ContextSummarize,
+    /// `context show`/`clear`/`trim` (not `summarize`); carries the already-rendered output. The
+    /// one variant here that mutates as part of deciding (`clear`/`trim` change the transcript) —
+    /// still safe in a `&self` classifier because the mutation goes through `self.transcript`'s
+    /// `Mutex`, not a `Session` field, so nothing here needs `&mut Session` the way
+    /// `run_secret_export`/`surface_prompt` do. Kept as one call into `dispatch_context` (rather
+    /// than a separate pure pre-check duplicating its operator-scan) so there is exactly one place
+    /// that knows what counts as a `context` line.
+    ContextDispatch(Vec<u8>),
+    /// `prompt-user ...`.
+    PromptUser,
+    /// `export --secret NAME=VALUE` as a standalone command.
+    SecretExport,
+    /// `export --secret ...` carrying shell operators — refused outright rather than falling
+    /// through to Brush's own unredacted `export`.
+    SecretExportRefused,
+    /// A `type` line resolved entirely against clank-intercepted names; carries the rendered output
+    /// and exit code.
+    TypeDispatch(String, u8),
+    /// `<server> --help` / `<server> <tool> --help` for an installed MCP server; carries the
+    /// rendered help text.
+    McpHelp(String),
+    /// `<name> --help` / `<agent> help` for an installed grease command package; carries the
+    /// rendered help text.
+    PkgHelp(String),
+    /// `ask repl` reaching the durable-agent path (the interactive REPL is native-only there).
+    AskReplOnAgent,
+    /// `… | ask "…"` — a stdin-as-context pipeline; carries the parsed upstream/tail split.
+    AskPipe(crate::ai::ask::AskTailPipe),
+    /// None of the above: falls through to the authorization gate, then `run_command`.
+    Brush,
+}
+
+/// What [`Session::classify_command`] decided a line is, once `eval_line_inner`'s authorization
+/// gate has already resolved. Same order-is-behaviour contract as [`LineRoute`] — see that enum's
+/// doc and `classify_command`'s.
+enum CommandRoute {
+    /// A deferred-confirm re-run of a top-level `context summarize`.
+    ContextSummarize,
+    /// `kill ...`, parsed (or a parse error to report).
+    Kill(crate::error::Result<crate::builtins::kill::KillArgs>),
+    /// `ask ...`, parsed.
+    Ask(crate::ai::ask::AskArgs),
+    /// `mcp ...` management, parsed (or a parse error to report).
+    Mcp(crate::mcp::error::Result<crate::mcp::cmd::McpCommand>),
+    /// `grease ...` package management, parsed (or a parse error to report).
+    Grease(crate::grease::error::Result<crate::grease::cmd::GreaseCommand>),
+    /// `golem ...` cluster command, parsed (or a parse error to report).
+    Golem(crate::golem::error::Result<crate::golem::cluster::GolemCommand>),
+    /// `<server> <tool> …` for an installed MCP server.
+    McpToolLine,
+    /// A grease-installed prompt invocation.
+    PromptLine,
+    /// A grease-installed script invocation.
+    ScriptLine,
+    /// A grease-installed Golem agent invocation.
+    AgentLine,
+    /// A grease-installed MCP resource-template invocation.
+    McpTemplateLine,
+    /// A top-level `cat /mnt/mcp/<server>/<dynamic>` read target; carries `(server, uri)`.
+    McpResourceRead(String, String),
+    /// A curl/wget-headed pipeline (`curl … | rest…`).
+    HttpPipe(crate::builtins::http::HttpHeadPipe),
+    /// A bare (unpiped) curl/wget invocation; carries its argv tail.
+    HttpDirect(crate::builtins::http::HttpCommand, Vec<String>),
+    /// None of the above: an ordinary line to run through Brush's `execute`.
+    Execute,
+}
+
 impl Session {
     /// Build a non-interactive shell with the full bash-compatible builtin set.
     ///
@@ -613,7 +701,12 @@ impl Session {
     }
 
     // The single per-line dispatch pipeline: pending-prompt guard, secret-env install, transcript
-    // record, then the ordered intercept ladder ending at the authz gate — one linear read.
+    // record, then `classify_line`'s ordered intercept ladder ending at the authz gate — one linear
+    // read. The guard clauses below all either mutate `Session` state directly or must run
+    // unconditionally before any classification, which is why they stay here rather than moving
+    // into `classify_line` — see that function's doc for the rule. Still over clippy's 100-line
+    // default after extracting `classify_line`/`dispatch_context_summarize`/
+    // `dispatch_via_authz_gate`: the ~130 mandatory setup lines above the `match` are a hard floor.
     #[allow(clippy::too_many_lines)]
     async fn eval_line_inner(&mut self, line: &str) -> LineResult {
         // A prompt is already outstanding: the caller must answer it (via `answer_prompt`), not run
@@ -754,179 +847,120 @@ impl Session {
             }
         };
 
-        // Syntactically incomplete input (an unterminated heredoc/quote/substitution) must not run:
-        // clank's Brush shell is non-interactive, so Brush marks the parse error FATAL and maps it
-        // to `ExitShell` — which `finish` faithfully turns into `Flow::Exit`, ending the whole
-        // session because someone typed `cat <<EOF`. Catch it here with Brush's own
-        // incomplete-input classification and answer honestly instead. Placed after the pid spawn
-        // (the attempt is real typed work; `ps` should show it) and before every intercept, so no
-        // classifier ever sees a half-construct. The native REPL upgrades this to PS2 continuation
-        // before eval; on the agent one eval is one invocation, so the whole construct must arrive
-        // in a single line (documented).
-        if self.line_is_incomplete(line) {
-            let result = LineResult::from_outcome(
-                Vec::new(),
-                b"clank: incomplete input (a heredoc, quote, or substitution is missing its \
-                  terminator); provide the full construct in one eval\n"
-                    .to_vec(),
-                2,
-            );
-            return self.finish_intercepted(pid, result);
-        }
-
-        // `<cmd> --help` for a clank-intercepted command: print its manifest help text (exit 0).
-        // These commands never reach Brush's dispatch, so they'd otherwise ignore `--help`. Handled
-        // FIRST among all interceptions (before `context`/`prompt-user`/curl and the authz gate) so
-        // each intercepted command's own handling doesn't swallow `--help`: `context --help` would
-        // otherwise be an "unknown subcommand", `prompt-user --help` would be parsed as a prompt, and
-        // `curl --help` would surface an outbound-HTTP confirmation instead of just printing help.
-        // Brush's own builtins (cat/grep) answer `--help` through their `get_content`; not here.
-        if let Some(help) = typecmd::help_for(line, &self.registry) {
-            let result = LineResult::from_outcome(help.into_bytes(), Vec::new(), 0);
-            return self.finish_intercepted(pid, result);
-        }
-
-        // `context summarize` is the ONE context subcommand that needs the model (an outbound LLM
-        // call), so it can't be served by the sync `dispatch_context`/`apply_context` engine — it
-        // routes to the async Session layer like `ask`. Detected here (a top-level `context
-        // summarize` with no shell operators, and any leading `sudo`), it goes through the authz gate
-        // as Confirm (outbound HTTP; `sudo context summarize` pre-authorizes), then
-        // `run_context_summarize`. A nested `$(context summarize)`/pipe stays with Brush and hits the
-        // honest error in `apply_context`. Its output is inspection-only — NOT recorded back.
-        if is_context_summarize(line) {
-            let elevated = authz::leading_command(line).1;
-            match authz::decide(
-                crate::manifest::AuthorizationPolicy::Confirm,
-                elevated,
-                self.authz.allow_all,
-            ) {
-                Decision::Allow => {
-                    // Inspection output — reap the row but do NOT record it back (like `context show`).
-                    let result = self.run_context_summarize().await;
-                    if let Some(pid) = pid {
-                        self.proc_table
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .complete(pid);
-                    }
-                    return result;
-                }
-                Decision::Deny => {
-                    return self.finish_intercepted(pid, LineResult::denied());
-                }
-                Decision::Confirm { sudo_grant } => {
-                    return self.surface_auth_confirm(
-                        Some("context"),
-                        "context summarize".to_string(),
-                        pid,
-                        sudo_grant,
-                        None,
-                        None,
-                    );
-                }
+        // Classify the line, then dispatch on the result — see `classify_line`/`LineRoute` for the
+        // order contract. Every arm below is a straight relocation of what used to be this
+        // function's own sequential ladder; only the CONDITION moved to `classify_line`.
+        match self.classify_line(line) {
+            LineRoute::IncompleteInput => {
+                // clank's Brush shell is non-interactive, so an unterminated heredoc/quote/
+                // substitution would otherwise hit Brush's fatal-parse path (`finish` turns it into
+                // `Flow::Exit`, ending the whole session). Answer honestly instead.
+                let result = LineResult::from_outcome(
+                    Vec::new(),
+                    b"clank: incomplete input (a heredoc, quote, or substitution is missing its \
+                      terminator); provide the full construct in one eval\n"
+                        .to_vec(),
+                    2,
+                );
+                self.finish_intercepted(pid, result)
             }
+            LineRoute::Help(help) | LineRoute::McpHelp(help) | LineRoute::PkgHelp(help) => {
+                let result = LineResult::from_outcome(help.into_bytes(), Vec::new(), 0);
+                self.finish_intercepted(pid, result)
+            }
+            LineRoute::ContextSummarize => self.dispatch_context_summarize(line, pid).await,
+            LineRoute::ContextDispatch(bytes) => {
+                // `context show` output is intentionally not recorded back into the transcript.
+                if let Some(pid) = pid {
+                    self.proc_table
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .complete(pid);
+                }
+                LineResult::continue_with_stdout(bytes)
+            }
+            // `prompt-user` does NOT block: it records a durable pending prompt, leaves the row in
+            // `P`, and returns immediately — surfacing the question to the caller, who answers via
+            // `answer_prompt`. See the `promptuser` module docs.
+            LineRoute::PromptUser => self.surface_prompt(line, pid),
+            LineRoute::SecretExport => self.run_secret_export(line, pid),
+            LineRoute::SecretExportRefused => {
+                let result = LineResult::from_outcome(
+                    Vec::new(),
+                    b"export --secret: must be a standalone command (no pipes, `&&`, `;`, or \
+                      substitutions) so the value never reaches an unredacted surface\n"
+                        .to_vec(),
+                    2,
+                );
+                self.finish_intercepted(pid, result)
+            }
+            LineRoute::TypeDispatch(stdout, exit_code) => {
+                let result = LineResult::from_outcome(stdout.into_bytes(), Vec::new(), exit_code);
+                self.finish_intercepted(pid, result)
+            }
+            LineRoute::AskReplOnAgent => {
+                // The native driver intercepts `ask repl` before `eval_line` and runs the
+                // interactive loop; the durable agent can't own a blocking read-loop (Golem
+                // serializes invocations). Return an honest pointer to the working forms.
+                let msg = b"ask repl: interactive REPL is a native-terminal feature; on the durable \
+                            agent, drive a conversation with repeated `ask` calls (each is one turn)\n";
+                self.finish_intercepted(pid, LineResult::from_outcome(Vec::new(), msg.to_vec(), 2))
+            }
+            LineRoute::AskPipe(pipe) => self.run_ask_pipe(pipe, pid).await,
+            LineRoute::Brush => self.dispatch_via_authz_gate(line, pid).await,
         }
+    }
 
-        // `context show` output is intentionally not recorded back into the transcript.
-        if let Some(bytes) = dispatch_context(
-            &mut self
-                .transcript
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-            line,
+    /// `context summarize`: needs the model (an outbound LLM call), so it goes through the authz
+    /// gate as `Confirm` (`sudo context summarize` pre-authorizes) and, once allowed, the async
+    /// `run_context_summarize` — never the sync `dispatch_context`/`apply_context` engine. Its
+    /// output is inspection-only: the row is reaped but NOT recorded back into the transcript (like
+    /// `context show`). Split out of `eval_line_inner`'s match for its size, not for any reuse.
+    async fn dispatch_context_summarize(&mut self, line: &str, pid: Option<u32>) -> LineResult {
+        let elevated = authz::leading_command(line).1;
+        match authz::decide(
+            crate::manifest::AuthorizationPolicy::Confirm,
+            elevated,
+            self.authz.allow_all,
         ) {
-            if let Some(pid) = pid {
-                self.proc_table
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .complete(pid);
+            Decision::Allow => {
+                let result = self.run_context_summarize().await;
+                if let Some(pid) = pid {
+                    self.proc_table
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .complete(pid);
+                }
+                result
             }
-            return LineResult::continue_with_stdout(bytes);
+            Decision::Deny => self.finish_intercepted(pid, LineResult::denied()),
+            Decision::Confirm { sudo_grant } => self.surface_auth_confirm(
+                Some("context"),
+                "context summarize".to_string(),
+                pid,
+                sudo_grant,
+                None,
+                None,
+            ),
         }
+    }
 
-        // `prompt-user` is intercepted before Brush dispatch (like `context` above). It does NOT
-        // block: it records a durable pending prompt, leaves the row in `P`, and returns
-        // immediately — surfacing the question to the caller, who answers via `answer_prompt`. See
-        // the `promptuser` module docs.
-        if promptuser::is_prompt_user(line) {
-            return self.surface_prompt(line, pid);
-        }
-
-        // `export --secret NAME=VALUE` — mark a variable sensitive (README "Sensitive environment
-        // variables"). Intercepted before Brush so clank owns the secret table + std::env write and
-        // the value never enters any rendered surface. Only a plain top-level line is handled; a
-        // `--secret` export carrying operators (`&&`, `|`, `;`, `$()`) is REFUSED rather than
-        // silently falling through to Brush — Brush's export would set the value with no redaction,
-        // which is exactly the surface the flag exists to prevent (observed live: the demo probe
-        // used `export --secret K=v && echo set` and concluded the feature was inert).
-        if crate::builtins::secretenv::is_secret_export(line) {
-            if is_plain_line(line) {
-                return self.run_secret_export(line, pid);
-            }
-            let result = LineResult::from_outcome(
-                Vec::new(),
-                b"export --secret: must be a standalone command (no pipes, `&&`, `;`, or \
-                  substitutions) so the value never reaches an unredacted surface\n"
-                    .to_vec(),
-                2,
-            );
-            return self.finish_intercepted(pid, result);
-        }
-
-        // `type` for clank's intercepted commands (`prompt-user`/`curl`/`wget`/`context`): Brush's
-        // own `type` can't see them (they aren't Brush builtins), so clank answers for lines that
-        // query ONLY intercepted names, matching Brush's wording. Any other `type` line (a
-        // Brush-known name, a mix, an unrecognized flag) returns `None` here and falls through to
-        // Brush's `type` unchanged. Read-only meta command — intercepted before the authz gate.
-        if let Some((stdout, exit_code)) = typecmd::dispatch(line, &self.registry) {
-            let result = LineResult::from_outcome(stdout.into_bytes(), Vec::new(), exit_code);
-            return self.finish_intercepted(pid, result);
-        }
-
-        // `<server> --help` / `<server> <tool> --help` for an installed MCP server: print generated
-        // help (before the authz gate — help never confirms).
-        if let Some(help) = self.mcp_help_for(line) {
-            let result = LineResult::from_outcome(help.into_bytes(), Vec::new(), 0);
-            return self.finish_intercepted(pid, result);
-        }
-
-        // `<name> --help` for an installed grease command package (prompt or script): print its
-        // generated help (before the gate).
-        if let Some(help) = self.pkg_help_for(line) {
-            let result = LineResult::from_outcome(help.into_bytes(), Vec::new(), 0);
-            return self.finish_intercepted(pid, result);
-        }
-
-        // `ask repl` reaching `eval_line` is the durable-agent path (the native driver intercepts it
-        // before `eval_line` and runs the interactive loop). An interactive REPL needs a terminal and
-        // a blocking read-loop, which the durable agent can't own (Golem serializes invocations — it
-        // can't park mid-loop waiting for a human). Return an honest pointer to the working forms.
-        if crate::ai::ask::classify_repl(line).is_some() {
-            let msg = b"ask repl: interactive REPL is a native-terminal feature; on the durable \
-                        agent, drive a conversation with repeated `ask` calls (each is one turn)\n";
-            return self
-                .finish_intercepted(pid, LineResult::from_outcome(Vec::new(), msg.to_vec(), 2));
-        }
-
-        // stdin-as-context: `cat x | ask "…"`. The LLM call can't run inside Brush's pipeline (the
-        // reactor isn't live there — the "Wall C" wall), so the Session pre-extracts it: run the
-        // upstream, capture its stdout, and dispatch the `ask` tail at the session layer with those
-        // bytes as stdin. `ask` must be the FINAL stage; anywhere else it stays the honest stub error.
-        if let Some(pipe) = crate::ai::ask::split_ask_tail(line) {
-            return self.run_ask_pipe(pipe, pid).await;
-        }
-
-        // Authorization gate: enforce the leading command's `authorization-policy` (README). A
-        // `confirm`/`sudo-only` command that isn't pre-authorized surfaces a confirmation pause
-        // (reusing the `prompt-user` mechanism) and defers the command until approved. In every
-        // path the command actually run is the line with any leading `sudo` token stripped — `sudo`
-        // is a clank authorization marker, not a real executable to dispatch to Brush.
-        //
-        // Resolution consults the static registry AND the dynamic MCP manifests (an installed server
-        // name resolves to its Confirm-policy manifest — MCP tool calls are outbound HTTP). It also
-        // covers EVERY top-level command segment of a compound line (`echo ok && rm -rf /x` gates on
-        // `rm`, not the harmless leading `echo`) and returns the strictest segment's tuple plus the
-        // full list of gated commands.
+    /// The tail of the classic ladder: every line `classify_line` didn't recognize falls through to
+    /// here — the authorization gate, then `run_command` (or a paused confirmation). Split out of
+    /// `eval_line_inner`'s match for its size, not for any reuse.
+    ///
+    /// Authorization gate: enforce the leading command's `authorization-policy` (README). A
+    /// `confirm`/`sudo-only` command that isn't pre-authorized surfaces a confirmation pause
+    /// (reusing the `prompt-user` mechanism) and defers the command until approved. In every path
+    /// the command actually run is the line with any leading `sudo` token stripped — `sudo` is a
+    /// clank authorization marker, not a real executable to dispatch to Brush.
+    ///
+    /// Resolution consults the static registry AND the dynamic MCP manifests (an installed server
+    /// name resolves to its Confirm-policy manifest — MCP tool calls are outbound HTTP). It also
+    /// covers EVERY top-level command segment of a compound line (`echo ok && rm -rf /x` gates on
+    /// `rm`, not the harmless leading `echo`) and returns the strictest segment's tuple plus the
+    /// full list of gated commands.
+    async fn dispatch_via_authz_gate(&mut self, line: &str, pid: Option<u32>) -> LineResult {
         let (policy, elevated, command, gated) =
             self.resolve_authz_strictest(line, self.authz.allow_all);
         let effective = strip_sudo_prefix(line);
@@ -984,6 +1018,92 @@ impl Session {
         result
     }
 
+    /// Classify `line` into a [`LineRoute`] — the pure "what kind of line is this" decision, run
+    /// after the guard clauses in `eval_line_inner`. See [`LineRoute`]'s doc for why the order below
+    /// can't change.
+    fn classify_line(&self, line: &str) -> LineRoute {
+        // Syntactically incomplete input must not reach Brush's fatal-parse path (which would end
+        // the whole session over an unterminated heredoc/quote/substitution). Checked first so no
+        // classifier below ever sees a half-construct.
+        if self.line_is_incomplete(line) {
+            return LineRoute::IncompleteInput;
+        }
+        // `<cmd> --help` for a clank-intercepted command: these commands never reach Brush's
+        // dispatch, so they'd otherwise ignore `--help`. Checked first among the interceptions so no
+        // intercepted command's own handling swallows it: `context --help` would otherwise be an
+        // "unknown subcommand", `prompt-user --help` would be parsed as a prompt, `curl --help`
+        // would surface an outbound-HTTP confirmation. Brush's own builtins (cat/grep) answer
+        // `--help` through their `get_content`; not here.
+        if let Some(help) = typecmd::help_for(line, &self.registry) {
+            return LineRoute::Help(help);
+        }
+        // `context summarize` needs the model, so it's detected here — before the generic `context`
+        // dispatch below — and routed (in the match arm) through the authz gate to the async Session
+        // layer instead of the sync `dispatch_context`/`apply_context` engine. A nested
+        // `$(context summarize)`/pipe stays with Brush and hits the honest error in `apply_context`.
+        if is_context_summarize(line) {
+            return LineRoute::ContextSummarize;
+        }
+        // `context show`/`clear`/`trim`.
+        if let Some(bytes) = dispatch_context(
+            &mut self
+                .transcript
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            line,
+        ) {
+            return LineRoute::ContextDispatch(bytes);
+        }
+        // `prompt-user` is intercepted before Brush dispatch (like `context` above).
+        if promptuser::is_prompt_user(line) {
+            return LineRoute::PromptUser;
+        }
+        // `export --secret NAME=VALUE` (README "Sensitive environment variables"). Intercepted
+        // before Brush so clank owns the secret table + std::env write and the value never enters
+        // any rendered surface. Only a plain top-level line is handled; a `--secret` export carrying
+        // operators (`&&`, `|`, `;`, `$()`) is REFUSED rather than silently falling through to
+        // Brush — Brush's export would set the value with no redaction, which is exactly the surface
+        // the flag exists to prevent (observed live: `export --secret K=v && echo set` concluded the
+        // feature was inert).
+        if crate::builtins::secretenv::is_secret_export(line) {
+            return if is_plain_line(line) {
+                LineRoute::SecretExport
+            } else {
+                LineRoute::SecretExportRefused
+            };
+        }
+        // `type` for clank's intercepted commands (`prompt-user`/`curl`/`wget`/`context`): Brush's
+        // own `type` can't see them (they aren't Brush builtins), so clank answers for lines that
+        // query ONLY intercepted names, matching Brush's wording. Any other `type` line (a
+        // Brush-known name, a mix, an unrecognized flag) returns `None` here and falls through to
+        // Brush's `type` unchanged. Read-only meta command — resolved before the authz gate.
+        if let Some((stdout, exit_code)) = typecmd::dispatch(line, &self.registry) {
+            return LineRoute::TypeDispatch(stdout, exit_code);
+        }
+        // `<server> --help` / `<server> <tool> --help` for an installed MCP server (before the authz
+        // gate — help never confirms).
+        if let Some(help) = self.mcp_help_for(line) {
+            return LineRoute::McpHelp(help);
+        }
+        // `<name> --help` for an installed grease command package (prompt or script), same rule.
+        if let Some(help) = self.pkg_help_for(line) {
+            return LineRoute::PkgHelp(help);
+        }
+        // `ask repl` reaching `eval_line` is the durable-agent path (the native driver intercepts it
+        // before `eval_line` and runs the interactive loop).
+        if crate::ai::ask::classify_repl(line).is_some() {
+            return LineRoute::AskReplOnAgent;
+        }
+        // stdin-as-context: `cat x | ask "…"`. The LLM call can't run inside Brush's pipeline (the
+        // reactor isn't live there — the "Wall C" wall), so the Session pre-extracts it: run the
+        // upstream, capture its stdout, and dispatch the `ask` tail at the session layer with those
+        // bytes as stdin. `ask` must be the FINAL stage; anywhere else it stays the honest stub error.
+        if let Some(pipe) = crate::ai::ask::split_ask_tail(line) {
+            return LineRoute::AskPipe(pipe);
+        }
+        LineRoute::Brush
+    }
+
     /// Run an authorized command line and reap its process row (`R → Z`). The shared execution choke
     /// point, reached both by `eval_line` (a directly-allowed command) and by `answer_prompt` (an
     /// approved gated command). Does not record the transcript — the caller decides.
@@ -1000,73 +1120,61 @@ impl Session {
         pid: Option<u32>,
         blanket_authorized: bool,
     ) -> LineResult {
-        let result = if is_context_summarize(line) {
+        let result = match self.classify_command(line) {
             // Reached here only on a deferred-confirm re-run (top-level `context summarize` is
             // intercepted in `eval_line`). Route to the async summarizer; the caller
             // (`resolve_auth_confirm`) skips recording its inspection output.
-            self.run_context_summarize().await
-        } else if let Some(parsed) = crate::builtins::kill::classify(line) {
+            CommandRoute::ContextSummarize => self.run_context_summarize().await,
             // `kill` is Session-owned (it mutates the job table + proc table + pending state) and
             // MUST be tick-free: driving the runtime here could first-poll another parked
             // background job and wedge the invocation on its synchronous body.
-            match parsed {
-                Ok(args) => self.run_kill(&args),
-                Err(e) => {
-                    LineResult::from_outcome(Vec::new(), format!("kill: {e}\n").into_bytes(), 2)
-                }
+            CommandRoute::Kill(Ok(args)) => self.run_kill(&args),
+            CommandRoute::Kill(Err(e)) => {
+                LineResult::from_outcome(Vec::new(), format!("kill: {e}\n").into_bytes(), 2)
             }
-        } else if let Some(args) = crate::ai::ask::classify(line) {
             // `ask` dispatches to the injected LLM provider — same "await at the Session layer, never
             // through `execute`'s nested runtime" rule as curl/wget. The provider's async `complete`
             // is awaited here, one level under the Golem SDK's executor, where the durable context
             // is live and WASI-HTTP futures actually complete. See `askcmd`.
-            self.run_ask(args, blanket_authorized).await
-        } else if let Some(parsed) = crate::mcp::cmd::classify(line) {
+            CommandRoute::Ask(args) => self.run_ask(args, blanket_authorized).await,
             // `mcp` management runs at the Session layer — its add/reload/session subcommands do
             // HTTP, which must await under the live reactor (same rule as curl/ask).
-            match parsed {
-                Ok(cmd) => self.run_mcp(cmd).await,
-                Err(e) => LineResult::from_outcome(Vec::new(), format!("{e}\n").into_bytes(), 2),
+            CommandRoute::Mcp(Ok(cmd)) => self.run_mcp(cmd).await,
+            CommandRoute::Mcp(Err(e)) => {
+                LineResult::from_outcome(Vec::new(), format!("{e}\n").into_bytes(), 2)
             }
-        } else if let Some(parsed) = crate::grease::cmd::classify(line) {
             // `grease` package management runs at the Session layer — install/search/update do HTTP.
-            match parsed {
-                Ok(cmd) => self.run_grease(cmd).await,
-                Err(e) => LineResult::from_outcome(Vec::new(), format!("{e}\n").into_bytes(), 2),
+            CommandRoute::Grease(Ok(cmd)) => self.run_grease(cmd).await,
+            CommandRoute::Grease(Err(e)) => {
+                LineResult::from_outcome(Vec::new(), format!("{e}\n").into_bytes(), 2)
             }
-        } else if let Some(parsed) = crate::golem::cluster::classify(line) {
             // `golem` cluster command — runtime API calls await under the reactor (like mcp/ask).
-            match parsed {
-                Ok(cmd) => self.run_golem(cmd).await,
-                Err(e) => LineResult::from_outcome(Vec::new(), format!("{e}\n").into_bytes(), 2),
+            CommandRoute::Golem(Ok(cmd)) => self.run_golem(cmd).await,
+            CommandRoute::Golem(Err(e)) => {
+                LineResult::from_outcome(Vec::new(), format!("{e}\n").into_bytes(), 2)
             }
-        } else if self.is_mcp_tool_line(line) {
             // `<server> <tool> …` for an installed MCP server: an outbound HTTP tool call (its authz
             // Confirm was already resolved via the dynamic manifest at the gate).
-            self.run_mcp_tool(line).await
-        } else if self.is_prompt_line(line) {
+            CommandRoute::McpToolLine => self.run_mcp_tool(line).await,
             // A grease-installed prompt: fill its body from args and run it through the model (its
             // Confirm was resolved via the dynamic manifest at the gate; sudo pre-authorizes).
-            self.run_prompt(line, blanket_authorized).await
-        } else if self.is_script_line(line) {
+            CommandRoute::PromptLine => self.run_prompt(line, blanket_authorized).await,
             // A grease-installed script: fill its body from args and run the shell source locally
             // (its Confirm was resolved via the dynamic manifest at the gate; sudo pre-authorizes).
-            self.run_script(line, blanket_authorized).await
-        } else if self.is_agent_line(line) {
+            CommandRoute::ScriptLine => self.run_script(line, blanket_authorized).await,
             // A grease-installed Golem agent: parse the ctor/method/args and invoke it via wRPC in the
             // cluster (Confirm resolved at the gate; sudo pre-authorizes). Await mode only in v1.
-            self.run_agent(line).await
-        } else if self.is_mcp_template_line(line) {
+            CommandRoute::AgentLine => self.run_agent(line).await,
             // A grease-installed MCP resource-template executable: substitute the args into the URI
             // template and read the constructed resource live (top-level only, Wall-C).
-            self.run_mcp_template(line).await
-        } else if let Some((server, uri)) = self.dynamic_mcp_read_target(line) {
+            CommandRoute::McpTemplateLine => self.run_mcp_template(line).await,
             // A top-level `cat /mnt/mcp/<server>/<dynamic>`: fetch the resource live via
             // `resources/read` (the read can't run in Brush's synchronous `cat` — the Wall-C wall — so
             // it's served here at the Session layer for top-level lines only; inside $()/pipes it falls
             // through to Brush and hits the honest "no such file").
-            self.run_mcp_resource_read(&server, &uri).await
-        } else if let Some(pipe) = crate::builtins::http::split_http_head(line) {
+            CommandRoute::McpResourceRead(server, uri) => {
+                self.run_mcp_resource_read(&server, &uri).await
+            }
             // A curl/wget-HEADED pipeline: the head's HTTP runs here at the Session layer (Wall C),
             // and the downstream runs through Brush with the response bytes as stdin. Reached only
             // from run_command, i.e. AFTER the line's authorization resolved (the gate reads the
@@ -1074,24 +1182,21 @@ impl Session {
             // which is also why this lives here and not in eval_line: the post-approval path
             // re-runs the raw line through run_command, and an eval_line-only intercept would miss
             // it.
-            self.run_http_pipe(pipe).await
-        } else {
-            match crate::builtins::http::classify(line) {
-                Some((crate::builtins::http::HttpCommand::Curl, args)) => {
-                    let o = wcurl::run(&args).await;
-                    log_http_tool("curl", &args, o.exit_code);
-                    LineResult::from_outcome(o.stdout, o.stderr, o.exit_code)
-                }
-                Some((crate::builtins::http::HttpCommand::Wget, args)) => {
-                    let o = waget::run(&args).await;
-                    log_http_tool("wget", &args, o.exit_code);
-                    LineResult::from_outcome(o.stdout, o.stderr, o.exit_code)
-                }
-                None => {
-                    let mut result = self.execute(line).await;
-                    self.adopt_new_jobs(pid, &mut result);
-                    result
-                }
+            CommandRoute::HttpPipe(pipe) => self.run_http_pipe(pipe).await,
+            CommandRoute::HttpDirect(crate::builtins::http::HttpCommand::Curl, args) => {
+                let o = wcurl::run(&args).await;
+                log_http_tool("curl", &args, o.exit_code);
+                LineResult::from_outcome(o.stdout, o.stderr, o.exit_code)
+            }
+            CommandRoute::HttpDirect(crate::builtins::http::HttpCommand::Wget, args) => {
+                let o = waget::run(&args).await;
+                log_http_tool("wget", &args, o.exit_code);
+                LineResult::from_outcome(o.stdout, o.stderr, o.exit_code)
+            }
+            CommandRoute::Execute => {
+                let mut result = self.execute(line).await;
+                self.adopt_new_jobs(pid, &mut result);
+                result
             }
         };
         if let Some(pid) = pid {
@@ -1101,6 +1206,58 @@ impl Session {
                 .complete(pid);
         }
         result
+    }
+
+    /// Classify `line` into a [`CommandRoute`] — the pure "what kind of line is this" decision at
+    /// the heart of `run_command`'s dispatch, run only after `eval_line_inner`'s authorization gate
+    /// has already resolved. Same behavioural-order contract as [`LineRoute`]/`classify_line`: this
+    /// is tested in the exact order the historical ladder always has, and reordering it changes
+    /// what the shell does (e.g. a curl/wget-headed PIPELINE must be recognized before a bare
+    /// curl/wget invocation, since the pipeline form is also a superset-ish shape).
+    fn classify_command(&self, line: &str) -> CommandRoute {
+        if is_context_summarize(line) {
+            return CommandRoute::ContextSummarize;
+        }
+        if let Some(parsed) = crate::builtins::kill::classify(line) {
+            return CommandRoute::Kill(parsed);
+        }
+        if let Some(args) = crate::ai::ask::classify(line) {
+            return CommandRoute::Ask(args);
+        }
+        if let Some(parsed) = crate::mcp::cmd::classify(line) {
+            return CommandRoute::Mcp(parsed);
+        }
+        if let Some(parsed) = crate::grease::cmd::classify(line) {
+            return CommandRoute::Grease(parsed);
+        }
+        if let Some(parsed) = crate::golem::cluster::classify(line) {
+            return CommandRoute::Golem(parsed);
+        }
+        if self.is_mcp_tool_line(line) {
+            return CommandRoute::McpToolLine;
+        }
+        if self.is_prompt_line(line) {
+            return CommandRoute::PromptLine;
+        }
+        if self.is_script_line(line) {
+            return CommandRoute::ScriptLine;
+        }
+        if self.is_agent_line(line) {
+            return CommandRoute::AgentLine;
+        }
+        if self.is_mcp_template_line(line) {
+            return CommandRoute::McpTemplateLine;
+        }
+        if let Some((server, uri)) = self.dynamic_mcp_read_target(line) {
+            return CommandRoute::McpResourceRead(server, uri);
+        }
+        if let Some(pipe) = crate::builtins::http::split_http_head(line) {
+            return CommandRoute::HttpPipe(pipe);
+        }
+        match crate::builtins::http::classify(line) {
+            Some((cmd, args)) => CommandRoute::HttpDirect(cmd, args),
+            None => CommandRoute::Execute,
+        }
     }
 
     /// Run a curl/wget-headed pipeline (`curl … | rest…`): the head's HTTP at the Session layer
@@ -1169,7 +1326,7 @@ impl Session {
                 .proc_table
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .spawn_bg(crate::runtime::process::ProcessKind::Builtin, argv, ppid);
+                .spawn_bg(crate::runtime::proctable::ProcessKind::Builtin, argv, ppid);
             self.bg_jobs.push(BgJob {
                 job_id,
                 pid: bg_pid,
@@ -1372,12 +1529,9 @@ impl Session {
     fn pkg_help_for(&self, line: &str) -> Option<String> {
         let words = crate::ai::ask::dequote_words(line)?;
         // Strip a leading `sudo` (it only pre-authorizes; help is resolved before the gate anyway).
-        let rest: &[String] = match words.split_first() {
-            Some((first, tail)) if first == "sudo" => tail,
-            _ => &words,
-        };
+        let rest = crate::helpshim::skip_leading_sudo(&words);
         let name = rest.first()?;
-        if rest.iter().any(|w| w == "--help") {
+        if crate::helpshim::asks_for_help(rest) {
             return self.grease.pkg_help(name);
         }
         // `<agent> help` — the bare reserved help subcommand (README:840), for an installed AGENT

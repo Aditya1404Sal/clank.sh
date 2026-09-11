@@ -561,7 +561,6 @@ dependencies = [
  "clap",
  "diffy",
  "ed25519-dalek",
- "futures",
  "grease-pkg",
  "grep",
  "infer",
@@ -600,9 +599,7 @@ dependencies = [
  "uucore 0.9.0",
  "waget",
  "walkdir",
- "wasip3",
  "wcurl",
- "wit-bindgen 0.57.1",
 ]
 
 [[package]]

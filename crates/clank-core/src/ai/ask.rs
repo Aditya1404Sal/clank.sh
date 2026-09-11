@@ -79,7 +79,7 @@ pub fn build_system_prompt(registry: &CommandRegistry) -> String {
 }
 
 /// Like [`build_system_prompt`] but also lists installed MCP tools (each exposed as its own
-/// `mcp__<server>__<tool>` tool). `mcp_tools` is [`crate::mcp::state::McpState::ask_tool_definitions`].
+/// `mcp__<server>__<tool>` tool). `mcp_tools` is [`mcp_ask_tool_definitions`].
 #[must_use]
 pub fn build_system_prompt_with_mcp(
     registry: &CommandRegistry,
@@ -125,13 +125,45 @@ pub fn build_system_prompt_with_capabilities(
 
 /// Append the installed-MCP-tools block to `out` (shared by both system-prompt builders).
 fn append_mcp_tools(out: &mut String, mcp: &crate::mcp::state::McpState) {
-    let mcp_tools = mcp.ask_tool_definitions();
+    let mcp_tools = mcp_ask_tool_definitions(mcp);
     if !mcp_tools.is_empty() {
         out.push_str(prompts::MCP_TOOLS_HEADER);
         for t in &mcp_tools {
             let _ = writeln!(out, "  {} — {}", t.name, t.description);
         }
     }
+}
+
+/// Every installed MCP tool as an [`AskTool`], for the agentic `ask` tool surface. The tool name is
+/// namespaced `mcp__<server>__<tool>` (the executor decodes it back to a `<server> <tool>` call);
+/// the parameters schema is the raw inputSchema string.
+///
+/// Lives here rather than as a method on [`crate::mcp::state::McpState`] (where it used to be) so
+/// the dependency between the `ai` and `mcp` directories runs one way: `ai` already reads
+/// `McpState` (the system-prompt builders above take `&McpState`), so `McpState` returning `ai`'s
+/// own [`AskTool`] made the two import each other's concrete types — the same
+/// adapter-belongs-on-the-consuming-side move as `grease::param_specs_of`.
+#[must_use]
+pub(crate) fn mcp_ask_tool_definitions(mcp: &crate::mcp::state::McpState) -> Vec<AskTool> {
+    let mut tools = Vec::new();
+    for server in mcp.servers() {
+        if !server.installed {
+            continue;
+        }
+        for t in &server.tools {
+            let desc = format!(
+                "[MCP: {}] {}",
+                server.name,
+                t.description.as_deref().unwrap_or("")
+            );
+            tools.push(AskTool {
+                name: format!("mcp__{}__{}", server.name, t.name),
+                description: desc,
+                parameters_schema: t.input_schema.to_string(),
+            });
+        }
+    }
+    tools
 }
 
 /// One tool the model may call, rendered from the manifest registry. The clank-neutral mirror of

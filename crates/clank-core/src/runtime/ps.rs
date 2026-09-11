@@ -97,7 +97,7 @@ impl SimpleCommand for Ps {
 
 /// The `ps` builtin registration, for `build_shell`.
 pub(crate) fn builtins<SE: ShellExtensions>() -> Vec<(String, Registration<SE>)> {
-    use crate::builtins::helpshim::simple_builtin_with_help;
+    use crate::helpshim::simple_builtin_with_help;
     vec![("ps".into(), simple_builtin_with_help::<Ps, SE>())]
 }
 

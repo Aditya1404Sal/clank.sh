@@ -32,11 +32,30 @@ use std::cell::RefCell;
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 
-use crate::runtime::process::ProcessKind;
-
 /// The synthetic shell-root PID (an init-like process). Not a stored row; `render_ps` synthesizes
 /// it so `ps` is never empty and every spawned row has a parent.
 pub const SHELL_ROOT_PID: u32 = 1;
+
+/// The type tag a process-table row carries. `classify` (in `session/mod.rs`) currently tags every
+/// command line as `Builtin`; `AgentInvocation` is set on remote agent-invocation rows.
+/// `Script`/`Prompt` are declared for future proc-table tagging (their features run through the
+/// `run_command` ladder today).
+///
+/// Formerly lived in its own `runtime::process` module alongside a `ClankProcess` trait — the
+/// original execution-shape sketch for a process abstraction. That trait had zero implementors (the
+/// running path drives Brush directly, a façade over `Shell::run_string`, not a parallel task
+/// runtime) and was deleted; `ProcessKind` moved here, the one place that actually uses it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcessKind {
+    /// A shell builtin or core command (uutils/text-lib), or brush-language execution.
+    Builtin,
+    /// An installed shell script on `$PATH`.
+    Script,
+    /// A prompt executed via `ask`.
+    Prompt,
+    /// A method invocation on a remote Golem agent.
+    AgentInvocation,
+}
 
 /// The first PID handed out to a real (spawned) process. PID 1 is reserved for the root.
 pub const FIRST_PID: u32 = 2;
@@ -614,5 +633,17 @@ mod tests {
         }
         // Restored to empty after the guard drops.
         assert!(active().is_none());
+    }
+
+    // Relocated from the deleted `runtime::process` module along with `ProcessKind` itself.
+    #[test]
+    fn process_kind_is_copy_and_comparable() {
+        let k = ProcessKind::Builtin;
+        assert_eq!(k, ProcessKind::Builtin);
+        assert_ne!(k, ProcessKind::Script);
+        // Copy semantics: the original stays usable after being copied.
+        let copied = k;
+        assert_eq!(copied, ProcessKind::Builtin);
+        assert_eq!(k, ProcessKind::Builtin);
     }
 }

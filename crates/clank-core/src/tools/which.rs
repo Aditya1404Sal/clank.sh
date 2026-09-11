@@ -109,7 +109,7 @@ fn resolve_file_backed(path_dirs: &[std::path::PathBuf], name: &str) -> Option<s
 
 /// The `which` builtin registration, for `build_shell`.
 pub(crate) fn builtins<SE: ShellExtensions>() -> Vec<(String, Registration<SE>)> {
-    use crate::builtins::helpshim::simple_builtin_with_help;
+    use crate::helpshim::simple_builtin_with_help;
     vec![(Which::NAME.into(), simple_builtin_with_help::<Which, SE>())]
 }
 

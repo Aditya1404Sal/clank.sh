@@ -365,7 +365,7 @@ fn canonicalize_checked(id: &str) -> crate::ai::error::Result<String> {
 
 /// The `model` builtin registration, for `build_shell`.
 pub(crate) fn builtins<SE: ShellExtensions>() -> Vec<(String, Registration<SE>)> {
-    use crate::builtins::helpshim::simple_builtin_with_help;
+    use crate::helpshim::simple_builtin_with_help;
     vec![(Model::NAME.into(), simple_builtin_with_help::<Model, SE>())]
 }
 

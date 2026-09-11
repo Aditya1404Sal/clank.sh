@@ -359,7 +359,7 @@ impl Session {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let pid = table.spawn_bg(
-            crate::runtime::process::ProcessKind::AgentInvocation,
+            crate::runtime::proctable::ProcessKind::AgentInvocation,
             argv,
             crate::runtime::proctable::SHELL_ROOT_PID,
         );

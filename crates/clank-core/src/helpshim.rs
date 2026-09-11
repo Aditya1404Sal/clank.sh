@@ -1,4 +1,30 @@
-//! A `--help` shim for hand-rolled `SimpleCommand` builtins.
+//! `--help` plumbing shared across clank's three separate `--help` mechanisms.
+//!
+//! There are three, solving the same concern ("how does a command answer `--help`") at three
+//! different layers, because each layer sees the line/argv at a different stage of dispatch and
+//! none can reach the other two directly:
+//!
+//! - [`builtins::typecmd::help_for`](crate::builtins::typecmd::help_for) — the static
+//!   clank-intercepted commands (`prompt-user`/`curl`/`wget`/`context`/…), resolved from the raw
+//!   line BEFORE Brush ever sees it.
+//! - `Session::pkg_help_for` — installed grease packages (prompts/scripts/agents), same layer.
+//! - [`WithHelp`] (this module) — hand-rolled Brush `SimpleCommand`s, resolved from `argv` INSIDE
+//!   Brush's own dispatch, after tokenization and routing already happened.
+//!
+//! Full unification isn't behaviour-preserving: the two line-string paths dequote+tokenize the
+//! line differently (`typecmd`'s own word-splitter keeps going past a shell operator and ignores
+//! it; `Session`'s `dequote_words` declines the whole line the moment one appears), and `WithHelp`
+//! checks only the *immediate* first argument (accepting `-h` too) rather than scanning for
+//! `--help` anywhere in the tail — a narrower rule suited to running inside a `SimpleCommand`
+//! rather than over an unparsed line. Collapsing any of that would change what actually matches.
+//! What genuinely is common — and is unified here — is: (1) `sudo` must be skipped before deciding
+//! what a line asks for help on (`sudo <cmd> --help` must answer identically to `<cmd> --help`,
+//! never fall through to `<cmd>`'s own arg parser), and (2) both line-string paths test the same
+//! "does the tail contain a literal `--help`" predicate. See [`skip_leading_sudo`]/
+//! [`asks_for_help`], used by both `typecmd::help_for` and `Session::pkg_help_for`. `WithHelp` has
+//! no `sudo` to skip — the authz gate strips a leading `sudo` before any line reaches Brush's
+//! dispatch, so a `SimpleCommand::execute` never sees it — which is exactly why it can't share the
+//! other two's detection wholesale either.
 //!
 //! Brush's `exec_simple_builtin_impl` passes ALL arguments straight to `SimpleCommand::execute` —
 //! unlike clap-derived `Command` builtins, nothing answers `--help` for a `SimpleCommand`, so each
@@ -15,6 +41,27 @@ use brush_core::commands::ExecutionContext;
 use brush_core::extensions::ShellExtensions;
 use brush_core::{Error, ExecutionResult};
 use std::io::Write;
+
+/// Skip a leading `sudo` token from an already-dequoted word list. `sudo` only pre-authorizes a
+/// command, so it must not change what `--help` (or a grease package's reserved bare `help`
+/// subcommand) resolves to. Shared by the two pre-Brush `--help` paths — `typecmd::help_for` and
+/// `Session::pkg_help_for` — which otherwise duplicated this exact match arm; see the module doc
+/// for why `WithHelp` below does not share it.
+#[must_use]
+pub(crate) fn skip_leading_sudo(words: &[String]) -> &[String] {
+    match words.split_first() {
+        Some((first, rest)) if first == "sudo" => rest,
+        _ => words,
+    }
+}
+
+/// Whether `words` (the words AFTER the command name, already sudo-stripped) contains a literal
+/// `--help`. Shared by the same two call sites as [`skip_leading_sudo`]; see the module doc for why
+/// `WithHelp`'s own (narrower, positional) check isn't merged into this.
+#[must_use]
+pub(crate) fn asks_for_help(words: &[String]) -> bool {
+    words.iter().any(|w| w == "--help")
+}
 
 /// A `SimpleCommand` wrapper that serves `--help`/`-h` (as the sole first argument) from the
 /// wrapped builtin's `DetailedHelp` content before its own arg parsing can mangle it.

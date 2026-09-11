@@ -145,15 +145,12 @@ pub fn dispatch(line: &str, registry: &CommandRegistry) -> Option<(String, u8)> 
 #[must_use]
 pub fn help_for(line: &str, registry: &CommandRegistry) -> Option<String> {
     let words = words(line)?;
-    let words = match words.split_first() {
-        Some((first, rest)) if first == "sudo" => rest,
-        _ => &words[..],
-    };
+    let words = crate::helpshim::skip_leading_sudo(&words);
     let (first, rest) = words.split_first()?;
     if !is_intercepted(first) {
         return None;
     }
-    if !rest.iter().any(|w| w == "--help") {
+    if !crate::helpshim::asks_for_help(rest) {
         return None;
     }
     let manifest = registry.get(first)?;

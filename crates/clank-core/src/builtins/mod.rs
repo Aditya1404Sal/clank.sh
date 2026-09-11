@@ -2,9 +2,12 @@
 //! `context` transcript command ([`context`]), [`promptuser`] (human-in-the-loop), `kill` ([`kill`]),
 //! `export --secret` ([`secretenv`]), curl/wget dispatch ([`http`]), `type` resolution ([`typecmd`] —
 //! `type` is a Rust keyword), and the nested-context honest-error stubs ([`interceptstub`]).
+//!
+//! The `--help` shim for hand-rolled `SimpleCommand`s (generic Brush registration plumbing, not a
+//! builtin) lives at the crate top level as `crate::helpshim`, not here — it's consumed from four
+//! other concern directories (`tools`, `runtime`, `ai`) besides this one.
 
 pub(crate) mod context;
-pub(crate) mod helpshim;
 pub(crate) mod http;
 pub(crate) mod interceptstub;
 pub(crate) mod kill;

@@ -185,7 +185,7 @@ pub fn system_prompt_stub() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime::process::ProcessKind;
+    use crate::runtime::proctable::ProcessKind;
 
     fn table_with_one(argv: &str) -> (ProcessTable, u32) {
         let mut t = ProcessTable::new();

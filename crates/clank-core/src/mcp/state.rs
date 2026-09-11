@@ -233,31 +233,12 @@ impl McpState {
             .collect()
     }
 
-    /// Every installed MCP tool as an [`crate::ai::ask::AskTool`], for the agentic `ask` tool surface.
-    /// The tool name is namespaced `mcp__<server>__<tool>` (the executor decodes it back to a
-    /// `<server> <tool>` call); the parameters schema is the raw inputSchema string.
-    #[must_use]
-    pub fn ask_tool_definitions(&self) -> Vec<crate::ai::ask::AskTool> {
-        let mut tools = Vec::new();
-        for server in &self.servers {
-            if !server.installed {
-                continue;
-            }
-            for t in &server.tools {
-                let desc = format!(
-                    "[MCP: {}] {}",
-                    server.name,
-                    t.description.as_deref().unwrap_or("")
-                );
-                tools.push(crate::ai::ask::AskTool {
-                    name: format!("mcp__{}__{}", server.name, t.name),
-                    description: desc,
-                    parameters_schema: t.input_schema.to_string(),
-                });
-            }
-        }
-        tools
-    }
+    // The `McpState -> Vec<AskTool>` conversion (formerly `ask_tool_definitions` here) now lives in
+    // `crate::ai::ask::mcp_ask_tool_definitions` instead: `ai` already depends on this module (the
+    // system-prompt builders take `&McpState`), so putting the adapter here too made the dependency
+    // run both ways — a `cargo tree`-shaped cycle between `ai` and `mcp` if they were ever split
+    // into separate crates (`grease::param_specs_of` is the same fix for the same shape of problem,
+    // between `grease-pkg` and `clank-core::grease`). `servers()` below is what that adapter reads.
 
     /// Human-facing help for a server: its tools and their synopses.
     #[must_use]
