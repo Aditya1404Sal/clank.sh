@@ -6,12 +6,12 @@ author: agent
 
 # Workspace cohesion
 
-Design for closing the defects in `dev-docs/issues/open/workspace-cohesion.md`. Written as intent
+Design for closing the defects in `dev-docs/issues/closed/workspace-cohesion.md`. Written as intent
 after a ten-agent audit of the workspace on 2026-09-11 and a brainstorm with Aditya the same day;
 the decisions below were made or confirmed in that session. Facts about clank refer to
 `main-rc-1` at `de5f908`; facts about the Golem monorepo refer to `clank-connect-patch` rebased
 onto upstream `f5a3d29b9`. The implementation plan
-(`dev-docs/plans/proposed/workspace-cohesion.md`) is the single source of truth for sequencing and
+(`dev-docs/plans/done/workspace-cohesion.md`) is the single source of truth for sequencing and
 acceptance; this document records intent and decisions.
 
 ## Overview

@@ -2,11 +2,21 @@
 title: "Workspace Cohesion - Implementation Plan"
 date: 2026-09-11
 author: agent
-issue: dev-docs/issues/open/workspace-cohesion.md
-design: dev-docs/designs/proposed/workspace-cohesion.md
+issue: dev-docs/issues/closed/workspace-cohesion.md
+design: dev-docs/designs/approved/workspace-cohesion.md
+status: executed 2026-09-11 — 12 of 13 tickets landed; ticket 6 blocked externally
 ---
 
 # Workspace Cohesion - Implementation Plan
+
+> **Status: executed 2026-09-11.** Twelve of thirteen tickets landed on `main-rc-1`. **Ticket 6 is
+> the exception and cannot land from this repository** — the `printf` width-panic fix belongs in the
+> `Aditya1404Sal/coreutils` fork and needs a rev bump here afterwards. The diagnosis and the patch
+> are complete in [`dev-docs/research/coreutils-printf-width-panic.md`](../../research/coreutils-printf-width-panic.md).
+>
+> Tickets 11 and 13 were re-scoped during execution, and several tickets were wrong in ways worth
+> knowing about. Read [Deviations noted during implementation](#deviations-noted-during-implementation)
+> before treating any ticket body as a current description of the code.
 
 ## Table of Contents
 
