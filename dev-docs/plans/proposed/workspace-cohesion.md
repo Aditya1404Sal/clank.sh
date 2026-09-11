@@ -149,6 +149,28 @@ test locally, confirm the workspace job would fail, revert.
 
 **Done when:** a red `clank-core` test turns CI red; the e2e runs on the nightly schedule.
 
+**DONE 2026-09-11 (`a4899c2`).** Deviations:
+
+- **Half of this ticket arrived with the merge.** `main`'s `469211b` had already added the
+  library-crate test step. The premise ("554 tests never run in CI") was true of `main-rc-1` when
+  the audit ran and false by the time the ticket was executed. **Re-check an audit finding against
+  the tree after a merge, not against the audit.**
+- **A gap no audit found: 8 tests ran nowhere at all.** `clank-embed` has 13 tests, 8 behind the
+  non-default `providers` feature. Neither `-p clank-embed` nor `cargo test --workspace` enables a
+  non-default feature, so they executed under no invocation anyone runs — and they cover the wRPC
+  encoding the merge had just rewritten. Own CI step now. **Worth a sweep: any other crate with a
+  non-default feature gating tests is invisible the same way.**
+- **`--test-threads=1` was documented-as-required and not honoured by CI.** Added to every test
+  step; it costs nothing (the suites run in under a second) and removes a latent SIGPIPE flake.
+- **The new `e2e` job cannot pass on this branch** — CI pins golem 1.5.1, the manifest is 1.6.0.
+  Stated in the job comment with the local workaround rather than left as a silently-red job.
+  Aditya's call whether to gate both it and the existing `golem` job off until a 1.6 CLI ships.
+- **Finishing `GOLEM_BIN` was not in the ticket and should have been.** A half-parameterised script
+  works only while the right binary happens to be on PATH, then fails as "server did not become
+  ready in 60s" — pointing at the server, not the missing binary. Cost a full e2e run to find.
+  All four harnesses now route every invocation through `$GOLEM`; the sweep also caught
+  `clank-repl.sh` starting its server without `-Y`.
+
 ---
 
 ### 3. Close the embedder log-sink hole
