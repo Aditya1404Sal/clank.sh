@@ -1,8 +1,12 @@
 # clank — Production-Readiness Audit
 
 > **2026-09-11 note:** the paths and crate names below predate the 2026-07-23 `clank-shell` →
-> `clank-core` rename — read every `clank-shell` reference as `clank-core`. Findings are left as
-> originally written.
+> `clank-core` rename — read every `clank-shell` reference as `clank-core`. They also predate the
+> 2026-09-11 workspace-cohesion epic, which moved several cited paths: the native platform layer
+> (`native.rs` and the five `*_native.rs` provider modules) became the `clank-native` crate,
+> `grease/pkg.rs` became `crates/grease-pkg/src/lib.rs`, and `wasm.rs` plus `runtime/process.rs`
+> were deleted as dead. Findings are left as originally written — a path here is a record of what
+> the auditor actually read, so correcting it would misrepresent the audit rather than update it.
 
 **Target:** `main-rc-1` (worktree `~/Desktop/clank-spike`), compared against `main`.
 **Operation:** read-only — no build, lint, test, or network was run. Findings are graded accordingly.

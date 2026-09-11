@@ -1,5 +1,10 @@
 # HANDROLLED.md — what clank implements itself, and how ready it is
 
+> **2026-09-11 note:** `grease/pkg.rs`, cited below, is now `crates/grease-pkg/src/lib.rs` — the
+> workspace-cohesion epic of the same day extracted it into its own crate. Line numbers in that file
+> are unchanged by the move but not guaranteed since. Findings are left as originally written — a
+> path here is a record of what the auditor actually read.
+
 Audience: anyone deciding whether to trust a clank-implemented tool with real work, or deciding
 whether the next gap should be fixed, documented, or delegated to a crate.
 

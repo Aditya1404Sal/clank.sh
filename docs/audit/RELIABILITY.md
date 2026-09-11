@@ -1,5 +1,12 @@
 # RELIABILITY.md — how clank fails, and how you can tell
 
+> **2026-09-11 note:** some paths below predate the workspace-cohesion epic of the same day, which
+> moved the native platform layer out of `clank-core` into the new `clank-native` crate:
+> `ai/anthropic_native.rs` → `clank-native/src/anthropic.rs`, `ai/llm_native.rs` → `llm.rs`,
+> `mcp/http_native.rs` → `mcp_http.rs`, `golem/rest_native.rs` → `rest.rs`. The timeout values this
+> document tabulates are unchanged. Findings are left as originally written — a path here is a
+> record of what the auditor actually read.
+
 Audience: anyone who needs to answer *"can this thing break in a way that requires a restart, and how
 would I know?"* — before trusting a durable agent with real work, or after something has already gone
 wrong.

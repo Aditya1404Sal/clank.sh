@@ -3,7 +3,11 @@
 > **2026-09-11 note:** the paths and crate names below predate the 2026-07-23 `clank-shell` →
 > `clank-core` rename — read every `clank-shell` reference as `clank-core`. This document's central
 > recommendation, **R1** (split `clank-shell` into a pure `clank-core` rlib plus a thin `clank-cli`
-> binary crate), has since shipped. Findings are otherwise left as originally written.
+> binary crate), has since shipped — and the 2026-09-11 workspace-cohesion epic carried it further,
+> extracting `clank-native` (the native REPL plus the five reqwest-backed providers, all previously
+> inside `clank-core`) and `grease-pkg` (from `grease/pkg.rs`). `wasm.rs` and `runtime/process.rs`
+> are gone. Findings are otherwise left as originally written — a path here is a record of what the
+> auditor actually read, so correcting it would misrepresent the audit rather than update it.
 
 **Scope:** `main-rc-1` worktree, compared against `main`. Read-only audit (no build/lint/test run).
 **Method:** every claim is anchored; counts come from `rg`/`find` over `crates/` excluding `target/`.
