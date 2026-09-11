@@ -628,3 +628,73 @@ three times — a comment is not a mechanism. Raise ticket 4 above tickets 2, 3,
 fixed exactly that bypass (`xargs` re-enters via `run_string`, never passing back through the gate —
 `echo /path | xargs rm` deleted the file at exit 0 while bare `rm` paused). A test can encode a bug
 as expected behaviour; when a merge "breaks" a test, check which side is right before restoring it.
+
+### Ticket 8 — the adapter belongs on the consuming side
+
+The ticket said to move `grease`'s `ParamSpec` conversion into the new `grease-pkg` crate. That was
+wrong: `ParamSpec` is *shared* with `mcp/state.rs`, so moving it would have made `grease-pkg` a
+dependency of the MCP surface for one type it does not own. Inverted instead —
+`args_to_param_specs` plus two `param_specs()` methods collapsed into
+`clank_core::grease::param_specs_of`, on the side that consumes the specs.
+
+**This turned out to be a general rule, and ticket 10 hit it again** with `McpState →
+Vec<AskTool>`: the same shape (`mcp` naming an `ai` type to serve `ai`), the same fix (move the
+conversion into `ai`). Where two modules each name the other's concrete types, the adapter almost
+always belongs with the consumer. `grease::state::GreaseState::ask_tool_definitions` is the third
+instance of this shape and is still outstanding — deliberately left, as it was outside both tickets.
+
+### Ticket 10 — done 2026-09-11 (`1ac0f06`)
+
+**The `too_many_lines` allow on `eval_line_inner` survives, and that is the honest outcome.**
+368 → 202 lines after extracting `classify_line` (82) plus two dispatch helpers. The residual ~130
+lines are the mandatory per-line *mutating* setup — pending-prompt guard, secret-env install,
+transcript record, thread-local installs, `cap_cache` rebuild, pid spawn — which the ticket itself
+requires stay in place. Getting under 100 would mean extracting that setup into a helper threading
+several RAII guards out through a return value: more risk than the ticket's behaviour-preserving
+mandate allows, for a lint number. Recorded rather than silently worked around.
+
+**One classifier variant is not pure, by design.** `LineRoute::ContextDispatch` calls
+`dispatch_context`, which mutates for `context clear`/`trim`. It is safe under `&self` (the mutation
+goes through the transcript's own `Mutex`, not a `Session` field), and the alternative — a pure
+pre-check duplicating `dispatch_context`'s operator-scan — would have forked the definition of what
+counts as a `context` line. Documented at the variant.
+
+**The `--help` unification is deliberately partial.** Only detection (`asks_for_help`) and the
+leading-`sudo` skip are shared. The two *tokenizers* stay separate because they genuinely differ:
+`typecmd::help_for` keeps matching past a shell operator, while `dequote_words` declines the whole
+line as soon as one appears — so `curl --help | cat` matches one path and not the other. Merging
+them would have changed what one side matches. `WithHelp` stays separate too: it runs a layer down,
+over already-tokenized argv, with no `sudo` to skip (the authz gate strips it before Brush).
+A partial correct unification beat a complete subtly-wrong one.
+
+### Ticket 13 — re-scoped 2026-09-11, after auditing what the merge delivered
+
+Ticket 1 predicted this; the audit confirmed it. Four of the five seams are already typed:
+`AgentInvoker` and `GolemCluster` return `golem::error::Result`, `McpHttp` returns
+`mcp::error::Result`, and `LogSink::append` returns `()` — fire-and-forget by design, so it needs no
+error type and the ticket's premise is simply wrong there.
+
+**Two things actually remained.** (1) `AskResponse.error: Option<String>` — the last untyped seam.
+The cost is concrete: `ai::error::Error` already defines `exit_code()`, `is_retryable()` and
+`retry_after()`, and `retry_after` exists precisely so a caller can back off on a 429 rather than
+guess — but no provider could reach any of them through a `String`. (2) Four divergent wordings of
+"no model provider configured" in `session/ask.rs`, plus two more in the provider crates.
+
+**One thing the ticket would have broken.** `AskToolResult.outcome: Result<String, String>` is not a
+seam error at all — it is the text handed back to *the model* as a tool result, and its doc already
+argues correctly that there is no kind to branch on. The ticket's blanket "no seam trait mentions
+`String` as its error type" would have imposed a taxonomy nothing consults. Left alone.
+
+**`SafeDisplay` was dropped.** See the ticket-13 commit for the reasoning; in short, clank's error
+variants are constructed from curated human-written messages at the boundary, so a `to_safe_string()`
+forwarding to `Display` would be ceremony. `logging::redact_url` already covers the one real leak
+shape. The trait earns its place the day a raw transport error becomes a variant payload.
+
+### Ticket 6 — blocked on the maintainer, not on this plan
+
+The diagnosis and the patch are complete in `dev-docs/research/coreutils-printf-width-panic.md`:
+`MAX_FORMAT_WIDTH = 1_000_000` guards a limit that Rust ≥1.88 `core::fmt` no longer has — widths are
+`u16` there, so anything in 65,536..1,000,000 passes the guard and then aborts. Six affected sites.
+`num_format::zero_pad_to` already documents this exact bug for the *precision* path, which is the
+strongest evidence the fix is right. It cannot land from here: the fix belongs in
+`Aditya1404Sal/coreutils` and needs a rev bump in this tree.
