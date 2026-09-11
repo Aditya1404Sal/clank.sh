@@ -10,9 +10,7 @@ pub mod config;
 pub mod error;
 
 pub use error::Error;
-// The native (reqwest) MCP HTTP transport. wasm uses the injected WASI-HTTP client from `clank-embed`;
-// this fills the same `McpHttp` seam off-Golem, unblocking MCP *and* grease-over-network (they share
-// the transport). cfg-gated so `reqwest` never reaches the wasm build.
-#[cfg(not(target_arch = "wasm32"))]
-pub mod http_native;
+// The native (reqwest) MCP HTTP transport now lives in the separate `clank-native` crate (mirroring
+// how the wasm client lives in `clank-embed`), not here: `clank-native::mcp_http` fills the same
+// `McpHttp` seam off-Golem, unblocking MCP *and* grease-over-network (they share the transport).
 pub mod state;

@@ -83,7 +83,7 @@ pub mod model {
 
     /// The provider assumed for a bare model id (one with no `<provider>/` prefix).
     ///
-    /// Distinct from a provider *backend's* own name: `ai::anthropic_native` keeps its own
+    /// Distinct from a provider *backend's* own name: `clank-native`'s `anthropic` module keeps its own
     /// `PROVIDER` const because that is its identity — it must keep looking up the `anthropic` key
     /// even if the default provider here were changed to something else.
     pub const DEFAULT_PROVIDER: &str = "anthropic";

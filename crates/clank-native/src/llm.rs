@@ -4,8 +4,8 @@
 //! `ask`'s model id is `provider/model` (e.g. `openai/gpt-4o`, `anthropic/claude-…`). This provider
 //! splits the prefix and routes to the right native transport:
 //!
-//! - `anthropic` → [`crate::ai::anthropic_native`] (Anthropic Messages API).
-//! - `openai` / `grok` / `openrouter` / `ollama` → [`crate::ai::openai_native`] (one OpenAI Chat
+//! - `anthropic` → [`crate::anthropic`] (Anthropic Messages API).
+//! - `openai` / `grok` / `openrouter` / `ollama` → [`crate::openai`] (one OpenAI Chat
 //!   Completions mapping, differing only in endpoint + key env var).
 //! - `bedrock` → an honest error: AWS SigV4 signing isn't available in native `ask`; use the Golem
 //!   agent (which reaches Bedrock through golem-ai-llm).
@@ -14,9 +14,9 @@
 //! provider's env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, `OPENROUTER_API_KEY`);
 //! Ollama is keyless. The bare-id default provider is anthropic.
 
-use crate::ai::anthropic_native::ReqwestAnthropicProvider;
-use crate::ai::ask::{AskProvider, AskResponse, AskTool, AskTurn};
-use crate::ai::openai_native::{self, Descriptor, GROK, OLLAMA, OPENAI, OPENROUTER};
+use crate::anthropic::ReqwestAnthropicProvider;
+use crate::openai::{self, Descriptor, GROK, OLLAMA, OPENAI, OPENROUTER};
+use clank_core::ai::ask::{AskProvider, AskResponse, AskTool, AskTurn};
 
 /// A native [`AskProvider`] that routes each turn to the transport for the model's `provider/` prefix.
 pub struct NativeLlmProvider {
@@ -33,8 +33,8 @@ impl NativeLlmProvider {
         Self {
             anthropic: ReqwestAnthropicProvider::new(),
             client: reqwest::Client::builder()
-                .connect_timeout(crate::config::net::CONNECT_TIMEOUT)
-                .timeout(crate::config::net::LLM_TIMEOUT)
+                .connect_timeout(clank_core::config::net::CONNECT_TIMEOUT)
+                .timeout(clank_core::config::net::LLM_TIMEOUT)
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
         }
@@ -57,7 +57,7 @@ impl NativeLlmProvider {
                 desc.provider, desc.key_env, desc.provider
             ));
         }
-        openai_native::turn(
+        openai::turn(
             &self.client,
             desc,
             key.as_deref(),
@@ -123,7 +123,7 @@ impl AskProvider for NativeLlmProvider {
 /// empty, i.e. a keyless provider).
 fn resolve_provider_key(provider: &str, key_env: &str) -> Option<String> {
     if let Ok(home) = std::env::var("HOME") {
-        if let Some(key) = crate::ai::config::provider_key(&home, provider) {
+        if let Some(key) = clank_core::ai::config::provider_key(&home, provider) {
             if !key.is_empty() {
                 return Some(key);
             }
@@ -140,7 +140,7 @@ mod tests {
     use super::*;
 
     // Route-only tests: bedrock + unknown provider return before any HTTP, so no network/env is
-    // touched. (The per-provider wire mapping is covered in `openai_native`/`anthropic_native`.)
+    // touched. (The per-provider wire mapping is covered in `openai`/`anthropic`.)
     #[tokio::test]
     async fn bedrock_is_an_honest_native_error() {
         let p = NativeLlmProvider::new();

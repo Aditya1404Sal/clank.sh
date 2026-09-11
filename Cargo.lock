@@ -533,6 +533,7 @@ name = "clank-cli"
 version = "0.0.0"
 dependencies = [
  "clank-core",
+ "clank-native",
  "tokio",
 ]
 
@@ -558,7 +559,6 @@ dependencies = [
  "brush-parser",
  "chrono",
  "clap",
- "crossterm 0.28.1",
  "diffy",
  "ed25519-dalek",
  "futures",
@@ -568,10 +568,7 @@ dependencies = [
  "jaq-json",
  "jaq-std",
  "libc",
- "nu-ansi-term",
- "reedline",
  "regex",
- "reqwest",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -618,6 +615,24 @@ dependencies = [
  "serde",
  "tokio",
  "wasi-fetch",
+]
+
+[[package]]
+name = "clank-native"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "clank-core",
+ "crossterm 0.28.1",
+ "http",
+ "libc",
+ "nu-ansi-term",
+ "reedline",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -1358,6 +1373,10 @@ name = "foldhash"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+
+[[package]]
+name = "fork-inventory"
+version = "0.1.0"
 
 [[package]]
 name = "form_urlencoded"

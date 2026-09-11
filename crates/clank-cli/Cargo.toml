@@ -22,6 +22,9 @@ path = "src/main.rs"
 clank-core = { path = "../clank-core", default-features = false }
 
 # `main` builds the multi-thread runtime itself (Runtime::new — I/O + time drivers, which Brush
-# needs to spawn external processes) and block_on's the async shell loop.
+# needs to spawn external processes) and block_on's the async shell loop. The native platform layer
+# (the REPL loop + provider wiring) is native-only — it carries `reqwest`/`reedline`/`crossterm`,
+# none of which target wasm32 — so it lives beside tokio here rather than in `[dependencies]` above.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { version = "1", features = ["rt-multi-thread"] }
+clank-native = { path = "../clank-native" }

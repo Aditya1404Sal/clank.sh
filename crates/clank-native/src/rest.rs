@@ -17,9 +17,10 @@
 //! ops for the same reason). `rollback`/`fork`/`self_oplog` are in-instance host operations with no
 //! native+cluster equivalent, so they report an honest error too.
 
-use crate::golem::agent::{AgentInvocation, AgentInvoker, InvokeHandle, InvokeMode};
-use crate::golem::cluster::GolemCluster;
-use crate::golem::config_native::ClusterConfig;
+use clank_core::golem::agent::{AgentInvocation, AgentInvoker, InvokeHandle, InvokeMode};
+use clank_core::golem::cluster::GolemCluster;
+
+use crate::cluster_config::ClusterConfig;
 
 use serde_json::{json, Value};
 
@@ -29,8 +30,8 @@ const INVOKE_PATH: &str = "/v1/agents/invoke-agent";
 /// Shared builder for a `reqwest` client used by both the invoker and the cluster.
 fn client() -> reqwest::Client {
     reqwest::Client::builder()
-        .connect_timeout(crate::config::net::CONNECT_TIMEOUT)
-        .timeout(crate::config::net::REQUEST_TIMEOUT)
+        .connect_timeout(clank_core::config::net::CONNECT_TIMEOUT)
+        .timeout(clank_core::config::net::REQUEST_TIMEOUT)
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
 }
@@ -120,8 +121,8 @@ impl NativeHttpAgentInvoker {
     /// This is where a REST failure gets its KIND: the HTTP status says whether the cluster refused
     /// us, whether the request was malformed, or whether the remote side failed — information that
     /// was previously flattened into one "agent invocation failed: …" string.
-    async fn post(&self, inv: &AgentInvocation) -> crate::golem::error::Result<Value> {
-        use crate::golem::Error;
+    async fn post(&self, inv: &AgentInvocation) -> clank_core::golem::error::Result<Value> {
+        use clank_core::golem::Error;
         let body = invoke_body(&self.cfg, inv);
         let mut req = self
             .client
@@ -171,7 +172,7 @@ impl NativeHttpAgentInvoker {
 
 #[async_trait::async_trait(?Send)]
 impl AgentInvoker for NativeHttpAgentInvoker {
-    async fn invoke(&self, inv: &AgentInvocation) -> crate::golem::error::Result<String> {
+    async fn invoke(&self, inv: &AgentInvocation) -> clank_core::golem::error::Result<String> {
         let result = self.post(inv).await?;
         Ok(render_result(&result))
     }
@@ -179,7 +180,7 @@ impl AgentInvoker for NativeHttpAgentInvoker {
     async fn invoke_async(
         &self,
         inv: &AgentInvocation,
-    ) -> crate::golem::error::Result<InvokeHandle> {
+    ) -> clank_core::golem::error::Result<InvokeHandle> {
         match &inv.mode {
             InvokeMode::Trigger => {
                 // Fire-and-forget: POST but don't render a result. No cancel token (the REST invoke
@@ -200,7 +201,7 @@ impl AgentInvoker for NativeHttpAgentInvoker {
                     note: format!("scheduled for {when}"),
                 })
             }
-            InvokeMode::Await => Err(crate::golem::Error::Invalid(
+            InvokeMode::Await => Err(clank_core::golem::Error::Invalid(
                 "invoke_async called with Await mode".to_string(),
             )),
         }
@@ -243,8 +244,8 @@ fn needs_schema(op: &str, agent_type: &str) -> String {
 impl GolemCluster for NativeHttpGolemCluster {
     // Every op here is an honest "not wired on this surface" stub, so they all classify as
     // `Unsupported` (exit 2) rather than looking like a cluster or remote fault.
-    async fn agent_list(&self) -> crate::golem::error::Result<String> {
-        Err(crate::golem::Error::Unsupported(
+    async fn agent_list(&self) -> clank_core::golem::error::Result<String> {
+        Err(clank_core::golem::Error::Unsupported(
             "golem agent list: full enumeration over REST needs a component filter (not wired in \
              v1); invoke agent executables directly instead"
                 .to_string(),
@@ -255,8 +256,8 @@ impl GolemCluster for NativeHttpGolemCluster {
         &self,
         agent_type: &str,
         _ctor: &[(String, String)],
-    ) -> crate::golem::error::Result<String> {
-        Err(crate::golem::Error::Unsupported(needs_schema(
+    ) -> clank_core::golem::error::Result<String> {
+        Err(clank_core::golem::Error::Unsupported(needs_schema(
             "agent oplog",
             agent_type,
         )))
@@ -266,37 +267,37 @@ impl GolemCluster for NativeHttpGolemCluster {
         &self,
         agent_type: &str,
         _ctor: &[(String, String)],
-    ) -> crate::golem::error::Result<String> {
-        Err(crate::golem::Error::Unsupported(needs_schema(
+    ) -> clank_core::golem::error::Result<String> {
+        Err(clank_core::golem::Error::Unsupported(needs_schema(
             "agent status",
             agent_type,
         )))
     }
 
-    async fn connect(&self, identity: &str) -> crate::golem::error::Result<String> {
-        Err(crate::golem::Error::Unsupported(format!(
+    async fn connect(&self, identity: &str) -> clank_core::golem::error::Result<String> {
+        Err(clank_core::golem::Error::Unsupported(format!(
             "golem connect '{identity}': streaming agent inspection over REST is not wired in v1"
         )))
     }
 
-    async fn self_oplog(&self) -> crate::golem::error::Result<String> {
-        Err(crate::golem::Error::Unsupported(
+    async fn self_oplog(&self) -> clank_core::golem::error::Result<String> {
+        Err(clank_core::golem::Error::Unsupported(
             "golem oplog: the shell instance's own oplog is an in-instance operation with no \
              native+cluster equivalent (available inside Golem)"
                 .to_string(),
         ))
     }
 
-    async fn rollback(&self) -> crate::golem::error::Result<String> {
-        Err(crate::golem::Error::Unsupported(
+    async fn rollback(&self) -> clank_core::golem::error::Result<String> {
+        Err(clank_core::golem::Error::Unsupported(
             "golem rollback: rewinding the shell instance is a Golem-only operation (available \
              inside Golem, not native+cluster)"
                 .to_string(),
         ))
     }
 
-    async fn fork(&self) -> crate::golem::error::Result<String> {
-        Err(crate::golem::Error::Unsupported(
+    async fn fork(&self) -> clank_core::golem::error::Result<String> {
+        Err(clank_core::golem::Error::Unsupported(
             "golem fork: forking the shell instance is a Golem-only operation (available inside \
              Golem, not native+cluster)"
                 .to_string(),
@@ -423,7 +424,7 @@ mod tests {
         // A 404 is the caller naming an agent that isn't there — their error to fix, so `Invalid`
         // (exit 2), NOT a transport or remote fault. This is exactly the distinction the enum adds.
         assert!(
-            matches!(err, crate::golem::Error::Invalid(_)),
+            matches!(err, clank_core::golem::Error::Invalid(_)),
             "a 4xx must classify as Invalid, got: {err:?}"
         );
         assert_eq!(err.exit_code(), 2);
@@ -445,7 +446,7 @@ mod tests {
             cluster.fork().await.unwrap_err(),
         ] {
             assert!(
-                matches!(err, crate::golem::Error::Unsupported(_)),
+                matches!(err, clank_core::golem::Error::Unsupported(_)),
                 "a stub must not look like a failure: {err:?}"
             );
             assert_eq!(err.exit_code(), 2);

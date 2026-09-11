@@ -35,7 +35,7 @@ impl std::fmt::Debug for ClusterConfig {
     }
 }
 
-use crate::config::env::{
+use clank_core::config::env::{
     GOLEM_APP as ENV_APP, GOLEM_ENV as ENV_ENV, GOLEM_TOKEN as ENV_TOKEN, GOLEM_URL as ENV_URL,
 };
 

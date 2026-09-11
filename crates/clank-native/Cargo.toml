@@ -1,0 +1,50 @@
+[package]
+name = "clank-native"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# The NATIVE platform layer: the reedline TUI, the reqwest-backed provider implementations, and the
+# cluster-config reader. The mirror image of `clank-embed`, which is the wasm/Golem platform layer.
+#
+# These lived inside `clank-core` while their wasm counterparts already lived in `clank-embed`, so
+# the crate boundary was asymmetric between targets for no principled reason — and `clank-core`
+# carried `reqwest`, `reedline` and `crossterm`, none of which a dual-target engine should know
+# about. Understanding one seam meant reading three crates. Now it is: trait in clank-core, one
+# implementation per platform crate.
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# The engine + the seam traits this crate implements. default-features=false for parity with the
+# other consumers (it drops clank-core's `repl-driver`).
+clank-core = { path = "../clank-core", default-features = false }
+
+http = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+
+# The native HTTP transport for every provider seam here, with pure-Rust rustls (no system
+# libcurl/OpenSSL). Same crate + features `wcurl`/`waget` use, so the workspace resolves one reqwest.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+# The interactive REPL's line editor and terminal control. Both are VENDORED FORKS (see
+# `[patch.crates-io]` in the root manifest): reedline tolerates a late cursor-position reply instead
+# of collapsing to a degraded prompt, and crossterm cuts the DSR poll from 2000ms to 250ms. Together
+# they are what keeps the prompt responsive after a burst of output (e.g. right after `ask`).
+reedline = "0.38"
+crossterm = "0.28"
+nu-ansi-term = "0.50"
+
+# `SIGPIPE` restoration and terminal detection on the native path.
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["rt", "macros"] }

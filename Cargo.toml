@@ -4,12 +4,14 @@ members = [
     "crates/clank-core",
     "crates/clank-cli",
     "crates/clank-embed",
+    "crates/clank-native",
     "crates/clank-agent",
     "crates/clank-conformance",
     "utilities/whttp",
     "utilities/wcurl",
     "utilities/waget",
     "dev-tools/grease-tool",
+    "dev-tools/fork-inventory",
     "fixtures/greeter-agent",
 ]
 # main-rc-1: exclude the vendored golem clone so its crates (golem-schema, etc.) resolve their
@@ -24,11 +26,13 @@ default-members = [
     "crates/clank-core",
     "crates/clank-cli",
     "crates/clank-embed",
+    "crates/clank-native",
     "crates/clank-conformance",
     "utilities/whttp",
     "utilities/wcurl",
     "utilities/waget",
     "dev-tools/grease-tool",
+    "dev-tools/fork-inventory",
 ]
 
 [workspace.package]

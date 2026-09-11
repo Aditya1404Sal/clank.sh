@@ -1,9 +1,9 @@
 //! The native (reqwest) Anthropic `ask` provider — the off-Golem mirror of `clank-agent`'s durable
 //! `DurableAnthropicProvider`.
 //!
-//! `clank-core` owns the target-agnostic [`AskProvider`](crate::ai::ask::AskProvider) seam and the
+//! `clank-core` owns the target-agnostic [`AskProvider`](clank_core::ai::ask::AskProvider) seam and the
 //! neutral `AskTurn`/`AskTool`/`AskToolCall`/`AskToolResult`/`AskResponse` types. The request/response
-//! wire mapping onto Anthropic's `POST /v1/messages` lives in [`anthropic_wire`](super::anthropic_wire)
+//! wire mapping onto Anthropic's `POST /v1/messages` lives in [`anthropic_wire`](clank_core::ai::anthropic_wire)
 //! (shared with the durable agent provider); this module is the thin `reqwest` transport around it, so
 //! `ask` works natively without the Golem crates. The `Session` owns the multi-turn agentic loop; this
 //! provider is a single-turn transport (one [`turn`](AskProvider::turn) = one Anthropic request).
@@ -14,10 +14,10 @@
 
 use serde_json::Value;
 
-use crate::ai::anthropic_wire::{
+use clank_core::ai::anthropic_wire::{
     build_request, parse_error, parse_response, ANTHROPIC_VERSION, MESSAGES_URL,
 };
-use crate::ai::ask::{AskProvider, AskResponse, AskTool, AskTurn};
+use clank_core::ai::ask::{AskProvider, AskResponse, AskTool, AskTurn};
 
 /// The provider name under which the key is stored in `ask.toml`.
 const PROVIDER: &str = "anthropic";
@@ -35,8 +35,8 @@ impl ReqwestAnthropicProvider {
     #[must_use]
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
-            .connect_timeout(crate::config::net::CONNECT_TIMEOUT)
-            .timeout(crate::config::net::LLM_TIMEOUT)
+            .connect_timeout(clank_core::config::net::CONNECT_TIMEOUT)
+            .timeout(clank_core::config::net::LLM_TIMEOUT)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self {
@@ -65,7 +65,7 @@ impl Default for ReqwestAnthropicProvider {
 /// `ANTHROPIC_API_KEY`. `None` ⇒ the provider reports "not configured".
 fn resolve_api_key() -> Option<String> {
     if let Ok(home) = std::env::var("HOME") {
-        if let Some(key) = crate::ai::config::provider_key(&home, PROVIDER) {
+        if let Some(key) = clank_core::ai::config::provider_key(&home, PROVIDER) {
             if !key.is_empty() {
                 return Some(key);
             }
@@ -135,7 +135,7 @@ impl AskProvider for ReqwestAnthropicProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ai::ask::AskTool;
+    use clank_core::ai::ask::AskTool;
 
     // The pure request-build / response-parse mapping is covered in `anthropic_wire`'s tests. Here we
     // exercise only the reqwest transport end-to-end over a hermetic mock server (mirrors wcurl's

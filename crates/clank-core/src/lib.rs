@@ -3,7 +3,9 @@
 //! A long-running, terminal-like read/eval/print loop that runs on two targets:
 //!
 //! - **wasm32** — a `wasi:cli/run` component (WASI 0.3, async p3 streams). See [`wasm`].
-//! - **native** — an ordinary executable over blocking `std::io`. See [`native`].
+//! - **native** — an ordinary executable over blocking `std::io`. This crate stays target-agnostic
+//!   for that platform too: the REPL loop and every `reqwest`-backed provider live in the separate
+//!   `clank-native` crate, which injects them into [`session::Session`].
 //!
 //! Two things are shared and target-agnostic:
 //!
@@ -38,9 +40,6 @@ mod tools;
 // `golem:agent` world) can link this crate without re-emitting a clashing `wasi:cli/run` export.
 #[cfg(all(target_arch = "wasm32", feature = "repl-driver"))]
 mod wasm;
-
-#[cfg(not(target_arch = "wasm32"))]
-pub mod native;
 
 /// The interactive prompt written before each line is read.
 pub const PROMPT: &[u8] = b"clank$ ";

@@ -1,4 +1,4 @@
-//! The native (reqwest) implementation of the [`McpHttp`](crate::mcp::client::McpHttp) transport.
+//! The native (reqwest) implementation of the [`McpHttp`](clank_core::mcp::client::McpHttp) transport.
 //!
 //! On the Golem agent this seam is filled by `clank-embed`'s WASI-HTTP client; natively there was no
 //! transport, so MCP and `grease`-over-network degraded to an honest "not configured" error. This
@@ -9,9 +9,10 @@
 //! response headers — the `Mcp-Session-Id` for session continuity and `Content-Type` for SSE-body
 //! detection — so this impl collects them into [`HttpResponse::headers`] with lowercased names, the
 //! documented convention. The transport is wrapped in `LoggingMcpHttp` automatically by
-//! [`Session::set_mcp_http`](crate::session::Session::set_mcp_http), so `http.log` covers it for free.
+//! [`Session::set_mcp_http`](clank_core::session::Session::set_mcp_http), so `http.log` covers it for
+//! free.
 
-use crate::mcp::client::{HttpResponse, McpHttp};
+use clank_core::mcp::client::{HttpResponse, McpHttp};
 
 /// A native `McpHttp` backed by a shared `reqwest` client (connection pool reused across requests).
 pub struct ReqwestMcpHttp {
@@ -24,8 +25,8 @@ impl ReqwestMcpHttp {
     #[must_use]
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
-            .connect_timeout(crate::config::net::CONNECT_TIMEOUT)
-            .timeout(crate::config::net::REQUEST_TIMEOUT)
+            .connect_timeout(clank_core::config::net::CONNECT_TIMEOUT)
+            .timeout(clank_core::config::net::REQUEST_TIMEOUT)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self { client }
@@ -46,9 +47,10 @@ impl McpHttp for ReqwestMcpHttp {
         url: &str,
         headers: &[(String, String)],
         body: Option<Vec<u8>>,
-    ) -> crate::mcp::error::Result<HttpResponse> {
-        let method = reqwest::Method::from_bytes(method.as_bytes())
-            .map_err(|e| crate::mcp::Error::transport(format!("bad method '{method}': {e}")))?;
+    ) -> clank_core::mcp::error::Result<HttpResponse> {
+        let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| {
+            clank_core::mcp::Error::transport(format!("bad method '{method}': {e}"))
+        })?;
 
         let mut builder = self.client.request(method, url);
         for (k, v) in headers {
@@ -61,7 +63,7 @@ impl McpHttp for ReqwestMcpHttp {
         let response = builder
             .send()
             .await
-            .map_err(|e| crate::mcp::Error::transport(format!("request failed: {e}")))?;
+            .map_err(|e| clank_core::mcp::Error::transport(format!("request failed: {e}")))?;
 
         let status = response.status().as_u16();
 
@@ -84,7 +86,9 @@ impl McpHttp for ReqwestMcpHttp {
         let body = response
             .bytes()
             .await
-            .map_err(|e| crate::mcp::Error::transport(format!("reading response failed: {e}")))?
+            .map_err(|e| {
+                clank_core::mcp::Error::transport(format!("reading response failed: {e}"))
+            })?
             .to_vec();
 
         Ok(HttpResponse {

@@ -43,7 +43,7 @@ impl AskProvider for DurableAnthropicProvider {
         // `provider/model` → (provider, bare). No prefix ⇒ the default provider. The Messages API
         // wants the BARE id: sending `anthropic/claude-…` verbatim is a 404 from Anthropic, and
         // `model default anthropic/claude-sonnet-4-5` writes exactly that prefixed form into
-        // ask.toml. The native dispatcher (`clank_core::ai::llm_native`) splits the same way.
+        // ask.toml. The native dispatcher (`clank_native::llm`) splits the same way.
         let (provider, bare) = match model.split_once('/') {
             Some((p, m)) => (p, m),
             None => (clank_core::config::model::DEFAULT_PROVIDER, model),

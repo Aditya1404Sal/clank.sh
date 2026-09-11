@@ -1,5 +1,5 @@
 //! Native target: the shell as an ordinary executable over blocking `std::io`. All command
-//! execution and output capture live in the shared [`crate::session::Session`]; this driver is
+//! execution and output capture live in the shared [`clank_core::session::Session`]; this driver is
 //! just the prompt/read/write loop.
 //!
 //! Two loops, chosen by whether stdin is a TTY:
@@ -10,8 +10,8 @@
 //! - **[`run_plain`]** — the original blocking `read_line` loop, used verbatim when stdin is piped
 //!   (`echo cmd | clank`, the e2e scripts, the tests). No terminal, no ANSI, no behavior change.
 
-use crate::session::Session;
-use crate::{trim_eol, Flow, PROMPT};
+use clank_core::session::Session;
+use clank_core::{trim_eol, Flow, PROMPT};
 use std::io::{self, IsTerminal, Write};
 
 /// Run the interactive read/eval/print loop until `exit` or end-of-input.
@@ -53,7 +53,7 @@ async fn run_plain(session: &mut Session) -> Result<(), Box<dyn std::error::Erro
         // `ask repl` is a native-terminal feature: run the interactive REPL loop inline (the native
         // driver owns the terminal, so it can block on human input between turns — the durable agent
         // cannot, and returns an honest message from `eval_line`). See `Session::repl_*`.
-        if let Some(args) = crate::ai::ask::classify_repl(&line_str) {
+        if let Some(args) = clank_core::ai::ask::classify_repl(&line_str) {
             run_repl(session, &args).await?;
             continue;
         }
@@ -63,7 +63,7 @@ async fn run_plain(session: &mut Session) -> Result<(), Box<dyn std::error::Erro
         // typed the way every shell user expects. Ctrl-D mid-construct discards the construct, not
         // the shell. The cap is a backstop against a pathological feed; overflowing it falls
         // through to eval, where the Session's incomplete-input check answers exit 2 honestly.
-        let max_continuations = crate::config::limits::MAX_CONTINUATION_LINES;
+        let max_continuations = clank_core::config::limits::MAX_CONTINUATION_LINES;
         let mut continuations = 0usize;
         let mut aborted = false;
         while session.line_is_incomplete(&line_str) && continuations < max_continuations {
@@ -131,7 +131,7 @@ async fn run_interactive(session: &mut Session) -> Result<(), Box<dyn std::error
     use reedline::Signal;
 
     // Backstop against a pathological continuation feed (matches the plain loop).
-    use crate::config::limits::MAX_CONTINUATION_LINES;
+    use clank_core::config::limits::MAX_CONTINUATION_LINES;
 
     let mut editor = build_editor();
     let mut last_ok = true;
@@ -174,7 +174,7 @@ async fn run_interactive(session: &mut Session) -> Result<(), Box<dyn std::error
 
         // `ask repl` — reuse the plain read-driven REPL (the terminal is cooked here; reedline only
         // holds raw mode during its own `read_line`).
-        if let Some(args) = crate::ai::ask::classify_repl(&line_str) {
+        if let Some(args) = clank_core::ai::ask::classify_repl(&line_str) {
             run_repl(session, &args).await?;
             last_ok = true;
             continue;
@@ -282,7 +282,7 @@ struct CommandHighlighter {
 
 impl CommandHighlighter {
     fn new() -> Self {
-        let mut known: std::collections::HashSet<String> = crate::registry::build()
+        let mut known: std::collections::HashSet<String> = clank_core::registry::build()
             .names()
             .map(std::string::ToString::to_string)
             .collect();
@@ -576,7 +576,7 @@ fn head_branch(gitdir: &std::path::Path) -> Option<String> {
 /// transcript is untouched during the REPL — only the isolated one grows.
 async fn run_repl(
     session: &mut Session,
-    args: &crate::ai::ask::ReplArgs,
+    args: &clank_core::ai::ask::ReplArgs,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let model = match session.repl_start(args) {
         Ok(m) => m,
@@ -638,24 +638,22 @@ async fn run_repl(
 ///   is present (env `ANTHROPIC_API_KEY` or `~/.config/ask/ask.toml`), rather than being absent.
 /// - **Golem cluster + agent invoker**: installed only when an external cluster config is found
 ///   (otherwise native keeps the honest "needs a cluster" error, unchanged).
-fn inject_native_providers(session: &mut Session) {
-    session.set_mcp_http(Box::new(crate::mcp::http_native::ReqwestMcpHttp::new()));
+pub fn inject_native_providers(session: &mut Session) {
+    session.set_mcp_http(Box::new(crate::mcp_http::ReqwestMcpHttp::new()));
     // The multi-provider dispatcher: routes `ask` by the model's `provider/` prefix (anthropic via
     // the Messages API; openai/grok/openrouter/ollama via the OpenAI Chat Completions API; bedrock is
     // an honest agent-only error). This is the NATIVE path and is pure reqwest — it carries no
     // golem-ai-llm dependency, so it is unaffected by the pin that keeps the wasm agent's `ask`
     // Anthropic-only on this branch. Native and agent therefore differ in provider coverage here.
-    session.set_ask_provider(Box::new(crate::ai::llm_native::NativeLlmProvider::new()));
+    session.set_ask_provider(Box::new(crate::llm::NativeLlmProvider::new()));
 
     // Golem cluster + agent invoker: only when an external cluster config is present (README §161-163).
     // Without it, native keeps the honest "needs a cluster" error — Tier C is inert unless configured.
-    if let Some(cfg) = crate::golem::config_native::load() {
-        session.set_golem_cluster(Box::new(
-            crate::golem::rest_native::NativeHttpGolemCluster::new(cfg.clone()),
-        ));
-        session.set_agent_invoker(Box::new(
-            crate::golem::rest_native::NativeHttpAgentInvoker::new(cfg),
-        ));
+    if let Some(cfg) = crate::cluster_config::load() {
+        session.set_golem_cluster(Box::new(crate::rest::NativeHttpGolemCluster::new(
+            cfg.clone(),
+        )));
+        session.set_agent_invoker(Box::new(crate::rest::NativeHttpAgentInvoker::new(cfg)));
     }
 }
 

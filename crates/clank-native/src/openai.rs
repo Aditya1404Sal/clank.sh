@@ -6,17 +6,17 @@
 //!
 //! One wire mapping serves four providers because they share the format — only the **endpoint** and
 //! **API-key env var** differ (see [`Descriptor`]). Anthropic is NOT here (its Messages API is a
-//! different shape — see [`crate::ai::anthropic_native`]); Bedrock is agent-only (AWS SigV4).
+//! different shape — see [`crate::anthropic`]); Bedrock is agent-only (AWS SigV4).
 //!
 //! The `Session` owns the multi-turn agentic loop; this is a single-turn transport — one
 //! [`turn`] = one Chat Completions request.
 
 use serde_json::{json, Value};
 
-use crate::ai::ask::{AskResponse, AskToolCall};
-use crate::ai::ask::{AskTool, AskTurn};
+use clank_core::ai::ask::{AskResponse, AskToolCall};
+use clank_core::ai::ask::{AskTool, AskTurn};
 
-use crate::config::model::MAX_TOKENS;
+use clank_core::config::model::MAX_TOKENS;
 
 /// A static description of one OpenAI-compatible provider: where to send and which env var holds the
 /// key. `requires_key` is false for local Ollama (no auth).
@@ -250,7 +250,7 @@ fn parse_response(v: &Value) -> AskResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ai::ask::AskToolResult;
+    use clank_core::ai::ask::AskToolResult;
 
     #[test]
     fn build_request_maps_system_user_and_tools() {

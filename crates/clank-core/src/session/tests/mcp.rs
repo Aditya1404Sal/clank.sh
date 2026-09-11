@@ -329,8 +329,8 @@ fn mcp_dispatch_survives_restart_without_reload() {
                 String::from_utf8_lossy(&add.stderr)
             );
         }
-        // Restart: a brand-new Session (reconstruction runs), transport re-injected as native::run
-        // does AFTER Session::new. Serve ONLY the tools/call response — no re-initialize.
+        // Restart: a brand-new Session (reconstruction runs), transport re-injected as clank-native's
+        // `run()` does AFTER Session::new. Serve ONLY the tools/call response — no re-initialize.
         let mut fresh = Session::new().await.unwrap();
         fresh.set_mcp_http(Box::new(FakeMcpHttp::new(vec![mcp_call_response(
             "echoed: hi",
