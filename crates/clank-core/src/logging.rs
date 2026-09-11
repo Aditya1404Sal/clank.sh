@@ -358,6 +358,66 @@ pub fn redact_url(url: &str) -> String {
     format!("{base}?{masked}")
 }
 
+/// Characters that end a URL inside prose. `)` is here because the single most important producer of
+/// these messages writes `for url (https://…)` — `reqwest::Error`'s `Display`.
+const URL_TERMINATORS: &[char] = &[
+    ')', ']', '}', '>', '"', '\'', '`', ',', ';', ' ', '\t', '\n',
+];
+
+/// Redact credentials from every URL embedded in *free text* — an error message, typically.
+///
+/// [`redact_url`] takes a URL. This takes a sentence that happens to contain one, which is the shape
+/// every transport failure arrives in: `reqwest::Error`'s `Display` appends `for url ({url})` with no
+/// redaction of its own (verified against reqwest 0.12), and `url::Url`'s `Display` serializes the
+/// `userinfo` password verbatim. So a connect failure to a credential-bearing endpoint produces a
+/// message carrying that password, and every one of those messages is logged.
+///
+/// This is the same leak class [`redact_userinfo`] was written for, one layer out: that fixed the
+/// URL *field*, while the error *text* logged beside it stayed raw. `mcp/client.rs` showed the gap
+/// exactly — it redacted `url` and then logged `e.to_string()` on the next line.
+///
+/// Passing free text to [`redact_url`] directly would appear to work (its `://` split absorbs the
+/// prefix into `scheme`) but only by accident, and its query handling would mangle any later `?` in
+/// the sentence. Hence a separate, tested entry point rather than a convenient misuse.
+#[must_use]
+pub fn redact_embedded_urls(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains("://") {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    let mut redacted_any = false;
+    while let Some(sep) = rest.find("://") {
+        // Walk back over the scheme (RFC 3986: ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )).
+        let scheme_start = rest[..sep]
+            .rfind(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
+            .map_or(0, |i| i + 1);
+        // A bare `://` with no scheme before it is not a URL — emit it and move on, or we loop.
+        if scheme_start == sep {
+            let (head, tail) = rest.split_at(sep + 3);
+            out.push_str(head);
+            rest = tail;
+            continue;
+        }
+        let end = rest[sep..]
+            .find(URL_TERMINATORS)
+            .map_or(rest.len(), |i| sep + i);
+        let url = &rest[scheme_start..end];
+        let clean = redact_url(url);
+        redacted_any |= clean != url;
+        out.push_str(&rest[..scheme_start]);
+        out.push_str(&clean);
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    if redacted_any {
+        std::borrow::Cow::Owned(out)
+    } else {
+        // Nothing was masked, so hand back the borrow rather than the (identical) copy.
+        std::borrow::Cow::Borrowed(text)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -554,5 +614,59 @@ mod tests {
             "https://h/repo/README.md"
         );
         assert_eq!(redact_url("https://h/p?page=2"), "https://h/p?page=2");
+    }
+
+    #[test]
+    fn embedded_urls_are_redacted_inside_error_prose() {
+        // The exact shape `reqwest::Error`'s Display produces, which is how this reaches http.log.
+        assert_eq!(
+            redact_embedded_urls(
+                "ask: model call failed: error sending request for url (http://u:hunter2@h:11434/v1/chat)\n"
+            ),
+            "ask: model call failed: error sending request for url (http://u:<redacted>@h:11434/v1/chat)\n"
+        );
+        // A secret query param in prose, and the `)` terminator not being swallowed into the URL.
+        assert_eq!(
+            redact_embedded_urls("mcp: GET https://h/mcp?token=sk-abc failed (timeout)"),
+            "mcp: GET https://h/mcp?token=<redacted> failed (timeout)"
+        );
+        // Two URLs in one message; both get scrubbed.
+        assert_eq!(
+            redact_embedded_urls("redirect https://a:p1@x/ -> https://b:p2@y/"),
+            "redirect https://a:<redacted>@x/ -> https://b:<redacted>@y/"
+        );
+    }
+
+    #[test]
+    fn redact_embedded_urls_leaves_ordinary_text_alone() {
+        // No URL at all, and a `?` that must not be treated as a query separator.
+        for s in [
+            "ask: model call failed: connection refused",
+            "grease: is this a url? no",
+            "",
+        ] {
+            assert!(matches!(
+                redact_embedded_urls(s),
+                std::borrow::Cow::Borrowed(_)
+            ));
+            assert_eq!(redact_embedded_urls(s), s);
+        }
+        // A URL with nothing secret in it is returned borrowed, not copied.
+        let plain = "fetching https://example.com/a?page=2 now";
+        assert!(matches!(
+            redact_embedded_urls(plain),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        assert_eq!(redact_embedded_urls(plain), plain);
+    }
+
+    #[test]
+    fn redact_embedded_urls_terminates_on_a_bare_scheme_separator() {
+        // A `://` with no scheme before it must not spin the scan loop.
+        assert_eq!(redact_embedded_urls("what is :// even"), "what is :// even");
+        assert_eq!(
+            redact_embedded_urls(":// then https://u:p@h/"),
+            ":// then https://u:<redacted>@h/"
+        );
     }
 }

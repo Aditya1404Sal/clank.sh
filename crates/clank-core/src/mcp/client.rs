@@ -104,7 +104,13 @@ impl McpHttp for LoggingMcpHttp {
             .field("url", crate::logging::redact_url(url));
         let rec = match &result {
             Ok(resp) => rec.field("status", resp.status.to_string()),
-            Err(e) => rec.field("status", "error").field("error", e.to_string()),
+            // The message is scrubbed too, not just the `url` field above it: a transport error's
+            // `Display` appends the URL it failed on, so redacting one and not the other logged the
+            // credentials anyway.
+            Err(e) => rec.field("status", "error").field(
+                "error",
+                crate::logging::redact_embedded_urls(&e.to_string()),
+            ),
         };
         rec.emit(crate::logging::LogFile::Http);
         result
@@ -369,10 +375,16 @@ impl<'a> McpClient<'a> {
         // mcp.log: every JSON-RPC method + its outcome (the single funnel all MCP ops pass through).
         let rec = crate::logging::Record::new("rpc")
             .field("method", method)
-            .field("url", &self.url);
+            // `redact_url`, not the raw session URL: an MCP server is configured by URL and that URL
+            // routinely carries a token. The `http` record above always redacted; this one did not,
+            // so every rpc call wrote the credential to mcp.log.
+            .field("url", crate::logging::redact_url(&self.url));
         match &result {
             Ok(_) => rec.field("status", "ok"),
-            Err(e) => rec.field("status", "error").field("error", e.to_string()),
+            Err(e) => rec.field("status", "error").field(
+                "error",
+                crate::logging::redact_embedded_urls(&e.to_string()),
+            ),
         }
         .emit(crate::logging::LogFile::Mcp);
         result

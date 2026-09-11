@@ -55,7 +55,14 @@ impl Session {
                 .field("package", &name)
                 .field("outcome", &outcome);
             if result.exit_code != 0 {
-                record = record.field("detail", String::from_utf8_lossy(&result.stderr).trim());
+                // A failed `grease install` reports the registry URL it could not reach, and a
+                // private registry is configured with credentials in that URL.
+                record = record.field(
+                    "detail",
+                    crate::logging::redact_embedded_urls(
+                        String::from_utf8_lossy(&result.stderr).trim(),
+                    ),
+                );
             }
             record.emit(crate::logging::LogFile::Ops);
         }

@@ -367,7 +367,13 @@ impl AskProvider for LoggingAskProvider {
             .field("model", model)
             .field("tools", tools.len().to_string());
         let rec = match &resp.error {
-            Some(e) => rec.field("status", "error").field("error", e.to_string()),
+            // Scrubbed: `Error::Request` is built from a transport error's `Display`, which appends
+            // the endpoint URL. Four of the five providers point at a fixed HTTPS endpoint, but
+            // Ollama's is operator-set (`GOLEM_OLLAMA_BASE_URL`) and can carry `user:pass@`.
+            Some(e) => rec.field("status", "error").field(
+                "error",
+                crate::logging::redact_embedded_urls(&e.to_string()),
+            ),
             None => rec.field("status", "ok"),
         };
         rec.emit(crate::logging::LogFile::Http);
