@@ -23,6 +23,10 @@ crate-type = ["rlib"]
 brush-core = "0.5"
 brush-builtins = "0.2"
 brush-parser = "0.4"
+# The `grease` package types + sha256/ed25519/RFC-6962 integrity verification, extracted to their own
+# leaf crate so `dev-tools/grease-tool` can depend on just that instead of all of clank-core. Re-exported
+# whole as `grease::pkg` (see crates/clank-core/src/grease/mod.rs) so no in-tree path changes.
+grease-pkg = { path = "../grease-pkg" }
 # The curl/wget HTTP commands (wasm/native HTTP seam lives in these crates). clank intercepts
 # curl/wget in Session::run_command and awaits their async `run` under the live reactor.
 wcurl = { path = "../../utilities/wcurl" }

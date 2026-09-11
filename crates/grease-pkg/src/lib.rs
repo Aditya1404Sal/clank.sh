@@ -1,6 +1,7 @@
-//! `grease` package types: the registry payloads, `{{var}}` templating, and sha256 integrity.
+//! `grease-pkg`: the `grease` package manager's payload types — registry payloads, `{{var}}`
+//! templating, and sha256/ed25519/RFC-6962 integrity verification.
 //!
-//! grease installs several kinds of package (see [`PackageKind`]); this module models the ones this
+//! grease installs several kinds of package (see [`PackageKind`]); this crate models the ones this
 //! build supports:
 //!
 //! - **Prompt** ([`PromptPackage`]) — `{name, description, model?, arguments?, body}`; the `body`
@@ -11,31 +12,39 @@
 //!   documents?, scripts?}`; not a command, surfaced to the model + its bundled scripts land on `$PATH`.
 //!
 //! Prompt and script arguments share the [`PackageArg`] shape and the `{{var}}` [`fill`] machinery.
+//!
+//! Deliberately dependency-free of `clank-core` (only `serde`/`serde_json`/`sha2`/verify-only
+//! `ed25519-dalek`/`base64`), so `dev-tools/grease-tool` can depend on just this crate instead of all
+//! of `clank-core`. `clank-core` re-exports this crate as `grease::pkg`. One consequence: this crate
+//! does not know about clank-core's shared manifest `ParamSpec`/`ParamType` types — the
+//! `PackageArg` → `ParamSpec` adapter lives on the clank-core side, as `grease::param_specs_of`.
+
+pub mod error;
 
 use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::manifest::{ParamSpec, ParamType};
+pub use error::Error;
 
 // Module-local constructors: this file's failures fall into four roles, and naming them at the
 // construction site keeps the taxonomy visible where the error is raised rather than at a boundary.
 /// A payload that will not parse (bad JSON, bad frontmatter, unknown kind).
-fn malformed(msg: impl Into<String>) -> crate::grease::Error {
-    crate::grease::Error::Malformed(msg.into())
+fn malformed(msg: impl Into<String>) -> crate::Error {
+    crate::Error::Malformed(msg.into())
 }
 /// A required package argument the caller did not supply.
-fn missing_arg(msg: impl Into<String>) -> crate::grease::Error {
-    crate::grease::Error::MissingArgument(msg.into())
+fn missing_arg(msg: impl Into<String>) -> crate::Error {
+    crate::Error::MissingArgument(msg.into())
 }
 /// An ed25519 signature or key that failed to verify — a supply-chain rejection.
-fn signature(msg: impl Into<String>) -> crate::grease::Error {
-    crate::grease::Error::Signature(msg.into())
+fn signature(msg: impl Into<String>) -> crate::Error {
+    crate::Error::Signature(msg.into())
 }
 /// A transparency-log inclusion proof that failed to verify — a supply-chain rejection.
-fn log_proof(msg: impl Into<String>) -> crate::grease::Error {
-    crate::grease::Error::LogProof(msg.into())
+fn log_proof(msg: impl Into<String>) -> crate::Error {
+    crate::Error::LogProof(msg.into())
 }
 
 /// Which kind of package a registry entry / install marker describes. Declared by the registry
@@ -105,19 +114,6 @@ pub struct PackageArg {
 /// Back-compat alias — prompt code (and its tests) refer to `PromptArg`.
 pub type PromptArg = PackageArg;
 
-/// The declared arguments rendered as manifest [`ParamSpec`]s (drives `--help`, completion). All are
-/// `String`-typed (free text); `required`/`default` carry through. Shared by prompt and script.
-fn args_to_param_specs(args: &[PackageArg]) -> Vec<ParamSpec> {
-    args.iter()
-        .map(|a| ParamSpec {
-            name: a.name.clone(),
-            ty: ParamType::String,
-            required: a.required,
-            default: a.default.clone(),
-        })
-        .collect()
-}
-
 /// Fill `body`'s `{{arg}}` placeholders from `provided` (arg name → value). A declared arg not
 /// provided falls back to its `default`; a required arg with neither is an error (exit-2 usage).
 /// Unknown placeholders in the body are left as-is (honest, not silently dropped). Shared by prompt
@@ -126,7 +122,7 @@ fn fill_body(
     body: &str,
     args: &[PackageArg],
     provided: &[(String, String)],
-) -> crate::grease::error::Result<String> {
+) -> crate::error::Result<String> {
     let mut out = body.to_string();
     for arg in args {
         let value = provided
@@ -197,11 +193,7 @@ fn unquote(s: &str) -> &str {
 /// default false on anything else); unknown keys are ignored (forgiving).
 // Uniform fallible signature keeps the `?` call sites in `from_markdown` consistent.
 #[allow(clippy::unnecessary_wraps)]
-fn apply_arg_field(
-    arg: &mut PackageArg,
-    key: &str,
-    value: String,
-) -> crate::grease::error::Result<()> {
+fn apply_arg_field(arg: &mut PackageArg, key: &str, value: String) -> crate::error::Result<()> {
     match key {
         "name" => arg.name = value,
         "description" => arg.description = value,
@@ -236,7 +228,7 @@ impl PromptPackage {
     ///
     /// # Errors
     /// Returns `Err` if `bytes` is not valid JSON matching the package shape.
-    pub fn from_json(bytes: &[u8]) -> crate::grease::error::Result<Self> {
+    pub fn from_json(bytes: &[u8]) -> crate::error::Result<Self> {
         serde_json::from_slice(bytes).map_err(|e| malformed(format!("invalid package JSON: {e}")))
     }
 
@@ -254,7 +246,7 @@ impl PromptPackage {
     /// # Errors
     /// Returns `Err` if `bytes` isn't UTF-8, has no leading `---` frontmatter, contains a malformed
     /// frontmatter line, or is missing the required `name` (or an argument's `name`).
-    pub fn from_markdown(bytes: &[u8]) -> crate::grease::error::Result<Self> {
+    pub fn from_markdown(bytes: &[u8]) -> crate::error::Result<Self> {
         let text =
             std::str::from_utf8(bytes).map_err(|_| malformed("prompt .md is not valid UTF-8"))?;
         let (frontmatter, body) = split_frontmatter(text)
@@ -369,17 +361,11 @@ impl PromptPackage {
         serde_json::to_string_pretty(self).unwrap_or_default()
     }
 
-    /// The package's arguments rendered as manifest [`ParamSpec`]s.
-    #[must_use]
-    pub fn param_specs(&self) -> Vec<ParamSpec> {
-        args_to_param_specs(&self.arguments)
-    }
-
     /// Fill the body's `{{arg}}` placeholders (see [`fill_body`]).
     ///
     /// # Errors
     /// Returns `Err` if a required argument is neither provided nor defaulted.
-    pub fn fill(&self, provided: &[(String, String)]) -> crate::grease::error::Result<String> {
+    pub fn fill(&self, provided: &[(String, String)]) -> crate::error::Result<String> {
         fill_body(&self.body, &self.arguments, provided)
     }
 }
@@ -405,7 +391,7 @@ impl ScriptPackage {
     ///
     /// # Errors
     /// Returns `Err` if `bytes` is not valid JSON matching the script-package shape.
-    pub fn from_json(bytes: &[u8]) -> crate::grease::error::Result<Self> {
+    pub fn from_json(bytes: &[u8]) -> crate::error::Result<Self> {
         serde_json::from_slice(bytes)
             .map_err(|e| malformed(format!("invalid script package JSON: {e}")))
     }
@@ -416,17 +402,11 @@ impl ScriptPackage {
         serde_json::to_string_pretty(self).unwrap_or_default()
     }
 
-    /// The package's arguments rendered as manifest [`ParamSpec`]s.
-    #[must_use]
-    pub fn param_specs(&self) -> Vec<ParamSpec> {
-        args_to_param_specs(&self.arguments)
-    }
-
     /// Fill the shell source's `{{arg}}` placeholders (see [`fill_body`]).
     ///
     /// # Errors
     /// Returns `Err` if a required argument is neither provided nor defaulted.
-    pub fn fill(&self, provided: &[(String, String)]) -> crate::grease::error::Result<String> {
+    pub fn fill(&self, provided: &[(String, String)]) -> crate::error::Result<String> {
         fill_body(&self.body, &self.arguments, provided)
     }
 }
@@ -477,7 +457,7 @@ impl SkillPackage {
     ///
     /// # Errors
     /// Returns `Err` if `bytes` is not valid JSON matching the skill-package shape.
-    pub fn from_json(bytes: &[u8]) -> crate::grease::error::Result<Self> {
+    pub fn from_json(bytes: &[u8]) -> crate::error::Result<Self> {
         serde_json::from_slice(bytes)
             .map_err(|e| malformed(format!("invalid skill package JSON: {e}")))
     }
@@ -537,8 +517,8 @@ impl McpArtifacts {
     }
 }
 
-/// One tool cached in an installed MCP package's payload (a serde mirror of
-/// [`crate::mcp::client::ToolSpec`] so `load()` rebuilds the tool surface without a live `tools/list`).
+/// One tool cached in an installed MCP package's payload (a serde mirror of clank-core's
+/// `mcp::client::ToolSpec` so `load()` rebuilds the tool surface without a live `tools/list`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct McpToolCache {
@@ -653,7 +633,7 @@ impl McpPackage {
     ///
     /// # Errors
     /// Returns `Err` if `bytes` is not valid JSON matching the MCP-package shape.
-    pub fn from_json(bytes: &[u8]) -> crate::grease::error::Result<Self> {
+    pub fn from_json(bytes: &[u8]) -> crate::error::Result<Self> {
         serde_json::from_slice(bytes)
             .map_err(|e| malformed(format!("invalid mcp package JSON: {e}")))
     }
@@ -709,7 +689,7 @@ impl AgentPackage {
     ///
     /// # Errors
     /// Returns `Err` if `bytes` is not valid JSON matching the agent-package shape.
-    pub fn from_json(bytes: &[u8]) -> crate::grease::error::Result<Self> {
+    pub fn from_json(bytes: &[u8]) -> crate::error::Result<Self> {
         serde_json::from_slice(bytes)
             .map_err(|e| malformed(format!("invalid agent package JSON: {e}")))
     }
@@ -749,11 +729,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 /// # Errors
 /// Returns `Err` if the key or signature isn't valid base64 / the right length, the key isn't a valid
 /// ed25519 public key, or the signature doesn't verify over `body`.
-pub fn verify_signature(
-    body: &[u8],
-    sig_b64: &str,
-    key_b64: &str,
-) -> crate::grease::error::Result<()> {
+pub fn verify_signature(body: &[u8], sig_b64: &str, key_b64: &str) -> crate::error::Result<()> {
     use base64::Engine;
     use ed25519_dalek::{Signature, VerifyingKey};
 
@@ -789,7 +765,7 @@ pub fn verify_signature(
 ///
 /// # Errors
 /// Returns `Err` if `key_b64` isn't valid base64, isn't 32 bytes, or isn't a valid ed25519 key.
-pub fn validate_public_key(key_b64: &str) -> crate::grease::error::Result<()> {
+pub fn validate_public_key(key_b64: &str) -> crate::error::Result<()> {
     use base64::Engine;
     use ed25519_dalek::VerifyingKey;
     let bytes = base64::engine::general_purpose::STANDARD
@@ -839,7 +815,7 @@ pub fn verify_inclusion_proof(
     tree_size: u64,
     root_hash: &[u8],
     proof: &[Vec<u8>],
-) -> crate::grease::error::Result<()> {
+) -> crate::error::Result<()> {
     if leaf_index >= tree_size {
         return Err(log_proof(format!(
             "leaf index {leaf_index} out of range for tree size {tree_size}"
@@ -897,7 +873,7 @@ pub fn verify_inclusion_proof(
 ///
 /// # Errors
 /// Returns `Err` if `bytes` isn't valid JSON, or its `kind` field is an unknown package kind.
-pub fn payload_kind(bytes: &[u8]) -> crate::grease::error::Result<PackageKind> {
+pub fn payload_kind(bytes: &[u8]) -> crate::error::Result<PackageKind> {
     let v: serde_json::Value = serde_json::from_slice(bytes)
         .map_err(|e| malformed(format!("invalid package JSON: {e}")))?;
     match v.get("kind").and_then(|k| k.as_str()) {
@@ -1034,18 +1010,6 @@ mod tests {
         let from_md = PromptPackage::from_markdown(md.as_bytes()).unwrap();
         let via_json = PromptPackage::from_json(from_md.to_json().as_bytes()).unwrap();
         assert_eq!(from_md, via_json);
-    }
-
-    #[test]
-    fn param_specs_map_arguments() {
-        let p = pkg(r#"{"name":"x","body":"{{a}}","arguments":[
-                {"name":"a","required":true},{"name":"b","required":false,"default":"z"}]}"#);
-        let specs = p.param_specs();
-        assert_eq!(specs.len(), 2);
-        let a = specs.iter().find(|s| s.name == "a").unwrap();
-        assert!(a.required && matches!(a.ty, ParamType::String));
-        let b = specs.iter().find(|s| s.name == "b").unwrap();
-        assert!(!b.required && b.default.as_deref() == Some("z"));
     }
 
     #[test]
@@ -1196,7 +1160,7 @@ mod tests {
     }
 
     #[test]
-    fn script_package_fills_and_specs() {
+    fn script_package_fills_and_round_trips() {
         let s = ScriptPackage::from_json(
             br#"{"kind":"script","name":"greet","description":"greet",
                  "arguments":[{"name":"who","required":true}],
@@ -1212,7 +1176,6 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("missing required argument --who"));
-        assert_eq!(s.param_specs().len(), 1);
         let back = ScriptPackage::from_json(s.to_json().as_bytes()).unwrap();
         assert_eq!(s, back);
     }

@@ -12,15 +12,16 @@ workspace = true
 # `grease-populate` — an interactive authoring tool + live HTTP server for a grease registry. One
 # process: it serves the registry directory over HTTP AND walks you through authoring every package
 # kind (prompt/script/skill/agent/mcp), signing + hashing + transparency-logging each with the SAME
-# `clank_core::grease::pkg` crypto the durable agent verifies with. Native-only dev tool.
+# `grease_pkg` crypto the durable agent verifies with. Native-only dev tool.
 [[bin]]
 name = "grease-populate"
 path = "src/main.rs"
 
 [dependencies]
-# The single source of truth for the package schemas + content hash + verify helpers. default-features
-# = false drops the repl-driver / wasi:cli export we don't need — we only touch `grease::pkg`.
-clank-core = { path = "../../crates/clank-core", default-features = false }
+# The single source of truth for the package schemas + content hash + verify helpers. A standalone
+# leaf crate (no brush/tokio/uucore/clap/... — clank-core's whole closure), so this tool's own
+# dependency tree stays small; see crates/grease-pkg.
+grease-pkg = { path = "../../crates/grease-pkg" }
 # Signing (SigningKey/Signer) — the lib pulls ed25519-dalek verify-only; the default features here add
 # the signing half, exactly as the grease-fixture example does.
 ed25519-dalek = { version = "2" }

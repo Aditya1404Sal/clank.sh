@@ -2,13 +2,17 @@
 
 Audience: a maintainer who needs to know exactly what was forked, patched, or cfg-split to run
 `clank.sh` inside a `wasm32-wasip2` component (the durable Golem agent) and why. Every entry below
-was verified against the tree on branch `clank-golem-agent`. Native builds are unaffected by all of
+was verified against the tree on branch `main-rc-1`. Native builds are unaffected by all of
 it — every change is either a fork that keeps native behavior identical, or a `cfg`-gated branch.
 
-There are exactly **two** third-party source forks (Brush, coreutils) and **one** `[patch.crates-io]`
-block. Everything else is in-repo `cfg(target_arch = "wasm32")` code plus default-feature trimming.
-No other crate is pinned to a git rev (verified: the only `git+` sources in `Cargo.lock` are the
-Brush and coreutils forks).
+For the current, *generated* inventory of every patched crate — pin kind, resolved rev, and the
+ones that arrive transitively and are named in no `Cargo.toml` — see
+[`docs/FORKS.md`](FORKS.md). That table is regenerated from `Cargo.toml`/`Cargo.lock` by
+`dev-tools/fork-inventory` and is CI-gated (`check-forks`), so it cannot drift silently the way an
+earlier version of this paragraph did: it asserted "exactly two forks" and "no other crate is
+pinned to a git rev" for months after a third, `golemcloud/wit-bindgen`, had been resolving into
+`Cargo.lock` transitively (via the `golem-rust` path dependency) the whole time. This file keeps
+what a generated table cannot produce: *why* each fork exists.
 
 ---
 
@@ -17,19 +21,14 @@ Brush and coreutils forks).
 **WHAT:** `brush-core`, `brush-builtins`, `brush-parser` — the bash-compatible shell interpreter
 clank embeds. Redirected from crates.io to a fork.
 
-**WHERE:** root `Cargo.toml` `[workspace.dependencies]`, lines 54–56:
+**WHERE:** `[workspace.dependencies]` in root `Cargo.toml` — see [`docs/FORKS.md`](FORKS.md) for the
+exact pin and resolved rev (`check-forks` in CI keeps that table honest; the literal rev is not
+repeated here so this file cannot go stale the way it previously did).
 
-```
-brush-core    = { git = "https://github.com/Aditya1404Sal/brush", rev = "02de798" }
-brush-builtins = { git = "https://github.com/Aditya1404Sal/brush", rev = "02de798" }
-brush-parser  = { git = "https://github.com/Aditya1404Sal/brush", rev = "02de798" }
-```
-
-Fork branch `std-utils` (stacked on `wall-c-wasm-pipes`, branched from upstream `0300a84`); pinned
-to exact commit `02de798` (see `Cargo.lock` for the full hash).
-All three crates are one monorepo and are pinned in lockstep. The published crates would be
+Fork branch `std-utils` (stacked on `wall-c-wasm-pipes`, branched from upstream `0300a84`). All
+three crates are one monorepo and are pinned in lockstep. The published crates would be
 `brush-core 0.5 / brush-builtins 0.2 / brush-parser 0.4` (see the version strings in
-`crates/clank-core/Cargo.toml` lines 21–23, which the workspace git pin overrides).
+`crates/clank-core/Cargo.toml`, which the workspace git pin overrides).
 
 **WHY wasip2 forced it — two independent reasons, both documented inline in `Cargo.toml` lines 42–53:**
 
@@ -59,18 +58,11 @@ gives the reader a clean EOF. No OS pipes, no task spawning. Native behavior is 
 **WHAT:** `uucore` plus all 18 `uu_*` command crates clank registers as builtins
 (`cat ls wc head sort mkdir rm mv cp env cut tr uniq tail tee touch sleep printf`).
 
-**WHERE:** root `Cargo.toml` — the **only** `[patch.crates-io]` block, lines 18–41 (verified: exactly
-one `[patch` block in the file). Every entry points at:
-
-```
-git = "https://github.com/Aditya1404Sal/coreutils", branch = "wasip2-oscompat"
-```
-
-Resolved commit `35ecf24d7caa2202940a18ef61be5037776ecd36`. The `[patch]` block names 19 crates
-(`uucore` + the 18 `uu_*`), but `Cargo.lock` resolves **20** `git+` source lines from the fork — the
-20th is `uucore_procs`, pulled transitively because `uucore` depends on it from the same repo. The
-`clank-core` `Cargo.toml` still *names* the plain `"0.9"` versions (lines 39–59); the workspace
-`[patch]` transparently redirects them to the fork.
+**WHERE:** the **only** `[patch.crates-io]` block in root `Cargo.toml` — see
+[`docs/FORKS.md`](FORKS.md) for the exact pin and resolved rev. The block names 19 crates (`uucore`
++ the 18 `uu_*`), but `Cargo.lock` resolves a 20th `git+` package from the same fork — `uucore_procs`,
+pulled in transitively because `uucore` itself depends on it. The `clank-core` `Cargo.toml` still
+*names* the plain `"0.9"` versions; the workspace `[patch]` transparently redirects them to the fork.
 
 **WHY wasip2 forced it:** upstream `uucore 0.9` uses the **unstable `wasip2` std feature** and fails
 to build on the target at all. The fork adds:
@@ -231,7 +223,9 @@ For completeness, so a maintainer doesn't go hunting for phantom patches:
 
 - **`getrandom`, `ring`, `tokio`, `wasi-fetch`** are plain crates.io dependencies — no fork, no git rev, no
   `[patch]`. Verified: `Cargo.lock` shows `ring 0.17.14`, `getrandom 0.2.17`/`0.4.3`, all
-  `registry+…crates.io`. The only `git+` sources in the lock are the Brush and coreutils forks.
+  `registry+…crates.io`, not git-sourced. (For the complete, generated list of every `git+` source
+  in `Cargo.lock` — including the ones no `Cargo.toml` names directly — see
+  [`docs/FORKS.md`](FORKS.md).)
 - Wasm compatibility for these is handled by **`cfg`-gated deps** (the `[target.'cfg(...)']` blocks
   in the crate `Cargo.toml`s) and by **`default-features = false` trimming**, not by patching:
   - `ed25519-dalek = { version = "2", default-features = false }`
@@ -242,3 +236,87 @@ For completeness, so a maintainer doesn't go hunting for phantom patches:
   - `reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }`
     (native-only, `wcurl`/`waget` `Cargo.toml`) — pure-Rust rustls TLS, no system libcurl/OpenSSL.
   - `chrono` with `default-features = false, features = ["clock"]` (`clank-core/Cargo.toml:69`).
+
+---
+
+## 6. The supply-chain risk that applies to every git fork
+
+**The coreutils and brush forks live in a single maintainer's personal GitHub account**
+(`Aditya1404Sal/coreutils`, `Aditya1404Sal/brush`). A delete, a rename, a force-push that drops the
+pinned object, or an account change breaks **every build of clank on every machine without a warm git
+cache** — CI, a fresh clone, a `golem deploy`. Cargo fails to resolve; it does not fall back.
+
+Two things reduce that today, and one does not:
+
+- **Reduces it:** both are pinned to an exact `rev`, not a branch. A branch pin silently advances to
+  branch-tip on a fresh resolve (audit P2-7); a rev pin is reproducible from source control alone,
+  and a force-push that *keeps* the object still resolves. ([`docs/FORKS.md`](FORKS.md) now reports
+  pin kind per crate, so a branch pin cannot hide — it currently flags four, all `wit-bindgen`,
+  arriving transitively through the dev SDK.)
+- **Reduces it:** `Cargo.lock` records the full 40-char hash, so the exact object is named even where
+  `Cargo.toml` abbreviates.
+- **Does NOT reduce it:** nothing mirrors these repositories. The `Cargo.toml` comment says "mirror
+  the fork so a delete/force-push can't break the build" — an instruction that has not been carried
+  out. **This is the single highest-leverage supply-chain fix available to this project**, and it
+  costs one `git push --mirror` per fork to an org-owned remote plus a one-line URL change.
+
+The two vendored forks (`reedline-fork/`, `crossterm-fork/`) have none of this exposure — the source
+is in-tree and committed. Their cost is the opposite: nothing tells you when upstream moves, so they
+go stale silently.
+
+---
+
+## 7. The `golem` CLI fork — not a dependency, and why it is still stuck
+
+`golem-stuff/golem` is a **nested git clone** (its own repo and remotes, gitignored by clank) of
+`golemcloud/golem`, on branch `clank-connect-patch`. It builds the `golem` CLI *binary* supplying
+`golem agent shell` — the command that drives a deployed clank agent interactively. **Nothing in
+clank's `Cargo.toml` points at it**, which is exactly why the generated `FORKS.md` cannot see it: a
+manifest-driven table structurally cannot report a fork that is not a Cargo dependency. (On
+`main-rc-1` the same clone additionally supplies the dev Golem SDK *via path deps*, which **is** a
+build dependency — see `DEV_SDK_CHANGES.md`.)
+
+**The upstreaming attempt.** [PR #3700](https://github.com/golemcloud/golem/pull/3700) was opened
+2026-07-16 17:19:08Z and **closed 19 seconds later, at 17:19:27Z**, by a bot: the project requires
+pull-request authors to be vouched, and the author was not on the list. The CLA *was* signed. **The
+PR was never reviewed on technical merit** — no maintainer read it. So the blocker is not code
+quality, an API objection, or a design disagreement.
+
+The unblock is documented in the repo's own `.github/VOUCHED.td`: a maintainer comments
+`vouch @Aditya1404Sal` on any issue. **That is the whole gate.** Worth pursuing — every rebase of
+this fork costs real work, and that cost recurs for as long as the patch lives out-of-tree.
+
+**Why rebases hurt the way they do:** only five files are *modified*; everything else is new
+(`interactive_shell.rs` ~1100 lines, `tests/agent_shell.rs`, the `test-components/agent-shell/`
+component). New files cannot textually conflict, so a rebase is rarely a merge-conflict problem — it
+is **compile-level API drift**, surfacing as build errors after a clean rebase rather than as
+`<<<<<<<` markers. The 2026-09-11 rebase onto `f5a3d29b9` is the case in point: two conflicts, then
+six identifier/signature changes from upstream's `worker`→`agent` rename.
+
+**Rebase procedure:**
+
+```bash
+cd golem-stuff/golem
+git branch -f clank-connect-patch-prerebase-<date> HEAD   # backup ref, always
+git fetch upstream
+git rebase upstream/main
+cargo build -p golem-cli                                   # the real gate
+git push --force-with-lease origin clank-connect-patch     # origin ONLY, never upstream
+```
+
+---
+
+## 8. Maintenance checklist
+
+When bumping any fork:
+
+1. **Bump the `rev`, never point at a branch** (audit P2-7). `check-forks` reports pin kind, so a
+   branch pin is visible in review rather than buried in `Cargo.lock`.
+2. Regenerate the inventory: `cargo run -p fork-inventory` (CI's `check-forks` fails otherwise), and
+   update the *rationale* here if the reason for the fork changed.
+3. `cargo clean` first if `target/` holds wasm artifacts — a stale one produces "failed to parse
+   WebAssembly module", which reads like a toolchain regression and is not one. Note
+   `scripts/lib/golem-json.sh`'s freshness check now covers the related (and more common) case where
+   `golem build` silently skips a component whose path dependency changed.
+4. Verify on **both** targets: `cargo test -- --test-threads=1`, then `scripts/golem-e2e.sh`. A fork
+   fix for wasm that breaks native is the failure mode these pins exist to prevent.

@@ -562,6 +562,7 @@ dependencies = [
  "diffy",
  "ed25519-dalek",
  "futures",
+ "grease-pkg",
  "grep",
  "infer",
  "jaq-core",
@@ -1637,13 +1638,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "grease-pkg"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "ed25519-dalek",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "grease-tool"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64",
- "clank-core",
  "ed25519-dalek",
+ "grease-pkg",
  "inquire",
  "serde",
  "serde_json",

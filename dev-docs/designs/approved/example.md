@@ -6,6 +6,10 @@ author: John A. De Goes
 
 # HTTP Client Abstraction Layer
 
+> **Template only — fictional, not project history.** This is a worked example of the dev-docs
+> workflow; its `HttpClient`/`wstd`-vs-`reqwest` scenario is invented, not a record of clank's
+> actual HTTP transport work.
+
 ## Overview
 
 The shell requires outbound HTTP on both `wasm32-wasip2` and native Rust targets. The two targets cannot share a single HTTP client crate. This design specifies a thin abstraction that accommodates both without leaking target-specific concerns into call sites.

@@ -1,0 +1,37 @@
+[package]
+name = "grease-pkg"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# grease's package payload types + sha256/ed25519/RFC-6962 integrity verification — deliberately the
+# ONLY dependencies below, and none of them is `clank-core`. This crate used to be a module inside
+# clank-core (`grease::pkg`), which meant `dev-tools/grease-tool` — a tool that only ever touches this
+# one self-contained module — dragged in clank-core's whole dependency closure (brush, 20 uu_*
+# coreutils, tokio, jaq, clap...) just to sign/hash/verify a package. Extracted so grease-tool can
+# depend on just this crate; `clank-core` depends on it too and re-exports it as `grease::pkg` so no
+# existing `crate::grease::pkg::...`/`crate::grease::Error` path inside clank-core had to change.
+#
+# Deliberately does NOT depend on clank-core's `manifest::{ParamSpec, ParamType}` — those are shared
+# manifest types (`mcp::state` builds them too), not grease-owned, so pulling them in here would make
+# this "dependency-free" crate depend on clank-core, inverting the direction the split exists to fix.
+# The `PackageArg` -> `ParamSpec` adapter instead lives on the clank-core side, as
+# `clank_core::grease::param_specs_of`.
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+# `error.rs`'s `Error` enum is a `thiserror::Error` derive (structured variants + `Display`). Not in
+# the ticket's dependency list, but unavoidable: `error.rs` moved here whole, and it was already
+# thiserror-derived in clank-core. Version matches clank-core's own pin.
+thiserror = "2"
+sha2 = "0.11.0"
+# Signature VERIFICATION only (no keygen/signing), so no RNG/getrandom — builds clean on
+# wasm32-wasip2. `default-features = false` drops the `rand_core`/`std` extras (mirrors clank-core's
+# own pin, which this crate's Cargo.toml previously inherited from).
+ed25519-dalek = { version = "2", default-features = false }
+base64 = "0.22"

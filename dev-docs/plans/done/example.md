@@ -13,6 +13,10 @@ realized_design: "dev-docs/designs/approved/example.md"
 
 # Implement HTTP Client Abstraction Layer
 
+> **Template only — fictional, not project history.** This is a worked example of the dev-docs
+> workflow; its `HttpClient`/`wstd`-vs-`reqwest` scenario is invented, not a record of clank's
+> actual HTTP transport work.
+
 ## Originating Issue
 
 Silent HTTP failures on `wasm32-wasip2` — see `dev-docs/issues/closed/example.md`.

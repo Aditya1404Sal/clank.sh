@@ -62,3 +62,21 @@ This issue does not require implementing Golem durability, MCP resource mounts, 
 installation, authorization prompts, or a complete POSIX filesystem. It is about introducing the
 shell-owned filesystem boundary so command implementations stop depending directly on host
 preopens as their primary storage model.
+
+## Resolution
+
+Resolved by the pivot to the Golem agent model — never through a dedicated design/plan of its own,
+which is why this issue skipped straight to closed instead of following the usual
+issue-design-plan sequence. clank's real deployment target became a durable Golem agent instance
+rather than a `wasmtime --dir`-preopened component, and Golem gives each agent instance its own
+filesystem rooted at `/`: preopened with `DirPerms::all()` + `FilePerms::all()`, fully read-write
+and recursive, durable across invocations, and isolated per agent identity (the filesystem
+directory derives from the agent-id string, so no two instances — and no host repo — share one).
+There is no host preopen left to depend on or leak through: the per-agent Golem filesystem *is*
+the shell-owned filesystem this issue asked for.
+
+See `dev-docs/designs/approved/clank-golem-agent.md` ("Filesystem: what the Golem model actually
+gives us (verified)") for the verified details. `dev-docs/plans/done/clank-golem-agent.md`
+("Context") names this issue directly and calls its gap "essentially moot" once the per-agent host
+FS model was confirmed with the Golem team. `docs/WASM_CHANGES.md` §8 records the same isolation
+property from the `clank-embed` side: "one agent instance = one worker = one isolated VFS."

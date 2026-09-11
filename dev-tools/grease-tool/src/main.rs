@@ -3,9 +3,9 @@
 //! One process: it serves a registry directory over HTTP (so `grease registry add` can point at it)
 //! AND walks you through authoring every package kind — prompts (inline or from a `.md`), scripts
 //! (from a `.sh`), skills (`.md` docs + `.sh` scripts), agents, and mcp. Each package is signed +
-//! content-hashed + given an RFC-6962 single-leaf transparency proof using the SAME
-//! `clank_core::grease::pkg` code the durable agent verifies with — so what this tool emits is,
-//! by construction, exactly what `grease install` accepts.
+//! content-hashed + given an RFC-6962 single-leaf transparency proof using the SAME `grease_pkg`
+//! code the durable agent verifies with — so what this tool emits is, by construction, exactly what
+//! `grease install` accepts.
 //!
 //! Usage:  grease-populate <registry-dir> [--port <n>] [--signer <name>]
 //!
@@ -23,7 +23,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use clank_core::grease::pkg::{
+use grease_pkg::{
     sha256_hex, AgentMethod, AgentPackage, PackageArg, PromptPackage, ScriptPackage, SkillDocument,
     SkillPackage, SkillScript,
 };
@@ -547,7 +547,7 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clank_core::grease::pkg::{verify_inclusion_proof, verify_signature};
+    use grease_pkg::{verify_inclusion_proof, verify_signature};
 
     fn temp_dir(tag: &str) -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};

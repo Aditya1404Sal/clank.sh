@@ -1,5 +1,10 @@
 # clank — Conventions & Restructure
 
+> **2026-09-11 note:** the paths and crate names below predate the 2026-07-23 `clank-shell` →
+> `clank-core` rename — read every `clank-shell` reference as `clank-core`. This document's central
+> recommendation, **R1** (split `clank-shell` into a pure `clank-core` rlib plus a thin `clank-cli`
+> binary crate), has since shipped. Findings are otherwise left as originally written.
+
 **Scope:** `main-rc-1` worktree, compared against `main`. Read-only audit (no build/lint/test run).
 **Method:** every claim is anchored; counts come from `rg`/`find` over `crates/` excluding `target/`.
 Confidence grades: `Confirmed` (read it) / `Likely` (pattern strong, some context untraced) /

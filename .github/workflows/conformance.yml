@@ -53,7 +53,8 @@ jobs:
 
   hygiene:
     # Lint + supply-chain gate (the audit's VERIFY.md S1/S2/S4/S5 suite): clippy on the native crates
-    # AND the wasm guest crates (dual-target lints native clippy never sees), plus cargo-audit
+    # AND the wasm guest crates (dual-target lints native clippy never sees), a check that the
+    # generated fork inventory (docs/FORKS.md) still matches Cargo.toml/Cargo.lock, plus cargo-audit
     # (advisories) and cargo-deny (advisories/licenses/bans/sources). Config lives in clippy.toml and
     # deny.toml. Do NOT use `--workspace` — the wasm cdylib crates don't link natively (see VERIFY.md).
     if: github.event_name == 'push'
@@ -70,10 +71,18 @@ jobs:
         run: >-
           cargo clippy
           -p clank-core -p clank-cli -p clank-embed -p whttp -p wcurl -p waget
-          -p clank-conformance -p grease-tool
+          -p clank-conformance -p grease-tool -p fork-inventory
           --all-targets -- -D warnings
       - name: Clippy — wasm guest crates (warnings are errors)
         run: cargo clippy --target wasm32-wasip2 -p clank-agent -p greeter-agent -- -D warnings
+      - name: Fork inventory is up to date (check-forks)
+        # docs/FORKS.md is generated (dev-tools/fork-inventory) from Cargo.toml/Cargo.lock, never
+        # hand-edited. Regenerate and diff: a pin change (or a drifted rev) that lands without a
+        # regenerated table fails here instead of drifting silently — the pattern the Golem
+        # monorepo uses for its own generated artifacts.
+        run: |
+          cargo run -p fork-inventory
+          git diff --exit-code -- docs/FORKS.md
       - name: Supply-chain advisories (cargo-audit)
         run: cargo audit
       - name: Licenses / bans / sources / advisories (cargo-deny)

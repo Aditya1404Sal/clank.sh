@@ -6,6 +6,10 @@ author: John A. De Goes
 
 # HTTP requests fail silently on WASM target
 
+> **Template only — fictional, not project history.** This is a worked example of the dev-docs
+> workflow; its `HttpClient`/`wstd`-vs-`reqwest` scenario is invented, not a record of clank's
+> actual HTTP transport work.
+
 ## Problem
 
 When running on `wasm32-wasip2`, outbound HTTP calls from `ask` to model providers fail without any error message. The process exits `0` as if the call succeeded, but no model response is produced.

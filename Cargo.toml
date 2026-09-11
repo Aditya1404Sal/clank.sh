@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/clank-core",
+    "crates/grease-pkg",
     "crates/clank-cli",
     "crates/clank-embed",
     "crates/clank-native",
@@ -24,6 +25,7 @@ exclude = ["golem-stuff"]
 # golem deploy path still build both for wasm.
 default-members = [
     "crates/clank-core",
+    "crates/grease-pkg",
     "crates/clank-cli",
     "crates/clank-embed",
     "crates/clank-native",

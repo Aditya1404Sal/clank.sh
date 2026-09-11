@@ -1,5 +1,9 @@
 # clank — Verification commands
 
+> **2026-09-11 note:** the paths and crate names below predate the 2026-07-23 `clank-shell` →
+> `clank-core` rename — read every `clank-shell` reference as `clank-core`. Findings are left as
+> originally written.
+
 This audit is **read-only**: it never built, linted, ran tests, or hit the network. Therefore it
 **cannot know** what a compiler, linter, advisory database, or test run would report — only what the
 source says. Every claim that depends on a tool is graded `Unverified` in `AUDIT.md` and mapped to a

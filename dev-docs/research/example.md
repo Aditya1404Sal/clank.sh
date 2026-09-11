@@ -6,6 +6,10 @@ author: agent
 
 # Survey of WebAssembly HTTP Client Libraries
 
+> **Template only — fictional, not project history.** This is a worked example of the dev-docs
+> workflow; its `HttpClient`/`wstd`-vs-`reqwest` scenario is invented, not a record of clank's
+> actual HTTP transport work.
+
 ## Motivation
 
 The shell requires outbound HTTP for model provider calls and MCP server communication. The native target can use `reqwest`; the `wasm32-wasip2` target cannot. This research surveys the available options for the WASM target.

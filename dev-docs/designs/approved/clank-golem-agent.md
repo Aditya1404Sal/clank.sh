@@ -123,3 +123,30 @@ wasm openfiles patch; `uu_mkdir` and other coreutils *write* commands also misbe
 raw `std::fs` works); cleaning up the `.clank-uu-capture` file the coreutils `close(1)` capture
 leaves behind; HTTP mount/endpoints; snapshotting; pipelines/subshells on the agent;
 deterministic-recovery wrappers for clock/random; MCP; Golem cloud deploy.
+
+---
+
+## Addendum (2026-09-11) — the `block_on` premise above is superseded
+
+The section above titled *"The executor / `block_on` conflict (the crux) — RESOLVED"* rested on a
+premise that no longer holds: at the time it was written, `golem-rust` drove every agent invocation
+with `wstd::runtime::block_on`, with clank's own tokio `block_on` nested one level inside it. As of
+2026-09-11, `golem-rust` has **dropped `wstd` entirely** and drives agent methods with
+**wit-bindgen's own async runtime** instead. `wstd`'s HTTP client resolves its reactor from a
+thread-local that only `wstd::block_on` installs, so anything still calling into `wstd` under the
+new executor panics `Reactor::current must be called within a wstd runtime` and traps the agent.
+
+This reached clank directly: `ask`, MCP, and `curl`/`wget` all made their outbound HTTP calls
+through `wstd`. All three transports have since moved to **`wasi-fetch = "=0.2.0"`** over the wasip3
+WASI-HTTP bindings — the same client golem-rust's own reference agent components use, and one that
+holds no runtime state of its own (its futures are driven by whatever executor polls them, so it
+does not care which async runtime owns the outer `block_on`). See `docs/WASM_CHANGES.md` §3c for
+the current state of that transport seam.
+
+Brush's own execution model is **not** affected: Brush has no dependency on `wstd`, so clank's
+*nested* tokio `block_on` driving the Brush `Session` — one level under whatever the SDK's outer
+executor happens to be — still applies, and the nesting argument above (a pure-CPU future that
+completes synchronously never yields to, or starves, the outer scheduler) holds regardless of the
+outer executor's identity. What actually broke was narrower than "the crux": not the nesting shape
+itself, but the one piece of code (`wstd`'s HTTP client) that assumed the outer executor was
+specifically `wstd`.

@@ -1,0 +1,19 @@
+[package]
+name = "fork-inventory"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+# Regenerates `docs/FORKS.md` from the root `Cargo.toml`'s `[patch.crates-io]` table and the
+# resolved `git+` sources in `Cargo.lock` — see `src/main.rs` for the full explanation. Zero
+# dependencies, deliberately: this tool exists to stop a *hand-written* fork ledger from drifting
+# out of sync with the manifests (see docs/FORKS.md's own history), so reaching for a TOML-parser
+# crate to read two small, machine-formatted, line-oriented files would be the wrong trade for a
+# tool whose entire job is "don't be another thing that can silently drift." Native dev tool only —
+# never built for wasm32-wasip2.
+[dependencies]

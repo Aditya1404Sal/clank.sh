@@ -14,6 +14,7 @@ use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
+use crate::grease::param_specs_of;
 use crate::grease::pkg::{
     AgentPackage, McpPackage, PackageKind, PromptPackage, ScriptPackage, SkillPackage,
 };
@@ -415,11 +416,11 @@ impl GreaseState {
         let (synopsis, params): (String, Vec<crate::manifest::ParamSpec>) = match &pkg.payload {
             Payload::Prompt(p) => (
                 fallback_synopsis(name, &p.description, "prompt"),
-                p.param_specs(),
+                param_specs_of(&p.arguments),
             ),
             Payload::Script(s) => (
                 fallback_synopsis(name, &s.description, "script"),
-                s.param_specs(),
+                param_specs_of(&s.arguments),
             ),
             Payload::Agent(a) => {
                 // An agent IS a command (remote wRPC invocation → Confirm). Its input schema is the

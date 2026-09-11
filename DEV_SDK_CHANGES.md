@@ -12,8 +12,8 @@ Audience: a maintainer who needs to know exactly what moving clank.sh off the pi
 `golem-rust 2.1.0` and onto the **unreleased dev SDK** cost, and why. Every entry below was verified
 against the tree at the analysis-time HEAD (`db9a820`) versus `main` (`4586d81`); `main` was then
 fully contained in this branch. Sibling doc:
-[WASM_CHANGES.md](WASM_CHANGES.md) (clank's third-party forks for `wasm32-wasip2`) — **§6 below
-falsifies one of its opening claims while this branch is checked out.**
+[docs/WASM_CHANGES.md](docs/WASM_CHANGES.md) (clank's third-party forks for `wasm32-wasip2`) — **§6
+below falsifies one of its opening claims while this branch is checked out.**
 
 The changes fall into **four buckets**, and only one of them is a real loss.
 
@@ -275,7 +275,7 @@ couldn't recover. See `golem-native-testing/GOLEM-CONNECT.md`.
 
 ## 6. ⚠ THE FINDING — the spike adds a **third git fork** to `Cargo.lock`
 
-[WASM_CHANGES.md](WASM_CHANGES.md) opens with this invariant:
+[docs/WASM_CHANGES.md](docs/WASM_CHANGES.md) opens with this invariant:
 
 > *"No other crate is pinned to a git rev (verified: the only `git+` sources in `Cargo.lock` are the
 > Brush and coreutils forks)."*
