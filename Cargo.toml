@@ -14,6 +14,9 @@ members = [
     "dev-tools/grease-tool",
     "dev-tools/fork-inventory",
     "fixtures/greeter-agent",
+    # T1 PROBE — THROWAWAY: the tool provider the probe calls. Deliberately NOT in default-members,
+    # like greeter-agent: it is a wasm-only cdylib component.
+    "fixtures/probe-tool",
     # T2 FIXTURE: the tool every agent-tools ticket tests against. wasm-only cdylib, so like the
     # other component fixtures it stays out of default-members.
     "fixtures/echo-tool",

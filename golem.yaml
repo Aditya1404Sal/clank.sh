@@ -36,16 +36,26 @@ components:
   greeter:agent:
     dir: fixtures/greeter-agent
     templates: rust
+  # T1 PROBE — THROWAWAY. A minimal tool provider (fixtures/probe-tool) so the probe has a real
+  # Golem tool to invoke over tool-rpc. Remove with the probe.
+  probe:tool:
+    dir: fixtures/probe-tool
+    templates: rust
   # T2 FIXTURE (fixtures/echo-tool): the tool the agent-tools tickets are tested against. Its
   # commands between them declare every construct the CLI projection has to parse.
   echo:tool:
     dir: fixtures/echo-tool
     templates: rust
 
-# Tool declarations. A provisioned file is what implies the filesystem grant today (gol-33
-# §Filesystem capability classification); the binding-level `filesystemAccess` key arrives with
-# upstream PR #3842.
+# T1 PROBE — THROWAWAY. Tool declarations. `capable-probe` declares a provisioned file, which is
+# what implies the filesystem grant today (gol-33 §Filesystem capability classification); the
+# binding-level `filesystemAccess` key arrives with upstream PR #3842.
 tools:
+  probe: {}
+  capable-probe:
+    files:
+      - sourcePath: fixtures/probe-tool/marker
+        targetPath: /.probe/MARKER
   echo-tool: {}
   # The fixture's filesystem-capable tool: the provisioned marker is what implies the grant today.
   capable-echo:
@@ -62,10 +72,12 @@ tools:
   # `echo-tool` and invoke the subtree on its own.
   tree: {}
 
-# The bindings: which tools ClankAgent may invoke. A binding is compiled per agent type at deploy
-# time, so nothing inside a running agent can create one.
+# T1 PROBE — THROWAWAY. The bindings: which tools ClankAgent may invoke. A binding is compiled per
+# agent type at deploy time, so nothing inside a running agent can create one.
 agents:
   ClankAgent:
     tools:
+      probe: {}
+      capable-probe: {}
       echo-tool: {}
       capable-echo: {}

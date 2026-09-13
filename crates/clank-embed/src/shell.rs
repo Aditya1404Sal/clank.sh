@@ -117,6 +117,8 @@ impl EmbeddedShell {
             // `set_log_sink` takes `Arc`; the sink is `?Send`+`?Sync` and the agent is single-threaded.
             #[allow(clippy::arc_with_non_send_sync)]
             s.set_log_sink(std::sync::Arc::new(crate::log_sink::DurableLogSink::new()));
+            // T1 PROBE — THROWAWAY: lets the `probe-tool` builtin reach a real tool over tool-rpc.
+            clank_core::builtins::probe::install(Box::new(crate::tool_probe::run));
         })
     }
 

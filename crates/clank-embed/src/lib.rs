@@ -77,6 +77,10 @@ pub mod ask_provider;
 #[cfg(all(feature = "providers", target_arch = "wasm32"))]
 pub mod mcp_http;
 
+/// T1 PROBE — THROWAWAY. Real `tool-rpc` call behind the `probe-tool` builtin; delete with it.
+#[cfg(all(feature = "providers", target_arch = "wasm32"))]
+pub mod tool_probe;
+
 pub use shell::EmbeddedShell;
 pub use wire::{EvalResult, PendingPromptView};
 

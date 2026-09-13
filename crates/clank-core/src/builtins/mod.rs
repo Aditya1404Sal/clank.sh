@@ -11,6 +11,7 @@ pub(crate) mod context;
 pub(crate) mod http;
 pub(crate) mod interceptstub;
 pub(crate) mod kill;
+pub mod probe;
 pub mod promptuser;
 pub mod secretenv;
 pub mod typecmd;

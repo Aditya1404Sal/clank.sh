@@ -1,0 +1,21 @@
+[package]
+name = "probe-tool"
+version = "0.0.0"
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+# T1 PROBE FIXTURE — THROWAWAY. A minimal Golem *tool* provider (not an agent), deployed beside
+# clank:agent so the probe has a real tool to call. cdylib = leaf component.
+crate-type = ["cdylib"]
+
+[dependencies]
+# `export_golem_agentic` makes the #[tool_definition]/#[tool_implementation] macros emit the
+# golem:tool guest exports, exactly as clank-agent enables it for the agent world. A leaf component
+# is the one place that feature may be turned on.
+golem-rust = { workspace = true, features = ["export_golem_agentic"] }
