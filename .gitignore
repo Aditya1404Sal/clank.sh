@@ -10,3 +10,11 @@
 
 # Vendored Golem monorepo (SDK reference; cloned locally, not tracked).
 /golem-stuff/
+
+# In-progress agent-tools working notes (tickets to file, probe findings, upstream-ask drafts).
+# Kept local until the epic's tickets exist in Linear.
+/dev-docs/plans/proposed/agent-tools-tickets.md
+/dev-docs/research/agent-tools-potholes.md
+/dev-docs/research/agent-tools-probes.md
+/dev-docs/research/agent-tools-upstream-asks.md
+/dev-docs/research/nested-block-on-spike.md
