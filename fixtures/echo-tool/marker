@@ -1,0 +1,3 @@
+capable-echo: provisioned marker. Its presence at /.echo/MARKER is what makes the tool
+filesystem-capable today (gol-33 §Filesystem capability classification); the declaration-level
+`filesystemAccess` key is upstream Issue 2.

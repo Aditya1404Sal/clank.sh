@@ -1,4 +1,4 @@
-# yaml-language-server: $schema=https://schema.golem.cloud/app/golem/1.6.0-dev.6/golem.schema.json
+# yaml-language-server: $schema=https://schema.golem.cloud/app/golem/1.6.0-dev.9/golem.schema.json
 # clank.sh Golem application: the `clank:agent` component (crates/clank-agent) wraps the shell
 # Session as a durable agent instance. Build/deploy with `golem build` / `golem deploy`.
 
@@ -36,3 +36,36 @@ components:
   greeter:agent:
     dir: fixtures/greeter-agent
     templates: rust
+  # T2 FIXTURE (fixtures/echo-tool): the tool the agent-tools tickets are tested against. Its
+  # commands between them declare every construct the CLI projection has to parse.
+  echo:tool:
+    dir: fixtures/echo-tool
+    templates: rust
+
+# Tool declarations. A provisioned file is what implies the filesystem grant today (gol-33
+# §Filesystem capability classification); the binding-level `filesystemAccess` key arrives with
+# upstream PR #3842.
+tools:
+  echo-tool: {}
+  # The fixture's filesystem-capable tool: the provisioned marker is what implies the grant today.
+  capable-echo:
+    files:
+      - sourcePath: fixtures/echo-tool/marker
+        targetPath: /.echo/MARKER
+  # `tree` is echo-tool's subcommand SUBTREE, not a tool anyone should bind. It has to be declared
+  # anyway: a subtree child carries its own `#[tool_implementation]`, which registers it in the
+  # guest tool registry — that is how the parent forwards `tree add` to it in-process, via
+  # `get_tool_invoker_by_name` — and nothing filters that registry before `discover-tools`, so
+  # deploy rejects it as "a discovered tool with no matching top-level declaration". Every subtree
+  # therefore leaks into the manifest as a peer of its parent. Deliberately NOT bound to
+  # ClankAgent: the parent reaches it directly, and binding it would let a caller bypass
+  # `echo-tool` and invoke the subtree on its own.
+  tree: {}
+
+# The bindings: which tools ClankAgent may invoke. A binding is compiled per agent type at deploy
+# time, so nothing inside a running agent can create one.
+agents:
+  ClankAgent:
+    tools:
+      echo-tool: {}
+      capable-echo: {}

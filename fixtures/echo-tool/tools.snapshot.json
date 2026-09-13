@@ -1,0 +1,1695 @@
+{
+  "capable-echo": {
+    "version": "1.0.0",
+    "commands": {
+      "nodes": [
+        {
+          "name": "capable-echo",
+          "aliases": [],
+          "doc": {
+            "summary": "The filesystem-capable half of the fixture. Declared in `golem.yaml` with a provisioned marker file (`/.echo/MARKER`), which is what implies the filesystem grant today, so its commands run against the *calling agent's* filesystem under the owner lane. `write` then `read` round-tripping through the shell proves the capability classification, not just the wire.",
+            "description": "",
+            "examples": []
+          },
+          "globals": {
+            "options": [],
+            "flags": []
+          },
+          "subcommands": [
+            1,
+            2
+          ],
+          "body": null
+        },
+        {
+          "name": "write",
+          "aliases": [],
+          "doc": {
+            "summary": "Write `text` to `path` as a whole-file write (idempotent under replay); returns the byte count.",
+            "description": "",
+            "examples": []
+          },
+          "globals": {
+            "options": [],
+            "flags": []
+          },
+          "subcommands": [],
+          "body": {
+            "positionals": {
+              "fixed": [
+                {
+                  "name": "path",
+                  "doc": {
+                    "summary": "",
+                    "description": "",
+                    "examples": []
+                  },
+                  "value_name": null,
+                  "type_": {
+                    "kind": "string",
+                    "value": {}
+                  },
+                  "default": null,
+                  "required": true,
+                  "accepts_stdio": false
+                },
+                {
+                  "name": "text",
+                  "doc": {
+                    "summary": "",
+                    "description": "",
+                    "examples": []
+                  },
+                  "value_name": null,
+                  "type_": {
+                    "kind": "string",
+                    "value": {}
+                  },
+                  "default": null,
+                  "required": true,
+                  "accepts_stdio": false
+                }
+              ],
+              "tail": null
+            },
+            "options": [],
+            "flags": [],
+            "constraints": [],
+            "stdin": null,
+            "stdout": null,
+            "result": {
+              "type_": {
+                "kind": "u64",
+                "value": {}
+              },
+              "doc": {
+                "summary": "",
+                "description": "",
+                "examples": []
+              },
+              "formatters": [
+                {
+                  "name": "default",
+                  "doc": {
+                    "summary": "",
+                    "description": "",
+                    "examples": []
+                  }
+                }
+              ],
+              "default_formatter": "default"
+            },
+            "errors": [
+              {
+                "name": "bad-input",
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "kind": "usage-error",
+                "exit_code": 2,
+                "payload": {
+                  "kind": "string",
+                  "value": {}
+                }
+              },
+              {
+                "name": "boom",
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "kind": "runtime-error",
+                "exit_code": 7,
+                "payload": null
+              }
+            ],
+            "annotations": {
+              "read_only": false,
+              "destructive": true,
+              "idempotent": true,
+              "open_world": true
+            }
+          }
+        },
+        {
+          "name": "read",
+          "aliases": [],
+          "doc": {
+            "summary": "Read `path` back.",
+            "description": "",
+            "examples": []
+          },
+          "globals": {
+            "options": [],
+            "flags": []
+          },
+          "subcommands": [],
+          "body": {
+            "positionals": {
+              "fixed": [
+                {
+                  "name": "path",
+                  "doc": {
+                    "summary": "",
+                    "description": "",
+                    "examples": []
+                  },
+                  "value_name": null,
+                  "type_": {
+                    "kind": "string",
+                    "value": {}
+                  },
+                  "default": null,
+                  "required": true,
+                  "accepts_stdio": false
+                }
+              ],
+              "tail": null
+            },
+            "options": [],
+            "flags": [],
+            "constraints": [],
+            "stdin": null,
+            "stdout": null,
+            "result": {
+              "type_": {
+                "kind": "string",
+                "value": {}
+              },
+              "doc": {
+                "summary": "",
+                "description": "",
+                "examples": []
+              },
+              "formatters": [
+                {
+                  "name": "default",
+                  "doc": {
+                    "summary": "",
+                    "description": "",
+                    "examples": []
+                  }
+                }
+              ],
+              "default_formatter": "default"
+            },
+            "errors": [
+              {
+                "name": "bad-input",
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "kind": "usage-error",
+                "exit_code": 2,
+                "payload": {
+                  "kind": "string",
+                  "value": {}
+                }
+              },
+              {
+                "name": "boom",
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "kind": "runtime-error",
+                "exit_code": 7,
+                "payload": null
+              }
+            ],
+            "annotations": {
+              "read_only": true,
+              "destructive": true,
+              "idempotent": true,
+              "open_world": true
+            }
+          }
+        }
+      ]
+    },
+    "schema": {
+      "root": {
+        "kind": "record",
+        "value": {
+          "fields": []
+        }
+      }
+    }
+  },
+  "echo-tool": {
+    "version": "1.0.0",
+    "commands": {
+      "nodes": [
+        {
+          "name": "echo-tool",
+          "aliases": [],
+          "doc": {
+            "summary": "",
+            "description": "",
+            "examples": []
+          },
+          "globals": {
+            "options": [],
+            "flags": []
+          },
+          "subcommands": [
+            1,
+            2,
+            3,
+            4,
+            5,
+            7,
+            8
+          ],
+          "body": null
+        },
+        {
+          "name": "greet",
+          "aliases": [
+            "hi"
+          ],
+          "doc": {
+            "summary": "Greet someone by name.",
+            "description": "",
+            "examples": []
+          },
+          "globals": {
+            "options": [
+              {
+                "long": "color",
+                "short": null,
+                "aliases": [],
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "value_name": null,
+                "shape": {
+                  "kind": "scalar",
+                  "value": {
+                    "kind": "string",
+                    "value": {}
+                  }
+                },
+                "default": {
+                  "kind": "string",
+                  "value": "auto"
+                },
+                "required": false,
+                "env_var": null
+              }
+            ],
+            "flags": [
+              {
+                "long": "verbose",
+                "short": "v",
+                "aliases": [],
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "shape": {
+                  "kind": "count-flag",
+                  "value": 3
+                },
+                "env_var": null
+              }
+            ]
+          },
+          "subcommands": [],
+          "body": {
+            "positionals": {
+              "fixed": [
+                {
+                  "name": "name",
+                  "doc": {
+                    "summary": "",
+                    "description": "",
+                    "examples": []
+                  },
+                  "value_name": null,
+                  "type_": {
+                    "kind": "string",
+                    "value": {}
+                  },
+                  "default": null,
+                  "required": true,
+                  "accepts_stdio": false
+                }
+              ],
+              "tail": null
+            },
+            "options": [
+              {
+                "long": "times",
+                "short": "n",
+                "aliases": [],
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "value_name": null,
+                "shape": {
+                  "kind": "scalar",
+                  "value": {
+                    "kind": "u32",
+                    "value": {}
+                  }
+                },
+                "default": {
+                  "kind": "u32",
+                  "value": 1
+                },
+                "required": false,
+                "env_var": null
+              }
+            ],
+            "flags": [
+              {
+                "long": "shout",
+                "short": null,
+                "aliases": [],
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "shape": {
+                  "kind": "bool-flag",
+                  "value": {
+                    "default": false,
+                    "negatable": true
+                  }
+                },
+                "env_var": null
+              }
+            ],
+            "constraints": [],
+            "stdin": null,
+            "stdout": null,
+            "result": {
+              "type_": {
+                "kind": "string",
+                "value": {}
+              },
+              "doc": {
+                "summary": "",
+                "description": "",
+                "examples": []
+              },
+              "formatters": [
+                {
+                  "name": "plain",
+                  "doc": {
+                    "summary": "",
+                    "description": "",
+                    "examples": []
+                  }
+                },
+                {
+                  "name": "loud",
+                  "doc": {
+                    "summary": "",
+                    "description": "",
+                    "examples": []
+                  }
+                }
+              ],
+              "default_formatter": "plain"
+            },
+            "errors": [
+              {
+                "name": "bad-input",
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "kind": "usage-error",
+                "exit_code": 2,
+                "payload": {
+                  "kind": "string",
+                  "value": {}
+                }
+              },
+              {
+                "name": "boom",
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "kind": "runtime-error",
+                "exit_code": 7,
+                "payload": null
+              }
+            ],
+            "annotations": {
+              "read_only": true,
+              "destructive": true,
+              "idempotent": true,
+              "open_world": true
+            }
+          }
+        },
+        {
+          "name": "grep",
+          "aliases": [],
+          "doc": {
+            "summary": "Filter lines, echoing back what the projection actually parsed.",
+            "description": "",
+            "examples": []
+          },
+          "globals": {
+            "options": [
+              {
+                "long": "color",
+                "short": null,
+                "aliases": [],
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "value_name": null,
+                "shape": {
+                  "kind": "scalar",
+                  "value": {
+                    "kind": "string",
+                    "value": {}
+                  }
+                },
+                "default": {
+                  "kind": "string",
+                  "value": "auto"
+                },
+                "required": false,
+                "env_var": null
+              }
+            ],
+            "flags": [
+              {
+                "long": "verbose",
+                "short": "v",
+                "aliases": [],
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "shape": {
+                  "kind": "count-flag",
+                  "value": 3
+                },
+                "env_var": null
+              }
+            ]
+          },
+          "subcommands": [],
+          "body": {
+            "positionals": {
+              "fixed": [],
+              "tail": {
+                "name": "files",
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "value_name": null,
+                "item_type": {
+                  "kind": "string",
+                  "value": {}
+                },
+                "min": 0,
+                "max": null,
+                "separator": "--",
+                "verbatim": true,
+                "accepts_stdio": false
+              }
+            },
+            "options": [
+              {
+                "long": "pattern",
+                "short": "e",
+                "aliases": [],
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "value_name": null,
+                "shape": {
+                  "kind": "repeatable-list",
+                  "value": {
+                    "repetition": {
+                      "kind": "either",
+                      "value": ","
+                    },
+                    "item_type": {
+                      "kind": "string",
+                      "value": {}
+                    }
+                  }
+                },
+                "default": null,
+                "required": false,
+                "env_var": null
+              },
+              {
+                "long": "items",
+                "short": null,
+                "aliases": [],
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "value_name": null,
+                "shape": {
+                  "kind": "repeatable-list",
+                  "value": {
+                    "repetition": {
+                      "kind": "delimited",
+                      "value": ","
+                    },
+                    "item_type": {
+                      "kind": "string",
+                      "value": {}
+                    }
+                  }
+                },
+                "default": null,
+                "required": false,
+                "env_var": null
+              }
+            ],
+            "flags": [
+              {
+                "long": "all-match",
+                "short": null,
+                "aliases": [],
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "shape": {
+                  "kind": "bool-flag",
+                  "value": {
+                    "default": false,
+                    "negatable": false
+                  }
+                },
+                "env_var": null
+              }
+            ],
+            "constraints": [
+              {
+                "kind": "all-or-none",
+                "value": [
+                  {
+                    "kind": "present",
+                    "value": "all-match"
+                  },
+                  {
+                    "kind": "present",
+                    "value": "pattern"
+                  }
+                ]
+              }
+            ],
+            "stdin": null,
+            "stdout": null,
+            "result": {
+              "type_": {
+                "kind": "list",
+                "value": {
+                  "element": {
+                    "kind": "string",
+                    "value": {}
+                  }
+                }
+              },
+              "doc": {
+                "summary": "",
+                "description": "",
+                "examples": []
+              },
+              "formatters": [
+                {
+                  "name": "default",
+                  "doc": {
+                    "summary": "",
+                    "description": "",
+                    "examples": []
+                  }
+                }
+              ],
+              "default_formatter": "default"
+            },
+            "errors": [
+              {
+                "name": "bad-input",
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "kind": "usage-error",
+                "exit_code": 2,
+                "payload": {
+                  "kind": "string",
+                  "value": {}
+                }
+              },
+              {
+                "name": "boom",
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "kind": "runtime-error",
+                "exit_code": 7,
+                "payload": null
+              }
+            ],
+            "annotations": {
+              "read_only": true,
+              "destructive": true,
+              "idempotent": false,
+              "open_world": true
+            }
+          }
+        },
+        {
+          "name": "upper",
+          "aliases": [],
+          "doc": {
+            "summary": "Uppercase stdin onto stdout: the stream-in, stream-out shape.",
+            "description": "",
+            "examples": []
+          },
+          "globals": {
+            "options": [
+              {
+                "long": "color",
+                "short": null,
+                "aliases": [],
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "value_name": null,
+                "shape": {
+                  "kind": "scalar",
+                  "value": {
+                    "kind": "string",
+                    "value": {}
+                  }
+                },
+                "default": {
+                  "kind": "string",
+                  "value": "auto"
+                },
+                "required": false,
+                "env_var": null
+              }
+            ],
+            "flags": [
+              {
+                "long": "verbose",
+                "short": "v",
+                "aliases": [],
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "shape": {
+                  "kind": "count-flag",
+                  "value": 3
+                },
+                "env_var": null
+              }
+            ]
+          },
+          "subcommands": [],
+          "body": {
+            "positionals": {
+              "fixed": [],
+              "tail": null
+            },
+            "options": [],
+            "flags": [],
+            "constraints": [],
+            "stdin": {
+              "doc": {
+                "summary": "",
+                "description": "",
+                "examples": []
+              },
+              "mime": [],
+              "required": true
+            },
+            "stdout": {
+              "doc": {
+                "summary": "",
+                "description": "",
+                "examples": []
+              },
+              "mime": [],
+              "required": true
+            },
+            "result": {
+              "type_": {
+                "kind": "ref",
+                "value": {
+                  "id": "echo_tool.Summary"
+                }
+              },
+              "doc": {
+                "summary": "",
+                "description": "",
+                "examples": []
+              },
+              "formatters": [
+                {
+                  "name": "default",
+                  "doc": {
+                    "summary": "",
+                    "description": "",
+                    "examples": []
+                  }
+                }
+              ],
+              "default_formatter": "default"
+            },
+            "errors": [
+              {
+                "name": "bad-input",
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "kind": "usage-error",
+                "exit_code": 2,
+                "payload": {
+                  "kind": "string",
+                  "value": {}
+                }
+              },
+              {
+                "name": "boom",
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "kind": "runtime-error",
+                "exit_code": 7,
+                "payload": null
+              }
+            ],
+            "annotations": null
+          }
+        },
+        {
+          "name": "fail",
+          "aliases": [],
+          "doc": {
+            "summary": "Fail on purpose. `--usage` selects the usage-kind case (exit 2), otherwise runtime (exit 7).",
+            "description": "",
+            "examples": []
+          },
+          "globals": {
+            "options": [
+              {
+                "long": "color",
+                "short": null,
+                "aliases": [],
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "value_name": null,
+                "shape": {
+                  "kind": "scalar",
+                  "value": {
+                    "kind": "string",
+                    "value": {}
+                  }
+                },
+                "default": {
+                  "kind": "string",
+                  "value": "auto"
+                },
+                "required": false,
+                "env_var": null
+              }
+            ],
+            "flags": [
+              {
+                "long": "verbose",
+                "short": "v",
+                "aliases": [],
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "shape": {
+                  "kind": "count-flag",
+                  "value": 3
+                },
+                "env_var": null
+              }
+            ]
+          },
+          "subcommands": [],
+          "body": {
+            "positionals": {
+              "fixed": [],
+              "tail": null
+            },
+            "options": [],
+            "flags": [
+              {
+                "long": "usage",
+                "short": null,
+                "aliases": [],
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "shape": {
+                  "kind": "bool-flag",
+                  "value": {
+                    "default": false,
+                    "negatable": false
+                  }
+                },
+                "env_var": null
+              }
+            ],
+            "constraints": [],
+            "stdin": null,
+            "stdout": null,
+            "result": {
+              "type_": {
+                "kind": "string",
+                "value": {}
+              },
+              "doc": {
+                "summary": "",
+                "description": "",
+                "examples": []
+              },
+              "formatters": [
+                {
+                  "name": "default",
+                  "doc": {
+                    "summary": "",
+                    "description": "",
+                    "examples": []
+                  }
+                }
+              ],
+              "default_formatter": "default"
+            },
+            "errors": [
+              {
+                "name": "bad-input",
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "kind": "usage-error",
+                "exit_code": 2,
+                "payload": {
+                  "kind": "string",
+                  "value": {}
+                }
+              },
+              {
+                "name": "boom",
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "kind": "runtime-error",
+                "exit_code": 7,
+                "payload": null
+              }
+            ],
+            "annotations": null
+          }
+        },
+        {
+          "name": "tree",
+          "aliases": [
+            "t"
+          ],
+          "doc": {
+            "summary": "Pure dispatcher: a subcommand subtree, reached as `tree add` (or `t add`).",
+            "description": "",
+            "examples": []
+          },
+          "globals": {
+            "options": [
+              {
+                "long": "color",
+                "short": null,
+                "aliases": [],
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "value_name": null,
+                "shape": {
+                  "kind": "scalar",
+                  "value": {
+                    "kind": "string",
+                    "value": {}
+                  }
+                },
+                "default": {
+                  "kind": "string",
+                  "value": "auto"
+                },
+                "required": false,
+                "env_var": null
+              }
+            ],
+            "flags": [
+              {
+                "long": "verbose",
+                "short": "v",
+                "aliases": [],
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "shape": {
+                  "kind": "count-flag",
+                  "value": 3
+                },
+                "env_var": null
+              }
+            ]
+          },
+          "subcommands": [
+            6
+          ],
+          "body": null
+        },
+        {
+          "name": "add",
+          "aliases": [],
+          "doc": {
+            "summary": "Repeatable map option (`-c k=v`) plus a record-typed option, with a constraint tying them.",
+            "description": "`meta` is deliberately `Meta`, not `Option<Meta>`. An `Option<T>` option parameter cannot be\ninvoked at all as of SDK `f5a3d29b9`: the descriptor unwraps `Option<T>` to `T`\n(`golem-rust-macro/src/tool/descriptor.rs:1125`, \"it only makes the argument not-required\"),\nso the canonical input field is a bare `Meta` and the host demands a record value — but the\ngenerated guest decode still runs `<Option<Meta> as FromSchema>::from_value`, which accepts\nonly an `option` value. Observed live on 2026-09-14: the host accepted the record, the parent\nforwarded it to this subtree, and the guest replied\n`InvalidInput(\"shape mismatch in Option: expected option, got record\")`. No caller can satisfy\nboth sides; see `dev-docs/research/agent-tools-probes.md` (T2) and upstream-asks Issue 9.",
+            "examples": []
+          },
+          "globals": {
+            "options": [],
+            "flags": []
+          },
+          "subcommands": [],
+          "body": {
+            "positionals": {
+              "fixed": [],
+              "tail": null
+            },
+            "options": [
+              {
+                "long": "entries",
+                "short": "c",
+                "aliases": [],
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "value_name": null,
+                "shape": {
+                  "kind": "repeatable-map",
+                  "value": {
+                    "repetition": {
+                      "kind": "repeated"
+                    },
+                    "map_type": {
+                      "kind": "map",
+                      "value": {
+                        "key": {
+                          "kind": "string",
+                          "value": {}
+                        },
+                        "value": {
+                          "kind": "string",
+                          "value": {}
+                        }
+                      }
+                    },
+                    "duplicate_key_policy": "reject"
+                  }
+                },
+                "default": null,
+                "required": false,
+                "env_var": null
+              },
+              {
+                "long": "meta",
+                "short": null,
+                "aliases": [],
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "value_name": null,
+                "shape": {
+                  "kind": "scalar",
+                  "value": {
+                    "kind": "ref",
+                    "value": {
+                      "id": "echo_tool.Meta"
+                    }
+                  }
+                },
+                "default": null,
+                "required": false,
+                "env_var": null
+              }
+            ],
+            "flags": [],
+            "constraints": [
+              {
+                "kind": "all-or-none",
+                "value": [
+                  {
+                    "kind": "present",
+                    "value": "meta"
+                  },
+                  {
+                    "kind": "present",
+                    "value": "entries"
+                  }
+                ]
+              }
+            ],
+            "stdin": null,
+            "stdout": null,
+            "result": {
+              "type_": {
+                "kind": "ref",
+                "value": {
+                  "id": "echo_tool.Meta"
+                }
+              },
+              "doc": {
+                "summary": "",
+                "description": "",
+                "examples": []
+              },
+              "formatters": [
+                {
+                  "name": "default",
+                  "doc": {
+                    "summary": "",
+                    "description": "",
+                    "examples": []
+                  }
+                }
+              ],
+              "default_formatter": "default"
+            },
+            "errors": [
+              {
+                "name": "bad-input",
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "kind": "usage-error",
+                "exit_code": 2,
+                "payload": {
+                  "kind": "string",
+                  "value": {}
+                }
+              },
+              {
+                "name": "boom",
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "kind": "runtime-error",
+                "exit_code": 7,
+                "payload": null
+              }
+            ],
+            "annotations": null
+          }
+        },
+        {
+          "name": "list",
+          "aliases": [],
+          "doc": {
+            "summary": "A structured result with no stdout stream — the other half of the output rule.",
+            "description": "",
+            "examples": []
+          },
+          "globals": {
+            "options": [
+              {
+                "long": "color",
+                "short": null,
+                "aliases": [],
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "value_name": null,
+                "shape": {
+                  "kind": "scalar",
+                  "value": {
+                    "kind": "string",
+                    "value": {}
+                  }
+                },
+                "default": {
+                  "kind": "string",
+                  "value": "auto"
+                },
+                "required": false,
+                "env_var": null
+              }
+            ],
+            "flags": [
+              {
+                "long": "verbose",
+                "short": "v",
+                "aliases": [],
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "shape": {
+                  "kind": "count-flag",
+                  "value": 3
+                },
+                "env_var": null
+              }
+            ]
+          },
+          "subcommands": [],
+          "body": {
+            "positionals": {
+              "fixed": [],
+              "tail": null
+            },
+            "options": [],
+            "flags": [],
+            "constraints": [],
+            "stdin": null,
+            "stdout": null,
+            "result": {
+              "type_": {
+                "kind": "list",
+                "value": {
+                  "element": {
+                    "kind": "string",
+                    "value": {}
+                  }
+                }
+              },
+              "doc": {
+                "summary": "",
+                "description": "",
+                "examples": []
+              },
+              "formatters": [
+                {
+                  "name": "default",
+                  "doc": {
+                    "summary": "",
+                    "description": "",
+                    "examples": []
+                  }
+                }
+              ],
+              "default_formatter": "default"
+            },
+            "errors": [
+              {
+                "name": "bad-input",
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "kind": "usage-error",
+                "exit_code": 2,
+                "payload": {
+                  "kind": "string",
+                  "value": {}
+                }
+              },
+              {
+                "name": "boom",
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "kind": "runtime-error",
+                "exit_code": 7,
+                "payload": null
+              }
+            ],
+            "annotations": {
+              "read_only": true,
+              "destructive": true,
+              "idempotent": false,
+              "open_world": true
+            }
+          }
+        },
+        {
+          "name": "destroy",
+          "aliases": [],
+          "doc": {
+            "summary": "Destructive: the annotation ticket 4 turns into a confirmation policy.",
+            "description": "",
+            "examples": []
+          },
+          "globals": {
+            "options": [
+              {
+                "long": "color",
+                "short": null,
+                "aliases": [],
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "value_name": null,
+                "shape": {
+                  "kind": "scalar",
+                  "value": {
+                    "kind": "string",
+                    "value": {}
+                  }
+                },
+                "default": {
+                  "kind": "string",
+                  "value": "auto"
+                },
+                "required": false,
+                "env_var": null
+              }
+            ],
+            "flags": [
+              {
+                "long": "verbose",
+                "short": "v",
+                "aliases": [],
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "shape": {
+                  "kind": "count-flag",
+                  "value": 3
+                },
+                "env_var": null
+              }
+            ]
+          },
+          "subcommands": [],
+          "body": {
+            "positionals": {
+              "fixed": [],
+              "tail": null
+            },
+            "options": [],
+            "flags": [],
+            "constraints": [],
+            "stdin": null,
+            "stdout": null,
+            "result": {
+              "type_": {
+                "kind": "string",
+                "value": {}
+              },
+              "doc": {
+                "summary": "",
+                "description": "",
+                "examples": []
+              },
+              "formatters": [
+                {
+                  "name": "default",
+                  "doc": {
+                    "summary": "",
+                    "description": "",
+                    "examples": []
+                  }
+                }
+              ],
+              "default_formatter": "default"
+            },
+            "errors": [
+              {
+                "name": "bad-input",
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "kind": "usage-error",
+                "exit_code": 2,
+                "payload": {
+                  "kind": "string",
+                  "value": {}
+                }
+              },
+              {
+                "name": "boom",
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "kind": "runtime-error",
+                "exit_code": 7,
+                "payload": null
+              }
+            ],
+            "annotations": {
+              "read_only": false,
+              "destructive": true,
+              "idempotent": false,
+              "open_world": true
+            }
+          }
+        }
+      ]
+    },
+    "schema": {
+      "defs": [
+        {
+          "id": "echo_tool.Summary",
+          "name": "Summary",
+          "body": {
+            "kind": "record",
+            "value": {
+              "fields": [
+                {
+                  "name": "chunks",
+                  "body": {
+                    "kind": "u32",
+                    "value": {}
+                  }
+                },
+                {
+                  "name": "bytes",
+                  "body": {
+                    "kind": "u64",
+                    "value": {}
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "id": "echo_tool.Meta",
+          "name": "Meta",
+          "body": {
+            "kind": "record",
+            "value": {
+              "fields": [
+                {
+                  "name": "k",
+                  "body": {
+                    "kind": "string",
+                    "value": {}
+                  }
+                },
+                {
+                  "name": "n",
+                  "body": {
+                    "kind": "u32",
+                    "value": {}
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "root": {
+        "kind": "record",
+        "value": {
+          "fields": []
+        }
+      }
+    }
+  },
+  "tree": {
+    "version": "0.0.0",
+    "commands": {
+      "nodes": [
+        {
+          "name": "tree",
+          "aliases": [],
+          "doc": {
+            "summary": "",
+            "description": "",
+            "examples": []
+          },
+          "globals": {
+            "options": [],
+            "flags": []
+          },
+          "subcommands": [
+            1
+          ],
+          "body": null
+        },
+        {
+          "name": "add",
+          "aliases": [],
+          "doc": {
+            "summary": "Repeatable map option (`-c k=v`) plus a record-typed option, with a constraint tying them.",
+            "description": "`meta` is deliberately `Meta`, not `Option<Meta>`. An `Option<T>` option parameter cannot be\ninvoked at all as of SDK `f5a3d29b9`: the descriptor unwraps `Option<T>` to `T`\n(`golem-rust-macro/src/tool/descriptor.rs:1125`, \"it only makes the argument not-required\"),\nso the canonical input field is a bare `Meta` and the host demands a record value — but the\ngenerated guest decode still runs `<Option<Meta> as FromSchema>::from_value`, which accepts\nonly an `option` value. Observed live on 2026-09-14: the host accepted the record, the parent\nforwarded it to this subtree, and the guest replied\n`InvalidInput(\"shape mismatch in Option: expected option, got record\")`. No caller can satisfy\nboth sides; see `dev-docs/research/agent-tools-probes.md` (T2) and upstream-asks Issue 9.",
+            "examples": []
+          },
+          "globals": {
+            "options": [],
+            "flags": []
+          },
+          "subcommands": [],
+          "body": {
+            "positionals": {
+              "fixed": [],
+              "tail": null
+            },
+            "options": [
+              {
+                "long": "entries",
+                "short": "c",
+                "aliases": [],
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "value_name": null,
+                "shape": {
+                  "kind": "repeatable-map",
+                  "value": {
+                    "repetition": {
+                      "kind": "repeated"
+                    },
+                    "map_type": {
+                      "kind": "map",
+                      "value": {
+                        "key": {
+                          "kind": "string",
+                          "value": {}
+                        },
+                        "value": {
+                          "kind": "string",
+                          "value": {}
+                        }
+                      }
+                    },
+                    "duplicate_key_policy": "reject"
+                  }
+                },
+                "default": null,
+                "required": false,
+                "env_var": null
+              },
+              {
+                "long": "meta",
+                "short": null,
+                "aliases": [],
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "value_name": null,
+                "shape": {
+                  "kind": "scalar",
+                  "value": {
+                    "kind": "ref",
+                    "value": {
+                      "id": "echo_tool.Meta"
+                    }
+                  }
+                },
+                "default": null,
+                "required": false,
+                "env_var": null
+              }
+            ],
+            "flags": [],
+            "constraints": [
+              {
+                "kind": "all-or-none",
+                "value": [
+                  {
+                    "kind": "present",
+                    "value": "meta"
+                  },
+                  {
+                    "kind": "present",
+                    "value": "entries"
+                  }
+                ]
+              }
+            ],
+            "stdin": null,
+            "stdout": null,
+            "result": {
+              "type_": {
+                "kind": "ref",
+                "value": {
+                  "id": "echo_tool.Meta"
+                }
+              },
+              "doc": {
+                "summary": "",
+                "description": "",
+                "examples": []
+              },
+              "formatters": [
+                {
+                  "name": "default",
+                  "doc": {
+                    "summary": "",
+                    "description": "",
+                    "examples": []
+                  }
+                }
+              ],
+              "default_formatter": "default"
+            },
+            "errors": [
+              {
+                "name": "bad-input",
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "kind": "usage-error",
+                "exit_code": 2,
+                "payload": {
+                  "kind": "string",
+                  "value": {}
+                }
+              },
+              {
+                "name": "boom",
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "kind": "runtime-error",
+                "exit_code": 7,
+                "payload": null
+              }
+            ],
+            "annotations": null
+          }
+        }
+      ]
+    },
+    "schema": {
+      "defs": [
+        {
+          "id": "echo_tool.Meta",
+          "name": "Meta",
+          "body": {
+            "kind": "record",
+            "value": {
+              "fields": [
+                {
+                  "name": "k",
+                  "body": {
+                    "kind": "string",
+                    "value": {}
+                  }
+                },
+                {
+                  "name": "n",
+                  "body": {
+                    "kind": "u32",
+                    "value": {}
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "root": {
+        "kind": "record",
+        "value": {
+          "fields": []
+        }
+      }
+    }
+  }
+}

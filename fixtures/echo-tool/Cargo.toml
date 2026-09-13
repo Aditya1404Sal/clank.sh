@@ -1,0 +1,24 @@
+[package]
+name = "echo-tool"
+version = "0.0.0"
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+# T2 FIXTURE. The Golem tool every later agent-tools ticket tests against: its commands between
+# them exercise each construct the CLI projection (ticket 5) has to parse. cdylib = leaf component.
+crate-type = ["cdylib"]
+
+[dependencies]
+# `export_golem_agentic` emits the golem:tool guest exports. A leaf component is the one place that
+# feature may be enabled.
+golem-rust = { workspace = true, features = ["export_golem_agentic"] }
+
+[dev-dependencies]
+# The snapshot test serializes the golem-schema tool model (see `mod snapshot` in lib.rs).
+serde_json = { workspace = true }
