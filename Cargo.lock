@@ -171,6 +171,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "bash"
+version = "0.0.0"
+dependencies = [
+ "base64",
+ "clank-embed",
+ "golem-rust",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "bigdecimal"
 version = "0.4.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1587,6 +1599,7 @@ dependencies = [
  "ctor",
  "golem-rust-macro",
  "golem-schema",
+ "golem-tool-metadata",
  "http",
  "log",
  "serde",
@@ -1643,6 +1656,13 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "golem-tool-metadata"
+version = "0.0.0"
+dependencies = [
+ "golem-schema",
 ]
 
 [[package]]

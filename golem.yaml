@@ -46,6 +46,11 @@ components:
   echo:tool:
     dir: fixtures/echo-tool
     templates: rust
+  # SPIKE — the `bash` tool walking skeleton (crates/bash): clank's shell core as a Golem tool,
+  # bound to ClankAgent below so the probe builtin can call it over tool-rpc.
+  clank:bash:
+    dir: crates/bash
+    templates: rust
 
 # T1 PROBE — THROWAWAY. Tool declarations. `capable-probe` declares a provisioned file, which is
 # what implies the filesystem grant today (gol-33 §Filesystem capability classification); the
@@ -71,6 +76,12 @@ tools:
   # ClankAgent: the parent reaches it directly, and binding it would let a caller bypass
   # `echo-tool` and invoke the subtree on its own.
   tree: {}
+  # SPIKE — a provisioned file is what makes a tool filesystem-capable on golem main today (a
+  # binding with nothing set and no files leaves it with no filesystem at all — measured live).
+  bash:
+    files:
+      - sourcePath: crates/bash/marker
+        targetPath: /.bash/MARKER
 
 # T1 PROBE — THROWAWAY. The bindings: which tools ClankAgent may invoke. A binding is compiled per
 # agent type at deploy time, so nothing inside a running agent can create one.
@@ -81,3 +92,4 @@ agents:
       capable-probe: {}
       echo-tool: {}
       capable-echo: {}
+      bash: {}

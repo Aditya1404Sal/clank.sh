@@ -1,0 +1,32 @@
+[package]
+name = "bash"
+version = "0.0.0"
+edition = "2024"
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+# SPIKE — the `bash` tool walking skeleton: clank's shell core exported as a Golem agent tool
+# (component `clank:bash`). A leaf component, so cdylib, and wasm-only like the fixtures.
+crate-type = ["cdylib"]
+# `golem build` looks for the artifact under the component name (`clank:bash` → clank_bash.wasm).
+name = "clank_bash"
+
+[dependencies]
+# `export_golem_agentic` emits the golem:tool guest exports; a leaf component is the one place that
+# feature may be enabled.
+golem-rust = { workspace = true, features = ["export_golem_agentic"] }
+# The shell engine. `providers` brings the durable log sink and the probe hook, so a tool call made
+# from inside `bash` (`probe-tool greet Ada`) goes out over tool-rpc from this sidecar.
+clank-embed = { path = "../clank-embed", features = ["providers"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = "0.22"
+
+[dev-dependencies]
+# The session round-trip test drives the async Session natively, the way clank-core's own tests do.
+tokio = { version = "1", features = ["rt"] }

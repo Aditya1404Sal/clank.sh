@@ -297,6 +297,59 @@ fn type_name(ty: &SchemaType) -> &'static str {
     }
 }
 
+thread_local! {
+    /// The `state` the last `probe-tool bash` call returned, handed back on the next one — the
+    /// caller-carried session, held here the way an interactive client would hold it.
+    static BASH_STATE: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// SPIKE — one call to the bound `bash` tool (`bash run --state <last> <script>`).
+///
+/// The tool's result record is `{stdout, stderr, exit_code, pending_prompt, cwd, state}`. Its
+/// stdout is written as-is, then its stderr lines prefixed `[bash stderr] `, then one trailer
+/// `[bash exit=N cwd=… state=NB]`; the builtin exits with the tool's exit code.
+fn call_bash(script: &str) -> Result<(Vec<u8>, u8), String> {
+    let state = BASH_STATE.with(|s| s.borrow().clone());
+    let input = encode_for(
+        "bash",
+        &["run"],
+        &[("state", state), ("script", script.to_string())],
+    )?;
+    let result = wit_bindgen::block_on(async move {
+        tool_host::ToolRpc::new("bash")
+            .invoke_and_await(vec!["run".to_string()], input, None, None)
+            .await
+    });
+    let invocation = result.map_err(|e| format!("rpc error: {e:?}"))?;
+    let wire = invocation
+        .result
+        .ok_or_else(|| "bash returned no result".to_string())?;
+    let typed =
+        golem_rust::decode_typed_schema_value(&wire).map_err(|e| format!("decode: {e:?}"))?;
+    let SchemaValue::Record { fields } = typed.value() else {
+        return Err(format!("bash result is not a record: {:?}", typed.value()));
+    };
+    let text = |i: usize| match fields.get(i) {
+        Some(SchemaValue::String(s)) => s.clone(),
+        _ => String::new(),
+    };
+    let exit_code = match fields.get(2) {
+        Some(SchemaValue::U8(code)) => *code,
+        _ => 1,
+    };
+    let (stdout, stderr, cwd, new_state) = (text(0), text(1), text(4), text(5));
+    BASH_STATE.with(|s| s.borrow_mut().clone_from(&new_state));
+    let mut out = stdout;
+    for line in stderr.lines() {
+        out.push_str(&format!("[bash stderr] {line}\n"));
+    }
+    out.push_str(&format!(
+        "[bash exit={exit_code} cwd={cwd} state={}B]\n",
+        new_state.len()
+    ));
+    Ok((out.into_bytes(), exit_code))
+}
+
 /// Dispatch for the `probe-tool` builtin's argv.
 pub fn run(argv: &[String]) -> Result<(Vec<u8>, u8), String> {
     let arg = |i: usize| argv.get(i).cloned().unwrap_or_default();
@@ -357,6 +410,17 @@ pub fn run(argv: &[String]) -> Result<(Vec<u8>, u8), String> {
             false,
         ),
         "cread" => call("capable-echo", &["read"], &[("path", arg(1))], false),
+
+        // --- SPIKE: the `bash` tool, state carried between calls by this agent ----------------
+        "bash" => call_bash(&argv[1..].join(" ")),
+        "bash-reset" => {
+            BASH_STATE.with(|s| s.borrow_mut().clear());
+            Ok((Vec::new(), 0))
+        }
+        "bash-state" => Ok((
+            format!("{}\n", BASH_STATE.with(|s| s.borrow().len())).into_bytes(),
+            0,
+        )),
 
         // --- introspection ------------------------------------------------------------------
         "expect" => {
