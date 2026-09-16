@@ -70,8 +70,16 @@ pub trait Plugin: Any {
     fn intercepted(&self) -> &'static [&'static str] {
         &[]
     }
-    /// Directories appended to `$PATH`, in order.
+    /// Directories appended to `$PATH`, in order. Entries only: a `$PATH` element may be a glob
+    /// (`…/skills/*/bin`) that names no single directory, which is why the dirs to *create* are a
+    /// separate list ([`layout_dirs`](Self::layout_dirs)).
     fn path_dirs(&self) -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
+    /// Directories to create when the plug-in is installed — its own package layout, already
+    /// filtered to what it is willing to create on this target (the shell core creates whatever it
+    /// is handed, so a plug-in that must not touch host system paths omits them here).
+    fn layout_dirs(&self) -> Vec<std::path::PathBuf> {
         Vec::new()
     }
     /// Called once when the plug-in is installed on a session.

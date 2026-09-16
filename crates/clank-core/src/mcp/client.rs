@@ -386,7 +386,7 @@ impl<'a> McpClient<'a> {
                 crate::logging::redact_embedded_urls(&e.to_string()),
             ),
         }
-        .emit(crate::logging::LogFile::Mcp);
+        .emit(crate::logging::LogFile::Rpc);
         result
     }
 

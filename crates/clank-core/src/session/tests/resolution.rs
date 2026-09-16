@@ -4,7 +4,6 @@
 //! Fixtures live in the parent module ([`super`]).
 
 use super::*;
-use crate::session::env::effective_path;
 
 /// `type` for a clank-intercepted command resolves through clank's own dispatch (Brush's `type`
 /// can't see it): `type curl` → "curl is a shell builtin", exit 0. This is the README's "type
@@ -13,7 +12,13 @@ use crate::session::env::effective_path;
 fn type_resolves_intercepted_command_as_builtin() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
-        for name in typecmd::INTERCEPTED {
+        // The core's intercepted names plus the installed plug-in's — `type` is authoritative for
+        // both, and the session under test has clank installed.
+        let intercepted = typecmd::CORE_INTERCEPTED
+            .iter()
+            .copied()
+            .chain(["ask", "mcp", "grease", "golem"]);
+        for name in intercepted {
             let result = session.eval_line(&format!("type {name}")).await;
             assert_eq!(result.exit_code, 0, "type {name} should exit 0");
             assert_eq!(
@@ -109,43 +114,6 @@ fn path_is_the_readme_default() {
     });
 }
 
-/// With no `CLANK_*` overrides, `effective_path()` is byte-identical to the documented default —
-/// the drift guard for the dynamic construction.
-#[test]
-fn effective_path_defaults_to_the_readme_path() {
-    // House lock order: grease, then mcp (see path_is_the_readme_default).
-    let _grease = crate::grease::config::TEST_ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let _mcp = crate::mcp::config::TEST_ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    assert_eq!(effective_path(), crate::config::vfs::DEFAULT_PATH);
-}
-
-/// A `CLANK_MCP_BIN` override lands in `$PATH`, so a native session RESOLVES what `mcp add`
-/// installs — before this, the launcher went to the override dir while `$PATH` kept the hardcoded
-/// default, and `which <server>` never saw it.
-#[test]
-fn effective_path_honors_the_mcp_bin_override() {
-    let _lock = crate::mcp::config::TEST_ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let dir = tempfile::tempdir().unwrap();
-    let bin = dir.path().join("mcp-bin");
-    std::env::set_var("CLANK_MCP_BIN", &bin);
-    let path = effective_path();
-    std::env::remove_var("CLANK_MCP_BIN");
-    assert!(
-        path.contains(bin.to_str().unwrap()),
-        "PATH should contain the override: {path}"
-    );
-    assert!(
-        !path.contains("/usr/lib/mcp/bin"),
-        "default entry should be replaced: {path}"
-    );
-}
-
 /// `which` finds nothing for a name with no file-backed form, and does NOT report a phantom
 /// path (the bug caught on the agent: Brush's wasm `executable()` returns true unconditionally,
 /// so `which` must verify existence itself). Chained with a marker to prove no wedge/error.
@@ -237,8 +205,10 @@ fn cat_reads_virtual_proc_status() {
     });
 }
 
-/// `ls /bin` enumerates every registered command name — intercepted (`curl`, `prompt-user`) and
-/// Brush-registered (`cat`) alike — so the AI can discover the full capability set. Virtual `/bin`.
+/// `ls /bin` enumerates every registered command name — intercepted (`curl`, `prompt-user`),
+/// Brush-registered (`cat`) and plug-in-installed (`ask`) alike — so the AI can discover the full
+/// capability set. Virtual `/bin`, resolved against the SESSION registry (core + plug-in), which is
+/// why a plug-in's commands appear here at all.
 #[test]
 fn ls_bin_lists_all_commands() {
     on_rt(async {
@@ -248,6 +218,7 @@ fn ls_bin_lists_all_commands() {
         assert!(out.contains("curl"), "got: {out}");
         assert!(out.contains("prompt-user"));
         assert!(out.contains("cat"));
+        assert!(out.contains("ask"), "plug-in commands too, got: {out}");
     });
 }
 

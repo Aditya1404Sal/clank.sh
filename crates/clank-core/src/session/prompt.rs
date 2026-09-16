@@ -34,7 +34,7 @@ impl Session {
         let Some(manifest) = self.registry.get(command) else {
             return false;
         };
-        let Some(words) = crate::ai::ask::dequote_words(line) else {
+        let Some(words) = crate::helpshim::dequote_words(line) else {
             return false;
         };
         crate::manifest::flags_trigger_redaction(&manifest.redaction_rules, &words)

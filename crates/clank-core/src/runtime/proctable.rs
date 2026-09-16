@@ -105,21 +105,6 @@ impl ProcState {
     }
 }
 
-/// The Golem agent-invocation identity fields surfaced in `/proc/<pid>/status` (README:252-258) for
-/// an [`ProcessKind::AgentInvocation`] row. Only the fields clank actually knows are carried: the
-/// agent type, the ordered constructor params, and the phantom UUID. (`agent-revision` and the
-/// await-mode idempotency-key are not surfaced by the golem host on this SDK path, so they are
-/// omitted rather than fabricated — consistent with the honest `--revision` stub.)
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AgentMeta {
-    /// The Golem agent type name (e.g. `GreeterAgent`).
-    pub agent_type: String,
-    /// Constructor params rendered as `k=v,k=v` (ordered), matching the invocation grammar.
-    pub agent_params: String,
-    /// The phantom-instance UUID when the invocation targeted a phantom agent; `None` otherwise.
-    pub phantom_uuid: Option<String>,
-}
-
 /// One process-table row: a single invocation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProcRow {
@@ -136,9 +121,10 @@ pub struct ProcRow {
     /// Logical start ordinal (monotonic within the session), not wall-clock — keeps the table
     /// fully deterministic under replay.
     pub start: u64,
-    /// For an `AgentInvocation` row: the Golem agent identity `/proc/<pid>/status` exposes. `None`
-    /// for every other process kind.
-    pub agent_meta: Option<AgentMeta>,
+    /// Extra `Key: Value` lines `/proc/<pid>/status` appends to this row, in the order given.
+    /// Whatever the row's owner attached to it — the shell core labels nothing, so this is empty
+    /// unless a plug-in described its own invocation (see [`ProcessTable::set_labels`]).
+    pub labels: Vec<(String, String)>,
 }
 
 impl ProcRow {
@@ -163,7 +149,7 @@ pub fn root_row() -> ProcRow {
         argv: vec!["clank".to_string()],
         state: ProcState::S,
         start: 0,
-        agent_meta: None,
+        labels: Vec::new(),
     }
 }
 
@@ -217,7 +203,7 @@ impl ProcessTable {
             argv,
             state: ProcState::R,
             start,
-            agent_meta: None,
+            labels: Vec::new(),
         });
         pid
     }
@@ -239,17 +225,17 @@ impl ProcessTable {
             argv,
             state: ProcState::S,
             start,
-            agent_meta: None,
+            labels: Vec::new(),
         });
         pid
     }
 
-    /// Attach Golem agent-invocation identity to an existing row (spawned by [`spawn_bg`]), so
-    /// `/proc/<pid>/status` can surface the agent-type/params/phantom fields (README:252-258). No-op
-    /// if the PID is unknown.
-    pub fn set_agent_meta(&mut self, pid: u32, meta: AgentMeta) {
+    /// Attach descriptive `Key: Value` labels to an existing row (spawned by [`spawn_bg`]), so
+    /// `/proc/<pid>/status` can surface what the row's owner knows about it (README:252-258). The
+    /// keys and their order are the caller's to choose. No-op if the PID is unknown.
+    pub fn set_labels(&mut self, pid: u32, labels: Vec<(String, String)>) {
         if let Some(row) = self.rows.iter_mut().find(|r| r.pid == pid) {
-            row.agent_meta = Some(meta);
+            row.labels = labels;
         }
     }
 

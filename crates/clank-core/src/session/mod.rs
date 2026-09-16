@@ -34,7 +34,10 @@ use crate::runtime::proctable::ProcessTable;
 type BoxError = Box<dyn std::error::Error>;
 
 mod ctx;
-mod env;
+// `pub(crate)` for `env::effective_path`: the `$PATH` a session installs is now built in two halves
+// (the core's, plus the installed plug-in's `path_dirs`), and the drift guard pinning the two
+// against the README default lives with the plug-in that supplies the second half.
+pub(crate) mod env;
 mod prompt;
 mod streams;
 
@@ -182,8 +185,11 @@ pub struct Session {
     /// reads — that's how `$(context show)` and `context show | head` reach it.
     transcript: Arc<Mutex<Transcript>>,
     /// The clank-owned inventory of command manifests (sits beside `transcript` as a shell-owned
-    /// state object). Drives command metadata surfaces; not yet consulted on the execution path.
-    registry: CommandRegistry,
+    /// state object): the core surface plus any installed plug-in's. Drives command metadata
+    /// surfaces. Behind an `Arc` (like `transcript` and `proc_table`) so each executed line can
+    /// install it into the thread-local slot the `/bin`-reading builtins (`cat`/`ls`/`man`/`stat`)
+    /// resolve against — that's how `ls /bin` lists a plug-in's commands too.
+    registry: Arc<CommandRegistry>,
     /// The process table: one row per executed line. Shared behind `Arc<Mutex>` so `run_line` can
     /// install it into the process-global slot the `ps` builtin reads (Brush builtins can't reach
     /// `Session` directly).
@@ -297,7 +303,8 @@ impl Session {
         allow(clippy::unused_async, clippy::unused_async_trait_impl)
     )]
     pub async fn new() -> Result<Self, BoxError> {
-        ensure_fs_layout();
+        // The core namespace only; an installed plug-in's own dirs are created by `set_plugin`.
+        ensure_fs_layout(&[]);
         #[cfg(target_arch = "wasm32")]
         {
             // wasip2 has no threads: a current-thread runtime drives Brush's async.
@@ -308,7 +315,7 @@ impl Session {
                 transcript: Arc::new(Mutex::new(Transcript::with_cap(
                     crate::configured_context_cap(),
                 ))),
-                registry: crate::registry::build(),
+                registry: Arc::new(crate::registry::build()),
                 proc_table: Arc::new(Mutex::new(ProcessTable::new())),
                 pending: None,
                 authz: AuthzState::default(),
@@ -321,9 +328,11 @@ impl Session {
                 secret_env: std::collections::BTreeMap::new(),
                 rt,
             };
+            // GUARD-EXEMPT-BEGIN: naming clank here is the embedder's job from Task 10 on.
             let mut clank = crate::clank::Clank::new();
             clank.reconstruct_mcp();
             session.set_plugin(Box::new(clank));
+            // GUARD-EXEMPT-END
             Ok(session)
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -334,7 +343,7 @@ impl Session {
                 transcript: Arc::new(Mutex::new(Transcript::with_cap(
                     crate::configured_context_cap(),
                 ))),
-                registry: crate::registry::build(),
+                registry: Arc::new(crate::registry::build()),
                 proc_table: Arc::new(Mutex::new(ProcessTable::new())),
                 pending: None,
                 authz: AuthzState::default(),
@@ -346,9 +355,11 @@ impl Session {
                 source: SourceInfo::default(),
                 secret_env: std::collections::BTreeMap::new(),
             };
+            // GUARD-EXEMPT-BEGIN: naming clank here is the embedder's job from Task 10 on.
             let mut clank = crate::clank::Clank::new();
             clank.reconstruct_mcp();
             session.set_plugin(Box::new(clank));
+            // GUARD-EXEMPT-END
             Ok(session)
         }
     }
@@ -369,14 +380,39 @@ impl Session {
         &self.registry
     }
 
-    /// Install `plugin`: its builtins join the shell, its manifests join the registry, and its
-    /// `on_start` runs. Replaces any previous plug-in.
+    /// Install `plugin`: its layout dirs are created, its builtins join the shell, its manifests
+    /// join the registry, its `path_dirs` are appended to `$PATH`, and its `on_start` runs.
+    /// Replaces any previous plug-in.
+    ///
+    /// The filesystem layout comes first: the plug-in's `on_start` may materialize files into its
+    /// own dirs, and the `$PATH` it extends has to resolve them.
     pub fn set_plugin(&mut self, mut plugin: Box<dyn crate::plugin::Plugin>) {
+        ensure_fs_layout(&plugin.layout_dirs());
         for (name, registration) in plugin.builtins() {
             self.shell.register_builtin(name, registration);
         }
+        let registry = Arc::make_mut(&mut self.registry);
         for manifest in plugin.manifests() {
-            self.registry.insert(manifest);
+            registry.insert(manifest);
+        }
+        // Extend, rather than rebuild, `$PATH`: the core half is already installed, so appending
+        // keeps the README order byte for byte.
+        let path_dirs = plugin.path_dirs();
+        if !path_dirs.is_empty() {
+            let base = self
+                .shell
+                .env()
+                .get_str("PATH", &self.shell)
+                .map_or_else(|| env::effective_path(&[]), std::borrow::Cow::into_owned);
+            let mut path = base;
+            for dir in &path_dirs {
+                path.push(':');
+                path.push_str(&dir.display().to_string());
+            }
+            let _ = self
+                .shell
+                .env_mut()
+                .set_global("PATH", brush_core::variables::ShellVariable::new(path));
         }
         plugin.on_start();
         self.capabilities = None;
@@ -397,11 +433,28 @@ impl Session {
     /// Test-only: uninstall the plug-in, so the contract tests can see what the bare shell core
     /// does. There is no user command for this — `Session::new` always installs clank until Task 11
     /// makes that the embedder's job.
+    ///
+    /// Undoes what `set_plugin` did to the shell, so "no plug-in" means it everywhere: the builtins
+    /// it registered are disabled (Brush has no unregister, and a disabled registration falls
+    /// through to ordinary command resolution — which is exactly what "not installed" means), and
+    /// its manifests go by rebuilding the core registry. Its `$PATH` entries stay; they name
+    /// directories, and an empty directory on `$PATH` resolves nothing.
     #[cfg(test)]
     pub(crate) fn clear_plugin_for_test(&mut self) {
-        self.plugin = None;
+        if let Some(plugin) = self.plugin.take() {
+            for (name, _registration) in plugin.builtins() {
+                if let Some(registration) = self.shell.builtin_mut(&name) {
+                    registration.disabled = true;
+                }
+            }
+        }
+        self.registry = Arc::new(crate::registry::build());
         self.capabilities = None;
     }
+
+    // GUARD-EXEMPT-BEGIN: the provider-injection and REPL entry points still name clank's types.
+    // They are the embedder's from Task 10 on (they inject into a plug-in it constructed), and the
+    // family-name guard skips them until then.
 
     /// Install the LLM provider that backs `ask`. The agent build injects a durable Anthropic
     /// provider here after constructing the session; without one, `ask` reports "not configured".
@@ -488,6 +541,8 @@ impl Session {
             .map(crate::clank::Clank::repl_end)
             .unwrap_or_default()
     }
+
+    // GUARD-EXEMPT-END
 
     /// Install the `/var/log` log sink. The agent injects a whole-file-rewrite sink (idempotent under
     /// oplog replay, so no duplicated lines); native keeps the default direct-append sink.
@@ -696,6 +751,10 @@ impl Session {
         // Brush-registered `context` builtin in nested contexts ($(context show), context | head).
         let _install = crate::runtime::proctable::install(self.proc_table.clone());
         let _install_transcript = crate::install_transcript(self.transcript.clone());
+        // Same pattern for the registry: the `/bin`-reading builtins (`cat /bin/<name>`, `ls /bin`,
+        // `man`, `stat`) are Brush builtins with no path to `Session`, and the registry is
+        // per-session (core + whatever plug-in is installed), so it rides the thread-local slot too.
+        let _install_registry = crate::runtime::binfs::install(self.registry.clone());
         // Build (or reuse a cached) view of the installed capabilities, keyed by the plug-in's own
         // version — so the dynamic manifests (`man`/`type` resolution), the MCP resource index (`ls
         // /mnt/mcp/...`), and the live system prompt (`cat /proc/clank/system-prompt`) are re-rendered
@@ -907,7 +966,7 @@ impl Session {
         // "unknown subcommand", `prompt-user --help` would be parsed as a prompt, `curl --help`
         // would surface an outbound-HTTP confirmation. Brush's own builtins (cat/grep) answer
         // `--help` through their `get_content`; not here.
-        if let Some(help) = typecmd::help_for(line, &self.registry) {
+        if let Some(help) = typecmd::help_for(line, &self.registry, plugin_intercepted(plugin)) {
             return LineRoute::Help(help);
         }
         // The plug-in's first look, at the rung its `context summarize` check used to occupy: after
@@ -950,7 +1009,9 @@ impl Session {
         // query ONLY intercepted names, matching Brush's wording. Any other `type` line (a
         // Brush-known name, a mix, an unrecognized flag) returns `None` here and falls through to
         // Brush's `type` unchanged. Read-only meta command — resolved before the authz gate.
-        if let Some((stdout, exit_code)) = typecmd::dispatch(line, &self.registry) {
+        if let Some((stdout, exit_code)) =
+            typecmd::dispatch(line, &self.registry, plugin_intercepted(plugin))
+        {
             return LineRoute::TypeDispatch(stdout, exit_code);
         }
         // The plug-in's second look, at the rung its MCP-help / package-help / `ask repl` / ask-pipe
@@ -1532,6 +1593,12 @@ impl Session {
 /// command kinds exist (they'll be resolved from `$PATH` / the registry).
 fn classify(_line: &str) -> ProcessKind {
     ProcessKind::Builtin
+}
+
+/// The command names the installed plug-in intercepts (empty with no plug-in) — the set `type` and
+/// `--help` own on top of [`typecmd::CORE_INTERCEPTED`].
+fn plugin_intercepted(plugin: Option<&dyn Plugin>) -> &'static [&'static str] {
+    plugin.map_or(&[][..], Plugin::intercepted)
 }
 
 /// A shell.log-safe rendering of `line`: strips the VALUE of an `export --secret NAME=VALUE` AND the

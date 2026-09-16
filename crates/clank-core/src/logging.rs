@@ -3,7 +3,7 @@
 //!
 //! - `shell.log` — per-command start/end/exit-code events and authorization pauses.
 //! - `http.log`  — outbound HTTP (MCP, grease registry, curl/wget, and the `ask` LLM call), secrets redacted.
-//! - `mcp.log`   — MCP JSON-RPC tool invocations and their responses.
+//! - `mcp.log`   — outbound tool and agent invocations and their responses.
 //! - `ops.log`   — destructive operations (the `sudo-only` tier).
 //!
 //! ## Replay safety — why writes go through a [`LogSink`] seam
@@ -135,8 +135,8 @@ pub enum LogFile {
     Shell,
     /// `http.log` — outbound HTTP (MCP, grease registry, curl/wget, `ask`), secrets redacted.
     Http,
-    /// `mcp.log` — MCP JSON-RPC tool invocations and their responses.
-    Mcp,
+    /// `mcp.log` — outbound tool and agent invocations and their responses.
+    Rpc,
     /// `ops.log` — destructive operations (the `sudo-only` tier).
     Ops,
 }
@@ -148,7 +148,7 @@ impl LogFile {
         match self {
             LogFile::Shell => "shell.log",
             LogFile::Http => "http.log",
-            LogFile::Mcp => "mcp.log",
+            LogFile::Rpc => "mcp.log",
             LogFile::Ops => "ops.log",
         }
     }

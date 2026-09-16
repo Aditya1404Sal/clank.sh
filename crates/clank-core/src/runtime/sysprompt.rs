@@ -8,8 +8,9 @@
 //! installs the string here; the procfs resolver reads it. Mirrors the per-line thread-local install
 //! pattern of [`crate::runtime::proctable`] / [`crate::runtime::mcpfs`] / [`crate::runtime::dynreg`] exactly.
 //!
-//! When nothing is installed (native off-session reads, tests), the resolver falls back to the static
-//! base prompt — so `cat /proc/clank/system-prompt` is always answerable.
+//! When nothing is installed (native off-session reads, tests, or a session with no plug-in at all)
+//! there is no prompt to show — rendering one is the plug-in's job — and the resolver says exactly
+//! that, so `cat /proc/clank/system-prompt` is always answerable.
 
 use std::cell::RefCell;
 use std::sync::Arc;

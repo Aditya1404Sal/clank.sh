@@ -14,6 +14,9 @@ pub mod ask;
 pub mod grease;
 pub mod mcp;
 
+#[cfg(test)]
+mod tests_guard;
+
 use crate::builtins::promptuser::Resolution;
 use crate::plugin::{Capabilities, LineAction, LinePhase, PluginPending, Route};
 use crate::session::{LineResult, SessionCtx};
@@ -52,6 +55,11 @@ pub struct Clank {
 }
 
 impl Clank {
+    /// The family commands the shell must route to the plug-in rather than to Brush: `type` reports
+    /// them as builtins, `--help` serves their manifest help, and each gets an honest-error stub
+    /// for the nested contexts Brush does dispatch.
+    const INTERCEPTED: &'static [&'static str] = &["ask", "mcp", "grease", "golem"];
+
     /// The plug-in as a new session starts it: grease packages loaded from the filesystem, MCP empty
     /// until the session reconstructs it.
     #[must_use]
@@ -108,6 +116,95 @@ impl crate::plugin::Plugin for Clank {
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
+    }
+
+    fn builtins(
+        &self,
+    ) -> Vec<(
+        String,
+        brush_core::builtins::Registration<brush_core::extensions::DefaultShellExtensions>,
+    )> {
+        let mut builtins = crate::ai::model::builtins();
+        // `ask`/`mcp`/`grease`/`golem` are Session-layer commands: a top-level line never reaches
+        // Brush for them, but `$(...)`, a pipeline stage, `xargs` and `eval` dispatch straight to
+        // Brush — where the stub gives the honest "top-level only" error instead of an external-exec
+        // failure. See [`crate::builtins::interceptstub`].
+        for name in Self::INTERCEPTED {
+            builtins.push((
+                (*name).to_string(),
+                crate::builtins::interceptstub::session_stub(),
+            ));
+        }
+        builtins
+    }
+
+    /// Every family's static manifests, merged into the session registry by `set_plugin`.
+    ///
+    /// `ask`, `mcp`, `grease` and `golem` have a manifest but no `SimpleCommand` of their own:
+    /// they are intercepted at the Session layer (an `ask` LLM call must run where the Golem
+    /// durable context is live, not inside a synchronous Brush builtin under the nested runtime),
+    /// and what IS registered for them is the honest-error stub above. The `registry_guard` test
+    /// below pins that pairing.
+    fn manifests(&self) -> Vec<crate::manifest::Manifest> {
+        let mut manifests = crate::ai::model::manifests();
+        manifests.extend(crate::ai::ask::manifests());
+        manifests.extend(crate::mcp::cmd::manifests());
+        manifests.extend(crate::grease::cmd::manifests());
+        manifests.extend(crate::golem::cluster::manifests());
+        manifests
+    }
+
+    fn intercepted(&self) -> &'static [&'static str] {
+        Self::INTERCEPTED
+    }
+
+    fn path_dirs(&self) -> Vec<std::path::PathBuf> {
+        vec![
+            crate::grease::config::script_bin_dir(), // default /usr/bin
+            crate::mcp::config::bin_dir(),           // default /usr/lib/mcp/bin
+            crate::grease::config::agent_bin_dir(),  // default /usr/lib/agents/bin
+            crate::grease::config::bin_dir(),        // default /usr/lib/prompts/bin
+            // A glob, not a directory: each installed skill's own `bin`.
+            std::path::PathBuf::from(format!(
+                "{}/*/bin",
+                crate::grease::config::skills_dir().display()
+            )),
+        ]
+    }
+
+    /// The package layout `mcp add` / `grease install` write into.
+    ///
+    /// Native creates ONLY the dirs the operator explicitly pointed somewhere writable via a
+    /// `CLANK_*` env override — never absolute system paths on the host (`/usr/lib/...` on macOS is
+    /// not clank's to create). On the agent, whose per-instance VFS starts empty, all of them.
+    fn layout_dirs(&self) -> Vec<std::path::PathBuf> {
+        let dirs = [
+            ("CLANK_MCP_ETC", crate::mcp::config::etc_dir()),
+            ("CLANK_MCP_BIN", crate::mcp::config::bin_dir()),
+            ("CLANK_GREASE_ETC", crate::grease::config::etc_dir()),
+            ("CLANK_GREASE_STORE", crate::grease::config::store_dir()),
+            ("CLANK_GREASE_BIN", crate::grease::config::bin_dir()),
+            (
+                "CLANK_GREASE_SCRIPT_BIN",
+                crate::grease::config::script_bin_dir(),
+            ),
+            ("CLANK_GREASE_SKILLS", crate::grease::config::skills_dir()),
+            (
+                "CLANK_GREASE_AGENT_BIN",
+                crate::grease::config::agent_bin_dir(),
+            ),
+        ];
+        #[cfg(target_arch = "wasm32")]
+        {
+            dirs.into_iter().map(|(_var, dir)| dir).collect()
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            dirs.into_iter()
+                .filter(|(var, _dir)| std::env::var_os(var).is_some())
+                .map(|(_var, dir)| dir)
+                .collect()
+        }
     }
 
     fn version(&self) -> u64 {
@@ -314,5 +411,117 @@ impl crate::plugin::Plugin for Clank {
         // marker into a model-generated summary block (no-op when nothing was dropped or no
         // provider exists).
         self.compact_dropped_span(ctx).await;
+    }
+}
+
+#[cfg(test)]
+mod registry_guard {
+    use crate::plugin::Plugin as _;
+
+    /// The plug-in half of the registry drift guard (`registry::tests` owns the core half): every
+    /// builtin the plug-in registers has exactly one manifest, and every manifest it contributes
+    /// either has a builtin or is one of the Session-intercepted commands whose "builtin" is the
+    /// honest-error stub.
+    #[test]
+    fn plugin_builtins_and_manifests_match() {
+        let clank = super::Clank::default();
+        let builtins: std::collections::BTreeSet<String> =
+            clank.builtins().into_iter().map(|(n, _)| n).collect();
+        let manifests: std::collections::BTreeSet<String> =
+            clank.manifests().into_iter().map(|m| m.name).collect();
+        let manual: std::collections::BTreeSet<String> = super::Clank::INTERCEPTED
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        assert!(
+            builtins.is_subset(&manifests),
+            "a plug-in builtin has no manifest: {:?}",
+            builtins.difference(&manifests)
+        );
+        assert_eq!(
+            &manifests - &builtins,
+            &manual - &builtins,
+            "a plug-in manifest has no builtin or manual entry"
+        );
+    }
+}
+
+/// What the plug-in contributes to a session's surface, tested against the hooks themselves: the
+/// `$PATH` half it supplies and the system prompt it renders. Both were pinned against the core
+/// before the families moved behind the seam.
+#[cfg(test)]
+mod tests {
+    use crate::plugin::Plugin as _;
+
+    /// `$PATH` with clank installed is the documented README default, byte for byte: the core's
+    /// `/usr/local/bin` followed by the plug-in's [`path_dirs`] in order. The drift guard for a
+    /// `$PATH` that is now built in two halves.
+    ///
+    /// House lock order: grease, then mcp (see `session::tests::resolution`) — a test that reads the
+    /// env-overridable dirs must hold both, and always in that order, or the suite deadlocks AB-BA.
+    ///
+    /// [`path_dirs`]: crate::plugin::Plugin::path_dirs
+    #[test]
+    fn installed_path_is_the_readme_default() {
+        let _grease = crate::grease::config::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _mcp = crate::mcp::config::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let clank = super::Clank::default();
+        assert_eq!(
+            crate::session::env::effective_path(&clank.path_dirs()),
+            crate::config::vfs::DEFAULT_PATH
+        );
+    }
+
+    /// A `CLANK_MCP_BIN` override lands in `$PATH`, so a native session RESOLVES what `mcp add`
+    /// installs — before this, the launcher went to the override dir while `$PATH` kept the
+    /// hardcoded default, and `which <server>` never saw it.
+    #[test]
+    fn path_dirs_honor_the_mcp_bin_override() {
+        let _lock = crate::mcp::config::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("mcp-bin");
+        std::env::set_var("CLANK_MCP_BIN", &bin);
+        let path = crate::session::env::effective_path(&super::Clank::default().path_dirs());
+        std::env::remove_var("CLANK_MCP_BIN");
+        assert!(
+            path.contains(bin.to_str().unwrap()),
+            "PATH should contain the override: {path}"
+        );
+        assert!(
+            !path.contains("/usr/lib/mcp/bin"),
+            "default entry should be replaced: {path}"
+        );
+    }
+
+    /// The system prompt `/proc/clank/system-prompt` serves is the plug-in's to render: the fixed
+    /// preamble plus the rendered command surface over the session registry (core + plug-in). `ask`
+    /// itself is a Subprocess command with a `[confirm]` marker; `shell` is the one tool.
+    #[test]
+    fn capabilities_render_the_system_prompt_over_the_command_surface() {
+        let clank = super::Clank::default();
+        let mut registry = crate::registry::build();
+        for manifest in clank.manifests() {
+            registry.insert(manifest);
+        }
+        let out = clank
+            .capabilities(&registry)
+            .system_prompt
+            .expect("clank renders a system prompt");
+        assert!(out.contains("You are clank"), "got: {out}");
+        assert!(
+            out.contains("`shell`"),
+            "should describe the shell tool, got: {out}"
+        );
+        assert!(
+            out.contains("ask —"),
+            "should list ask in the surface, got: {out}"
+        );
+        assert!(out.contains("[confirm]"), "ask is confirm-tier, got: {out}");
     }
 }

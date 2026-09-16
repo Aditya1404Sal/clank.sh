@@ -119,16 +119,10 @@ fn status(row: &ProcRow) -> String {
         row.start,
         row.command(),
     );
-    // For a Golem agent invocation, expose the agent identity (README:252-258). Only the fields the
-    // host surfaces on this SDK path are shown — agent-type, ordered constructor params, and the
-    // phantom UUID when present. (agent-revision and the await idempotency-key have no host field
-    // here, matching the honest `--revision` stub, so they are not emitted rather than fabricated.)
-    if let Some(meta) = &row.agent_meta {
-        let _ = writeln!(out, "AgentType:\t{}", meta.agent_type);
-        let _ = writeln!(out, "AgentParams:\t{}", meta.agent_params);
-        if let Some(uuid) = &meta.phantom_uuid {
-            let _ = writeln!(out, "PhantomUuid:\t{uuid}");
-        }
+    // Whatever the row's owner labelled it with (README:252-258), in the order it chose. The core
+    // knows none of these keys; a labelled row is one a plug-in described for itself.
+    for (key, value) in &row.labels {
+        let _ = writeln!(out, "{key}:\t{value}");
     }
     out
 }
@@ -169,16 +163,17 @@ pub fn list_children(dir: &str) -> Option<Vec<String>> {
     None
 }
 
-/// `/proc/clank/system-prompt` — the live `ask` system prompt, so this path and the model see the same
+/// `/proc/clank/system-prompt` — the live system prompt, so this path and the model see the same
 /// bytes (README: "always inspectable"). When a line is executing, the `Session` has installed the
 /// fully-rendered prompt (command surface + installed MCP tools + grease prompts/skills) into the
-/// [`crate::runtime::sysprompt`] slot; we serve that. Off-session (native tests, a bare read with no live
-/// Session), fall back to the static base prompt over the registry snapshot.
+/// [`crate::runtime::sysprompt`] slot; we serve that. The prompt is the installed plug-in's to render
+/// (`Capabilities::system_prompt`), so off-session — or with no plug-in installed — there is nothing
+/// to serve and the file says so rather than inventing one.
 #[must_use]
 pub fn system_prompt_stub() -> String {
     match crate::runtime::sysprompt::active() {
         Some(prompt) => (*prompt).clone(),
-        None => crate::ai::ask::build_system_prompt(crate::runtime::binfs::registry()),
+        None => String::from("no system prompt: no plug-in is providing one\n"),
     }
 }
 
@@ -244,13 +239,13 @@ mod tests {
                 .collect(),
             crate::runtime::proctable::SHELL_ROOT_PID,
         );
-        t.set_agent_meta(
+        t.set_labels(
             pid,
-            crate::runtime::proctable::AgentMeta {
-                agent_type: "GreeterAgent".into(),
-                agent_params: "name=greeter".into(),
-                phantom_uuid: Some("abc-123".into()),
-            },
+            vec![
+                ("AgentType".into(), "GreeterAgent".into()),
+                ("AgentParams".into(), "name=greeter".into()),
+                ("PhantomUuid".into(), "abc-123".into()),
+            ],
         );
         let out = resolve(&format!("/proc/{pid}/status"), &t, &env()).unwrap();
         assert!(out.contains("AgentType:\tGreeterAgent"), "got:\n{out}");
@@ -299,24 +294,6 @@ mod tests {
         let out = resolve(&format!("/proc/{pid}/environ"), &t, &env()).unwrap();
         // Sorted: GOLEM_AGENT_TYPE before HOME.
         assert_eq!(out, "GOLEM_AGENT_TYPE=ClankAgent\nHOME=/home/user\n");
-    }
-
-    #[test]
-    fn system_prompt_reflects_the_command_surface() {
-        let (t, _pid) = table_with_one("echo x");
-        let out = resolve("/proc/clank/system-prompt", &t, &env()).unwrap();
-        // The live prompt: the fixed preamble plus the rendered command surface. `ask` itself is a
-        // Subprocess command with a [confirm] marker; `shell` is the one tool.
-        assert!(out.contains("You are clank"), "got: {out}");
-        assert!(
-            out.contains("`shell`"),
-            "should describe the shell tool, got: {out}"
-        );
-        assert!(
-            out.contains("ask —"),
-            "should list ask in the surface, got: {out}"
-        );
-        assert!(out.contains("[confirm]"), "ask is confirm-tier, got: {out}");
     }
 
     #[test]

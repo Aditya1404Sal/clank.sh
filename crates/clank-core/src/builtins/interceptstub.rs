@@ -1,9 +1,10 @@
 //! Honest-error Brush builtins for the Session-intercepted commands in NESTED contexts.
 //!
-//! `curl`, `wget`, `ask`, and `kill` are Session-layer interceptions: curl/wget/ask must await
-//! their async work directly under the Golem SDK's executor (a WASI-HTTP future never completes
-//! under `execute`'s nested tokio runtime — the "Wall C shape"), and `kill` mutates Session state
-//! (the bg-job mapping, the pending prompt). Top-level lines never reach Brush for these names.
+//! `curl`, `wget` and `kill` are the shell core's Session-layer interceptions (an installed plug-in
+//! registers the same stub for its own, such as `ask`): curl/wget must await their async work
+//! directly under the Golem SDK's executor (a WASI-HTTP future never completes under `execute`'s
+//! nested tokio runtime — the "Wall C shape"), and `kill` mutates Session state (the bg-job mapping,
+//! the pending prompt). Top-level lines never reach Brush for these names.
 //!
 //! But inside `$(...)`, pipelines, `xargs`, and `eval`, Brush dispatches directly — and these
 //! words used to fall through to external exec, dying with the misleading "operation not
@@ -21,96 +22,82 @@ use brush_core::commands::ExecutionContext;
 use brush_core::extensions::ShellExtensions;
 use brush_core::{Error, ExecutionResult};
 
-macro_rules! session_stub {
-    ($ty:ident, $name:literal) => {
-        pub(crate) struct $ty;
+/// The honest-error builtin for a session-layer command reached from a nested context.
+///
+/// One type for every such name: it reads the name it was invoked as at run time, so the set of
+/// session-layer commands is a registration-time list rather than something this module enumerates.
+pub(crate) struct SessionStub;
 
-        impl SimpleCommand for $ty {
-            fn get_content(
-                name: &str,
-                content_type: ContentType,
-                _options: &ContentOptions,
-            ) -> Result<String, Error> {
-                // Serve the real manifest help (same source as `cat /bin/<name>`), so `help`
-                // inside Brush matches the top-level surfaces.
-                let help = crate::runtime::binfs::registry()
-                    .get($name)
-                    .map(|m| m.help_text.clone())
-                    .unwrap_or_else(|| $name.to_string());
-                match content_type {
-                    ContentType::ShortDescription => Ok(format!("{name} - session command\n")),
-                    ContentType::ShortUsage => Ok(format!("{name}: see `{name} --help`\n")),
-                    ContentType::DetailedHelp => Ok(format!("{help}\n")),
-                    ContentType::ManPage => {
-                        brush_core::error::unimp("man page not yet implemented")
-                    }
-                }
-            }
-
-            fn execute<SE, I, S>(
-                context: ExecutionContext<'_, SE>,
-                _args: I,
-            ) -> Result<ExecutionResult, Error>
-            where
-                SE: ShellExtensions,
-                I: Iterator<Item = S>,
-                S: AsRef<str>,
-            {
-                let _ = writeln!(
-                    context.stderr(),
-                    "{name}: only available as a top-level command (it runs at the session layer); \
-                     not usable inside $(...), xargs, or eval on this build",
-                    name = $name,
-                );
-                // `ask` DOES work as the final stage of a pipeline (`cat x | ask \"…\"`) — the
-                // session pre-extracts the upstream. This stub only fires when `ask` is NOT the tail
-                // (mid-pipe or inside a substitution); point the user at the forms that work.
-                if $name == "ask" {
-                    let _ = writeln!(
-                        context.stderr(),
-                        "ask: to feed input to ask, put it as the LAST pipeline stage \
-                         (cat x | ask \"…\") or inline it (ask \"$(cat x)\")",
-                    );
-                }
-                // curl/wget DO work as the FIRST pipeline stage (`curl -s URL | jq .x`) — the
-                // session runs the HTTP and feeds the response to the downstream. This stub only
-                // fires for the other shapes (mid-pipe, after `&&`/`;`, inside a substitution).
-                if $name == "curl" || $name == "wget" {
-                    let _ = writeln!(
-                        context.stderr(),
-                        "{name}: to pipe a response, put {name} FIRST in the pipeline \
-                         ({name} -s URL | jq .x), or write to a file (-o f) and read that",
-                        name = $name,
-                    );
-                }
-                Ok(ExecutionResult::new(1))
-            }
+impl SimpleCommand for SessionStub {
+    fn get_content(
+        name: &str,
+        content_type: ContentType,
+        _options: &ContentOptions,
+    ) -> Result<String, Error> {
+        // Serve the real manifest help (same source as `cat /bin/<name>`), so `help`
+        // inside Brush matches the top-level surfaces.
+        let help = crate::runtime::binfs::registry()
+            .get(name)
+            .map_or_else(|| name.to_string(), |m| m.help_text.clone());
+        match content_type {
+            ContentType::ShortDescription => Ok(format!("{name} - session command\n")),
+            ContentType::ShortUsage => Ok(format!("{name}: see `{name} --help`\n")),
+            ContentType::DetailedHelp => Ok(format!("{help}\n")),
+            ContentType::ManPage => brush_core::error::unimp("man page not yet implemented"),
         }
-    };
+    }
+
+    fn execute<SE, I, S>(
+        context: ExecutionContext<'_, SE>,
+        _args: I,
+    ) -> Result<ExecutionResult, Error>
+    where
+        SE: ShellExtensions,
+        I: Iterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let name = context.command_name.clone();
+        let _ = writeln!(
+            context.stderr(),
+            "{name}: only available as a top-level command (it runs at the session layer); \
+             not usable inside $(...), xargs, or eval on this build",
+        );
+        // `ask` DOES work as the final stage of a pipeline (`cat x | ask \"…\"`) — the
+        // session pre-extracts the upstream. This stub only fires when `ask` is NOT the tail
+        // (mid-pipe or inside a substitution); point the user at the forms that work.
+        if name == "ask" {
+            let _ = writeln!(
+                context.stderr(),
+                "ask: to feed input to ask, put it as the LAST pipeline stage \
+                 (cat x | ask \"…\") or inline it (ask \"$(cat x)\")",
+            );
+        }
+        // curl/wget DO work as the FIRST pipeline stage (`curl -s URL | jq .x`) — the
+        // session runs the HTTP and feeds the response to the downstream. This stub only
+        // fires for the other shapes (mid-pipe, after `&&`/`;`, inside a substitution).
+        if name == "curl" || name == "wget" {
+            let _ = writeln!(
+                context.stderr(),
+                "{name}: to pipe a response, put {name} FIRST in the pipeline \
+                 ({name} -s URL | jq .x), or write to a file (-o f) and read that",
+            );
+        }
+        Ok(ExecutionResult::new(1))
+    }
 }
 
-session_stub!(CurlStub, "curl");
-session_stub!(WgetStub, "wget");
-session_stub!(AskStub, "ask");
-session_stub!(KillStub, "kill");
-session_stub!(McpStub, "mcp");
-session_stub!(GreaseStub, "grease");
-session_stub!(GolemStub, "golem");
+/// The registration a plug-in uses for its own session-layer commands.
+#[must_use]
+pub(crate) fn session_stub<SE: ShellExtensions>() -> Registration<SE> {
+    crate::helpshim::simple_builtin_with_help::<SessionStub, SE>()
+}
 
 pub(crate) fn builtins<SE: ShellExtensions>() -> Vec<(String, Registration<SE>)> {
     // The help shim makes a nested `$(curl --help)` print the manifest help (exit 0) instead of
     // the stub's not-usable-here error — help never depends on where it's asked from.
-    use crate::helpshim::simple_builtin_with_help;
     vec![
-        ("curl".into(), simple_builtin_with_help::<CurlStub, SE>()),
-        ("wget".into(), simple_builtin_with_help::<WgetStub, SE>()),
-        ("ask".into(), simple_builtin_with_help::<AskStub, SE>()),
-        ("kill".into(), simple_builtin_with_help::<KillStub, SE>()),
-        ("mcp".into(), simple_builtin_with_help::<McpStub, SE>()),
-        (
-            "grease".into(),
-            simple_builtin_with_help::<GreaseStub, SE>(),
-        ),
-        ("golem".into(), simple_builtin_with_help::<GolemStub, SE>()),
+        ("curl".into(), session_stub::<SE>()),
+        ("wget".into(), session_stub::<SE>()),
+        ("kill".into(), session_stub::<SE>()),
     ]
 }

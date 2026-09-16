@@ -33,9 +33,6 @@ use crate::manifest::{AuthorizationPolicy, ExecutionScope, Manifest};
 /// - `context` — the clank-specific transcript builtin, intercepted in `Session::eval_line` via
 ///   `dispatch_context` *before* Brush dispatch (it operates on the session transcript, which a Brush
 ///   builtin can't reach); not `.builtins()`-registered. See `dispatch_context`.
-/// - `ask` — the AI-native LLM command, intercepted in `Session::run_command` (its LLM call must run at
-///   the Session layer where the Golem durable context is live, not inside a synchronous Brush builtin
-///   under the nested runtime); not `.builtins()`-registered. See `askcmd`.
 /// - `kill` — the synthetic kill, intercepted in `Session::run_command` (it mutates Session state:
 ///   the bg-job mapping, proc table, and pending prompt; Brush's own kill is nix/unix-gated). See
 ///   `killcmd`.
@@ -51,11 +48,7 @@ pub const MANUAL_MANIFESTS: &[&str] = &[
     "curl",
     "wget",
     "context",
-    "ask",
     "kill",
-    "mcp",
-    "grease",
-    "golem",
     // Brush-native BashMode builtins — parent-shell (POSIX special builtins):
     "cd",
     "export",
@@ -238,12 +231,16 @@ impl CommandRegistry {
     }
 }
 
-/// Build the registry from the manifests authored alongside clank's builtins.
+/// Build the registry from the manifests authored alongside the shell core's builtins.
 ///
-/// Clank-authored builtins carry their manifests next to their registration; the Brush-native
-/// `BashMode` builtins (`cd`, `export`, `type`, `alias`, …) have hand-authored manifests in
+/// Core builtins carry their manifests next to their registration; the Brush-native `BashMode`
+/// builtins (`cd`, `export`, `type`, `alias`, …) have hand-authored manifests in
 /// [`manual_manifests`] classifying them as `parent-shell` / `shell-internal`. (`echo` and other
 /// Brush builtins without a clank manifest simply fall back to Brush's own help.)
+///
+/// This is the CORE surface only. An installed plug-in's manifests
+/// ([`Plugin::manifests`](crate::plugin::Plugin::manifests)) are merged in by
+/// `Session::set_plugin`, so the session registry is always a superset of this.
 #[must_use]
 pub fn build() -> CommandRegistry {
     let mut registry = CommandRegistry::default();
@@ -271,22 +268,7 @@ pub fn build() -> CommandRegistry {
     for manifest in crate::tools::xargs::manifests() {
         registry.insert(manifest);
     }
-    for manifest in crate::ai::model::manifests() {
-        registry.insert(manifest);
-    }
     for manifest in crate::builtins::http::manifests() {
-        registry.insert(manifest);
-    }
-    for manifest in crate::ai::ask::manifests() {
-        registry.insert(manifest);
-    }
-    for manifest in crate::mcp::cmd::manifests() {
-        registry.insert(manifest);
-    }
-    for manifest in crate::grease::cmd::manifests() {
-        registry.insert(manifest);
-    }
-    for manifest in crate::golem::cluster::manifests() {
         registry.insert(manifest);
     }
     for manifest in crate::builtins::kill::manifests() {
@@ -312,13 +294,14 @@ mod tests {
         }
     }
 
-    /// Drift guard: the registry's names are exactly the names of the builtins clank registers on
-    /// the shell. If a builtin is added/removed without its manifest (or vice versa), this fails.
+    /// Drift guard: the registry's names are exactly the names of the builtins the shell core
+    /// registers. If a builtin is added/removed without its manifest (or vice versa), this fails.
+    /// The plug-in half of the same invariant is guarded in `clank::registry_guard`.
     #[test]
     fn registry_names_match_registered_builtins() {
         use std::collections::BTreeSet;
 
-        // The names clank actually registers on the Brush shell, from the same producers
+        // The names the core actually registers on the Brush shell, from the same producers
         // `build_shell` uses. Uses the DefaultShellExtensions so the generic `builtins()` resolves.
         type SE = brush_core::extensions::DefaultShellExtensions;
         let builtin_names: BTreeSet<String> = crate::tools::coreutils::builtins::<SE>()
@@ -330,7 +313,6 @@ mod tests {
             .chain(crate::tools::stat::builtins::<SE>())
             .chain(crate::tools::find::builtins::<SE>())
             .chain(crate::tools::xargs::builtins::<SE>())
-            .chain(crate::ai::model::builtins::<SE>())
             .chain(crate::builtins::context::builtins::<SE>())
             .chain(crate::builtins::interceptstub::builtins::<SE>())
             .map(|(name, _reg)| name)
@@ -349,7 +331,7 @@ mod tests {
 
         assert_eq!(
             manifest_names, builtin_names,
-            "clank builtins and their manifests have drifted: \
+            "core builtins and their manifests have drifted: \
              every registered builtin must have exactly one manifest and vice versa"
         );
     }

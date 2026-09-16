@@ -5,12 +5,19 @@
 //! `cat /bin/<name>` to read its help. This module is that namespace: a pure resolver from a `/bin`
 //! path to content, computed from clank's [`CommandRegistry`].
 //!
-//! **Static, unlike `/proc`.** The [`crate::runtime::procfs`] namespace reflects the *current* process table
-//! (per-session, mutable) and is reached through a thread-local slot. The builtin *set* never changes
-//! at runtime, so `/bin` resolves against a single lazily-built static snapshot of
-//! [`crate::registry::build`] — no thread-local, no `Session` access needed. clank's own `cat`/`ls`
-//! shim `/bin` reads through here exactly as they shim `/proc`, so the namespace stays virtual while
-//! still composing with pipes (`ls /bin | grep`).
+//! **Per-line, like `/proc`.** The [`crate::runtime::procfs`] namespace reflects the *current* process
+//! table through a thread-local slot, and `/bin` works the same way: a `Session`'s registry is the core
+//! manifests plus the installed plug-in's, so the set of commands depends on what is installed. The
+//! `Session` [`install`]s its registry for the duration of each line; off-session (a unit test, a bare
+//! read with no live `Session`) the lookups fall back to a lazily-built static snapshot of
+//! [`crate::registry::build`] — the core surface alone. clank's own `cat`/`ls` shim `/bin` reads
+//! through here exactly as they shim `/proc`, so the namespace stays virtual while still composing
+//! with pipes (`ls /bin | grep`).
+//!
+//! Thread-local, like every sibling slot (`proctable`, `dynreg`, the transcript): parallel Sessions
+//! in native tests don't collide, and the flip side is that a pipeline stage or `$(...)` dispatched
+//! onto a native worker thread sees the static snapshot instead — the core surface, minus whatever
+//! a plug-in installed. On the agent everything is single-threaded and inline, so it always resolves.
 //!
 //! Serves:
 //! - `/bin`               — the directory: `ls /bin` lists every registered command name (sorted).
@@ -20,7 +27,8 @@
 //! (which only walks real `$PATH` entries via `Path::exists`). `type` is the resolver for builtins;
 //! `which` is for file-backed `$PATH` executables. This mirrors the README's split.
 
-use std::sync::OnceLock;
+use std::cell::RefCell;
+use std::sync::{Arc, OnceLock};
 
 use crate::registry::CommandRegistry;
 
@@ -33,12 +41,44 @@ pub enum BinError {
 
 use crate::config::vfs::BIN_ROOT;
 
-/// The lazily-built static registry snapshot. Built once from [`crate::registry::build`], which is
-/// pure (no host/native-only calls) and therefore sound on wasm. Shared with `man` (same content
-/// as `cat /bin/<name>`) and `stat` (virtual-file sizes).
-pub(crate) fn registry() -> &'static CommandRegistry {
-    static REGISTRY: OnceLock<CommandRegistry> = OnceLock::new();
-    REGISTRY.get_or_init(crate::registry::build)
+thread_local! {
+    /// The session registry (core plus plug-in) for the executing line; `None` off-session.
+    static ACTIVE: RefCell<Option<Arc<CommandRegistry>>> = const { RefCell::new(None) };
+}
+
+/// Install the session registry for the current line; the guard restores the previous slot.
+#[must_use]
+pub fn install(registry: Arc<CommandRegistry>) -> InstallGuard {
+    InstallGuard {
+        previous: ACTIVE.with(|slot| slot.borrow_mut().replace(registry)),
+    }
+}
+
+/// Restores the previous slot when dropped.
+pub struct InstallGuard {
+    previous: Option<Arc<CommandRegistry>>,
+}
+
+impl Drop for InstallGuard {
+    fn drop(&mut self) {
+        let previous = self.previous.take();
+        ACTIVE.with(|slot| *slot.borrow_mut() = previous);
+    }
+}
+
+/// The registry `/bin` resolves against: the executing line's session registry when one is
+/// installed, else the lazily-built static snapshot. That snapshot is built once from
+/// [`crate::registry::build`], which is pure (no host/native-only calls) and therefore sound on
+/// wasm. Shared with `man` (same content as `cat /bin/<name>`) and `stat` (virtual-file sizes).
+pub(crate) fn registry() -> Arc<CommandRegistry> {
+    static REGISTRY: OnceLock<Arc<CommandRegistry>> = OnceLock::new();
+    ACTIVE
+        .with(|slot| slot.borrow().clone())
+        .unwrap_or_else(|| {
+            REGISTRY
+                .get_or_init(|| Arc::new(crate::registry::build()))
+                .clone()
+        })
 }
 
 /// Whether `path` is under the virtual `/bin` namespace. (`/bin` itself and `/bin/` count too.)

@@ -172,15 +172,14 @@ fn without_a_plugin_family_commands_are_not_found() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
         session.clear_plugin_for_test();
-        // `sudo` so the `ask` manifest's Confirm policy (still in the core registry until Task 8)
-        // does not pause the line before it reaches Brush.
-        //
-        // Exit 1, not 127: with no plug-in the core `ask` stub builtin (`builtins::interceptstub`)
-        // still answers the line. Task 8 moves that stub into the plug-in and changes this to 127.
+        // `sudo` is harmless here (nothing is left to authorize) and pins that the line reaches
+        // Brush rather than a gate: with no plug-in installed there is no `ask` manifest, no `ask`
+        // builtin and no `ask` route, so the bare shell core answers the way it answers any unknown
+        // word — command not found, exit 127.
         let result = session.eval_line("sudo ask hello").await;
         assert_eq!(
             result.exit_code,
-            1,
+            127,
             "stderr: {}",
             String::from_utf8_lossy(&result.stderr)
         );

@@ -197,7 +197,7 @@ impl super::Clank {
             .field("method", &inv.method)
             .field("mode", &mode)
             .field("phantom", inv.phantom.as_deref().unwrap_or(""))
-            .emit(crate::logging::LogFile::Mcp);
+            .emit(crate::logging::LogFile::Rpc);
 
         match parsed.mode {
             crate::golem::agent::InvokeMode::Await => match invoker.invoke(&inv).await {
@@ -357,17 +357,25 @@ impl super::Clank {
             .map(|(k, v)| format!("{k}={v}"))
             .collect::<Vec<_>>()
             .join(",");
-        let meta = crate::runtime::proctable::AgentMeta {
-            agent_type: inv.agent_type.clone(),
-            agent_params,
-            phantom_uuid: inv.phantom.clone(),
-        };
+        // The Golem agent-invocation identity fields surfaced in `/proc/<pid>/status`
+        // (README:252-258) for an `AgentInvocation` row. Only the fields clank actually knows are
+        // carried: the agent type, the ordered constructor params, and the phantom UUID.
+        // (`agent-revision` and the await-mode idempotency-key are not surfaced by the golem host on
+        // this SDK path, so they are omitted rather than fabricated — consistent with the honest
+        // `--revision` stub.)
+        let mut labels = vec![
+            ("AgentType".to_string(), inv.agent_type.clone()),
+            ("AgentParams".to_string(), agent_params),
+        ];
+        if let Some(uuid) = inv.phantom.clone() {
+            labels.push(("PhantomUuid".to_string(), uuid));
+        }
         let pid = ctx.proc_spawn_bg(
             crate::runtime::proctable::ProcessKind::AgentInvocation,
             argv,
             crate::runtime::proctable::SHELL_ROOT_PID,
         );
-        ctx.proc_set_agent_meta(pid, meta);
+        ctx.proc_set_labels(pid, labels);
         self.pending_invocations
             .push(PendingInvocation { pid, cancel_token });
         // Bound the fire-and-forget tracking. A `--trigger`/`--schedule` invocation has no

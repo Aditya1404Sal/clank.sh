@@ -5,7 +5,7 @@
 use super::{LineResult, Session};
 use crate::manifest::Manifest;
 use crate::registry::CommandRegistry;
-use crate::runtime::proctable::{AgentMeta, ProcessKind, ProcessTable};
+use crate::runtime::proctable::{ProcessKind, ProcessTable};
 
 /// A plug-in's handle on the shell for the duration of one call.
 pub struct SessionCtx<'a> {
@@ -151,9 +151,9 @@ impl<'a> SessionCtx<'a> {
         self.with_proc(|t| t.spawn_bg(kind, argv, ppid))
     }
 
-    /// Attach Golem agent identity to `pid`'s row (renders in `/proc/<pid>/status`).
-    pub fn proc_set_agent_meta(&mut self, pid: u32, meta: AgentMeta) {
-        self.with_proc(|t| t.set_agent_meta(pid, meta));
+    /// Attach descriptive `Key: Value` labels to `pid`'s row (they render in `/proc/<pid>/status`).
+    pub fn proc_set_labels(&mut self, pid: u32, labels: Vec<(String, String)>) {
+        self.with_proc(|t| t.set_labels(pid, labels));
     }
 
     /// Whether the session-wide "all" confirmation grant is set.
