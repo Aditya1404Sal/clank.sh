@@ -1,7 +1,6 @@
 //! [`EmbeddedShell`] — a lazily-built shell [`Session`] plus the [`LineResult`]→[`EvalResult`]
 //! mapping, i.e. everything between an agent's three shell-surface methods and the shell core.
 
-use clank_core::ClankSessionExt as _;
 use clank_core::session::{LineResult, Session};
 
 use crate::wire::{EvalResult, PendingPromptView};
@@ -44,8 +43,12 @@ pub struct EmbeddedShell {
 }
 
 impl EmbeddedShell {
-    /// A bare shell: the full command surface over this agent's own filesystem; `ask`/`mcp`/cluster
-    /// commands degrade to honest errors.
+    /// A bare shell: the shell core's full command surface over this agent's own filesystem, and
+    /// **no plug-in**. `ask`/`mcp`/`grease`/`golem` are a plug-in's commands, so on a bare shell
+    /// they are not commands at all — the line reaches Brush and answers `command not found`
+    /// (exit 127), the same as any other unknown word. An embedder that wants them installs
+    /// clank's families itself (`ClankSessionExt::install_clank`, via [`Self::with_setup`]), or
+    /// uses [`Self::with_default_golem_providers`], which does it along with the four providers.
     ///
     /// The replay-safe [`DurableLogSink`](crate::DurableLogSink) is installed — see
     /// [`install_durable_log_sink`]. Every constructor here does that, including this one.
@@ -104,7 +107,14 @@ impl EmbeddedShell {
     #[cfg(all(feature = "providers", target_arch = "wasm32"))]
     #[must_use]
     pub fn with_default_golem_providers() -> Self {
+        // Scoped to this constructor: it is the only one that installs a plug-in, so a
+        // crate-level import would be dead in every build that compiles this method out.
+        use clank_core::ClankSessionExt as _;
         Self::with_setup(|s| {
+            // Clank's command families FIRST: the shell core starts with no plug-in, and each
+            // setter below reaches into the installed `Clank` (`plugin_mut::<Clank>()`), so a
+            // setter that ran before this line would silently no-op.
+            s.install_clank();
             // The durable Anthropic provider so `ask` can reach the model (reads ANTHROPIC_API_KEY
             // from the agent environment; absent ⇒ `ask` reports not-configured).
             s.set_ask_provider(Box::new(crate::ask_provider::DurableAnthropicProvider));
@@ -156,9 +166,6 @@ impl EmbeddedShell {
         if self.session.is_none() {
             match Session::new().await {
                 Ok(mut s) => {
-                    // The shell core starts with no plug-in; this surface is clank's, so install
-                    // the command families before the embedder's setup injects their providers.
-                    s.install_clank();
                     if let Some(setup) = self.setup.take() {
                         setup(&mut s);
                     }
@@ -289,6 +296,25 @@ mod tests {
                 result.stdout
             );
             assert!(result.pending_prompt.is_none());
+        });
+    }
+
+    /// A bare `EmbeddedShell` carries NO plug-in, so a family command is not a command: it reaches
+    /// Brush and answers `command not found` (127), like any unknown word. This is the design's
+    /// decision — the `bash` tool, `greeter-agent` and a bare embed all run pluginless — and it is
+    /// exactly what a stray `install_clank()` on the shared build path silently reverts, which is
+    /// why it is pinned here rather than left to the docs. `sudo` pre-authorizes, so an authz
+    /// confirmation pause can never stand in for the assertion.
+    #[test]
+    fn bare_shell_has_no_plugin_family_commands_are_not_found() {
+        on_rt(async {
+            let mut shell = EmbeddedShell::new();
+            let result = shell.eval("sudo ask hi").await;
+            assert_eq!(result.exit_code, 127, "stderr: {}", result.stderr);
+            assert!(
+                result.pending_prompt.is_none(),
+                "no plug-in means no ask manifest to confirm against"
+            );
         });
     }
 
