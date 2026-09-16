@@ -20,9 +20,12 @@ name = "clank_bash"
 # `export_golem_agentic` emits the golem:tool guest exports; a leaf component is the one place that
 # feature may be enabled.
 golem-rust = { workspace = true, features = ["export_golem_agentic"] }
-# The shell engine. `providers` brings the durable log sink and the probe hook, so a tool call made
-# from inside `bash` (`probe-tool greet Ada`) goes out over tool-rpc from this sidecar.
-clank-embed = { path = "../clank-embed", features = ["providers"] }
+# The shell engine, and ONLY the shell engine: no `clank-embed`, so none of clank's ai/mcp/grease/
+# golem plug-in code (nor the `Clank` plug-in itself) is linked into the shipped `clank:bash`
+# component. curl/wget already work without it (`bash` carries `wcurl`/`waget` directly); the one
+# capability this drops is the throwaway T1 tool-probe hook `clank-embed`'s `providers` feature
+# installs, which only 3 of `bash-tool-live.sh`'s 23 probes exercise (see the design's Verification).
+bash = { path = "../bash" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 base64 = "0.22"

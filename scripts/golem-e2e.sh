@@ -1127,10 +1127,10 @@ GRS_ANS="$(greeter_json answer_prompt '"aditya"')"
 expect_eval "greeter answer_prompt resolves"       "$GRS_ANS"  '.stdout'  'aditya'
 expect_eval "greeter prompt clears after answer"   "$GRS_ANS"  '.pending_prompt'  'null'
 
-# The log-sink-only tier degrades honestly: no ask provider ⇒ exit 4 with the not-configured
-# message (sudo pre-authorizes so the authz confirm doesn't mask the provider check).
+# The bare embed carries only the shell core: clank's command families are not installed, so `ask`
+# is not a command there (exit 127) rather than a degraded one (sudo pre-authorizes, as before).
 GRS_ASK="$(greeter_json eval '"sudo ask hi"')"
-expect_eval "greeter ask degrades honestly (no provider)" "$GRS_ASK"  '.stderr | contains("no model provider configured")'  'true'
+expect_eval "greeter has no ask (bare shell core)"  "$GRS_ASK"  '.exit_code'  '127'
 
 # greet() still works on the same instance — the shell surface coexists with the agent's own methods.
 GRS_GREET_LOG="$(greeter_json eval '"echo shell-and-greet-coexist > /tmp/proof; cat /tmp/proof"')"

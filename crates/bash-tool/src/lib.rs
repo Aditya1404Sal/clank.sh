@@ -1,10 +1,12 @@
 //! SPIKE — `bash`, clank's shell core exported as a Golem agent tool.
 //!
-//! A walking skeleton of the 1.6 `bash` tool, built to prove the shape on a live cluster before the
-//! shell core is extracted into this crate. One command, `bash run [--state <S>] <script>`, whose
-//! result record carries the session state back to the caller. The tool keeps nothing between
-//! calls: a fresh Store runs every invocation, and a caller that wants continuity hands the last
-//! `state` back unchanged.
+//! A walking skeleton of the 1.6 `bash` tool, built to prove the shape on a live cluster. Links
+//! only the shell core (`bash`) — no ai/mcp/grease/golem plug-in code, and no `Clank` plug-in — so
+//! the shipped `clank:bash` component stays genuinely lean.
+//!
+//! One command, `bash run [--state <S>] <script>`, whose result record carries the session state
+//! back to the caller. The tool keeps nothing between calls: a fresh Store runs every invocation,
+//! and a caller that wants continuity hands the last `state` back unchanged.
 //!
 //! The state is `"1." + base64url(json)` holding the working directory, the last exit status and
 //! the shell's variables, functions and aliases as a re-sourceable script. Not carried yet: shell
@@ -18,9 +20,13 @@
 use std::fmt::Write as _;
 
 use base64::Engine as _;
-use clank_embed::EmbeddedShell;
+use bash::session::Session;
 use golem_rust::{FromSchema, IntoSchema, ToolError, tool_definition, tool_implementation};
 use serde::{Deserialize, Serialize};
+
+use durable_log_sink::DurableLogSink;
+
+mod durable_log_sink;
 
 /// Cap on the encoded state. It rides in every invocation's input and result, both recorded in the
 /// owner's oplog, so an unbounded one would grow the oplog on every line.
@@ -70,14 +76,29 @@ impl Bash for BashImpl {
 
 /// One call: restore `state` into a fresh shell, run `script`, capture the state back.
 pub async fn run_script(state: &str, script: &str) -> BashResult {
-    let mut shell = new_shell();
+    let mut session = match new_session().await {
+        Ok(session) => session,
+        // Reported as a well-formed result rather than a panic: this is an agent's tool-call path,
+        // where a panic traps the guest and wedges the durable instance for every later invocation.
+        Err(e) => {
+            return BashResult {
+                stdout: String::new(),
+                stderr: format!("bash: failed to start shell: {e}\n"),
+                exit_code: 1,
+                pending_prompt: None,
+                cwd: String::new(),
+                state: String::new(),
+            };
+        }
+    };
+
     let mut stderr = String::new();
     if !state.is_empty() {
         match Snapshot::decode(state) {
             // The restore's own output (a readonly variable refusing reassignment, say) is not
             // the caller's business; only the script's is returned.
             Ok(snapshot) => {
-                let _ = shell.eval(&snapshot.restore_script()).await;
+                let _ = session.eval_line(&snapshot.restore_script()).await;
             }
             Err(e) => {
                 stderr = format!("bash: ignoring --state ({e}); starting a fresh session\n");
@@ -85,13 +106,15 @@ pub async fn run_script(state: &str, script: &str) -> BashResult {
         }
     }
 
-    let result = shell.eval(script).await;
-    stderr.push_str(&result.stderr);
-    let captured = shell.eval(CAPTURE).await;
+    let result = session.eval_line(script).await;
+    // Read the cwd AFTER the line runs, so a `cd` is reflected; the eval borrow has ended.
+    let cwd = session.cwd().display().to_string();
+    stderr.push_str(&lossy_utf8(result.stderr));
+    let captured = session.eval_line(CAPTURE).await;
     let snapshot = Snapshot {
-        cwd: result.cwd.clone(),
+        cwd: cwd.clone(),
         last_exit_code: result.exit_code,
-        shell_state: captured.stdout,
+        shell_state: lossy_utf8(captured.stdout),
     };
     let state = snapshot.encode(MAX_STATE_BYTES).unwrap_or_else(|e| {
         let _ = writeln!(
@@ -102,25 +125,36 @@ pub async fn run_script(state: &str, script: &str) -> BashResult {
     });
 
     BashResult {
-        stdout: result.stdout,
+        stdout: lossy_utf8(result.stdout),
         stderr,
         exit_code: result.exit_code,
         pending_prompt: result.pending_prompt.map(|p| p.question),
-        cwd: result.cwd,
+        cwd,
         state,
     }
 }
 
-/// The full provider set on the agent, so `curl` and tool calls work from inside `bash`; the bare
-/// shell natively, where the unit tests run.
-#[cfg(target_arch = "wasm32")]
-fn new_shell() -> EmbeddedShell {
-    EmbeddedShell::with_default_golem_providers()
+/// A fresh shell session with the replay-safe `/var/log` sink installed.
+///
+/// `clank-embed`'s `EmbeddedShell::ensure` builds a `Session` the same way and installs the same
+/// kind of sink (see [`durable_log_sink`]); this tool inlines the equivalent rather than depending
+/// on that crate, so the shipped `clank:bash` component links only the shell core. There is no
+/// wasm/native split here (unlike the `EmbeddedShell::with_default_golem_providers` this replaces):
+/// `Session::new` itself already builds the right async runtime for each target, and this tool never
+/// installed the plug-in providers that used to be the only reason for the split.
+async fn new_session() -> Result<Session, String> {
+    let mut session = Session::new().await.map_err(|e| e.to_string())?;
+    // `set_log_sink` takes `Arc`; the sink is `?Send`+`?Sync` and this tool is single-threaded.
+    #[allow(clippy::arc_with_non_send_sync)]
+    session.set_log_sink(std::sync::Arc::new(DurableLogSink::new()));
+    Ok(session)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn new_shell() -> EmbeddedShell {
-    EmbeddedShell::new()
+/// `bytes` as a `String`, valid UTF-8 passed through unchanged and any invalid byte replaced rather
+/// than the whole call failing — shell output is not guaranteed valid UTF-8, and a wire result field
+/// has nowhere else to put raw bytes.
+fn lossy_utf8(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
 /// The session a caller carries between calls.
