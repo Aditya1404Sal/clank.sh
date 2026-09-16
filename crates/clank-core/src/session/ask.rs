@@ -6,7 +6,7 @@ use std::fmt::Write as _;
 
 use super::{
     authz, strip_sudo_prefix, AskLoopState, AskPause, AskPauseKind, Decision, LineResult,
-    PendingKind, PendingPrompt, ReplState, Resolution, Session, ToolStep, Transcript, DEFAULT_HOME,
+    PendingKind, PendingPrompt, ReplState, Resolution, Session, ToolStep, Transcript,
 };
 use crate::config::limits::{ASK_MAX_ITERATIONS, ASK_TOOL_RESULT_CAP};
 
@@ -475,14 +475,6 @@ impl Session {
             }
         }
         Ok((chosen, warning))
-    }
-
-    /// The shell's `$HOME` (seeded to `/home/user` on the agent), for locating `~/.config/ask/ask.toml`.
-    fn shell_home(&self) -> String {
-        self.shell
-            .env()
-            .get_str("HOME", &self.shell)
-            .map_or_else(|| DEFAULT_HOME.to_string(), std::borrow::Cow::into_owned)
     }
 
     /// Resolve a line's authorization policy, consulting the static registry AND the dynamic MCP

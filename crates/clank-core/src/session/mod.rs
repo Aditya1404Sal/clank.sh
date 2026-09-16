@@ -35,11 +35,14 @@ type BoxError = Box<dyn std::error::Error>;
 
 mod agent;
 mod ask;
+mod ctx;
 mod env;
 mod grease;
 mod mcp;
 mod prompt;
 mod streams;
+
+pub use ctx::SessionCtx;
 
 // What the eval pipeline still reaches for after the relocation. Everything else that used to live
 // here moved to the module that owns it AND is now only called from there — the short length of this
@@ -595,6 +598,14 @@ impl Session {
                     .ok()
             })
             .filter(|w| *w > 0)
+    }
+
+    /// The shell's `$HOME` (seeded to `/home/user` on the agent), for locating `~/.config/ask/ask.toml`.
+    pub(super) fn shell_home(&self) -> String {
+        self.shell
+            .env()
+            .get_str("HOME", &self.shell)
+            .map_or_else(|| DEFAULT_HOME.to_string(), std::borrow::Cow::into_owned)
     }
 
     /// Evaluate one input line: record it, serve the clank-specific `context` builtin, otherwise

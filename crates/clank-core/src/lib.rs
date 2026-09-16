@@ -38,6 +38,7 @@ mod helpshim;
 pub mod logging;
 pub mod manifest;
 pub mod mcp;
+pub mod plugin;
 pub mod registry;
 pub mod runtime;
 pub mod session;
