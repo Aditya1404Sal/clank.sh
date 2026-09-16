@@ -4,7 +4,8 @@
 
 use std::fmt::Write as _;
 
-use crate::session::{grease::prompt_leading_word, LineResult, SessionCtx};
+use crate::clank::grease::prompt_leading_word;
+use crate::session::{LineResult, SessionCtx};
 
 impl super::Clank {
     /// Dispatch a parsed `mcp` management command. HTTP-performing subcommands (`add`, `reload`,

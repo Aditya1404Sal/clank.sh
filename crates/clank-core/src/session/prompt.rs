@@ -60,21 +60,23 @@ impl Session {
         // per-command authz) BEFORE the human approves — README "discloses capability requests before
         // completing". Only what's knowable pre-fetch is shown; declared args are one `grease info`
         // away after install.
-        let question =
-            if let Some(question) = self.grease_install_disclosure(&gated_command, sudo_grant) {
-                question
-            } else if let Some(summary) = multi_summary {
-                // A compound line with several gated commands: name them all, tier = the strictest.
-                authz::confirm_question_multi(&summary, sudo_grant)
-            } else {
-                let synopsis = self
-                    .registry
-                    .get(name)
-                    .map(|m| m.synopsis.clone())
-                    .or_else(|| self.clank.mcp.manifest_for(name).map(|m| m.synopsis))
-                    .unwrap_or_else(|| "run this command".to_string());
-                authz::confirm_question(name, &synopsis, sudo_grant)
-            };
+        let question = if let Some(question) = self
+            .clank
+            .grease_install_disclosure(&gated_command, sudo_grant)
+        {
+            question
+        } else if let Some(summary) = multi_summary {
+            // A compound line with several gated commands: name them all, tier = the strictest.
+            authz::confirm_question_multi(&summary, sudo_grant)
+        } else {
+            let synopsis = self
+                .registry
+                .get(name)
+                .map(|m| m.synopsis.clone())
+                .or_else(|| self.clank.mcp.manifest_for(name).map(|m| m.synopsis))
+                .unwrap_or_else(|| "run this command".to_string());
+            authz::confirm_question(name, &synopsis, sudo_grant)
+        };
         let prompt = PendingPrompt {
             question,
             choices: Some(authz::confirm_choices(sudo_grant)),
@@ -89,38 +91,6 @@ impl Session {
                 ask_stdin,
             },
         )
-    }
-
-    /// If `gated_command` is a `grease install <pkg>` line, build a capability-disclosure confirmation
-    /// prompt naming the package, its source registries, and its `ask` capability. `None` otherwise
-    /// (the caller falls back to the generic confirm text).
-    // Kept a method for call-site symmetry with the other `surface_*`/disclosure helpers on `Session`.
-    #[allow(clippy::unused_self)]
-    fn grease_install_disclosure(&self, gated_command: &str, sudo_grant: bool) -> Option<String> {
-        let cmd = crate::grease::cmd::classify(gated_command)?.ok()?;
-        let crate::grease::cmd::GreaseCommand::Install { name, .. } = cmd else {
-            return None;
-        };
-        let registries = crate::grease::config::list_registries();
-        let from = if registries.is_empty() {
-            "no configured registry".to_string()
-        } else {
-            registries.join(", ")
-        };
-        let tail = if sudo_grant {
-            "(y)es, (n)o"
-        } else {
-            "(y)es, (n)o, (a)ll"
-        };
-        // The disclosure fires before the fetch, so the package's kind isn't known yet — disclose the
-        // full capability an install can grant: a prompt runs via ask (outbound LLM); a script runs
-        // local shell commands; a skill installs model-facing context + `$PATH` scripts. Each is
-        // Confirm-gated per run.
-        Some(format!(
-            "Install package \"{name}\" from {from}? Depending on its kind it may run via ask \
-             (outbound LLM), execute local shell commands, or install a skill (model context + \
-             $PATH scripts); each is confirmed per run unless you use sudo. {tail}"
-        ))
     }
 
     /// Shared tail of the surface paths: pause the row, record the question, stash the pending

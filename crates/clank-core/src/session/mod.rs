@@ -36,7 +36,6 @@ type BoxError = Box<dyn std::error::Error>;
 mod ask;
 mod ctx;
 mod env;
-pub(crate) mod grease;
 mod prompt;
 mod streams;
 
@@ -47,7 +46,6 @@ pub use ctx::SessionCtx;
 // list is the evidence that the split fell along a real seam rather than an arbitrary one.
 use ask::is_context_summarize;
 use env::{build_shell, ensure_fs_layout};
-use grease::{parse_pkg_invocation, prompt_leading_word};
 use streams::finish;
 // The wasm capture adapters; the code that constructs them is `cfg`-gated the same way.
 #[cfg(target_arch = "wasm32")]
@@ -972,7 +970,7 @@ impl Session {
             return LineRoute::McpHelp(help);
         }
         // `<name> --help` for an installed grease command package (prompt or script), same rule.
-        if let Some(help) = self.pkg_help_for(line) {
+        if let Some(help) = self.clank.pkg_help_for(line) {
             return LineRoute::PkgHelp(help);
         }
         // `ask repl` reaching `eval_line` is the durable-agent path (the native driver intercepts it
@@ -1035,7 +1033,12 @@ impl Session {
                 LineResult::from_outcome(Vec::new(), format!("{e}\n").into_bytes(), 2)
             }
             // `grease` package management runs at the Session layer — install/search/update do HTTP.
-            CommandRoute::Grease(Ok(cmd)) => self.run_grease(cmd).await,
+            CommandRoute::Grease(Ok(cmd)) => {
+                let mut clank = std::mem::take(&mut self.clank);
+                let result = clank.run_grease(&mut SessionCtx::new(self), cmd).await;
+                self.clank = clank;
+                result
+            }
             CommandRoute::Grease(Err(e)) => {
                 LineResult::from_outcome(Vec::new(), format!("{e}\n").into_bytes(), 2)
             }
@@ -1062,7 +1065,12 @@ impl Session {
             CommandRoute::PromptLine => self.run_prompt(line, blanket_authorized).await,
             // A grease-installed script: fill its body from args and run the shell source locally
             // (its Confirm was resolved via the dynamic manifest at the gate; sudo pre-authorizes).
-            CommandRoute::ScriptLine => self.run_script(line, blanket_authorized).await,
+            CommandRoute::ScriptLine => {
+                let mut clank = std::mem::take(&mut self.clank);
+                let result = clank.run_script(&mut SessionCtx::new(self), line).await;
+                self.clank = clank;
+                result
+            }
             // A grease-installed Golem agent: parse the ctor/method/args and invoke it via wRPC in the
             // cluster (Confirm resolved at the gate; sudo pre-authorizes). Await mode only in v1.
             CommandRoute::AgentLine => {
@@ -1150,10 +1158,10 @@ impl Session {
         if self.clank.is_mcp_tool_line(line) {
             return CommandRoute::McpToolLine;
         }
-        if self.is_prompt_line(line) {
+        if self.clank.is_prompt_line(line) {
             return CommandRoute::PromptLine;
         }
-        if self.is_script_line(line) {
+        if self.clank.is_script_line(line) {
             return CommandRoute::ScriptLine;
         }
         if self.clank.is_agent_line(line) {
@@ -1332,33 +1340,16 @@ impl Session {
 
     /// Whether `line`'s leading word is an installed grease prompt. Drives the `run_prompt` dispatch.
     /// Only top-level lines (no operators) count — a prompt makes an LLM call and can't run in Brush's
-    /// nested runtime (the Wall-C wall), so a nested use falls through to the stub honest error.
-    fn is_prompt_line(&self, line: &str) -> bool {
-        let Some(word) = prompt_leading_word(line) else {
-            return false;
-        };
-        self.clank.grease.is_prompt(&word)
-    }
-
-    /// Whether `line`'s leading word is an installed grease script. Drives the `run_script` dispatch.
-    /// Like prompts, only top-level lines count (a script runs through the session's `execute`, which
-    /// isn't reachable from Brush's nested runtime).
-    fn is_script_line(&self, line: &str) -> bool {
-        let Some(word) = prompt_leading_word(line) else {
-            return false;
-        };
-        self.clank.grease.is_script(&word)
-    }
-
     /// Run an installed grease prompt: parse `--arg value` flags against the package's declared
     /// arguments, fill the body's `{{arg}}` placeholders, and dispatch the filled prompt through
     /// `run_ask`. `--model` on the prompt line overrides the package model. Missing required args are
     /// an exit-2 usage error (no model call).
     async fn run_prompt(&mut self, line: &str, blanket_authorized: bool) -> LineResult {
-        let (name, provided, model_override) = match parse_pkg_invocation(line) {
-            Ok(t) => t,
-            Err(e) => return e,
-        };
+        let (name, provided, model_override) =
+            match crate::clank::grease::parse_pkg_invocation(line) {
+                Ok(t) => t,
+                Err(e) => return e,
+            };
         let Some(package) = self.clank.grease.prompt(&name).cloned() else {
             return LineResult::denied(); // shouldn't happen (is_prompt_line gated it)
         };
@@ -1384,62 +1375,6 @@ impl Session {
             stdin: None,
         };
         self.run_ask(args, blanket_authorized).await
-    }
-
-    /// Run an installed grease script: parse `--arg value` flags against the package's declared
-    /// arguments, fill the body's `{{arg}}` placeholders, and dispatch the filled **shell source**
-    /// through the session's `execute` (Brush `run_string`) — the local-shell path, no LLM call.
-    /// Missing required args are an exit-2 usage error. `blanket_authorized` is threaded for parity
-    /// with prompts but the authz gate already resolved before dispatch; the script itself runs its
-    /// filled body as ordinary shell.
-    async fn run_script(&mut self, line: &str, _blanket_authorized: bool) -> LineResult {
-        let (name, provided, _model) = match parse_pkg_invocation(line) {
-            Ok(t) => t,
-            Err(e) => return e,
-        };
-        let Some(package) = self.clank.grease.script(&name).cloned() else {
-            return LineResult::denied(); // shouldn't happen (is_script_line gated it)
-        };
-        let filled = match package.fill(&provided) {
-            Ok(f) => f,
-            Err(e) => {
-                return LineResult::from_outcome(
-                    Vec::new(),
-                    format!("{name}: {e}\n").into_bytes(),
-                    2,
-                )
-            }
-        };
-        // Run the filled shell source through the local-shell path. `execute` adopts no jobs here
-        // (a script is a synthetic top-level invocation, not a backgrounded pipeline stage).
-        self.execute(&filled).await
-    }
-
-    /// Generated help for an installed command-package line ending in `--help` (prompt, script, or
-    /// agent). `None` if the line isn't an installed command package or doesn't request help.
-    ///
-    /// A leading `sudo` is skipped: it only pre-authorizes, so it must not change what `--help`
-    /// prints. Without this, `sudo <pkg> --help` looked up the package named "sudo", found nothing,
-    /// and fell through to the package's own parser — for an agent that means
-    /// "unknown flag --help before the method" (exit 2) instead of the agent's surface. The path is
-    /// not hypothetical: `ask`'s per-command authorization re-runs an approved command WITH the sudo
-    /// grant, so a model asking for `<pkg> --help` always took the broken one.
-    /// (`builtins::typecmd::help_for` does the same for the statically-intercepted commands.)
-    fn pkg_help_for(&self, line: &str) -> Option<String> {
-        let words = crate::ai::ask::dequote_words(line)?;
-        // Strip a leading `sudo` (it only pre-authorizes; help is resolved before the gate anyway).
-        let rest = crate::helpshim::skip_leading_sudo(&words);
-        let name = rest.first()?;
-        if crate::helpshim::asks_for_help(rest) {
-            return self.clank.grease.pkg_help(name);
-        }
-        // `<agent> help` — the bare reserved help subcommand (README:840), for an installed AGENT
-        // package only, as exactly `<name> help`. Resolved HERE, before the authz gate, so help never
-        // triggers the agent's Confirm prompt (a prompt/script package's `help` is an ordinary arg).
-        if rest.len() == 2 && rest[1] == "help" && self.clank.grease.is_agent(name) {
-            return self.clank.grease.pkg_help(name);
-        }
-        None
     }
 
     /// Complete an intercepted line's row and record its output (for intercepted paths that don't go

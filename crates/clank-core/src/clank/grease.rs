@@ -1,17 +1,18 @@
-//! `Session` methods for the grease package manager: install/remove/list/info/search/update,
+//! `Clank` methods for the grease package manager: install/remove/list/info/search/update,
 //! registry management, and the install machinery those need: the integrity chain
 //! ([`InstallIntegrity`], [`fetch_index_entry`], [`verify_log_inclusion`]), the on-disk marker, and
 //! the `info` renderers.
 
 use std::fmt::Write as _;
 
-use super::{LineResult, Session};
 use crate::clank::mcp::materialize_mcp_resources;
+use crate::session::{LineResult, SessionCtx};
 
-impl Session {
+impl super::Clank {
     /// Dispatch a parsed `grease` command.
-    pub(super) async fn run_grease(
+    pub(crate) async fn run_grease(
         &mut self,
+        ctx: &mut SessionCtx<'_>,
         cmd: crate::grease::cmd::GreaseCommand,
     ) -> LineResult {
         use crate::grease::cmd::GreaseCommand;
@@ -31,13 +32,13 @@ impl Session {
             GreaseCommand::RegistryList => self.grease_registry_list(),
             GreaseCommand::RegistryRemove { url } => self.grease_registry_remove(&url),
             GreaseCommand::List => self.grease_list(),
-            GreaseCommand::Info { name } => self.grease_info(&name),
+            GreaseCommand::Info { name } => self.grease_info(ctx, &name),
             GreaseCommand::Install { name, artifacts } => {
-                self.grease_install(&name, artifacts).await
+                self.grease_install(ctx, &name, artifacts).await
             }
             GreaseCommand::Remove { name } => self.grease_remove(&name),
             GreaseCommand::Search { query } => self.grease_search(&query).await,
-            GreaseCommand::Update { name } => self.grease_update(name.as_deref()).await,
+            GreaseCommand::Update { name } => self.grease_update(ctx, name.as_deref()).await,
         };
         // Audit the supply-chain operations. Nothing in the whole install pipeline used to reach any
         // log — a sha256 mismatch, a bad signature, a failed inclusion proof, all wrote to the
@@ -71,8 +72,8 @@ impl Session {
 
     /// `grease list`: installed packages (all kinds), each tagged with its kind.
     fn grease_list(&self) -> LineResult {
-        let packages = self.clank.grease.packages();
-        let broken = self.clank.grease.broken();
+        let packages = self.grease.packages();
+        let broken = self.grease.broken();
         if packages.is_empty() && broken.is_empty() {
             return LineResult::continue_with_stdout(b"no packages installed\n".to_vec());
         }
@@ -107,16 +108,16 @@ impl Session {
 
     /// `grease info <name>`: an installed package's metadata. Command packages (prompt/script) show
     /// their generated help; skills (not commands) show the envelope + bundled documents/scripts.
-    fn grease_info(&self, name: &str) -> LineResult {
-        if let Some(help) = self.clank.grease.pkg_help(name) {
+    fn grease_info(&self, ctx: &mut SessionCtx<'_>, name: &str) -> LineResult {
+        if let Some(help) = self.grease.pkg_help(name) {
             return LineResult::continue_with_stdout(help.into_bytes());
         }
-        if let Some(sk) = self.clank.grease.skill(name) {
+        if let Some(sk) = self.grease.skill(name) {
             return LineResult::continue_with_stdout(
-                skill_info_text(sk, self.columns()).into_bytes(),
+                skill_info_text(sk, ctx.columns()).into_bytes(),
             );
         }
-        if let Some(m) = self.clank.grease.mcp(name) {
+        if let Some(m) = self.grease.mcp(name) {
             return LineResult::continue_with_stdout(mcp_info_text(m).into_bytes());
         }
         LineResult::from_outcome(
@@ -136,6 +137,7 @@ impl Session {
     #[allow(clippy::too_many_lines)]
     async fn grease_install(
         &mut self,
+        ctx: &mut SessionCtx<'_>,
         name: &str,
         artifacts: crate::grease::cmd::ArtifactFlags,
     ) -> LineResult {
@@ -148,7 +150,7 @@ impl Session {
             );
         }
         // Reject a name that collides with a static builtin (mirrors `mcp_add`).
-        if self.registry.get(name).is_some() {
+        if ctx.manifest(name).is_some() {
             return LineResult::from_outcome(
                 Vec::new(),
                 format!("grease install: '{name}' collides with a built-in command\n").into_bytes(),
@@ -164,7 +166,7 @@ impl Session {
                 1,
             );
         }
-        let Some(http) = self.clank.mcp_http.as_ref() else {
+        let Some(http) = self.mcp_http.as_ref() else {
             return LineResult::from_outcome(
                 Vec::new(),
                 b"grease install: no HTTP transport configured (available on the Golem agent)\n"
@@ -407,7 +409,7 @@ impl Session {
             artifacts.resources,
         );
 
-        let Some(http) = self.clank.mcp_http.as_deref() else {
+        let Some(http) = self.mcp_http.as_deref() else {
             return LineResult::from_outcome(
                 Vec::new(),
                 b"grease install: no HTTP transport configured (available on the Golem agent)\n"
@@ -552,8 +554,8 @@ impl Session {
         if pkg.artifacts.tools {
             let mcp_tools: Vec<crate::mcp::state::McpTool> =
                 tool_specs.into_iter().map(Into::into).collect();
-            self.clank.mcp.set_installed(name, config, mcp_tools);
-            if let Some(help) = self.clank.mcp.server_help(name) {
+            self.mcp.set_installed(name, config, mcp_tools);
+            if let Some(help) = self.mcp.server_help(name) {
                 let _ = crate::mcp::config::write_bin_stub(name, &help);
             }
         }
@@ -574,8 +576,7 @@ impl Session {
         }
 
         // Register the grease package view.
-        self.clank
-            .grease
+        self.grease
             .set_installed(crate::grease::state::InstalledPackage { marker, payload });
 
         note.extend_from_slice(
@@ -647,7 +648,7 @@ impl Session {
         let installed = crate::grease::state::InstalledPackage { marker, payload };
         // Materialize the kind's on-disk surface (bin stub / skill dir tree) — needs the help text,
         // which is derived from the registered package, so register first.
-        self.clank.grease.set_installed(installed);
+        self.grease.set_installed(installed);
         self.materialize_package(name, kind);
 
         let run_hint = match kind {
@@ -712,8 +713,7 @@ impl Session {
         if write_install_marker(&spec.name, &marker).is_err() {
             return;
         }
-        self.clank
-            .grease
+        self.grease
             .set_installed(crate::grease::state::InstalledPackage { marker, payload });
         self.materialize_package(&spec.name, crate::grease::pkg::PackageKind::Prompt);
     }
@@ -821,7 +821,6 @@ impl Session {
         match kind {
             PackageKind::Prompt => {
                 let help = self
-                    .clank
                     .grease
                     .pkg_help(name)
                     .unwrap_or_else(|| format!("{name} — installed prompt\n"));
@@ -834,7 +833,6 @@ impl Session {
             }
             PackageKind::Script => {
                 let help = self
-                    .clank
                     .grease
                     .pkg_help(name)
                     .unwrap_or_else(|| format!("{name} — installed script\n"));
@@ -846,7 +844,7 @@ impl Session {
                 );
             }
             PackageKind::Skill => {
-                if let Some(sk) = self.clank.grease.skill(name) {
+                if let Some(sk) = self.grease.skill(name) {
                     let _ = crate::grease::config::materialize_skill(sk);
                 }
             }
@@ -857,7 +855,6 @@ impl Session {
             }
             PackageKind::Agent => {
                 let help = self
-                    .clank
                     .grease
                     .pkg_help(name)
                     .unwrap_or_else(|| format!("{name} — installed agent\n"));
@@ -874,16 +871,16 @@ impl Session {
     /// `grease remove <name>`: delete the store, marker, and the kind's on-disk surface, and
     /// deregister.
     fn grease_remove(&mut self, name: &str) -> LineResult {
-        let Some(kind) = self.clank.grease.kind_of(name) else {
+        let Some(kind) = self.grease.kind_of(name) else {
             // A half-installed package has no loadable kind, but its marker (and possibly a partial
             // store dir) IS on disk — so "is not installed" would be false, and would leave the user
             // with no way to clean it up. Remove what exists and say so.
-            if self.clank.grease.broken().iter().any(|(n, _)| n == name) {
+            if self.grease.broken().iter().any(|(n, _)| n == name) {
                 let _ = std::fs::remove_file(
                     crate::grease::config::etc_dir().join(format!("{name}.toml")),
                 );
                 let _ = std::fs::remove_dir_all(crate::grease::config::store_dir().join(name));
-                self.clank.grease.forget_broken(name);
+                self.grease.forget_broken(name);
                 return LineResult::continue_with_stdout(
                     format!("removed {name} (was a half-installed package)\n").into_bytes(),
                 );
@@ -910,14 +907,14 @@ impl Session {
                 // Deregister the server from `McpState` (also removes its /usr/lib/mcp/bin stub) and
                 // remove any materialized resource tree under /mnt/mcp/<name>/.
                 let _ = crate::mcp::config::remove(name);
-                self.clank.mcp.remove(name);
+                self.mcp.remove(name);
                 let _ = std::fs::remove_dir_all(crate::grease::config::mcp_mount_dir().join(name));
             }
             crate::grease::pkg::PackageKind::Agent => {
                 let _ = std::fs::remove_file(crate::grease::config::agent_bin_dir().join(name));
             }
         }
-        self.clank.grease.remove(name);
+        self.grease.remove(name);
         LineResult::continue_with_stdout(format!("removed {name}\n").into_bytes())
     }
 
@@ -931,7 +928,7 @@ impl Session {
                 1,
             );
         }
-        let Some(http) = self.clank.mcp_http.as_ref() else {
+        let Some(http) = self.mcp_http.as_ref() else {
             return LineResult::from_outcome(
                 Vec::new(),
                 b"grease search: no HTTP transport configured (available on the Golem agent)\n"
@@ -1010,9 +1007,9 @@ impl Session {
     }
 
     /// `grease update [<name>]`: re-fetch + re-verify + re-persist installed packages (all, or one).
-    async fn grease_update(&mut self, name: Option<&str>) -> LineResult {
+    async fn grease_update(&mut self, ctx: &mut SessionCtx<'_>, name: Option<&str>) -> LineResult {
         let targets: Vec<String> = match name {
-            Some(n) if self.clank.grease.get(n).is_some() => vec![n.to_string()],
+            Some(n) if self.grease.get(n).is_some() => vec![n.to_string()],
             Some(n) => {
                 return LineResult::from_outcome(
                     Vec::new(),
@@ -1021,7 +1018,6 @@ impl Session {
                 )
             }
             None => self
-                .clank
                 .grease
                 .packages()
                 .iter()
@@ -1042,7 +1038,6 @@ impl Session {
             // Re-install preserving the package's existing artifact selection (for MCP; a no-op for
             // other kinds). The stored payload carries the prior `artifacts`, so pass its flags.
             let flags = self
-                .clank
                 .grease
                 .mcp(&t)
                 .map(|m| crate::grease::cmd::ArtifactFlags {
@@ -1051,7 +1046,7 @@ impl Session {
                     resources: m.artifacts.resources,
                 })
                 .unwrap_or_default();
-            let result = Box::pin(self.grease_install(&t, flags)).await;
+            let result = Box::pin(self.grease_install(ctx, &t, flags)).await;
             if result.exit_code != 0 {
                 failed += 1;
                 worst = worst.max(result.exit_code);
@@ -1132,6 +1127,115 @@ impl Session {
                 LineResult::from_outcome(Vec::new(), format!("grease: {e}\n").into_bytes(), 1)
             }
         }
+    }
+
+    /// Whether `line`'s leading word is an installed grease prompt. Drives the `run_prompt` dispatch.
+    /// Only top-level lines count; a prompt invokes `ask`, which awaits under the Session reactor (the
+    /// nested runtime (the Wall-C wall), so a nested use falls through to the stub honest error.
+    pub(crate) fn is_prompt_line(&self, line: &str) -> bool {
+        let Some(word) = prompt_leading_word(line) else {
+            return false;
+        };
+        self.grease.is_prompt(&word)
+    }
+
+    /// Whether `line`'s leading word is an installed grease script. Drives the `run_script` dispatch.
+    /// Like prompts, only top-level lines count (a script runs through the session's `execute`, which
+    /// isn't reachable from Brush's nested runtime).
+    pub(crate) fn is_script_line(&self, line: &str) -> bool {
+        let Some(word) = prompt_leading_word(line) else {
+            return false;
+        };
+        self.grease.is_script(&word)
+    }
+
+    /// Run an installed grease script: parse `--arg value` flags against the package's declared
+    /// arguments, fill the body's `{{arg}}` placeholders, and dispatch the filled **shell source**
+    /// through the session's `execute` (Brush `run_string`) — the local-shell path, no LLM call.
+    /// Missing required args are an exit-2 usage error.
+    pub(crate) async fn run_script(&mut self, ctx: &mut SessionCtx<'_>, line: &str) -> LineResult {
+        let (name, provided, _model) = match parse_pkg_invocation(line) {
+            Ok(t) => t,
+            Err(e) => return e,
+        };
+        let Some(package) = self.grease.script(&name).cloned() else {
+            return LineResult::denied(); // shouldn't happen (is_script_line gated it)
+        };
+        let filled = match package.fill(&provided) {
+            Ok(f) => f,
+            Err(e) => {
+                return LineResult::from_outcome(
+                    Vec::new(),
+                    format!("{name}: {e}\n").into_bytes(),
+                    2,
+                )
+            }
+        };
+        // Run the filled shell source through the local-shell path. `execute` adopts no jobs here
+        // (a script is a synthetic top-level invocation, not a backgrounded pipeline stage).
+        ctx.execute(&filled).await
+    }
+
+    /// Generated help for an installed command-package line ending in `--help` (prompt, script, or
+    /// agent). `None` if the line isn't an installed command package or doesn't request help.
+    ///
+    /// A leading `sudo` is skipped: it only pre-authorizes, so it must not change what `--help`
+    /// prints. Without this, `sudo <pkg> --help` looked up the package named "sudo", found nothing,
+    /// and fell through to the package's own parser — for an agent that means
+    /// "unknown flag --help before the method" (exit 2) instead of the agent's surface. The path is
+    /// not hypothetical: `ask`'s per-command authorization re-runs an approved command WITH the sudo
+    /// grant, so a model asking for `<pkg> --help` always took the broken one.
+    /// (`builtins::typecmd::help_for` does the same for the statically-intercepted commands.)
+    pub(crate) fn pkg_help_for(&self, line: &str) -> Option<String> {
+        let words = crate::ai::ask::dequote_words(line)?;
+        // Strip a leading `sudo` (it only pre-authorizes; help is resolved before the gate anyway).
+        let rest = crate::helpshim::skip_leading_sudo(&words);
+        let name = rest.first()?;
+        if crate::helpshim::asks_for_help(rest) {
+            return self.grease.pkg_help(name);
+        }
+        // `<agent> help` — the bare reserved help subcommand (README:840), for an installed AGENT
+        // package only, as exactly `<name> help`. Resolved HERE, before the authz gate, so help never
+        // triggers the agent's Confirm prompt (a prompt/script package's `help` is an ordinary arg).
+        if rest.len() == 2 && rest[1] == "help" && self.grease.is_agent(name) {
+            return self.grease.pkg_help(name);
+        }
+        None
+    }
+
+    /// If `gated_command` is a `grease install <pkg>` line, build a capability-disclosure confirmation
+    /// prompt naming the package, its source registries, and its `ask` capability. `None` otherwise
+    /// (the caller falls back to the generic confirm text).
+    #[allow(clippy::unused_self)]
+    pub(crate) fn grease_install_disclosure(
+        &self,
+        gated_command: &str,
+        sudo_grant: bool,
+    ) -> Option<String> {
+        let cmd = crate::grease::cmd::classify(gated_command)?.ok()?;
+        let crate::grease::cmd::GreaseCommand::Install { name, .. } = cmd else {
+            return None;
+        };
+        let registries = crate::grease::config::list_registries();
+        let from = if registries.is_empty() {
+            "no configured registry".to_string()
+        } else {
+            registries.join(", ")
+        };
+        let tail = if sudo_grant {
+            "(y)es, (n)o"
+        } else {
+            "(y)es, (n)o, (a)ll"
+        };
+        // The disclosure fires before the fetch, so the package's kind isn't known yet — disclose the
+        // full capability an install can grant: a prompt runs via ask (outbound LLM); a script runs
+        // local shell commands; a skill installs model-facing context + `$PATH` scripts. Each is
+        // Confirm-gated per run.
+        Some(format!(
+            "Install package \"{name}\" from {from}? Depending on its kind it may run via ask \
+             (outbound LLM), execute local shell commands, or install a skill (model context + \
+             $PATH scripts); each is confirmed per run unless you use sudo. {tail}"
+        ))
     }
 }
 
@@ -1435,7 +1539,7 @@ pub(crate) fn prompt_leading_word(line: &str) -> Option<String> {
 /// `sudo`-prefixed here (the caller reaches this after the authz gate strips sudo). Returns a
 /// pre-built exit-2 `LineResult` on a parse error or a `--key` missing its value.
 #[allow(clippy::type_complexity)]
-pub(super) fn parse_pkg_invocation(
+pub(crate) fn parse_pkg_invocation(
     line: &str,
 ) -> Result<(String, Vec<(String, String)>, Option<String>), LineResult> {
     let words = crate::ai::ask::dequote_words(line).ok_or_else(|| {

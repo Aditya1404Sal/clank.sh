@@ -1,6 +1,7 @@
 //! `Clank` methods for Golem agent invocation (`<agent> [flags] <method>`), the `golem` cluster
 //! command, and the invocation-line parser they dispatch on ([`parse_agent_line`]).
 
+use super::grease::prompt_leading_word;
 use crate::config::limits::MAX_PENDING_INVOCATIONS;
 use crate::session::{LineResult, SessionCtx};
 
@@ -16,7 +17,7 @@ impl super::Clank {
     /// Top-level only (a remote invocation awaits under the Session reactor; not reachable from Brush's
     /// nested runtime — the Wall-C wall).
     pub(crate) fn is_agent_line(&self, line: &str) -> bool {
-        let Some(word) = crate::session::grease::prompt_leading_word(line) else {
+        let Some(word) = prompt_leading_word(line) else {
             return false;
         };
         self.grease.is_agent(&word)
