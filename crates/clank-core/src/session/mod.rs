@@ -1338,8 +1338,6 @@ impl Session {
         LineResult::from_outcome(stdout, stderr, u8::from(any_missed))
     }
 
-    /// Whether `line`'s leading word is an installed grease prompt. Drives the `run_prompt` dispatch.
-    /// Only top-level lines (no operators) count — a prompt makes an LLM call and can't run in Brush's
     /// Run an installed grease prompt: parse `--arg value` flags against the package's declared
     /// arguments, fill the body's `{{arg}}` placeholders, and dispatch the filled prompt through
     /// `run_ask`. `--model` on the prompt line overrides the package model. Missing required args are

@@ -1130,7 +1130,7 @@ impl super::Clank {
     }
 
     /// Whether `line`'s leading word is an installed grease prompt. Drives the `run_prompt` dispatch.
-    /// Only top-level lines count; a prompt invokes `ask`, which awaits under the Session reactor (the
+    /// Only top-level lines (no operators) count — a prompt makes an LLM call and can't run in Brush's
     /// nested runtime (the Wall-C wall), so a nested use falls through to the stub honest error.
     pub(crate) fn is_prompt_line(&self, line: &str) -> bool {
         let Some(word) = prompt_leading_word(line) else {
@@ -1206,6 +1206,7 @@ impl super::Clank {
     /// If `gated_command` is a `grease install <pkg>` line, build a capability-disclosure confirmation
     /// prompt naming the package, its source registries, and its `ask` capability. `None` otherwise
     /// (the caller falls back to the generic confirm text).
+    // Kept a method for call-site symmetry with the other `surface_*`/disclosure helpers on `Session`.
     #[allow(clippy::unused_self)]
     pub(crate) fn grease_install_disclosure(
         &self,
