@@ -199,7 +199,8 @@ impl Session {
         mut config: crate::mcp::config::McpServerConfig,
     ) -> LineResult {
         let Some(http) = self.clank.mcp_http.as_deref() else {
-            self.clank.mcp
+            self.clank
+                .mcp
                 .set_failed(name, config, "no HTTP transport".into());
             return LineResult::from_outcome(
                 Vec::new(),

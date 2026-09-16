@@ -574,7 +574,8 @@ impl Session {
         }
 
         // Register the grease package view.
-        self.clank.grease
+        self.clank
+            .grease
             .set_installed(crate::grease::state::InstalledPackage { marker, payload });
 
         note.extend_from_slice(
@@ -711,7 +712,8 @@ impl Session {
         if write_install_marker(&spec.name, &marker).is_err() {
             return;
         }
-        self.clank.grease
+        self.clank
+            .grease
             .set_installed(crate::grease::state::InstalledPackage { marker, payload });
         self.materialize_package(&spec.name, crate::grease::pkg::PackageKind::Prompt);
     }
@@ -819,7 +821,8 @@ impl Session {
         match kind {
             PackageKind::Prompt => {
                 let help = self
-                    .clank.grease
+                    .clank
+                    .grease
                     .pkg_help(name)
                     .unwrap_or_else(|| format!("{name} — installed prompt\n"));
                 let _ = crate::grease::config::write_bin_stub(
@@ -831,7 +834,8 @@ impl Session {
             }
             PackageKind::Script => {
                 let help = self
-                    .clank.grease
+                    .clank
+                    .grease
                     .pkg_help(name)
                     .unwrap_or_else(|| format!("{name} — installed script\n"));
                 let _ = crate::grease::config::write_bin_stub(
@@ -853,7 +857,8 @@ impl Session {
             }
             PackageKind::Agent => {
                 let help = self
-                    .clank.grease
+                    .clank
+                    .grease
                     .pkg_help(name)
                     .unwrap_or_else(|| format!("{name} — installed agent\n"));
                 let _ = crate::grease::config::write_bin_stub(
@@ -1016,7 +1021,8 @@ impl Session {
                 )
             }
             None => self
-                .clank.grease
+                .clank
+                .grease
                 .packages()
                 .iter()
                 .map(|p| p.name().to_string())
@@ -1036,7 +1042,8 @@ impl Session {
             // Re-install preserving the package's existing artifact selection (for MCP; a no-op for
             // other kinds). The stored payload carries the prior `artifacts`, so pass its flags.
             let flags = self
-                .clank.grease
+                .clank
+                .grease
                 .mcp(&t)
                 .map(|m| crate::grease::cmd::ArtifactFlags {
                     tools: m.artifacts.tools,

@@ -773,7 +773,11 @@ impl Session {
             // Invariant: Some by this point — the block just above sets it when the cap key changed,
             // and leaves the existing value otherwise.
             #[allow(clippy::expect_used)]
-            let cap = self.clank.cap_cache.as_ref().expect("cap_cache just populated");
+            let cap = self
+                .clank
+                .cap_cache
+                .as_ref()
+                .expect("cap_cache just populated");
             (cap.dynreg.clone(), cap.mcpfs.clone(), cap.sysprompt.clone())
         };
         let _install_dynreg = crate::runtime::dynreg::install(dynreg);
@@ -1326,7 +1330,12 @@ impl Session {
                     // best-effort cancel. (The scheduled-invocation token doesn't survive across the
                     // durable agent's serialized invocations, so a remote cancel-after-return isn't
                     // guaranteed — documented.)
-                    if let Some(idx) = self.clank.pending_invocations.iter().position(|p| p.pid == *pid) {
+                    if let Some(idx) = self
+                        .clank
+                        .pending_invocations
+                        .iter()
+                        .position(|p| p.pid == *pid)
+                    {
                         let inv = self.clank.pending_invocations.remove(idx);
                         self.proc_table
                             .lock()
@@ -1515,7 +1524,8 @@ impl Session {
             // Bare `<server>` with no tool: show help (help path already handled this in eval_line, but
             // a direct run_command re-entry lands here).
             return LineResult::continue_with_stdout(
-                self.clank.mcp
+                self.clank
+                    .mcp
                     .server_help(&inv.server)
                     .unwrap_or_default()
                     .into_bytes(),
@@ -1568,7 +1578,8 @@ impl Session {
         };
         // Reuse an explicit --session-id, else an open session for the server, else stateless.
         let session_id = inv.session_id.clone().or_else(|| {
-            self.clank.mcp
+            self.clank
+                .mcp
                 .session_for(&inv.server)
                 .and_then(|s| s.server_session_id.clone())
         });

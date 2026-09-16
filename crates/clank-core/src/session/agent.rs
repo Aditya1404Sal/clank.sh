@@ -365,7 +365,8 @@ impl Session {
         );
         table.set_agent_meta(pid, meta);
         drop(table);
-        self.clank.pending_invocations
+        self.clank
+            .pending_invocations
             .push(PendingInvocation { pid, cancel_token });
         // Bound the fire-and-forget tracking. A `--trigger`/`--schedule` invocation has no
         // remote-completion signal, so without this its `S` row and `pending_invocations` entry would
