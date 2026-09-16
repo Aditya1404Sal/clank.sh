@@ -24,7 +24,8 @@ use super::{BuiltinSet, Shell, ShellBuilderExt, DEFAULT_HOME};
 /// /bin` never saw the installed command. With the clank plug-in installed and no overrides set,
 /// this is byte-identical to [`DEFAULT_PATH`](crate::config::vfs::DEFAULT_PATH) (unit-pinned in
 /// `clank`). With no plug-in it is just `/usr/local/bin` — the core installs nothing.
-pub(crate) fn effective_path(dirs: &[PathBuf]) -> String {
+#[must_use]
+pub fn effective_path(dirs: &[PathBuf]) -> String {
     let mut path = String::from("/usr/local/bin");
     for dir in dirs {
         path.push(':');

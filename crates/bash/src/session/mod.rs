@@ -34,10 +34,10 @@ use crate::runtime::proctable::ProcessTable;
 type BoxError = Box<dyn std::error::Error>;
 
 mod ctx;
-// `pub(crate)` for `env::effective_path`: the `$PATH` a session installs is now built in two halves
-// (the core's, plus the installed plug-in's `path_dirs`), and the drift guard pinning the two
-// against the README default lives with the plug-in that supplies the second half.
-pub(crate) mod env;
+// `pub` for `env::effective_path`: the `$PATH` a session installs is now built in two halves (the
+// core's, plus the installed plug-in's `path_dirs`), and the drift guard pinning the two against
+// the README default lives with the plug-in that supplies the second half — in another crate.
+pub mod env;
 mod prompt;
 mod streams;
 
@@ -123,7 +123,9 @@ impl LineResult {
         output
     }
 
-    pub(crate) fn continue_with_stdout(stdout: Vec<u8>) -> Self {
+    /// A successful line: `stdout`, no stderr, exit `0`, keep looping.
+    #[must_use]
+    pub fn continue_with_stdout(stdout: Vec<u8>) -> Self {
         Self {
             stdout,
             stderr: Vec::new(),
@@ -138,12 +140,15 @@ impl LineResult {
     /// For commands that aggregate sub-results into one stdout blob and must still report the worst
     /// outcome — the exit code is the only machine-readable channel a non-interactive driver has, so
     /// "printed some failures, returned 0" is a lie to it.
-    pub(crate) fn with_exit_code(mut self, exit_code: u8) -> Self {
+    #[must_use]
+    pub fn with_exit_code(mut self, exit_code: u8) -> Self {
         self.exit_code = exit_code;
         self
     }
 
-    pub(crate) fn stderr(message: impl Into<Vec<u8>>) -> Self {
+    /// A failed line: `message` on stderr, nothing on stdout, exit `1`.
+    #[must_use]
+    pub fn stderr(message: impl Into<Vec<u8>>) -> Self {
         Self {
             stdout: Vec::new(),
             stderr: message.into(),
@@ -154,7 +159,8 @@ impl LineResult {
     }
 
     /// An authorization failure: exit `5` (README) with a stderr message.
-    pub(crate) fn denied() -> Self {
+    #[must_use]
+    pub fn denied() -> Self {
         Self {
             stdout: Vec::new(),
             stderr: b"clank: authorization denied\n".to_vec(),
@@ -165,7 +171,8 @@ impl LineResult {
     }
 
     /// Build a result from an HTTP command's outcome (`wcurl`/`waget` return the same shape).
-    pub(crate) fn from_outcome(stdout: Vec<u8>, stderr: Vec<u8>, exit_code: u8) -> Self {
+    #[must_use]
+    pub fn from_outcome(stdout: Vec<u8>, stderr: Vec<u8>, exit_code: u8) -> Self {
         Self {
             stdout,
             stderr,
@@ -292,6 +299,10 @@ enum CommandRoute {
 impl Session {
     /// Build a non-interactive shell with the full bash-compatible builtin set.
     ///
+    /// No plug-in is installed: the shell core cannot name a command family. An embedder that wants
+    /// one calls [`set_plugin`](Self::set_plugin) — for clank's families, `ClankSessionExt`'s
+    /// `install_clank`.
+    ///
     /// # Errors
     /// Returns `Err` if the Brush shell fails to build or its `$PATH`/`$HOME` seeding fails (and,
     /// on wasm, if the current-thread tokio runtime cannot be constructed).
@@ -310,7 +321,7 @@ impl Session {
             // wasip2 has no threads: a current-thread runtime drives Brush's async.
             let rt = tokio::runtime::Builder::new_current_thread().build()?;
             let shell = rt.block_on(build_shell())?;
-            let mut session = Self {
+            let session = Self {
                 shell,
                 transcript: Arc::new(Mutex::new(Transcript::with_cap(
                     crate::configured_context_cap(),
@@ -328,17 +339,12 @@ impl Session {
                 secret_env: std::collections::BTreeMap::new(),
                 rt,
             };
-            // GUARD-EXEMPT-BEGIN: naming clank here is the embedder's job from Task 10 on.
-            let mut clank = crate::clank::Clank::new();
-            clank.reconstruct_mcp();
-            session.set_plugin(Box::new(clank));
-            // GUARD-EXEMPT-END
             Ok(session)
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
             let shell = build_shell().await?;
-            let mut session = Self {
+            let session = Self {
                 shell,
                 transcript: Arc::new(Mutex::new(Transcript::with_cap(
                     crate::configured_context_cap(),
@@ -355,19 +361,17 @@ impl Session {
                 source: SourceInfo::default(),
                 secret_env: std::collections::BTreeMap::new(),
             };
-            // GUARD-EXEMPT-BEGIN: naming clank here is the embedder's job from Task 10 on.
-            let mut clank = crate::clank::Clank::new();
-            clank.reconstruct_mcp();
-            session.set_plugin(Box::new(clank));
-            // GUARD-EXEMPT-END
             Ok(session)
         }
     }
 
     /// Test-only: set the transcript safety cap at runtime to force eviction. There is no user
     /// command for this — production sets the cap once at construction from [`crate::configured_context_cap`].
-    #[cfg(test)]
-    pub(crate) fn set_context_cap(&self, cap_tokens: usize) {
+    ///
+    /// Behind the `test-support` feature so a consumer crate's suite (the plug-in's `ask` tests,
+    /// which drive auto-compaction) can force the same eviction without a second copy of the knob.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_context_cap(&self, cap_tokens: usize) {
         self.transcript
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -430,9 +434,42 @@ impl Session {
         self.plugin.as_deref_mut()?.as_any_mut().downcast_mut::<T>()
     }
 
+    /// Run `f` with the installed plug-in taken out and a context on this session, then put it
+    /// back. `None` when no plug-in of type `T` is installed.
+    ///
+    /// The plug-in must leave the slot for the call: `f` gets `&mut T` and a [`SessionCtx`] on the
+    /// same `Session` at once, which is the shape a plug-in's own entry points need (an `ask repl`
+    /// turn runs commands back through the shell while holding its REPL state).
+    pub async fn with_plugin<T: crate::plugin::Plugin, R>(
+        &mut self,
+        f: impl AsyncFnOnce(&mut T, &mut SessionCtx<'_>) -> R,
+    ) -> Option<R> {
+        let mut plugin = self.plugin.take()?;
+        let result = match plugin.as_any_mut().downcast_mut::<T>() {
+            Some(typed) => Some(f(typed, &mut SessionCtx::new(self)).await),
+            None => None,
+        };
+        self.plugin = Some(plugin);
+        result
+    }
+
+    /// [`with_plugin`](Self::with_plugin) for a synchronous plug-in entry point.
+    pub fn with_plugin_sync<T: crate::plugin::Plugin, R>(
+        &mut self,
+        f: impl FnOnce(&mut T, &mut SessionCtx<'_>) -> R,
+    ) -> Option<R> {
+        let mut plugin = self.plugin.take()?;
+        let result = plugin
+            .as_any_mut()
+            .downcast_mut::<T>()
+            .map(|typed| f(typed, &mut SessionCtx::new(self)));
+        self.plugin = Some(plugin);
+        result
+    }
+
     /// Test-only: uninstall the plug-in, so the contract tests can see what the bare shell core
-    /// does. There is no user command for this — `Session::new` always installs clank until Task 11
-    /// makes that the embedder's job.
+    /// does. There is no user command for this — a session starts with no plug-in and an embedder
+    /// installs one with [`set_plugin`](Self::set_plugin).
     ///
     /// Undoes what `set_plugin` did to the shell, so "no plug-in" means it everywhere: the builtins
     /// it registered are disabled (Brush has no unregister, and a disabled registration falls
@@ -451,98 +488,6 @@ impl Session {
         self.registry = Arc::new(crate::registry::build());
         self.capabilities = None;
     }
-
-    // GUARD-EXEMPT-BEGIN: the provider-injection and REPL entry points still name clank's types.
-    // They are the embedder's from Task 10 on (they inject into a plug-in it constructed), and the
-    // family-name guard skips them until then.
-
-    /// Install the LLM provider that backs `ask`. The agent build injects a durable Anthropic
-    /// provider here after constructing the session; without one, `ask` reports "not configured".
-    pub fn set_ask_provider(&mut self, provider: Box<dyn crate::ai::ask::AskProvider>) {
-        if let Some(clank) = self.plugin_mut::<crate::clank::Clank>() {
-            // Wrap so each LLM turn is logged to http.log (the outbound Anthropic call).
-            clank.ask_provider = Some(Box::new(crate::ai::ask::LoggingAskProvider::new(provider)));
-        }
-    }
-
-    /// Install the Golem-agent invoker (a durable `WasmRpc` binding on the agent). Without one, an
-    /// installed agent command reports "needs a cluster" (README:895). Injected after construction.
-    pub fn set_agent_invoker(&mut self, invoker: Box<dyn crate::golem::agent::AgentInvoker>) {
-        if let Some(clank) = self.plugin_mut::<crate::clank::Clank>() {
-            clank.agent_invoker = Some(invoker);
-        }
-    }
-
-    /// Install the Golem cluster interface backing the `golem` command + agent oplog/status (durable
-    /// `golem:api` bindings on the agent). Without one, `golem` reports "needs a cluster".
-    pub fn set_golem_cluster(&mut self, cluster: Box<dyn crate::golem::cluster::GolemCluster>) {
-        if let Some(clank) = self.plugin_mut::<crate::clank::Clank>() {
-            clank.golem_cluster = Some(cluster);
-        }
-    }
-
-    /// Install the MCP HTTP transport (a durable WASI-HTTP client on the agent). Without one, MCP
-    /// commands report "not configured" (exit 4). Injected after construction like the ask provider.
-    pub fn set_mcp_http(&mut self, http: Box<dyn crate::mcp::client::McpHttp>) {
-        if let Some(clank) = self.plugin_mut::<crate::clank::Clank>() {
-            // Wrap the transport so every MCP + grease-registry request is logged to http.log (redacted).
-            clank.mcp_http = Some(Box::new(crate::mcp::client::LoggingMcpHttp::new(http)));
-        }
-    }
-
-    /// Start an `ask repl` session (see [`crate::clank::Clank::repl_start`]).
-    ///
-    /// # Errors
-    /// Returns `Err` when no plug-in owns `ask`, no provider is configured, or the resolved model
-    /// carries an unknown `provider/` prefix.
-    pub fn repl_start(
-        &mut self,
-        args: &crate::ai::ask::ReplArgs,
-    ) -> crate::ai::error::Result<String> {
-        let Some(mut clank) = self.plugin.take() else {
-            return Err(crate::ai::Error::not_configured("ask repl"));
-        };
-        let result = match clank.as_any_mut().downcast_mut::<crate::clank::Clank>() {
-            Some(clank) => clank.repl_start(&SessionCtx::new(self), args),
-            None => Err(crate::ai::Error::not_configured("ask repl")),
-        };
-        self.plugin = Some(clank);
-        result
-    }
-
-    /// The active REPL's model id, for the `[model]>` prompt. `None` if no REPL is active.
-    #[must_use]
-    pub fn repl_model(&self) -> Option<String> {
-        self.plugin_ref::<crate::clank::Clank>()?.repl_model()
-    }
-
-    /// Handle a REPL meta-command (see [`crate::clank::Clank::repl_meta`]).
-    pub fn repl_meta(&mut self, line: &str) -> Option<(String, bool)> {
-        self.plugin_mut::<crate::clank::Clank>()?.repl_meta(line)
-    }
-
-    /// Run one REPL turn (see [`crate::clank::Clank::repl_turn`]).
-    pub async fn repl_turn(&mut self, prompt: &str) -> String {
-        let Some(mut clank) = self.plugin.take() else {
-            return "ask repl: no active session\n".to_string();
-        };
-        let reply = match clank.as_any_mut().downcast_mut::<crate::clank::Clank>() {
-            Some(clank) => clank.repl_turn(&mut SessionCtx::new(self), prompt).await,
-            None => "ask repl: no active session\n".to_string(),
-        };
-        self.plugin = Some(clank);
-        reply
-    }
-
-    /// End the REPL session and return its rendered transcript (see
-    /// [`crate::clank::Clank::repl_end`]).
-    pub fn repl_end(&mut self) -> Vec<u8> {
-        self.plugin_mut::<crate::clank::Clank>()
-            .map(crate::clank::Clank::repl_end)
-            .unwrap_or_default()
-    }
-
-    // GUARD-EXEMPT-END
 
     /// Install the `/var/log` log sink. The agent injects a whole-file-rewrite sink (idempotent under
     /// oplog replay, so no duplicated lines); native keeps the default direct-append sink.
@@ -1624,7 +1569,8 @@ fn log_safe_line(line: &str) -> std::borrow::Cow<'_, str> {
 /// Strip a leading `sudo ` token from a line (the command to actually run once `sudo`-elevated
 /// authorization is satisfied). Whitespace-based — sufficient for the leading-word scope of this
 /// increment. If the line isn't `sudo`-prefixed, it's returned unchanged.
-pub(crate) fn strip_sudo_prefix(line: &str) -> String {
+#[must_use]
+pub fn strip_sudo_prefix(line: &str) -> String {
     let trimmed = line.trim_start();
     match trimmed.strip_prefix("sudo") {
         // Only a `sudo` token followed by whitespace (not `sudoedit`, etc.).

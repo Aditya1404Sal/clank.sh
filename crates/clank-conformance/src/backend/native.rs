@@ -11,6 +11,7 @@
 use super::{Outcome, PendingView, ShellBackend};
 use anyhow::Context;
 use clank_core::session::Session;
+use clank_core::ClankSessionExt as _;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -99,9 +100,12 @@ impl NativeBackend {
             .enable_all()
             .build()
             .context("building tokio runtime")?;
-        let session = rt
+        let mut session = rt
             .block_on(Session::new())
             .map_err(|e| anyhow::anyhow!("Session::new failed: {e}"))?;
+        // The corpus exercises clank's command families, so the backend installs the plug-in the
+        // shell core no longer installs for itself.
+        session.install_clank();
 
         Ok(Self {
             session,

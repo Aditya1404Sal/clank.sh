@@ -17,64 +17,27 @@ workspace = true
 # enabled) was deleted with it — see git history to resurrect it.
 crate-type = ["rlib"]
 
-# All-target deps: Brush (the shell interpreter) now runs on both native and wasm. `nix` is
-# gated under cfg(unix) inside brush-core, so the wasm32-wasip2 build still pulls zero nix.
-# tokio provides the runtime brush requires for its internal async (current-thread on wasm).
 [dependencies]
+# The shell core: `Session`, the builtins, the tools, authorization, the registry and the `Plugin`
+# seam clank's families attach to. Re-exported whole from `lib.rs` (`pub use bash::*`), so every
+# existing `clank_core::session::Session`-style path keeps resolving.
+bash = { path = "../bash" }
+# Brush itself is still a DIRECT dependency of this crate, not only of `bash`: `ai::model` is a
+# hand-rolled `SimpleCommand` (brush-core's builtin traits) and `Clank::builtins` names
+# `brush_core::builtins::Registration`, while `ai`/`mcp`/`grease`/`golem` each tokenize their own
+# command line with brush-parser.
 brush-core = "0.5"
-brush-builtins = "0.2"
 brush-parser = "0.4"
 # The `grease` package types + sha256/ed25519/RFC-6962 integrity verification, extracted to their own
 # leaf crate so `dev-tools/grease-tool` can depend on just that instead of all of clank-core. Re-exported
 # whole as `grease::pkg` (see crates/clank-core/src/grease/mod.rs) so no in-tree path changes.
 grease-pkg = { path = "../grease-pkg" }
-# The curl/wget HTTP commands (wasm/native HTTP seam lives in these crates). clank intercepts
-# curl/wget in Session::run_command and awaits their async `run` under the live reactor.
-wcurl = { path = "../../utilities/wcurl" }
-waget = { path = "../../utilities/waget" }
 tokio = { version = "1", features = ["rt"] }
-diffy = { version = "0.5", features = ["std"] }
-grep = "0.4"
-infer = "0.19"
-jaq-core = "3.1"
-jaq-json = "2.0"
-jaq-std = "3.0"
-regex = "1"
-similar = "2.7"
-# `find`'s real-filesystem traversal. Pure-Rust over `std::fs` (only pulls `same-file`); no icu/libc,
-# builds clean on wasm32-wasip2. The glob/predicate layer and the virtual /bin,/proc walks stay ours.
-walkdir = "2"
 # Display-cell width for laying out the `ask` answer/tools boxes (emoji labels are 2 cells wide).
 unicode-width = "0.1"
-# Internal coreutils (uutils), registered as clank builtins. uucore is patched for wasm32-wasip2
-# via [patch.crates-io] in the workspace root.
-uu_cat = "0.9"
-uu_ls = "0.9"
-uu_wc = "0.9"
-uu_head = "0.9"
-uu_sort = "0.9"
-uu_mkdir = "0.9"
-uu_rm = "0.9"
-uu_mv = "0.9"
-uu_cp = "0.9"
-uu_env = "0.9"
-uu_cut = "0.9"
-uu_tr = "0.9"
-uu_uniq = "0.9"
-uu_tail = "0.9"
-uu_tee = "0.9"
-uu_touch = "0.9"
-uu_sleep = "0.9"
-# printf is clank-registered (uu_printf) rather than Brush's builtin: Brush gates its printf to
-# `any(unix, windows)` (its uucore dep isn't linked on wasm), so the agent had no printf at all.
-# Registering uu_printf fills wasm and shadows Brush's on native for uniform behavior.
-uu_printf = "0.9"
-# Direct uucore dep (same patched fork) so `run_uu` can reset uucore's process-global exit code
-# per invocation — upstream resets it by process exit, which never happens in-process here.
-uucore = "0.9"
 async-trait = "0.1"
-# Parsing the agentic `ask` loop's tool-call arguments (the `shell` tool's JSON args) and, later,
-# MCP JSON-RPC. Pure Rust, dual-target-safe (no OS deps).
+# Parsing the agentic `ask` loop's tool-call arguments (the `shell` tool's JSON args) and MCP
+# JSON-RPC. Pure Rust, dual-target-safe (no OS deps).
 serde_json = "1"
 # ask.toml (default model + provider config) read/write. serde derive + the toml crate are pure Rust
 # (toml_edit/winnow, no OS deps) and compile on wasm32-wasip2.
@@ -84,11 +47,6 @@ toml = "0.8"
 # compiles unchanged for wasm32-wasip2. Lets a failure carry its KIND — retryable transport vs remote
 # fault vs malformed request — instead of collapsing to a String the caller can only print.
 thiserror = "2"
-# Timestamp rendering for `stat` (already in the tree via brush-core; compiles on wasm32-wasip2).
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
-# Arg parsing for clank builtins written in Brush's `Command` form (xargs) — the same clap the
-# Brush builtins themselves use (already in the tree).
-clap = { version = "4", features = ["derive"] }
 sha2 = "0.11.0"
 # grease package signing: ed25519 detached-signature VERIFICATION only (no keygen/signing), so no
 # RNG/getrandom is needed and the crate builds clean on wasm32-wasip2. `subtle`/`zeroize` (dalek's
@@ -97,23 +55,17 @@ ed25519-dalek = { version = "2", default-features = false }
 # base64 decoding for the signature + public key (already a transitive dep; pure Rust, dual-target).
 base64 = "0.22"
 
-# Native-only: a multi-thread tokio runtime (Runtime::new) and temp-file output capture.
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { version = "1", features = ["rt-multi-thread"] }
-tempfile = "3"
-# For redirecting fd 1/2 around uutils' uumain (which writes to std stdout) so its output is
-# captured by brush's fd table (pipes, redirects, the transcript capture). Stays here: the fd-swap
-# lives in `tools::coreutils`, which is engine code, not platform code.
-libc = "0.2"
-#
-# NOTE: `reqwest`, `reedline`, `crossterm` and `nu-ansi-term` are deliberately NOT here any more.
-# They moved to `clank-native` along with the code that used them — the REPL TUI and the four
-# reqwest-backed provider implementations. A dual-target engine crate has no business knowing about
-# an HTTP client or a terminal line editor; the wasm side already had that boundary (clank-embed),
-# and this is the missing mirror. clank-core keeps only the seam TRAITS.
-
 [dev-dependencies]
+# The shell core's test fixtures (`on_rt`, the process-cwd lock, `LogCapture`) and the test-only
+# `Session::set_context_cap`. The family suites drive a real `Session`, so they need the same
+# harness the core's own suite uses — it lives behind a feature rather than in a `dev-dependency`
+# cycle back to this crate.
+bash = { path = "../bash", features = ["test-support"] }
 # Signing side of ed25519 (SigningKey), for tests that produce a signed fixture payload to exercise
 # the verify-only install path. Dev-only, native — never in the wasm agent build. `from_bytes` on a
 # fixed 32-byte seed keeps it deterministic with no RNG.
 ed25519-dalek = { version = "2" }
+
+# Native-only dev dep: the `CLANK_MCP_BIN` override test builds a throwaway directory.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tempfile = "3"

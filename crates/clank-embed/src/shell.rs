@@ -1,6 +1,7 @@
 //! [`EmbeddedShell`] — a lazily-built shell [`Session`] plus the [`LineResult`]→[`EvalResult`]
 //! mapping, i.e. everything between an agent's three shell-surface methods and the shell core.
 
+use clank_core::ClankSessionExt as _;
 use clank_core::session::{LineResult, Session};
 
 use crate::wire::{EvalResult, PendingPromptView};
@@ -155,6 +156,9 @@ impl EmbeddedShell {
         if self.session.is_none() {
             match Session::new().await {
                 Ok(mut s) => {
+                    // The shell core starts with no plug-in; this surface is clank's, so install
+                    // the command families before the embedder's setup injects their providers.
+                    s.install_clank();
                     if let Some(setup) = self.setup.take() {
                         setup(&mut s);
                     }

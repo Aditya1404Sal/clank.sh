@@ -9,7 +9,9 @@
 
 pub(crate) mod context;
 pub(crate) mod http;
-pub(crate) mod interceptstub;
+// `pub` for [`interceptstub::session_stub`]: a plug-in crate registers the same honest-error stub
+// for its own session-layer commands, and it now lives on the other side of a crate boundary.
+pub mod interceptstub;
 pub(crate) mod kill;
 pub mod probe;
 pub mod promptuser;

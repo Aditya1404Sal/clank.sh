@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/bash",
     "crates/clank-core",
     "crates/grease-pkg",
     "crates/clank-cli",
@@ -36,6 +37,7 @@ exclude = ["golem-stuff", "fork/coreutils"]
 # natively — the link has never succeeded on native). `--workspace`, explicit `-p`, and the
 # golem deploy path still build both for wasm.
 default-members = [
+    "crates/bash",
     "crates/clank-core",
     "crates/grease-pkg",
     "crates/clank-cli",

@@ -13,6 +13,7 @@ use crate::config::limits::ASK_MAX_ITERATIONS;
 fn ask_returns_reply_and_feeds_transcript_as_context() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         session.set_ask_provider(Box::new(FakeProvider::reply(
             "the answer is 42",
@@ -55,6 +56,7 @@ fn ask_returns_reply_and_feeds_transcript_as_context() {
 fn auto_compaction_summarizes_the_dropped_span() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         // Several identical summaries: each eviction re-opens the pending span and re-summarizes,
         // so more than one summarize turn can fire across the run (the last one wins the marker).
@@ -99,6 +101,7 @@ fn auto_compaction_summarizes_the_dropped_span() {
 fn auto_compaction_falls_back_to_count_marker_without_a_provider() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         // No ask_provider injected.
         session.set_context_cap(4);
         session.run_line("echo marker_one").await;
@@ -122,6 +125,7 @@ fn auto_compaction_falls_back_to_count_marker_without_a_provider() {
 fn ask_fresh_sends_empty_transcript() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         session.set_ask_provider(Box::new(FakeProvider::reply("ok", seen.clone())));
 
@@ -146,6 +150,7 @@ fn ask_fresh_sends_empty_transcript() {
 fn ask_json_valid_reply_exits_zero() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         session.set_ask_provider(Box::new(FakeProvider::reply(
             r#"{"ok":true}"#,
@@ -173,6 +178,7 @@ fn ask_json_valid_reply_exits_zero() {
 fn ask_json_strips_code_fence() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         session.set_ask_provider(Box::new(FakeProvider::reply(
             "```json\n[1,2,3]\n```",
             std::sync::Arc::new(Mutex::new(Vec::new())),
@@ -189,6 +195,7 @@ fn ask_json_strips_code_fence() {
 fn ask_json_invalid_reply_exits_six() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         session.set_ask_provider(Box::new(FakeProvider::reply(
             "sorry, I cannot do that",
             std::sync::Arc::new(Mutex::new(Vec::new())),
@@ -216,6 +223,7 @@ fn ask_json_invalid_reply_exits_six() {
 fn ask_pipe_feeds_upstream_stdout_as_stdin() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         session.set_ask_provider(Box::new(FakeProvider::reply("got it", seen.clone())));
 
@@ -247,6 +255,7 @@ fn ask_pipe_feeds_upstream_stdout_as_stdin() {
 fn ask_pipe_confirmation_preserves_stdin() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         session.set_ask_provider(Box::new(FakeProvider::reply("answer", seen.clone())));
 
@@ -279,6 +288,7 @@ fn ask_pipe_confirmation_preserves_stdin() {
 fn ask_pipe_denied_exits_five_and_clears_stdin() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         session.set_ask_provider(Box::new(FakeProvider::reply("later", seen.clone())));
 
@@ -309,6 +319,7 @@ fn ask_pipe_denied_exits_five_and_clears_stdin() {
 fn context_summarize_returns_summary_without_mutating() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         session.set_ask_provider(Box::new(FakeProvider::reply(
             "You ran two echo commands.",
@@ -344,6 +355,7 @@ fn context_summarize_returns_summary_without_mutating() {
 fn context_summarize_confirms_then_runs() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         session.set_ask_provider(Box::new(FakeProvider::reply("a summary", seen.clone())));
         session.run_line("echo something").await;
@@ -377,6 +389,7 @@ fn context_summarize_confirms_then_runs() {
 fn context_summarize_denied_exits_five() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         session.set_ask_provider(Box::new(FakeProvider::reply("nope", seen.clone())));
         session.run_line("echo x").await;
@@ -396,6 +409,7 @@ fn context_summarize_denied_exits_five() {
 fn context_summarize_without_provider_errors() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         session.run_line("echo x").await;
         let result = session.eval_line("sudo context summarize").await;
         assert_eq!(result.exit_code, 4);
@@ -411,6 +425,7 @@ fn context_summarize_without_provider_errors() {
 fn context_summarize_in_substitution_is_honest() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         session.set_ask_provider(Box::new(FakeProvider::reply(
             "should not run",
             std::sync::Arc::new(Mutex::new(Vec::new())),
@@ -434,6 +449,7 @@ fn context_summarize_in_substitution_is_honest() {
 fn ask_repl_via_eval_line_is_honest_message() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let result = session.eval_line("ask repl").await;
         assert_eq!(result.exit_code, 2);
         let stderr = String::from_utf8(result.stderr).unwrap();
@@ -451,6 +467,7 @@ fn ask_repl_via_eval_line_is_honest_message() {
 fn repl_turn_uses_isolated_transcript() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         session.set_ask_provider(Box::new(FakeProvider::scripted(
             vec![
@@ -508,6 +525,7 @@ fn repl_turn_uses_isolated_transcript() {
 fn repl_meta_commands() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         session.set_ask_provider(Box::new(FakeProvider::reply(
             "ok",
             std::sync::Arc::new(Mutex::new(Vec::new())),
@@ -555,6 +573,7 @@ fn repl_meta_commands() {
 fn ask_reply_is_recorded_in_transcript() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         session.set_ask_provider(Box::new(FakeProvider::reply(
             "recorded_reply_xyz",
             std::sync::Arc::new(Mutex::new(Vec::new())),
@@ -575,6 +594,7 @@ fn ask_reply_is_recorded_in_transcript() {
 fn ask_without_provider_reports_not_configured() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let result = session.eval_line(r#"sudo ask "hi""#).await;
         assert_eq!(result.exit_code, 4);
         assert!(String::from_utf8(result.stderr)
@@ -589,6 +609,7 @@ fn ask_without_provider_reports_not_configured() {
 fn ask_surfaces_a_confirmation() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         session.set_ask_provider(Box::new(FakeProvider::reply(
             "should not run yet",
@@ -628,6 +649,7 @@ fn ask_surfaces_a_confirmation() {
 fn ask_shell_tool_runs_command_and_feeds_result_back() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         session.set_ask_provider(Box::new(FakeProvider::scripted(
             vec![
@@ -660,6 +682,7 @@ fn ask_shell_tool_runs_command_and_feeds_result_back() {
 fn ask_confirm_tool_pauses_and_deny_continues() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         session.set_ask_provider(Box::new(FakeProvider::scripted(
             vec![
@@ -705,6 +728,7 @@ fn ask_confirm_tool_pauses_and_deny_continues() {
 fn ask_sudo_only_tool_pauses_even_under_sudo_ask() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         // `rm` is sudo-only in the default policy table; try to delete a marker file.
         let path = std::env::temp_dir().join("clank_ask_sudoonly_proof");
@@ -748,6 +772,7 @@ fn ask_sudo_pre_authorizes_confirm_tool() {
     on_rt(async {
         let url = http_mock("fetched-body");
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         session.set_ask_provider(Box::new(FakeProvider::scripted(
             vec![
@@ -780,6 +805,7 @@ fn ask_all_answer_upgrades_blanket_mid_loop() {
         let url_a = http_mock("body-a");
         let url_b = http_mock("body-b");
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         session.set_ask_provider(Box::new(FakeProvider::scripted(
             vec![
@@ -825,6 +851,7 @@ fn ask_all_answer_upgrades_blanket_mid_loop() {
 fn ask_prompt_user_tool_round_trips() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         let prompt_call = crate::ai::ask::AskResponse {
             text: String::new(),
@@ -869,6 +896,7 @@ fn ask_prompt_user_tool_round_trips() {
 fn ask_pause_kill_aborts_the_whole_ask() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         let prompt_call = crate::ai::ask::AskResponse {
             text: String::new(),
@@ -893,7 +921,7 @@ fn ask_pause_kill_aborts_the_whole_ask() {
         // Abort (as a kill of the paused row would, via answer_prompt(None)).
         let aborted = session.answer_prompt(None).await;
         assert_eq!(aborted.exit_code, 130);
-        assert!(session.pending.is_none(), "no pending after abort");
+        assert!(!session.has_pending_prompt(), "no pending after abort");
     });
 }
 
@@ -903,6 +931,7 @@ fn ask_pause_kill_aborts_the_whole_ask() {
 fn ask_uses_model_default_and_flag_overrides() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         session.set_ask_provider(Box::new(FakeProvider::scripted(
             vec![
@@ -954,6 +983,7 @@ fn ask_uses_model_default_and_flag_overrides() {
 fn ask_unknown_provider_prefix_errors() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         session.set_ask_provider(Box::new(FakeProvider::reply("x", seen.clone())));
         // A truly-unknown provider errors before any call (known providers like openai now route).
@@ -974,6 +1004,7 @@ fn ask_unknown_provider_prefix_errors() {
 fn ask_recursion_is_refused() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         session.set_ask_provider(Box::new(FakeProvider::scripted(
             vec![
@@ -996,6 +1027,7 @@ fn ask_recursion_is_refused() {
 fn ask_shell_internal_command_is_refused() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         session.set_ask_provider(Box::new(FakeProvider::scripted(
             vec![
@@ -1020,6 +1052,7 @@ fn ask_shell_internal_command_is_refused() {
 fn ask_compound_tool_call_cannot_smuggle_a_shell_internal_command() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         session.set_ask_provider(Box::new(FakeProvider::scripted(
             vec![
@@ -1048,6 +1081,7 @@ fn ask_compound_tool_call_cannot_smuggle_a_shell_internal_command() {
 fn ask_command_substitution_tool_call_is_refused() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         session.set_ask_provider(Box::new(FakeProvider::scripted(
             vec![
@@ -1073,6 +1107,7 @@ fn ask_command_substitution_tool_call_is_refused() {
 fn ask_unknown_tool_command_is_denied_but_safe_builtins_run() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         session.set_ask_provider(Box::new(FakeProvider::scripted(
             vec![
@@ -1103,6 +1138,7 @@ fn ask_unknown_tool_command_is_denied_but_safe_builtins_run() {
 fn ask_malformed_tool_args_error_and_continue() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         let bad = crate::ai::ask::AskResponse {
             text: String::new(),
@@ -1140,6 +1176,7 @@ fn ask_malformed_tool_args_error_and_continue() {
 fn ask_loop_stops_at_the_iteration_cap() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         // More tool-call responses than the cap: the loop must stop at the cap.
         let script: Vec<_> = (0..ASK_MAX_ITERATIONS + 5)
@@ -1169,6 +1206,7 @@ fn ask_loop_stops_at_the_iteration_cap() {
 fn ask_provider_is_restored_between_calls() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         session.set_ask_provider(Box::new(FakeProvider::scripted(
             vec![
                 crate::ai::ask::AskResponse::text("first"),

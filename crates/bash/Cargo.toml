@@ -1,0 +1,102 @@
+[package]
+name = "bash"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[lib]
+# Pure rlib, like the `clank-core` this was carved out of: nothing consumes a cdylib artifact from
+# the shell core. The wasm components are `clank-agent` and `bash-tool`, and the native binary is
+# `clank-cli` — all of them link this as a library.
+crate-type = ["rlib"]
+
+[features]
+# Test fixtures (current-thread runtime helper, the process-cwd lock, log capture) for crates whose
+# tests drive a `Session` — the plug-in crate's family suites.
+test-support = []
+
+# All-target deps: Brush (the shell interpreter) now runs on both native and wasm. `nix` is
+# gated under cfg(unix) inside brush-core, so the wasm32-wasip2 build still pulls zero nix.
+# tokio provides the runtime brush requires for its internal async (current-thread on wasm).
+[dependencies]
+brush-core = "0.5"
+brush-builtins = "0.2"
+brush-parser = "0.4"
+# The curl/wget HTTP commands (wasm/native HTTP seam lives in these crates). clank intercepts
+# curl/wget in Session::run_command and awaits their async `run` under the live reactor.
+wcurl = { path = "../../utilities/wcurl" }
+waget = { path = "../../utilities/waget" }
+tokio = { version = "1", features = ["rt"] }
+diffy = { version = "0.5", features = ["std"] }
+grep = "0.4"
+infer = "0.19"
+jaq-core = "3.1"
+jaq-json = "2.0"
+jaq-std = "3.0"
+regex = "1"
+similar = "2.7"
+# `find`'s real-filesystem traversal. Pure-Rust over `std::fs` (only pulls `same-file`); no icu/libc,
+# builds clean on wasm32-wasip2. The glob/predicate layer and the virtual /bin,/proc walks stay ours.
+walkdir = "2"
+# Internal coreutils (uutils), registered as clank builtins. uucore is patched for wasm32-wasip2
+# via [patch.crates-io] in the workspace root.
+uu_cat = "0.9"
+uu_ls = "0.9"
+uu_wc = "0.9"
+uu_head = "0.9"
+uu_sort = "0.9"
+uu_mkdir = "0.9"
+uu_rm = "0.9"
+uu_mv = "0.9"
+uu_cp = "0.9"
+uu_env = "0.9"
+uu_cut = "0.9"
+uu_tr = "0.9"
+uu_uniq = "0.9"
+uu_tail = "0.9"
+uu_tee = "0.9"
+uu_touch = "0.9"
+uu_sleep = "0.9"
+# printf is clank-registered (uu_printf) rather than Brush's builtin: Brush gates its printf to
+# `any(unix, windows)` (its uucore dep isn't linked on wasm), so the agent had no printf at all.
+# Registering uu_printf fills wasm and shadows Brush's on native for uniform behavior.
+uu_printf = "0.9"
+# Direct uucore dep (same patched fork) so `run_uu` can reset uucore's process-global exit code
+# per invocation — upstream resets it by process exit, which never happens in-process here.
+uucore = "0.9"
+async-trait = "0.1"
+# Parsing the agentic `ask` loop's tool-call arguments (the `shell` tool's JSON args) and, later,
+# MCP JSON-RPC. Pure Rust, dual-target-safe (no OS deps).
+serde_json = "1"
+# ask.toml (default model + provider config) read/write. serde derive + the toml crate are pure Rust
+# (toml_edit/winnow, no OS deps) and compile on wasm32-wasip2.
+serde = { version = "1", features = ["derive"] }
+# Structured subsystem errors (golem/grease/mcp/ai). Derive-only, no runtime and no OS deps, so it
+# compiles unchanged for wasm32-wasip2. Lets a failure carry its KIND — retryable transport vs remote
+# fault vs malformed request — instead of collapsing to a String the caller can only print.
+thiserror = "2"
+# Timestamp rendering for `stat` (already in the tree via brush-core; compiles on wasm32-wasip2).
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Arg parsing for clank builtins written in Brush's `Command` form (xargs) — the same clap the
+# Brush builtins themselves use (already in the tree).
+clap = { version = "4", features = ["derive"] }
+
+# Native-only: a multi-thread tokio runtime (Runtime::new) and temp-file output capture.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1", features = ["rt-multi-thread"] }
+tempfile = "3"
+# For redirecting fd 1/2 around uutils' uumain (which writes to std stdout) so its output is
+# captured by brush's fd table (pipes, redirects, the transcript capture). Stays here: the fd-swap
+# lives in `tools::coreutils`, which is engine code, not platform code.
+libc = "0.2"
+#
+# NOTE: `reqwest`, `reedline`, `crossterm` and `nu-ansi-term` are deliberately NOT here any more.
+# They moved to `clank-native` along with the code that used them — the REPL TUI and the four
+# reqwest-backed provider implementations. A dual-target engine crate has no business knowing about
+# an HTTP client or a terminal line editor; the wasm side already had that boundary (clank-embed),
+# and this is the missing mirror. The shell core keeps only the seam TRAITS.

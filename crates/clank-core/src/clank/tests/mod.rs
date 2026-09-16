@@ -1,70 +1,39 @@
-// The session test suite (included via `#[cfg(all(test, not(wasm)))] mod tests` in mod.rs).
-// unwrap/expect on known-good fixtures is correct test style; clippy's allow-unwrap-in-tests does not
-// recognize the compound cfg gate, so scope it explicitly here — it covers the submodules too.
+// The plug-in test suite (included via `#[cfg(test)] mod tests` in clank/mod.rs).
+// unwrap/expect on known-good fixtures is correct test style; clippy's allow-unwrap-in-tests does
+// not recognize the compound cfg gate the submodules inherit, so scope it explicitly here — it
+// covers the submodules too.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-//! Shared test harness, plus one submodule per concern.
+//! Shared test harness for clank's command families, plus one submodule per family.
 //!
-//! Everything in THIS file is fixture: the fake `AskProvider`/`McpHttp`/`AgentInvoker`
-//! implementations, the env-var guards that make grease and MCP hermetic, and the small builders
-//! that shape a canned HTTP response. The submodules hold the assertions, and reach the fixtures
-//! through `use super::*`.
+//! Everything in THIS file is fixture: the fake `AskProvider`/`McpHttp`/`AgentInvoker`/
+//! `GolemCluster` implementations, the env-var guards that make grease and MCP hermetic, the small
+//! builders that shape a canned HTTP response, and the signed/logged package fixtures. The
+//! submodules hold the assertions, and reach the fixtures through `use super::*`.
 //!
-//! The split mirrors `session/*.rs` where a concern has its own module there, and adds a file where
-//! a concern is spread across several (`secrets`, `authz`, `resolution`, `logging`).
+//! These tests drive a real [`Session`] with [`Clank`](crate::clank::Clank) installed, so they take
+//! the same process-global locks the shell core's own suite does — and the runtime helper and log
+//! capture they share come from [`bash::test_support`], not from a copy here. See
+//! `bash::session::tests`'s module doc for why one test binary (submodules, not crate-root
+//! integration tests) is load-bearing for that.
 //!
-//! ## Why submodules of one `mod tests`, and not files under `tests/` at the crate root
-//!
-//! This matters more than it looks, and an earlier attempt at this split was abandoned over test
-//! races that turned out to be a consequence of getting it wrong.
-//!
-//! Crate-root integration tests compile to **separate binaries**, so each runs in its own process.
-//! Several things this suite depends on are **process-global**, not per-test:
-//!
-//! - the process working directory, which `tools::coreutils::ShellCwd` moves for the duration of a
-//!   builtin call (brush keeps `cd` in its own state and never touches the process cwd);
-//! - `$CLANK_GREASE_*`, `$CLANK_MCP_*` and `$CLANK_LOG_DIR`, which the hermetic-dir guards set and
-//!   restore;
-//! - uucore's exit code, an `AtomicI32` upstream only ever resets at process exit;
-//! - the `SIGPIPE` disposition that `run_uu` flips around a `uumain` call.
-//!
-//! The locks that serialize all of that — [`CWD_TEST_LOCK`], `grease::config::TEST_ENV_LOCK`,
-//! `mcp::config::TEST_ENV_LOCK`, `logging::test_env_lock` — are `static`s, so they serialize
-//! **within one process and not across processes**. Splitting into separate binaries silently
-//! removes every one of those guarantees while leaving the code that assumes them untouched, which
-//! is exactly the shape that produces intermittent, load-dependent failures.
-//!
-//! Submodules keep one binary, one process, one set of locks. The tests are unchanged and so are
-//! their guarantees — verified by the count being identical across the split (509) and by 12
-//! consecutive clean runs.
-//!
-//! Note the lock ORDER convention, which the split preserves: **grease, then mcp**. Taking them in
-//! the other order deadlocks against a test that takes them in this one.
+//! Note the lock ORDER convention: **grease, then mcp**. Taking them in the other order deadlocks
+//! against a test that takes them in this one.
 
-use super::*;
+use std::sync::Mutex;
+
+use bash::session::Session;
+use bash::test_support::{http_mock, on_rt, LogCapture};
+
+use crate::ClankSessionExt as _;
 
 mod agent;
 mod ask;
-mod authz;
-mod ctx;
-mod eval;
 mod grease;
-mod http;
 mod logging;
 mod mcp;
-mod plugin;
-mod prompt;
 mod resolution;
-mod secrets;
-
-/// Drive a closure on a fresh current-thread runtime (mirrors how `Session` is used natively).
-fn on_rt<F: std::future::Future>(f: F) -> F::Output {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap()
-        .block_on(f)
-}
+mod surface;
 
 /// What a [`FakeProvider`] recorded about a single `turn` call, so tests can assert what context
 /// `ask` assembled (transcript-as-context) and which model/tools it used.
@@ -574,64 +543,3 @@ fn mcp_call_response(text: &str) -> crate::mcp::client::HttpResponse {
     mcp_json(serde_json::json!({"jsonrpc":"2.0","id":9,"result":{
         "content":[{"type":"text","text":text}], "isError":false}}))
 }
-
-/// Points `CLANK_LOG_DIR` at a fresh temp dir for a Session logging test, restoring the env on drop.
-/// Serializes via a process-wide lock (env is global). The default `DefaultLogSink` (installed by
-/// `eval_line`) then writes real files under this dir.
-struct LogCapture {
-    _lock: std::sync::MutexGuard<'static, ()>,
-    dir: std::path::PathBuf,
-}
-
-impl LogCapture {
-    fn new(tag: &str) -> Self {
-        let lock = crate::logging::test_env_lock();
-        let dir = std::env::temp_dir().join(format!("clank-sesslog-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::env::set_var(crate::config::env::LOG_DIR, &dir);
-        Self { _lock: lock, dir }
-    }
-    fn read(&self, file: crate::logging::LogFile) -> String {
-        std::fs::read_to_string(self.dir.join(file.filename())).unwrap_or_default()
-    }
-}
-
-impl Drop for LogCapture {
-    fn drop(&mut self) {
-        std::env::remove_var(crate::config::env::LOG_DIR);
-        let _ = std::fs::remove_dir_all(&self.dir);
-    }
-}
-
-/// A seeded temp file for `rm` tests: returns its path. Uses a unique name per test.
-fn seed_file(tag: &str) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!("clank_authz_{tag}_{}", std::process::id()));
-    std::fs::write(&path, b"x").unwrap();
-    path
-}
-
-/// A one-shot localhost HTTP server (raw `std::net`, no dep) that replies `200 <body>` once.
-/// Hermetic — the `curl`/`wget` interception is exercised end-to-end without real internet.
-fn http_mock(body: &'static str) -> String {
-    use std::io::{Read, Write};
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-    std::thread::spawn(move || {
-        if let Ok((mut stream, _)) = listener.accept() {
-            let mut buf = [0u8; 2048];
-            let _ = stream.read(&mut buf);
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            let _ = stream.write_all(response.as_bytes());
-            let _ = stream.flush();
-        }
-    });
-    format!("http://{addr}")
-}
-
-/// Serializes the cwd-sensitive `cd` test against the curl-pipeline tests: their grep stages hold
-/// process-cwd windows (`ShellCwd`) while a mock server round-trips, and the process cwd is one
-/// global across Sessions. Test-parallelism artifact only; production runs one line at a time.
-static CWD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

@@ -1,4 +1,5 @@
-//! The `/var/log` sinks: what each command writes, and what must never appear there.
+//! The `/var/log` sinks: what each command writes, and what must never appear there. The plug-in's
+//! own half (an `ask` LLM turn in http.log) lives with the plug-in.
 //!
 //! Fixtures live in the parent module ([`super`]).
 
@@ -45,23 +46,5 @@ fn ops_log_records_destructive_ops() {
         );
         assert!(log.contains("cmd=rm"), "got:\n{log}");
         assert!(log.contains("confirm-required"), "got:\n{log}");
-    });
-}
-
-/// An `ask` LLM turn is recorded in http.log (via the `LoggingAskProvider` wrapper).
-#[test]
-fn http_log_records_the_llm_turn() {
-    on_rt(async {
-        let cap = LogCapture::new("http");
-        let mut session = Session::new().await.unwrap();
-        let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
-        session.set_ask_provider(Box::new(FakeProvider::reply("reply", seen)));
-        session.eval_line(r#"sudo ask "hello""#).await;
-        let log = cap.read(crate::logging::LogFile::Http);
-        assert!(
-            log.contains("kind=llm"),
-            "http.log should record the LLM call, got:\n{log}"
-        );
-        assert!(log.contains("status=ok"), "got:\n{log}");
     });
 }

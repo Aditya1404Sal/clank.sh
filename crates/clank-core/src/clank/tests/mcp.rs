@@ -17,6 +17,7 @@ fn mcp_resources_virtual_fs_static_and_dynamic() {
         let _dirs = set_grease_dirs();
         let _mcp = set_mcp_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
 
         let pkg = serde_json::json!({
             "kind": "mcp", "name": "srv", "description": "s", "url": "https://mcp.srv/x"
@@ -118,6 +119,7 @@ fn mcp_templates_and_resource_info() {
         let _dirs = set_grease_dirs();
         let _mcp = set_mcp_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
 
         let pkg = serde_json::json!({
             "kind": "mcp", "name": "gh", "description": "github", "url": "https://mcp.gh/x"
@@ -215,6 +217,7 @@ fn mcp_watch_is_a_bounded_poll() {
         let _dirs = set_grease_dirs();
         let _mcp = set_mcp_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let pkg = serde_json::json!({
             "kind": "mcp", "name": "metrics", "description": "m", "url": "https://mcp.m/x"
         });
@@ -272,6 +275,7 @@ fn mcp_add_installs_and_surfaces_the_server() {
     on_rt(async {
         let dirs = set_mcp_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         // Put the mcp bin dir on PATH so `which` finds the stub.
         session
             .run_line(&format!("export PATH={}:$PATH", dirs.bin))
@@ -320,6 +324,7 @@ fn mcp_dispatch_survives_restart_without_reload() {
         {
             // Session 1: install `demo`, caching its tools in the on-disk config.
             let mut session = Session::new().await.unwrap();
+            session.install_clank();
             session.set_mcp_http(Box::new(FakeMcpHttp::new(mcp_install_script())));
             let add = session.eval_line("sudo mcp add demo https://x/mcp").await;
             assert_eq!(
@@ -332,6 +337,7 @@ fn mcp_dispatch_survives_restart_without_reload() {
         // Restart: a brand-new Session (reconstruction runs), transport re-injected as clank-native's
         // `run()` does AFTER Session::new. Serve ONLY the tools/call response — no re-initialize.
         let mut fresh = Session::new().await.unwrap();
+        fresh.install_clank();
         fresh.set_mcp_http(Box::new(FakeMcpHttp::new(vec![mcp_call_response(
             "echoed: hi",
         )])));
@@ -360,6 +366,7 @@ fn mcp_state_reconstructs_from_config_cache() {
         let _dirs = set_mcp_dirs();
         {
             let mut session = Session::new().await.unwrap();
+            session.install_clank();
             session.set_mcp_http(Box::new(FakeMcpHttp::new(mcp_install_script())));
             let add = session
                 .eval_line("sudo mcp add demo https://x.example/mcp")
@@ -373,6 +380,7 @@ fn mcp_state_reconstructs_from_config_cache() {
         }
         // A brand-new Session, same CLANK_MCP_ETC, no HTTP transport at all.
         let mut fresh = Session::new().await.unwrap();
+        fresh.install_clank();
         let (list, _) = fresh.run_line("mcp list").await;
         let list = String::from_utf8(list).unwrap();
         assert!(
@@ -391,6 +399,7 @@ fn mcp_add_transport_failure_is_configured_not_installed() {
     on_rt(async {
         let _dirs = set_mcp_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         // initialize returns a 500.
         let bad = crate::mcp::client::HttpResponse {
             status: 500,
@@ -414,6 +423,7 @@ fn mcp_add_rejects_a_builtin_name_collision() {
     on_rt(async {
         let _dirs = set_mcp_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         session.set_mcp_http(Box::new(FakeMcpHttp::new(vec![])));
         let add = session.eval_line("sudo mcp add grep https://x/mcp").await;
         assert_eq!(add.exit_code, 2);
@@ -428,6 +438,7 @@ fn mcp_add_confirms_but_list_does_not() {
     on_rt(async {
         let _dirs = set_mcp_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         session.set_mcp_http(Box::new(FakeMcpHttp::new(mcp_install_script())));
 
         // `mcp list` (subcommand Allow) runs without a confirm.
@@ -449,6 +460,7 @@ fn mcp_tool_dispatch_maps_args_and_returns_text() {
     on_rt(async {
         let dirs = set_mcp_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let mut script = mcp_install_script();
         script.push(mcp_call_response("echoed: hello"));
         session.set_mcp_http(Box::new(FakeMcpHttp::new(script)));
@@ -475,6 +487,7 @@ fn mcp_tool_missing_required_arg_errors() {
     on_rt(async {
         let _dirs = set_mcp_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         session.set_mcp_http(Box::new(FakeMcpHttp::new(mcp_install_script())));
         session.eval_line("sudo mcp add demo https://x/mcp").await;
         // `echo` requires `text`; omit it.
@@ -490,6 +503,7 @@ fn mcp_tool_confirms_then_runs() {
     on_rt(async {
         let _dirs = set_mcp_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let mut script = mcp_install_script();
         script.push(mcp_call_response("ran"));
         session.set_mcp_http(Box::new(FakeMcpHttp::new(script)));
@@ -512,6 +526,7 @@ fn mcp_server_help_and_man_surfaces() {
     on_rt(async {
         let _dirs = set_mcp_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         session.set_mcp_http(Box::new(FakeMcpHttp::new(mcp_install_script())));
         session.eval_line("sudo mcp add demo https://x/mcp").await;
 
@@ -533,6 +548,7 @@ fn mcp_tool_raw_args_escape_hatch() {
     on_rt(async {
         let _dirs = set_mcp_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let mut script = mcp_install_script();
         script.push(mcp_call_response("raw ok"));
         let http = FakeMcpHttp::new(script);
@@ -566,6 +582,7 @@ fn mcp_session_lifecycle() {
     on_rt(async {
         let _dirs = set_mcp_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         // install script (init+initialized+tools/list) then a SECOND init for `session open`.
         let mut script = mcp_install_script();
         let mut open_init = mcp_json(serde_json::json!({"jsonrpc":"2.0","id":3,"result":{
@@ -622,6 +639,7 @@ fn mcp_session_close_405_removes_locally() {
     on_rt(async {
         let _dirs = set_mcp_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let mut script = mcp_install_script();
         let mut open_init = mcp_json(serde_json::json!({"jsonrpc":"2.0","id":3,"result":{
             "serverInfo":{"name":"demo","version":"1.0"},"capabilities":{}}}));
@@ -664,6 +682,7 @@ fn ask_can_call_an_mcp_tool() {
     on_rt(async {
         let _dirs = set_mcp_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let mut script = mcp_install_script();
         script.push(mcp_call_response("echoed by mcp"));
         let http = FakeMcpHttp::new(script);
@@ -731,6 +750,7 @@ fn ask_mcp_tool_pauses_without_sudo() {
     on_rt(async {
         let _dirs = set_mcp_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let mut script = mcp_install_script();
         script.push(mcp_call_response("ran after approval"));
         session.set_mcp_http(Box::new(FakeMcpHttp::new(script)));
@@ -772,6 +792,7 @@ fn ask_mcp_tool_pauses_without_sudo() {
 fn mcp_watch_unknown_uri_errors() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let result = session.eval_line("mcp watch some://uri").await;
         assert_eq!(result.exit_code, 1);
         assert!(String::from_utf8(result.stderr)

@@ -619,7 +619,7 @@ pub(crate) fn note_simple_line(line: &str) {
 /// characters before wrapping. Each cell is padded to the widest item + 2. Returns a newline-joined
 /// block (no trailing newline). Used for `ls` of the virtual `/bin`·`/mnt/mcp`·`/proc` namespaces and
 /// for skill script-name listings — the short-single-token lists that read better horizontally.
-pub(crate) fn format_columns<S: AsRef<str>>(items: &[S], width: usize) -> String {
+pub fn format_columns<S: AsRef<str>>(items: &[S], width: usize) -> String {
     if items.is_empty() {
         return String::new();
     }

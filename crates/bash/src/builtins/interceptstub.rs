@@ -88,7 +88,7 @@ impl SimpleCommand for SessionStub {
 
 /// The registration a plug-in uses for its own session-layer commands.
 #[must_use]
-pub(crate) fn session_stub<SE: ShellExtensions>() -> Registration<SE> {
+pub fn session_stub<SE: ShellExtensions>() -> Registration<SE> {
     crate::helpshim::simple_builtin_with_help::<SessionStub, SE>()
 }
 

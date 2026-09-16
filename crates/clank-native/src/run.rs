@@ -11,6 +11,7 @@
 //!   (`echo cmd | clank`, the e2e scripts, the tests). No terminal, no ANSI, no behavior change.
 
 use clank_core::session::Session;
+use clank_core::ClankSessionExt as _;
 use clank_core::{trim_eol, Flow, PROMPT};
 use std::io::{self, IsTerminal, Write};
 
@@ -25,6 +26,9 @@ use std::io::{self, IsTerminal, Write};
 /// writing to stdout fails.
 pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut session = Session::new().await?;
+    // The shell core starts with no plug-in; the native binary is a clank embedder, so it installs
+    // clank's command families before injecting the providers they read.
+    session.install_clank();
     inject_native_providers(&mut session);
     if io::stdin().is_terminal() {
         run_interactive(&mut session).await

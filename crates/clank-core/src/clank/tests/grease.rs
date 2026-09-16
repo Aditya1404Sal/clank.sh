@@ -11,12 +11,17 @@ use super::*;
 /// static resources under /mnt/mcp, and caches the surface so a fresh Session rebuilds it offline.
 // `init` (the JSON-RPC initialize response) reads close to `inst` (the install result) — clear in context.
 #[allow(clippy::similar_names)]
+// One end-to-end install: the whole scripted MCP surface has to be set up before the first
+// assertion, so the body is long by construction — splitting it would only hide the script from the
+// assertions that read it.
+#[allow(clippy::too_many_lines)]
 #[test]
 fn grease_install_an_mcp_server_registers_tools_prompts_resources() {
     on_rt(async {
         let _dirs = set_grease_dirs();
         let _mcp = set_mcp_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
 
         // The grease registry payload: a minimal mcp package pointing at the server URL.
         let pkg = serde_json::json!({
@@ -107,7 +112,8 @@ fn grease_install_an_mcp_server_registers_tools_prompts_resources() {
         );
 
         // A FRESH Session rebuilds the tool surface from the cached payload (no live fetch).
-        let session2 = Session::new().await.unwrap();
+        let mut session2 = Session::new().await.unwrap();
+        session2.install_clank();
         assert!(
             session2
                 .plugin_ref::<crate::clank::Clank>()
@@ -139,6 +145,7 @@ fn grease_registry_add_list_remove() {
     on_rt(async {
         let _dirs = set_grease_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
 
         let list0 = session.eval_line("grease registry list").await;
         assert!(String::from_utf8(list0.stdout)
@@ -181,6 +188,7 @@ fn grease_install_then_run_a_prompt() {
     on_rt(async {
         let _dirs = set_grease_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         session.set_ask_provider(Box::new(FakeProvider::reply("the summary", seen.clone())));
 
@@ -267,6 +275,7 @@ fn grease_install_then_run_a_markdown_prompt() {
     on_rt(async {
         let _dirs = set_grease_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(Vec::new()));
         session.set_ask_provider(Box::new(FakeProvider::reply("the summary", seen.clone())));
 
@@ -324,6 +333,7 @@ fn proc_system_prompt_reflects_installed_prompts() {
     on_rt(async {
         let _dirs = set_grease_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
 
         // Before install: the proc file has the base surface but NOT our prompt.
         let before = String::from_utf8(
@@ -375,6 +385,7 @@ fn grease_install_then_run_a_script() {
     on_rt(async {
         let _dirs = set_grease_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
 
         // A parameterized shell-script package.
         let pkg = serde_json::json!({
@@ -489,6 +500,7 @@ fn grease_install_a_skill_materializes_and_surfaces_it() {
     on_rt(async {
         let _dirs = set_grease_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
 
         let pkg = serde_json::json!({
             "kind": "skill",
@@ -567,7 +579,7 @@ fn grease_install_a_skill_materializes_and_surfaces_it() {
 
         // The skill is surfaced in the agentic system prompt (context, not a callable tool).
         let sys = crate::ai::ask::build_system_prompt_with_capabilities(
-            &session.registry,
+            session.registry(),
             &session.plugin_ref::<crate::clank::Clank>().unwrap().mcp,
             &session.plugin_ref::<crate::clank::Clank>().unwrap().grease,
         );
@@ -599,6 +611,7 @@ fn grease_install_verifies_a_valid_signature() {
     on_rt(async {
         let _dirs = set_grease_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
 
         let pkg = serde_json::json!({
             "kind": "prompt", "name": "signed-pkg", "description": "d", "body": "hi"
@@ -660,6 +673,7 @@ fn grease_install_rejects_a_bad_signature() {
     on_rt(async {
         let _dirs = set_grease_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
 
         let pkg = serde_json::json!({
             "kind": "prompt", "name": "bad-sig", "description": "d", "body": "hi"
@@ -715,6 +729,7 @@ fn grease_install_rejects_unsigned_package_from_signed_registry() {
     on_rt(async {
         let _dirs = set_grease_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let pkg = serde_json::json!({
             "kind": "prompt", "name": "nosig", "description": "d", "body": "hi"
         });
@@ -760,6 +775,7 @@ fn grease_install_from_unsigned_registry_is_record_only() {
     on_rt(async {
         let _dirs = set_grease_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let pkg = serde_json::json!({
             "kind": "prompt", "name": "plain", "description": "d", "body": "hi"
         });
@@ -797,6 +813,7 @@ fn grease_install_verifies_transparency_log_inclusion() {
         use base64::Engine;
         let _dirs = set_grease_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let pkg = serde_json::json!({
             "kind": "prompt", "name": "logged", "description": "d", "body": "hi"
         });
@@ -870,6 +887,7 @@ fn grease_install_rejects_bad_transparency_log_proof() {
         use base64::Engine;
         let _dirs = set_grease_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let pkg = serde_json::json!({
             "kind": "prompt", "name": "badlog", "description": "d", "body": "hi"
         });
@@ -927,6 +945,7 @@ fn grease_install_discloses_capabilities() {
     on_rt(async {
         let _dirs = set_grease_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         session
             .run_line("grease registry add https://reg.example/pkgs")
             .await;
@@ -969,6 +988,7 @@ fn grease_install_verifies_matching_sha256() {
         });
         let good = crate::grease::pkg::sha256_hex(pkg.to_string().as_bytes());
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let index = serde_json::json!({
             "packages": [{"name":"vpkg","description":"verified package","sha256": good}]
         });
@@ -1002,6 +1022,7 @@ fn grease_install_rejects_sha256_mismatch() {
         let _dirs = set_grease_dirs();
         let pkg = serde_json::json!({"name":"vpkg","description":"d","body":"hello."});
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let index = serde_json::json!({
             "packages": [{"name":"vpkg","sha256":"0000000000000000000000000000000000000000000000000000000000000000"}]
         });
@@ -1036,6 +1057,7 @@ fn grease_install_rejects_indexed_package_without_hash() {
     on_rt(async {
         let _dirs = set_grease_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let pkg = serde_json::json!({"name":"loose","description":"d","body":"hi."});
         // Index present but with no sha256 field for the package → refuse.
         let index = serde_json::json!({"packages":[{"name":"loose","description":"d"}]});
@@ -1069,6 +1091,7 @@ fn ask_can_call_an_installed_prompt() {
     on_rt(async {
         let _dirs = set_grease_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
 
         // Install a parameterized prompt (reuse the fetch flow).
         let pkg = serde_json::json!({
@@ -1151,6 +1174,7 @@ fn ask_prompt_tool_pauses_without_sudo() {
     on_rt(async {
         let _dirs = set_grease_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let pkg = serde_json::json!({
             "name": "greet", "description": "greet", "body": "Say hello."
         });
@@ -1196,6 +1220,7 @@ fn grease_install_rejects_builtin_collision() {
     on_rt(async {
         let _dirs = set_grease_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         session.set_mcp_http(Box::new(FakeMcpHttp::new(vec![])));
         session
             .run_line("grease registry add https://reg.example")
@@ -1216,6 +1241,7 @@ fn grease_install_confirms_and_errors_without_registry() {
     on_rt(async {
         let _dirs = set_grease_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
 
         let bad = session.eval_line("grease registry add not-a-url").await;
         assert_eq!(bad.exit_code, 2);
@@ -1276,6 +1302,7 @@ fn a_failed_grease_install_is_audited_to_ops_log() {
         let _dirs = set_grease_dirs();
         let cap = LogCapture::new("grease-audit");
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         // No registries configured → the install fails before any fetch.
         let r = session.eval_line("sudo grease install nope").await;
         assert_ne!(r.exit_code, 0);
@@ -1308,6 +1335,7 @@ fn a_half_installed_package_is_reported_and_can_be_removed() {
         .unwrap();
 
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         assert_eq!(
             session
                 .plugin_ref::<crate::clank::Clank>()
@@ -1363,7 +1391,8 @@ fn a_corrupt_payload_is_reported_not_silently_skipped() {
         )
         .unwrap();
 
-        let session = Session::new().await.unwrap();
+        let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let broken = session
             .plugin_ref::<crate::clank::Clank>()
             .unwrap()
@@ -1389,6 +1418,7 @@ fn grease_search_separates_an_unreadable_registry_from_a_real_no_match() {
     on_rt(async {
         let _dirs = set_grease_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         // No routes → every index.json fetch 404s.
         session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![])));
         session
@@ -1415,6 +1445,7 @@ fn grease_search_reports_a_genuine_no_match_as_success() {
     on_rt(async {
         let _dirs = set_grease_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         session.set_mcp_http(Box::new(FakeGreaseHttp::new(vec![(
             "/index.json",
             grease_json(serde_json::json!({"packages": []})),

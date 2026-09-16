@@ -50,7 +50,7 @@ use std::io::Write;
 /// `Session::pkg_help_for` — which otherwise duplicated this exact match arm; see the module doc
 /// for why `WithHelp` below does not share it.
 #[must_use]
-pub(crate) fn skip_leading_sudo(words: &[String]) -> &[String] {
+pub fn skip_leading_sudo(words: &[String]) -> &[String] {
     match words.split_first() {
         Some((first, rest)) if first == "sudo" => rest,
         _ => words,
@@ -61,7 +61,7 @@ pub(crate) fn skip_leading_sudo(words: &[String]) -> &[String] {
 /// `--help`. Shared by the same two call sites as [`skip_leading_sudo`]; see the module doc for why
 /// `WithHelp`'s own (narrower, positional) check isn't merged into this.
 #[must_use]
-pub(crate) fn asks_for_help(words: &[String]) -> bool {
+pub fn asks_for_help(words: &[String]) -> bool {
     words.iter().any(|w| w == "--help")
 }
 
@@ -87,7 +87,7 @@ pub fn dequote_words(line: &str) -> Option<Vec<String>> {
 
 /// A `SimpleCommand` wrapper that serves `--help`/`-h` (as the sole first argument) from the
 /// wrapped builtin's `DetailedHelp` content before its own arg parsing can mangle it.
-pub(crate) struct WithHelp<T>(std::marker::PhantomData<T>);
+pub struct WithHelp<T>(std::marker::PhantomData<T>);
 
 impl<T: SimpleCommand> SimpleCommand for WithHelp<T> {
     fn get_content(
@@ -127,7 +127,8 @@ impl<T: SimpleCommand> SimpleCommand for WithHelp<T> {
 
 /// [`brush_core::builtins::simple_builtin`] with the `--help` shim applied — the registration
 /// helper every hand-rolled `SimpleCommand` should use.
-pub(crate) fn simple_builtin_with_help<T, SE>() -> Registration<SE>
+#[must_use]
+pub fn simple_builtin_with_help<T, SE>() -> Registration<SE>
 where
     T: SimpleCommand + Send + Sync,
     SE: ShellExtensions,

@@ -40,8 +40,9 @@ pub fn log_dir() -> PathBuf {
 }
 
 /// A process-wide lock any test that mutates the global `CLANK_LOG_DIR` env var must hold — shared
-/// across the `logging` and `session` test modules so their env mutations never race. Test-only.
-#[cfg(test)]
+/// across the `logging` and `session` test modules, and (via [`crate::test_support::LogCapture`])
+/// a consumer crate's suites, so their env mutations never race. Test-only.
+#[cfg(any(test, feature = "test-support"))]
 pub fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     LOCK.lock()

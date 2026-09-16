@@ -15,6 +15,7 @@ fn grease_install_then_invoke_a_golem_agent() {
     on_rt(async {
         let _dirs = set_grease_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(None));
         session.set_agent_invoker(Box::new(FakeAgentInvoker {
             reply: "added sku abc123".into(),
@@ -169,7 +170,8 @@ fn grease_install_then_invoke_a_golem_agent() {
 fn agent_invocation_without_a_cluster_errors_honestly() {
     on_rt(async {
         let _dirs = set_grease_dirs();
-        let mut session = Session::new().await.unwrap(); // no set_agent_invoker
+        let mut session = Session::new().await.unwrap();
+        session.install_clank(); // no set_agent_invoker
         let pkg = serde_json::json!({
             "kind": "agent", "name": "counter", "description": "c", "agent-type": "Counter",
             "constructor-params": ["id"],
@@ -199,6 +201,7 @@ fn agent_trigger_mode_and_kill() {
     on_rt(async {
         let _dirs = set_grease_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(None));
         session.set_agent_invoker(Box::new(FakeAgentInvoker {
             reply: String::new(),
@@ -248,6 +251,7 @@ fn trigger_invocation_tracking_is_bounded() {
     on_rt(async {
         let _dirs = set_grease_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(None));
         session.set_agent_invoker(Box::new(FakeAgentInvoker {
             reply: String::new(),
@@ -292,6 +296,7 @@ fn agent_schedule_mode_and_kill_cancels() {
     on_rt(async {
         let _dirs = set_grease_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(None));
         session.set_agent_invoker(Box::new(FakeAgentInvoker {
             reply: String::new(),
@@ -340,6 +345,7 @@ fn agent_honest_stubs() {
     on_rt(async {
         let _dirs = set_grease_dirs();
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
         let seen = std::sync::Arc::new(Mutex::new(None));
         session.set_agent_invoker(Box::new(FakeAgentInvoker {
             reply: "ok".into(),
@@ -373,6 +379,7 @@ fn agent_honest_stubs() {
 fn golem_command_dispatch_and_honest_stubs() {
     on_rt(async {
         let mut session = Session::new().await.unwrap();
+        session.install_clank();
 
         // No cluster injected → honest error (but NOT for interrupt/resume, which are honest anyway).
         let no_cluster = session.eval_line("golem agent list").await;
