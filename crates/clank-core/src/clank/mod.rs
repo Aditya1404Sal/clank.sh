@@ -7,6 +7,7 @@
 //! the `Plugin` slot once every family's glue is `impl Clank`.
 
 pub mod agent;
+pub mod mcp;
 
 /// The per-session state of every clank command family.
 #[derive(Default)]

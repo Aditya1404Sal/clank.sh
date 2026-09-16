@@ -1,6 +1,6 @@
 //! `Session` methods for the AI layer: the `ask` command + agentic tool loop, `ask repl`,
 //! `context summarize`/auto-compaction summarization, and model resolution. A few core helpers
-//! (`shell_home`, `resolve_authz`, `mcp_help_for`) ride along here and are re-exported to `super`.
+//! (`shell_home`, `resolve_authz`) ride along here and are re-exported to `super`.
 
 use std::fmt::Write as _;
 
@@ -559,23 +559,6 @@ impl Session {
         #[allow(clippy::expect_used)]
         let (_, policy, elevated, command) = strictest.expect("split_segments never returns empty");
         (policy, elevated, command, gated)
-    }
-
-    /// Generated help for an MCP tool line ending in `--help` (or a bare `<server>`): the server's
-    /// tool list. `None` if the line isn't an installed-server line or doesn't request help.
-    pub(super) fn mcp_help_for(&self, line: &str) -> Option<String> {
-        let Ok(inv) = crate::mcp::cmd::parse_tool_invocation(line)? else {
-            return None;
-        };
-        if !self.clank.mcp.is_server(&inv.server) {
-            return None;
-        }
-        // Bare `<server>` or `--help` ⇒ server help; a `<tool> --help` ⇒ the same (tool-level help is
-        // the server help in MCP-lite).
-        if inv.help || inv.tool.is_none() {
-            return self.clank.mcp.server_help(&inv.server);
-        }
-        None
     }
 
     /// Drive the `ask` agentic loop from `state` until it completes (model answers, transport error,

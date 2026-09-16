@@ -5,8 +5,8 @@
 
 use std::fmt::Write as _;
 
-use super::mcp::materialize_mcp_resources;
 use super::{LineResult, Session};
+use crate::clank::mcp::materialize_mcp_resources;
 
 impl Session {
     /// Dispatch a parsed `grease` command.

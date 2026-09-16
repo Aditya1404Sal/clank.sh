@@ -71,7 +71,7 @@ fn grease_install_an_mcp_server_registers_tools_prompts_resources() {
         );
 
         // The server is registered in McpState: `<server> <tool>` is a recognized tool line.
-        assert!(session.is_mcp_tool_line("demo echo --text hi"));
+        assert!(session.clank.is_mcp_tool_line("demo echo --text hi"));
         assert!(session.clank.grease.is_mcp("demo"));
 
         // The prompt was materialized as a standalone $PATH prompt.
@@ -98,7 +98,7 @@ fn grease_install_an_mcp_server_registers_tools_prompts_resources() {
         // A FRESH Session rebuilds the tool surface from the cached payload (no live fetch).
         let session2 = Session::new().await.unwrap();
         assert!(
-            session2.is_mcp_tool_line("demo echo --text hi"),
+            session2.clank.is_mcp_tool_line("demo echo --text hi"),
             "boot reconstruction failed"
         );
 
@@ -106,7 +106,7 @@ fn grease_install_an_mcp_server_registers_tools_prompts_resources() {
         let rm = session.eval_line("sudo grease remove demo").await;
         assert_eq!(rm.exit_code, 0);
         assert!(!session.clank.grease.is_mcp("demo"));
-        assert!(!session.is_mcp_tool_line("demo echo --text hi"));
+        assert!(!session.clank.is_mcp_tool_line("demo echo --text hi"));
     });
 }
 

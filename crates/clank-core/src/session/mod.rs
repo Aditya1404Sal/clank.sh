@@ -37,7 +37,6 @@ mod ask;
 mod ctx;
 mod env;
 pub(crate) mod grease;
-mod mcp;
 mod prompt;
 mod streams;
 
@@ -49,7 +48,6 @@ pub use ctx::SessionCtx;
 use ask::is_context_summarize;
 use env::{build_shell, ensure_fs_layout};
 use grease::{parse_pkg_invocation, prompt_leading_word};
-use mcp::build_mcp_arguments;
 use streams::finish;
 // The wasm capture adapters; the code that constructs them is `cfg`-gated the same way.
 #[cfg(target_arch = "wasm32")]
@@ -410,8 +408,7 @@ impl Session {
                 secret_env: std::collections::BTreeMap::new(),
                 rt,
             };
-            session.reconstruct_mcp_from_grease();
-            session.reconstruct_mcp_from_configs();
+            session.clank.reconstruct_mcp();
             Ok(session)
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -432,8 +429,7 @@ impl Session {
                 source: SourceInfo::default(),
                 secret_env: std::collections::BTreeMap::new(),
             };
-            session.reconstruct_mcp_from_grease();
-            session.reconstruct_mcp_from_configs();
+            session.clank.reconstruct_mcp();
             Ok(session)
         }
     }
@@ -446,75 +442,6 @@ impl Session {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .set_cap(cap_tokens);
-    }
-
-    /// Re-register grease-installed MCP servers into `McpState` from their cached grease payloads.
-    /// `McpState` is empty on boot (it's replay-rebuilt, not FS-backed), but a grease-installed MCP
-    /// package durably cached its tool listing — so we rebuild the server + tool surface here without a
-    /// live `tools/list` (the actual `tools/call` still goes to the server at invocation time).
-    fn reconstruct_mcp_from_grease(&mut self) {
-        for m in self.clank.grease.mcp_packages() {
-            if !m.artifacts.tools {
-                continue;
-            }
-            let config = crate::mcp::config::McpServerConfig {
-                url: m.url.clone(),
-                enabled: true,
-                auth_env: m.auth_env.clone(),
-                auth_header: None,
-                tools: Vec::new(),
-            };
-            let tools: Vec<crate::mcp::state::McpTool> = m
-                .tools
-                .iter()
-                .map(|t| crate::mcp::state::McpTool {
-                    name: t.name.clone(),
-                    description: if t.description.is_empty() {
-                        None
-                    } else {
-                        Some(t.description.clone())
-                    },
-                    input_schema: serde_json::from_str(&t.input_schema)
-                        .unwrap_or(serde_json::json!({})),
-                })
-                .collect();
-            self.clank.mcp.set_installed(&m.name, config, tools);
-        }
-    }
-
-    /// Reconstruct plain `mcp add` servers from their on-disk configs — WITHOUT network. The tool
-    /// list is the cache written at install time (`mcp_install` re-saves the config with `tools`
-    /// populated); a config with no cache (pre-cache installs, or a failed install) is skipped —
-    /// `mcp reload` refreshes it live. Runs after `reconstruct_mcp_from_grease`, and never
-    /// overwrites a grease-reconstructed server (`is_server` guard); `set_installed` replaces by
-    /// name, so replaying `mcp add` lines on the durable agent stays idempotent over this.
-    ///
-    /// This is what makes native MCP survive a process restart: `McpState` is in-memory, and
-    /// before this only grease-installed servers came back.
-    fn reconstruct_mcp_from_configs(&mut self) {
-        for name in crate::mcp::config::list_names() {
-            let Ok(Some(config)) = crate::mcp::config::load(&name) else {
-                continue;
-            };
-            if !config.enabled || config.tools.is_empty() || self.clank.mcp.is_server(&name) {
-                continue;
-            }
-            let tools: Vec<crate::mcp::state::McpTool> = config
-                .tools
-                .iter()
-                .map(|t| crate::mcp::state::McpTool {
-                    name: t.name.clone(),
-                    description: if t.description.is_empty() {
-                        None
-                    } else {
-                        Some(t.description.clone())
-                    },
-                    input_schema: serde_json::from_str(&t.input_schema)
-                        .unwrap_or(serde_json::json!({})),
-                })
-                .collect();
-            self.clank.mcp.set_installed(&name, config, tools);
-        }
     }
 
     /// The command registry — clank's inventory of command manifests.
@@ -1041,7 +968,7 @@ impl Session {
         }
         // `<server> --help` / `<server> <tool> --help` for an installed MCP server (before the authz
         // gate — help never confirms).
-        if let Some(help) = self.mcp_help_for(line) {
+        if let Some(help) = self.clank.mcp_help_for(line) {
             return LineRoute::McpHelp(help);
         }
         // `<name> --help` for an installed grease command package (prompt or script), same rule.
@@ -1098,7 +1025,12 @@ impl Session {
             CommandRoute::Ask(args) => self.run_ask(args, blanket_authorized).await,
             // `mcp` management runs at the Session layer — its add/reload/session subcommands do
             // HTTP, which must await under the live reactor (same rule as curl/ask).
-            CommandRoute::Mcp(Ok(cmd)) => self.run_mcp(cmd).await,
+            CommandRoute::Mcp(Ok(cmd)) => {
+                let mut clank = std::mem::take(&mut self.clank);
+                let result = clank.run_mcp(&mut SessionCtx::new(self), cmd).await;
+                self.clank = clank;
+                result
+            }
             CommandRoute::Mcp(Err(e)) => {
                 LineResult::from_outcome(Vec::new(), format!("{e}\n").into_bytes(), 2)
             }
@@ -1119,7 +1051,12 @@ impl Session {
             }
             // `<server> <tool> …` for an installed MCP server: an outbound HTTP tool call (its authz
             // Confirm was already resolved via the dynamic manifest at the gate).
-            CommandRoute::McpToolLine => self.run_mcp_tool(line).await,
+            CommandRoute::McpToolLine => {
+                let mut clank = std::mem::take(&mut self.clank);
+                let result = clank.run_mcp_tool(line).await;
+                self.clank = clank;
+                result
+            }
             // A grease-installed prompt: fill its body from args and run it through the model (its
             // Confirm was resolved via the dynamic manifest at the gate; sudo pre-authorizes).
             CommandRoute::PromptLine => self.run_prompt(line, blanket_authorized).await,
@@ -1136,13 +1073,21 @@ impl Session {
             }
             // A grease-installed MCP resource-template executable: substitute the args into the URI
             // template and read the constructed resource live (top-level only, Wall-C).
-            CommandRoute::McpTemplateLine => self.run_mcp_template(line).await,
+            CommandRoute::McpTemplateLine => {
+                let mut clank = std::mem::take(&mut self.clank);
+                let result = clank.run_mcp_template(line).await;
+                self.clank = clank;
+                result
+            }
             // A top-level `cat /mnt/mcp/<server>/<dynamic>`: fetch the resource live via
             // `resources/read` (the read can't run in Brush's synchronous `cat` — the Wall-C wall — so
             // it's served here at the Session layer for top-level lines only; inside $()/pipes it falls
             // through to Brush and hits the honest "no such file").
             CommandRoute::McpResourceRead(server, uri) => {
-                self.run_mcp_resource_read(&server, &uri).await
+                let mut clank = std::mem::take(&mut self.clank);
+                let result = clank.run_mcp_resource_read(&server, &uri).await;
+                self.clank = clank;
+                result
             }
             // A curl/wget-HEADED pipeline: the head's HTTP runs here at the Session layer (Wall C),
             // and the downstream runs through Brush with the response bytes as stdin. Reached only
@@ -1202,7 +1147,7 @@ impl Session {
         if let Some(parsed) = crate::golem::cluster::classify(line) {
             return CommandRoute::Golem(parsed);
         }
-        if self.is_mcp_tool_line(line) {
+        if self.clank.is_mcp_tool_line(line) {
             return CommandRoute::McpToolLine;
         }
         if self.is_prompt_line(line) {
@@ -1214,10 +1159,10 @@ impl Session {
         if self.clank.is_agent_line(line) {
             return CommandRoute::AgentLine;
         }
-        if self.is_mcp_template_line(line) {
+        if self.clank.is_mcp_template_line(line) {
             return CommandRoute::McpTemplateLine;
         }
-        if let Some((server, uri)) = self.dynamic_mcp_read_target(line) {
+        if let Some((server, uri)) = self.clank.dynamic_mcp_read_target(line) {
             return CommandRoute::McpResourceRead(server, uri);
         }
         if let Some(pipe) = crate::builtins::http::split_http_head(line) {
@@ -1495,119 +1440,6 @@ impl Session {
             return self.clank.grease.pkg_help(name);
         }
         None
-    }
-
-    /// Execute a `<server> <tool> …` MCP tool call: build the arguments from the tool's inputSchema
-    /// (or `--args '<json>'`), issue `tools/call` (reusing an open session or initializing one), and
-    /// render the result (text content joined, or raw JSON with `--json`).
-    async fn run_mcp_tool(&mut self, line: &str) -> LineResult {
-        let inv = match crate::mcp::cmd::parse_tool_invocation(line) {
-            Some(Ok(inv)) => inv,
-            Some(Err(e)) => {
-                return LineResult::from_outcome(
-                    Vec::new(),
-                    format!("{}: {e}\n", "mcp").into_bytes(),
-                    2,
-                )
-            }
-            None => return LineResult::denied(),
-        };
-
-        let Some(tool_name) = inv.tool.clone() else {
-            // Bare `<server>` with no tool: show help (help path already handled this in eval_line, but
-            // a direct run_command re-entry lands here).
-            return LineResult::continue_with_stdout(
-                self.clank
-                    .mcp
-                    .server_help(&inv.server)
-                    .unwrap_or_default()
-                    .into_bytes(),
-            );
-        };
-
-        // Resolve the tool + its schema.
-        let Some(tool) = self.clank.mcp.tool(&inv.server, &tool_name).cloned() else {
-            return LineResult::from_outcome(
-                Vec::new(),
-                format!(
-                    "{}: no tool '{tool_name}' on server '{}'\n",
-                    inv.server, inv.server
-                )
-                .into_bytes(),
-                2,
-            );
-        };
-
-        // Build the arguments object: `--args` escape hatch wins; else map --flags via the schema.
-        let arguments = match &inv.raw_args {
-            Some(raw) => match serde_json::from_str::<serde_json::Value>(raw) {
-                Ok(v) => v,
-                Err(e) => {
-                    return LineResult::from_outcome(
-                        Vec::new(),
-                        format!("{}: --args is not valid JSON: {e}\n", inv.server).into_bytes(),
-                        2,
-                    )
-                }
-            },
-            None => match build_mcp_arguments(&tool.input_schema, &inv.flags) {
-                Ok(v) => v,
-                Err(e) => {
-                    return LineResult::from_outcome(
-                        Vec::new(),
-                        format!("{} {tool_name}: {e}\n", inv.server).into_bytes(),
-                        2,
-                    )
-                }
-            },
-        };
-
-        let Some(config) = self.clank.mcp.get(&inv.server).map(|s| s.config.clone()) else {
-            return LineResult::from_outcome(
-                Vec::new(),
-                format!("{}: server not installed\n", inv.server).into_bytes(),
-                1,
-            );
-        };
-        // Reuse an explicit --session-id, else an open session for the server, else stateless.
-        let session_id = inv.session_id.clone().or_else(|| {
-            self.clank
-                .mcp
-                .session_for(&inv.server)
-                .and_then(|s| s.server_session_id.clone())
-        });
-
-        let Some(http) = self.clank.mcp_http.as_deref() else {
-            return LineResult::from_outcome(
-                Vec::new(),
-                b"mcp: no HTTP transport configured (available on the Golem agent)\n".to_vec(),
-                4,
-            );
-        };
-        let auth = config.resolve_auth();
-        let mut client = crate::mcp::client::McpClient::new(http, &config.url, auth);
-        match client
-            .call_tool(&tool_name, arguments, session_id.as_deref())
-            .await
-        {
-            Ok(result) => {
-                let out = if inv.json {
-                    result.raw.to_string()
-                } else {
-                    result.text
-                };
-                let mut out = out.into_bytes();
-                if !out.is_empty() && !out.ends_with(b"\n") {
-                    out.push(b'\n');
-                }
-                LineResult::continue_with_stdout(out)
-            }
-            Err(e) => LineResult::from_outcome(
-                Vec::new(),
-                format!("{} {tool_name}: {e}\n", inv.server).into_bytes(),
-                e.exit_code(),
-            ),
-        }
     }
 
     /// Complete an intercepted line's row and record its output (for intercepted paths that don't go

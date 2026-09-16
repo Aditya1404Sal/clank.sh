@@ -1,17 +1,20 @@
-//! `Session` methods for MCP: the `mcp` management command, tool/resource/template dispatch,
+//! `Clank` methods for MCP: the `mcp` management command, tool/resource/template dispatch,
 //! session management, the `/mnt/mcp` dynamic-read + `mcp watch` paths, and the URI/argument
 //! plumbing they need ([`fill_uri_template`], [`build_mcp_arguments`], [`materialize_mcp_resources`]).
 
 use std::fmt::Write as _;
 
-use super::grease::prompt_leading_word;
-use super::{LineResult, Session};
+use crate::session::{grease::prompt_leading_word, LineResult, SessionCtx};
 
-impl Session {
+impl super::Clank {
     /// Dispatch a parsed `mcp` management command. HTTP-performing subcommands (`add`, `reload`,
     /// `session open`/`close`) require the injected transport; the sync ones (`list`, `tools`,
     /// `remove`, `session list`/`info`) work without it.
-    pub(super) async fn run_mcp(&mut self, cmd: crate::mcp::cmd::McpCommand) -> LineResult {
+    pub(crate) async fn run_mcp(
+        &mut self,
+        ctx: &mut SessionCtx<'_>,
+        cmd: crate::mcp::cmd::McpCommand,
+    ) -> LineResult {
         use crate::mcp::cmd::McpCommand;
         match cmd {
             McpCommand::List => self.mcp_list(),
@@ -24,7 +27,7 @@ impl Session {
                 url,
                 auth_env,
                 auth_header,
-            } => self.mcp_add(&name, &url, auth_env, auth_header).await,
+            } => self.mcp_add(ctx, &name, &url, auth_env, auth_header).await,
             McpCommand::Reload { name } => self.mcp_reload(name.as_deref()).await,
             McpCommand::SessionList => self.mcp_session_list(),
             McpCommand::SessionInfo { id } => self.mcp_session_info(&id),
@@ -41,7 +44,7 @@ impl Session {
         }
         let mut out = String::new();
         for name in &names {
-            match self.clank.mcp.get(name) {
+            match self.mcp.get(name) {
                 Some(s) if s.installed => {
                     let _ = writeln!(
                         out,
@@ -74,7 +77,7 @@ impl Session {
 
     /// `mcp tools <server>`: list an installed server's tools.
     fn mcp_tools(&self, server: &str) -> LineResult {
-        match self.clank.mcp.get(server) {
+        match self.mcp.get(server) {
             Some(s) if s.installed => {
                 let mut out = String::new();
                 for t in &s.tools {
@@ -104,7 +107,7 @@ impl Session {
     fn mcp_remove(&mut self, name: &str) -> LineResult {
         match crate::mcp::config::remove(name) {
             Ok(()) => {
-                self.clank.mcp.remove(name);
+                self.mcp.remove(name);
                 LineResult::continue_with_stdout(
                     format!("removed MCP server '{name}'\n").into_bytes(),
                 )
@@ -119,6 +122,7 @@ impl Session {
     /// failure keeps the config as "configured, not installed" and exits 4.
     async fn mcp_add(
         &mut self,
+        ctx: &mut SessionCtx<'_>,
         name: &str,
         url: &str,
         auth_env: Option<String>,
@@ -138,7 +142,7 @@ impl Session {
             return LineResult::from_outcome(Vec::new(), format!("mcp add: {e}\n").into_bytes(), 2);
         }
         // Reject a name that collides with a built-in command (it would shadow it).
-        if self.registry.get(name).is_some() {
+        if ctx.manifest(name).is_some() {
             return LineResult::from_outcome(
                 Vec::new(),
                 format!("mcp add: '{name}' collides with a built-in command\n").into_bytes(),
@@ -177,7 +181,7 @@ impl Session {
                 }
             };
             if !config.enabled {
-                self.clank.mcp.remove(&n);
+                self.mcp.remove(&n);
                 let _ = writeln!(out, "{n}: disabled (skipped)");
                 continue;
             }
@@ -198,9 +202,8 @@ impl Session {
         name: &str,
         mut config: crate::mcp::config::McpServerConfig,
     ) -> LineResult {
-        let Some(http) = self.clank.mcp_http.as_deref() else {
-            self.clank
-                .mcp
+        let Some(http) = self.mcp_http.as_deref() else {
+            self.mcp
                 .set_failed(name, config, "no HTTP transport".into());
             return LineResult::from_outcome(
                 Vec::new(),
@@ -214,7 +217,7 @@ impl Session {
             Ok(i) => i,
             Err(e) => {
                 let msg = format!("mcp: {name}: {e}\n");
-                self.clank.mcp.set_failed(name, config, e.to_string());
+                self.mcp.set_failed(name, config, e.to_string());
                 return LineResult::from_outcome(Vec::new(), msg.into_bytes(), e.exit_code());
             }
         };
@@ -222,7 +225,7 @@ impl Session {
             Ok(t) => t,
             Err(e) => {
                 let msg = format!("mcp: {name}: {e}\n");
-                self.clank.mcp.set_failed(name, config, e.to_string());
+                self.mcp.set_failed(name, config, e.to_string());
                 return LineResult::from_outcome(Vec::new(), msg.into_bytes(), e.exit_code());
             }
         };
@@ -241,9 +244,9 @@ impl Session {
             })
             .collect();
         let _ = crate::mcp::config::save(name, &config);
-        self.clank.mcp.set_installed(name, config, mcp_tools);
+        self.mcp.set_installed(name, config, mcp_tools);
         // Write the /usr/lib/mcp/bin stub so which/ls/type see the server as a $PATH command.
-        if let Some(help) = self.clank.mcp.server_help(name) {
+        if let Some(help) = self.mcp.server_help(name) {
             let _ = crate::mcp::config::write_bin_stub(name, &help);
         }
         LineResult::continue_with_stdout(
@@ -253,7 +256,7 @@ impl Session {
 
     /// `mcp session list`: local id, server, server session id, protocol.
     fn mcp_session_list(&self) -> LineResult {
-        let sessions = self.clank.mcp.sessions();
+        let sessions = self.mcp.sessions();
         if sessions.is_empty() {
             return LineResult::continue_with_stdout(b"no open MCP sessions\n".to_vec());
         }
@@ -273,7 +276,7 @@ impl Session {
 
     /// `mcp session info <id>`: server info, protocol, capabilities.
     fn mcp_session_info(&self, id: &str) -> LineResult {
-        match self.clank.mcp.session(id) {
+        match self.mcp.session(id) {
             Some(s) => {
                 let out = format!(
                     "id:         {}\nserver:     {}\nserver info: {}\nprotocol:   {}\ncapabilities: {}\n",
@@ -291,14 +294,14 @@ impl Session {
 
     /// `mcp session open <server>`: explicit initialize, record the session, print its ids.
     async fn mcp_session_open(&mut self, server: &str) -> LineResult {
-        let Some(config) = self.clank.mcp.get(server).map(|s| s.config.clone()) else {
+        let Some(config) = self.mcp.get(server).map(|s| s.config.clone()) else {
             return LineResult::from_outcome(
                 Vec::new(),
                 format!("mcp session open: no such installed server '{server}'\n").into_bytes(),
                 1,
             );
         };
-        let Some(http) = self.clank.mcp_http.as_deref() else {
+        let Some(http) = self.mcp_http.as_deref() else {
             return LineResult::from_outcome(
                 Vec::new(),
                 b"mcp: no HTTP transport configured (available on the Golem agent)\n".to_vec(),
@@ -309,7 +312,7 @@ impl Session {
         let mut client = crate::mcp::client::McpClient::new(http, &config.url, auth);
         match client.initialize().await {
             Ok(init) => {
-                let local_id = self.clank.mcp.open_session(server, &init);
+                let local_id = self.mcp.open_session(server, &init);
                 LineResult::continue_with_stdout(
                     format!(
                         "opened session {local_id} ({})\n",
@@ -329,7 +332,7 @@ impl Session {
     /// `mcp session close <id>`: DELETE the server session, remove it locally. A 405 refusal still
     /// removes the local session (with a note).
     async fn mcp_session_close(&mut self, id: &str) -> LineResult {
-        let Some((server, server_sid)) = self.clank.mcp.close_session(id) else {
+        let Some((server, server_sid)) = self.mcp.close_session(id) else {
             return LineResult::from_outcome(
                 Vec::new(),
                 format!("mcp session close: no such session '{id}'\n").into_bytes(),
@@ -340,8 +343,8 @@ impl Session {
         let Some(server_sid) = server_sid else {
             return LineResult::continue_with_stdout(format!("closed session {id}\n").into_bytes());
         };
-        let config = self.clank.mcp.get(&server).map(|s| s.config.clone());
-        let (Some(config), Some(http)) = (config, self.clank.mcp_http.as_deref()) else {
+        let config = self.mcp.get(&server).map(|s| s.config.clone());
+        let (Some(config), Some(http)) = (config, self.mcp_http.as_deref()) else {
             return LineResult::continue_with_stdout(
                 format!("closed session {id} (locally; server not reachable)\n").into_bytes(),
             );
@@ -362,9 +365,9 @@ impl Session {
 
     /// Whether `line`'s leading word is an installed MCP server (and it isn't `mcp` itself). Drives
     /// the dynamic `<server> <tool>` dispatch.
-    pub(super) fn is_mcp_tool_line(&self, line: &str) -> bool {
+    pub(crate) fn is_mcp_tool_line(&self, line: &str) -> bool {
         match crate::mcp::cmd::parse_tool_invocation(line) {
-            Some(Ok(inv)) => self.clank.mcp.is_server(&inv.server),
+            Some(Ok(inv)) => self.mcp.is_server(&inv.server),
             _ => false,
         }
     }
@@ -372,7 +375,7 @@ impl Session {
     /// If `line` is a top-level `cat /mnt/mcp/<server>/<path>` (optionally `sudo`-prefixed, one
     /// operand, no operators) naming a DYNAMIC MCP resource, return its `(server, uri)`. Static
     /// resources are real files that Brush's `cat` reads directly, so they return `None` here.
-    pub(super) fn dynamic_mcp_read_target(&self, line: &str) -> Option<(String, String)> {
+    pub(crate) fn dynamic_mcp_read_target(&self, line: &str) -> Option<(String, String)> {
         // Reject anything with shell operators (the Wall-C wall — a live read can't run in a pipe).
         if line.chars().any(|c| "|&;<>`$".contains(c)) {
             return None;
@@ -395,7 +398,7 @@ impl Session {
         if !crate::runtime::mcpfs::is_mcp_path(path) {
             return None;
         }
-        let index = self.clank.grease.mcp_resource_index();
+        let index = self.grease.mcp_resource_index();
         match crate::runtime::mcpfs::classify(path, &index) {
             crate::runtime::mcpfs::McpPathKind::Dynamic { server, uri } => Some((server, uri)),
             _ => None,
@@ -404,8 +407,8 @@ impl Session {
 
     /// Fetch a dynamic MCP resource live (`resources/read`) and print its content. Reuses the server's
     /// stored config for the endpoint + auth.
-    pub(super) async fn run_mcp_resource_read(&mut self, server: &str, uri: &str) -> LineResult {
-        let Some(m) = self.clank.grease.mcp(server) else {
+    pub(crate) async fn run_mcp_resource_read(&mut self, server: &str, uri: &str) -> LineResult {
+        let Some(m) = self.grease.mcp(server) else {
             return LineResult::from_outcome(
                 Vec::new(),
                 b"cat: mcp resource: server not installed\n".to_vec(),
@@ -414,7 +417,7 @@ impl Session {
         };
         let url = m.url.clone();
         let auth_env = m.auth_env.clone();
-        let Some(http) = self.clank.mcp_http.as_deref() else {
+        let Some(http) = self.mcp_http.as_deref() else {
             return LineResult::from_outcome(
                 Vec::new(),
                 b"cat: mcp resource: no HTTP transport configured (available on the Golem agent)\n"
@@ -462,7 +465,7 @@ impl Session {
                 2,
             );
         };
-        let Some(res) = self.clank.grease.mcp_resource_entry(server, sub) else {
+        let Some(res) = self.grease.mcp_resource_entry(server, sub) else {
             return LineResult::from_outcome(
                 Vec::new(),
                 format!("mcp resource info: no such resource '{path}'\n").into_bytes(),
@@ -504,7 +507,7 @@ impl Session {
     #[allow(clippy::items_after_statements)]
     async fn run_mcp_watch(&mut self, uri: &str) -> LineResult {
         // Resolve which installed server owns this URI (by scheme/prefix match against its resources).
-        let server = self.clank.grease.mcp_packages().iter().find_map(|m| {
+        let server = self.grease.mcp_packages().iter().find_map(|m| {
             let owns = m.resources.iter().any(|r| r.uri == uri)
                 || uri.split_once("://").map(|(s, _)| s) == Some(m.name.as_str());
             if owns {
@@ -520,7 +523,7 @@ impl Session {
                 1,
             );
         };
-        let Some(http) = self.clank.mcp_http.as_deref() else {
+        let Some(http) = self.mcp_http.as_deref() else {
             return LineResult::from_outcome(
                 Vec::new(),
                 b"mcp watch: no HTTP transport configured (available on the Golem agent)\n"
@@ -568,18 +571,18 @@ impl Session {
 
     /// Whether `line`'s leading word is an installed MCP resource-template executable
     /// (`<server>-<template>`). Top-level only (Wall-C — the read awaits under the reactor).
-    pub(super) fn is_mcp_template_line(&self, line: &str) -> bool {
+    pub(crate) fn is_mcp_template_line(&self, line: &str) -> bool {
         let Some(word) = prompt_leading_word(line) else {
             return false;
         };
-        self.clank.grease.is_mcp_template(&word)
+        self.grease.is_mcp_template(&word)
     }
 
     /// Run an installed MCP resource template: substitute the CLI args into the `{param}` placeholders
     /// of the stored URI template, then read the constructed resource live and print it (README:767).
     /// Positional args fill the template's `{param}` placeholders in order; `--param value` fills by
     /// name. The read awaits under the reactor (top-level only).
-    pub(super) async fn run_mcp_template(&mut self, line: &str) -> LineResult {
+    pub(crate) async fn run_mcp_template(&mut self, line: &str) -> LineResult {
         let Some(words) = crate::ai::ask::dequote_words(line) else {
             return LineResult::from_outcome(
                 Vec::new(),
@@ -594,7 +597,7 @@ impl Session {
             &words[..]
         };
         let cmd = rest[0].clone();
-        let Some((url, auth_env, template)) = self.clank.grease.mcp_template(&cmd) else {
+        let Some((url, auth_env, template)) = self.grease.mcp_template(&cmd) else {
             return LineResult::denied(); // is_mcp_template_line gated it
         };
         // Build the concrete URI: fill `{param}` placeholders. `--name value` fills by name; bare
@@ -609,7 +612,7 @@ impl Session {
                 )
             }
         };
-        let Some(http) = self.clank.mcp_http.as_deref() else {
+        let Some(http) = self.mcp_http.as_deref() else {
             return LineResult::from_outcome(
                 Vec::new(),
                 format!("{cmd}: no HTTP transport configured (available on the Golem agent)\n")
@@ -636,14 +639,213 @@ impl Session {
             ),
         }
     }
+
+    /// Reconstruct grease-installed MCP servers from their cached tool payloads (no network).
+    /// Runs once per session start.
+    fn reconstruct_mcp_from_grease(&mut self) {
+        for m in self.grease.mcp_packages() {
+            if !m.artifacts.tools {
+                continue;
+            }
+            let config = crate::mcp::config::McpServerConfig {
+                url: m.url.clone(),
+                enabled: true,
+                auth_env: m.auth_env.clone(),
+                auth_header: None,
+                tools: Vec::new(),
+            };
+            let tools: Vec<crate::mcp::state::McpTool> = m
+                .tools
+                .iter()
+                .map(|t| crate::mcp::state::McpTool {
+                    name: t.name.clone(),
+                    description: if t.description.is_empty() {
+                        None
+                    } else {
+                        Some(t.description.clone())
+                    },
+                    input_schema: serde_json::from_str(&t.input_schema)
+                        .unwrap_or(serde_json::json!({})),
+                })
+                .collect();
+            self.mcp.set_installed(&m.name, config, tools);
+        }
+    }
+
+    /// Reconstruct plain `mcp add` servers from their on-disk configs — WITHOUT network. The tool
+    /// list is the cache written at install time (`mcp_install` re-saves the config with `tools`
+    /// populated); a config with no cache (pre-cache installs, or a failed install) is skipped —
+    /// `mcp reload` refreshes it live. Runs after `reconstruct_mcp_from_grease`, and never
+    /// overwrites a grease-reconstructed server (`is_server` guard); `set_installed` replaces by
+    /// name, so replaying `mcp add` lines on the durable agent stays idempotent over this.
+    ///
+    /// This is what makes native MCP survive a process restart: `McpState` is in-memory, and
+    /// before this only grease-installed servers came back.
+    fn reconstruct_mcp_from_configs(&mut self) {
+        for name in crate::mcp::config::list_names() {
+            let Ok(Some(config)) = crate::mcp::config::load(&name) else {
+                continue;
+            };
+            if !config.enabled || config.tools.is_empty() || self.mcp.is_server(&name) {
+                continue;
+            }
+            let tools: Vec<crate::mcp::state::McpTool> = config
+                .tools
+                .iter()
+                .map(|t| crate::mcp::state::McpTool {
+                    name: t.name.clone(),
+                    description: if t.description.is_empty() {
+                        None
+                    } else {
+                        Some(t.description.clone())
+                    },
+                    input_schema: serde_json::from_str(&t.input_schema)
+                        .unwrap_or(serde_json::json!({})),
+                })
+                .collect();
+            self.mcp.set_installed(&name, config, tools);
+        }
+    }
+
+    /// Rebuild `McpState` without network: grease-installed servers from their cached payloads,
+    /// then plain `mcp add` servers from their on-disk configs. Runs once per session start.
+    pub(crate) fn reconstruct_mcp(&mut self) {
+        self.reconstruct_mcp_from_grease();
+        self.reconstruct_mcp_from_configs();
+    }
+
+    /// Run a tool invocation for an installed MCP server. Called by session on `McpToolLine`.
+    pub(crate) async fn run_mcp_tool(&mut self, line: &str) -> LineResult {
+        let inv = match crate::mcp::cmd::parse_tool_invocation(line) {
+            Some(Ok(inv)) => inv,
+            Some(Err(e)) => {
+                return LineResult::from_outcome(
+                    Vec::new(),
+                    format!("{}: {e}\n", "mcp").into_bytes(),
+                    2,
+                )
+            }
+            None => return LineResult::denied(),
+        };
+
+        let Some(tool_name) = inv.tool.clone() else {
+            // Bare `<server>` with no tool: show help (help path already handled this in eval_line, but
+            // a direct run_command re-entry lands here).
+            return LineResult::continue_with_stdout(
+                self.mcp
+                    .server_help(&inv.server)
+                    .unwrap_or_default()
+                    .into_bytes(),
+            );
+        };
+
+        // Resolve the tool + its schema.
+        let Some(tool) = self.mcp.tool(&inv.server, &tool_name).cloned() else {
+            return LineResult::from_outcome(
+                Vec::new(),
+                format!(
+                    "{}: no tool '{tool_name}' on server '{}'\n",
+                    inv.server, inv.server
+                )
+                .into_bytes(),
+                2,
+            );
+        };
+
+        // Build the arguments object: `--args` escape hatch wins; else map --flags via the schema.
+        let arguments = match &inv.raw_args {
+            Some(raw) => match serde_json::from_str::<serde_json::Value>(raw) {
+                Ok(v) => v,
+                Err(e) => {
+                    return LineResult::from_outcome(
+                        Vec::new(),
+                        format!("{}: --args is not valid JSON: {e}\n", inv.server).into_bytes(),
+                        2,
+                    )
+                }
+            },
+            None => match build_mcp_arguments(&tool.input_schema, &inv.flags) {
+                Ok(v) => v,
+                Err(e) => {
+                    return LineResult::from_outcome(
+                        Vec::new(),
+                        format!("{} {tool_name}: {e}\n", inv.server).into_bytes(),
+                        2,
+                    )
+                }
+            },
+        };
+
+        let Some(config) = self.mcp.get(&inv.server).map(|s| s.config.clone()) else {
+            return LineResult::from_outcome(
+                Vec::new(),
+                format!("{}: server not installed\n", inv.server).into_bytes(),
+                1,
+            );
+        };
+        // Reuse an explicit --session-id, else an open session for the server, else stateless.
+        let session_id = inv.session_id.clone().or_else(|| {
+            self.mcp
+                .session_for(&inv.server)
+                .and_then(|s| s.server_session_id.clone())
+        });
+
+        let Some(http) = self.mcp_http.as_deref() else {
+            return LineResult::from_outcome(
+                Vec::new(),
+                b"mcp: no HTTP transport configured (available on the Golem agent)\n".to_vec(),
+                4,
+            );
+        };
+        let auth = config.resolve_auth();
+        let mut client = crate::mcp::client::McpClient::new(http, &config.url, auth);
+        match client
+            .call_tool(&tool_name, arguments, session_id.as_deref())
+            .await
+        {
+            Ok(result) => {
+                let out = if inv.json {
+                    result.raw.to_string()
+                } else {
+                    result.text
+                };
+                let mut out = out.into_bytes();
+                if !out.is_empty() && !out.ends_with(b"\n") {
+                    out.push(b'\n');
+                }
+                LineResult::continue_with_stdout(out)
+            }
+            Err(e) => LineResult::from_outcome(
+                Vec::new(),
+                format!("{} {tool_name}: {e}\n", inv.server).into_bytes(),
+                e.exit_code(),
+            ),
+        }
+    }
+
+    /// Provide help text for an MCP server or tool command line for autocomplete/help display.
+    pub(crate) fn mcp_help_for(&self, line: &str) -> Option<String> {
+        let Ok(inv) = crate::mcp::cmd::parse_tool_invocation(line)? else {
+            return None;
+        };
+        if !self.mcp.is_server(&inv.server) {
+            return None;
+        }
+        // Bare `<server>` or `--help` ⇒ server help; a `<tool> --help` ⇒ the same (tool-level help is
+        // the server help in MCP-lite).
+        if inv.help || inv.tool.is_none() {
+            return self.mcp.server_help(&inv.server);
+        }
+        None
+    }
 }
 
 /// Materialize an MCP server's resources under `/mnt/mcp/<server>/` and return the cache entries that
 /// drive the virtual-fs listing. Fetches `resources/list`; each resource whose `resources/read`
 /// succeeds at install is written as a real STATIC file (composes in pipes); a resource that can't be
 /// read now is recorded as DYNAMIC (served live on a top-level `cat` interception). Path-confined.
-/// Free fn (no `self`) so it can run while `client` borrows `self.clank.mcp_http`.
-pub(super) async fn materialize_mcp_resources(
+/// Free fn (no `self`) so it can run while `client` borrows `self.mcp_http`.
+pub(crate) async fn materialize_mcp_resources(
     server: &str,
     client: &mut crate::mcp::client::McpClient<'_>,
     session: Option<&str>,
@@ -683,7 +885,7 @@ pub(super) async fn materialize_mcp_resources(
 /// the placeholder named `name`; bare positional args fill the remaining placeholders left-to-right.
 /// Values are inserted verbatim (MCP servers accept literal path segments). An unfilled placeholder is
 /// an error. Walks the template once, resolving each placeholder as it's encountered.
-pub(super) fn fill_uri_template(
+pub(crate) fn fill_uri_template(
     template: &str,
     args: &[String],
 ) -> crate::mcp::error::Result<String> {
@@ -736,7 +938,7 @@ pub(super) fn fill_uri_template(
 /// (or `<scheme>:`) prefix and any leading slashes, leaving the path-like remainder (e.g.
 /// `file:///repo/README.md` → `repo/README.md`, `github://repo/src/main.rs` → `repo/src/main.rs`).
 /// Query/fragment are dropped. The caller path-confines the result with `mcp_safe_join`.
-pub(super) fn mcp_resource_rel_path(uri: &str) -> String {
+pub(crate) fn mcp_resource_rel_path(uri: &str) -> String {
     // Drop the scheme.
     let after_scheme = match uri.split_once("://") {
         Some((_scheme, rest)) => rest,
@@ -761,7 +963,7 @@ pub(super) fn mcp_resource_rel_path(uri: &str) -> String {
 /// Build an MCP `tools/call` arguments object from `--flag value` pairs, coercing each value per the
 /// tool's JSON inputSchema (integer/number → number, boolean → bool, array/object → parsed JSON, else
 /// string). Bare flags (`--verbose`) become `true`. Errors if a required property is missing.
-pub(super) fn build_mcp_arguments(
+pub(crate) fn build_mcp_arguments(
     schema: &serde_json::Value,
     flags: &[(String, Option<String>)],
 ) -> crate::mcp::error::Result<serde_json::Value> {
