@@ -1,20 +1,25 @@
-//! `Session` methods for Golem agent invocation (`<agent> [flags] <method>`), the `golem` cluster
+//! `Clank` methods for Golem agent invocation (`<agent> [flags] <method>`), the `golem` cluster
 //! command, and the invocation-line parser they dispatch on ([`parse_agent_line`]).
 
-use super::grease::prompt_leading_word;
-use super::{LineResult, PendingInvocation, Session};
-
 use crate::config::limits::MAX_PENDING_INVOCATIONS;
+use crate::session::{LineResult, SessionCtx};
 
-impl Session {
+/// A triggered/scheduled agent invocation awaiting a possible `kill`-cancel: its proc-table PID and
+/// the opaque cancel token the invoker understands (README:850). `None` token = not cancelable.
+pub(crate) struct PendingInvocation {
+    pub(crate) pid: u32,
+    pub(crate) cancel_token: Option<String>,
+}
+
+impl super::Clank {
     /// Whether `line`'s leading word is an installed Golem agent. Drives the `run_agent` dispatch.
     /// Top-level only (a remote invocation awaits under the Session reactor; not reachable from Brush's
     /// nested runtime — the Wall-C wall).
-    pub(super) fn is_agent_line(&self, line: &str) -> bool {
-        let Some(word) = prompt_leading_word(line) else {
+    pub(crate) fn is_agent_line(&self, line: &str) -> bool {
+        let Some(word) = crate::session::grease::prompt_leading_word(line) else {
             return false;
         };
-        self.clank.grease.is_agent(&word)
+        self.grease.is_agent(&word)
     }
 
     /// Run an installed Golem agent: parse the ctor/wrapper-flags/method/args, validate the method (or
@@ -23,7 +28,7 @@ impl Session {
     // One end-to-end dispatch: parse, validate reserved subcommands + method, build the invocation,
     // audit-log, then branch on invoke mode — cohesive enough to keep in a single function.
     #[allow(clippy::too_many_lines)]
-    pub(super) async fn run_agent(&mut self, line: &str) -> LineResult {
+    pub(crate) async fn run_agent(&mut self, ctx: &mut SessionCtx<'_>, line: &str) -> LineResult {
         let Some(words) = crate::ai::ask::dequote_words(line) else {
             return LineResult::from_outcome(Vec::new(), b"agent: parse error\n".to_vec(), 2);
         };
@@ -34,7 +39,7 @@ impl Session {
             &words[..]
         };
         let name = rest[0].clone();
-        let Some(pkg) = self.clank.grease.agent(&name).cloned() else {
+        let Some(pkg) = self.grease.agent(&name).cloned() else {
             return LineResult::denied(); // is_agent_line gated it
         };
 
@@ -66,7 +71,7 @@ impl Session {
 
         // `--help` or no method → agent help.
         if parsed.method.is_empty() {
-            let help = self.clank.grease.pkg_help(&name).unwrap_or_default();
+            let help = self.grease.pkg_help(&name).unwrap_or_default();
             return LineResult::continue_with_stdout(help.into_bytes());
         }
 
@@ -107,7 +112,7 @@ impl Session {
             // The bare reserved word `help` (README:840) prints the agent's generated help, same as the
             // `--help` flag and the empty-method form above — it must not be treated as a method name.
             "help" => {
-                let help = self.clank.grease.pkg_help(&name).unwrap_or_default();
+                let help = self.grease.pkg_help(&name).unwrap_or_default();
                 return LineResult::continue_with_stdout(help.into_bytes());
             }
             _ => {}
@@ -158,7 +163,7 @@ impl Session {
             phantom: parsed.phantom,
         };
 
-        let Some(invoker) = self.clank.agent_invoker.as_deref() else {
+        let Some(invoker) = self.agent_invoker.as_deref() else {
             return LineResult::from_outcome(
                 Vec::new(),
                 format!(
@@ -220,6 +225,7 @@ impl Session {
                         // Spawn an S-state proc row for the pending invocation (README: all modes return
                         // a PID); retain the cancel token so `kill <pid>` can cancel it.
                         let pid = self.spawn_agent_invocation_row(
+                            ctx,
                             line,
                             &inv,
                             handle.cancel_token.clone(),
@@ -241,7 +247,7 @@ impl Session {
     /// Dispatch a `golem` cluster command through the injected [`crate::golem::cluster::GolemCluster`] seam.
     /// `interrupt`/`resume` are honest-stubbed (no host primitive); everything else needs a configured
     /// cluster (honest error otherwise).
-    pub(super) async fn run_golem(
+    pub(crate) async fn run_golem(
         &mut self,
         cmd: crate::golem::cluster::GolemCommand,
     ) -> LineResult {
@@ -263,7 +269,7 @@ impl Session {
                 2,
             );
         }
-        let Some(cluster) = self.clank.golem_cluster.as_deref() else {
+        let Some(cluster) = self.golem_cluster.as_deref() else {
             return LineResult::from_outcome(
                 Vec::new(),
                 b"golem: requires a configured Golem cluster (unavailable on this target)\n"
@@ -305,7 +311,7 @@ impl Session {
         parsed: &ParsedAgentLine,
         sub: &str,
     ) -> LineResult {
-        let Some(cluster) = self.clank.golem_cluster.as_deref() else {
+        let Some(cluster) = self.golem_cluster.as_deref() else {
             return LineResult::from_outcome(
                 Vec::new(),
                 format!(
@@ -337,6 +343,7 @@ impl Session {
     /// its cancel token so `kill <pid>` can cancel it. Returns the PID.
     fn spawn_agent_invocation_row(
         &mut self,
+        ctx: &mut SessionCtx<'_>,
         line: &str,
         inv: &crate::golem::agent::AgentInvocation,
         cancel_token: Option<String>,
@@ -354,19 +361,13 @@ impl Session {
             agent_params,
             phantom_uuid: inv.phantom.clone(),
         };
-        let mut table = self
-            .proc_table
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let pid = table.spawn_bg(
+        let pid = ctx.proc_spawn_bg(
             crate::runtime::proctable::ProcessKind::AgentInvocation,
             argv,
             crate::runtime::proctable::SHELL_ROOT_PID,
         );
-        table.set_agent_meta(pid, meta);
-        drop(table);
-        self.clank
-            .pending_invocations
+        ctx.proc_set_agent_meta(pid, meta);
+        self.pending_invocations
             .push(PendingInvocation { pid, cancel_token });
         // Bound the fire-and-forget tracking. A `--trigger`/`--schedule` invocation has no
         // remote-completion signal, so without this its `S` row and `pending_invocations` entry would
@@ -375,14 +376,34 @@ impl Session {
         // which the proc-table prune then bounds) and drop it from tracking. Deterministic (oldest
         // first), so oplog replay converges to the same bounded state. `kill` on an evicted pid then
         // reports "already dispatched", which is the honest answer for a fire-and-forget call.
-        while self.clank.pending_invocations.len() > MAX_PENDING_INVOCATIONS {
-            let old = self.clank.pending_invocations.remove(0);
-            self.proc_table
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .complete(old.pid);
+        while self.pending_invocations.len() > MAX_PENDING_INVOCATIONS {
+            let old = self.pending_invocations.remove(0);
+            ctx.proc_complete(old.pid);
         }
         pid
+    }
+
+    /// `kill <pid>` of a triggered/scheduled agent invocation: drop its tracking, reap its row and
+    /// return the line to print. `None` when `pid` is not a pending invocation.
+    ///
+    /// Tick-free, like the rest of `kill`: the remote cancel cannot be awaited here, so this reports
+    /// the best-effort local cancel (README:850).
+    pub(crate) fn cancel_invocation(
+        &mut self,
+        ctx: &mut SessionCtx<'_>,
+        pid: u32,
+    ) -> Option<String> {
+        let idx = self.pending_invocations.iter().position(|p| p.pid == pid)?;
+        let inv = self.pending_invocations.remove(idx);
+        ctx.proc_complete(pid);
+        Some(if inv.cancel_token.is_some() {
+            format!("[{pid}] cancelled (queued/scheduled invocation)\n")
+        } else {
+            format!(
+                "[{pid}] already dispatched (fire-and-forget) — cannot cancel; \
+                 local tracking cleared\n"
+            )
+        })
     }
 }
 
@@ -412,7 +433,7 @@ fn order_agent_params(
 }
 
 /// The parsed shape of an agent-executable line (everything after the command name).
-pub(super) struct ParsedAgentLine {
+pub(crate) struct ParsedAgentLine {
     constructor: Vec<(String, String)>,
     method: String,
     args: Vec<(String, String)>,
@@ -430,7 +451,7 @@ pub(super) struct ParsedAgentLine {
 // One flag-dispatch loop over a single word list; splitting it would mean threading the whole
 // accumulator set (constructor/args/mode/phantom/revision/method) through a helper for no gain.
 #[allow(clippy::too_many_lines)]
-pub(super) fn parse_agent_line(
+pub(crate) fn parse_agent_line(
     words: &[String],
     pkg: &crate::grease::pkg::AgentPackage,
 ) -> crate::golem::error::Result<ParsedAgentLine> {

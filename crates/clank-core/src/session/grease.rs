@@ -1420,7 +1420,7 @@ pub(super) fn mcp_info_text(m: &crate::grease::pkg::McpPackage) -> String {
 
 /// The leading command word of a top-level (operator-free) `line`, with any `sudo` prefix stripped —
 /// for matching against installed grease prompts. `None` for a nested line (operators present).
-pub(super) fn prompt_leading_word(line: &str) -> Option<String> {
+pub(crate) fn prompt_leading_word(line: &str) -> Option<String> {
     let words = crate::ai::ask::dequote_words(line)?;
     let first = words.first()?;
     if first == "sudo" {

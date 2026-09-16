@@ -6,6 +6,8 @@
 //! During the crate split this is a concrete field of [`crate::session::Session`]; it moves behind
 //! the `Plugin` slot once every family's glue is `impl Clank`.
 
+pub mod agent;
+
 /// The per-session state of every clank command family.
 #[derive(Default)]
 pub struct Clank {
@@ -22,7 +24,7 @@ pub struct Clank {
     /// no-cluster error. See [`crate::golem::cluster`].
     pub(crate) golem_cluster: Option<Box<dyn crate::golem::cluster::GolemCluster>>,
     /// Triggered/scheduled agent invocations awaiting a possible `kill`-cancel: PID → cancel token.
-    pub(crate) pending_invocations: Vec<crate::session::PendingInvocation>,
+    pub(crate) pending_invocations: Vec<agent::PendingInvocation>,
     /// Out-of-band stdin for the next `ask` dispatch: the captured stdout of an upstream pipeline
     /// stage (`cat x | ask "…"`). Set by the pipe pre-extraction (or restored on a deferred-confirm
     /// resume) and `take()`n by `run_ask`. `None` for an ordinary `ask` line.

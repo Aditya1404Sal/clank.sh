@@ -33,11 +33,10 @@ use crate::runtime::proctable::ProcessTable;
 
 type BoxError = Box<dyn std::error::Error>;
 
-mod agent;
 mod ask;
 mod ctx;
 mod env;
-mod grease;
+pub(crate) mod grease;
 mod mcp;
 mod prompt;
 mod streams;
@@ -163,13 +162,6 @@ struct BgJob {
     pid: u32,
 }
 
-/// A triggered/scheduled agent invocation awaiting a possible `kill`-cancel: its proc-table PID and
-/// the opaque cancel token the invoker understands (README:850). `None` token = not cancelable.
-pub(crate) struct PendingInvocation {
-    pub(crate) pid: u32,
-    pub(crate) cancel_token: Option<String>,
-}
-
 /// The result of evaluating one shell line.
 pub struct LineResult {
     /// The line's captured standard output.
@@ -195,7 +187,7 @@ impl LineResult {
         output
     }
 
-    fn continue_with_stdout(stdout: Vec<u8>) -> Self {
+    pub(crate) fn continue_with_stdout(stdout: Vec<u8>) -> Self {
         Self {
             stdout,
             stderr: Vec::new(),
@@ -210,12 +202,12 @@ impl LineResult {
     /// For commands that aggregate sub-results into one stdout blob and must still report the worst
     /// outcome — the exit code is the only machine-readable channel a non-interactive driver has, so
     /// "printed some failures, returned 0" is a lie to it.
-    fn with_exit_code(mut self, exit_code: u8) -> Self {
+    pub(crate) fn with_exit_code(mut self, exit_code: u8) -> Self {
         self.exit_code = exit_code;
         self
     }
 
-    fn stderr(message: impl Into<Vec<u8>>) -> Self {
+    pub(crate) fn stderr(message: impl Into<Vec<u8>>) -> Self {
         Self {
             stdout: Vec::new(),
             stderr: message.into(),
@@ -226,7 +218,7 @@ impl LineResult {
     }
 
     /// An authorization failure: exit `5` (README) with a stderr message.
-    fn denied() -> Self {
+    pub(crate) fn denied() -> Self {
         Self {
             stdout: Vec::new(),
             stderr: b"clank: authorization denied\n".to_vec(),
@@ -237,7 +229,7 @@ impl LineResult {
     }
 
     /// Build a result from an HTTP command's outcome (`wcurl`/`waget` return the same shape).
-    fn from_outcome(stdout: Vec<u8>, stderr: Vec<u8>, exit_code: u8) -> Self {
+    pub(crate) fn from_outcome(stdout: Vec<u8>, stderr: Vec<u8>, exit_code: u8) -> Self {
         Self {
             stdout,
             stderr,
@@ -1116,7 +1108,12 @@ impl Session {
                 LineResult::from_outcome(Vec::new(), format!("{e}\n").into_bytes(), 2)
             }
             // `golem` cluster command — runtime API calls await under the reactor (like mcp/ask).
-            CommandRoute::Golem(Ok(cmd)) => self.run_golem(cmd).await,
+            CommandRoute::Golem(Ok(cmd)) => {
+                let mut clank = std::mem::take(&mut self.clank);
+                let result = clank.run_golem(cmd).await;
+                self.clank = clank;
+                result
+            }
             CommandRoute::Golem(Err(e)) => {
                 LineResult::from_outcome(Vec::new(), format!("{e}\n").into_bytes(), 2)
             }
@@ -1131,7 +1128,12 @@ impl Session {
             CommandRoute::ScriptLine => self.run_script(line, blanket_authorized).await,
             // A grease-installed Golem agent: parse the ctor/method/args and invoke it via wRPC in the
             // cluster (Confirm resolved at the gate; sudo pre-authorizes). Await mode only in v1.
-            CommandRoute::AgentLine => self.run_agent(line).await,
+            CommandRoute::AgentLine => {
+                let mut clank = std::mem::take(&mut self.clank);
+                let result = clank.run_agent(&mut SessionCtx::new(self), line).await;
+                self.clank = clank;
+                result
+            }
             // A grease-installed MCP resource-template executable: substitute the args into the URI
             // template and read the constructed resource live (top-level only, Wall-C).
             CommandRoute::McpTemplateLine => self.run_mcp_template(line).await,
@@ -1209,7 +1211,7 @@ impl Session {
         if self.is_script_line(line) {
             return CommandRoute::ScriptLine;
         }
-        if self.is_agent_line(line) {
+        if self.clank.is_agent_line(line) {
             return CommandRoute::AgentLine;
         }
         if self.is_mcp_template_line(line) {
@@ -1335,32 +1337,12 @@ impl Session {
                         any_missed = true;
                         continue;
                     }
-                    // A pending (triggered/scheduled) agent invocation: cancel via its idempotency key
-                    // (README:850). `run_kill` is tick-free (must not drive the runtime), so we can't
-                    // await the remote cancel here — we drop the local tracking + row and report the
-                    // best-effort cancel. (The scheduled-invocation token doesn't survive across the
-                    // durable agent's serialized invocations, so a remote cancel-after-return isn't
-                    // guaranteed — documented.)
-                    if let Some(idx) = self
-                        .clank
-                        .pending_invocations
-                        .iter()
-                        .position(|p| p.pid == *pid)
-                    {
-                        let inv = self.clank.pending_invocations.remove(idx);
-                        self.proc_table
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .complete(*pid);
-                        let msg = if inv.cancel_token.is_some() {
-                            format!("[{pid}] cancelled (queued/scheduled invocation)\n")
-                        } else {
-                            format!(
-                                "[{pid}] already dispatched (fire-and-forget) — cannot cancel; \
-                                 local tracking cleared\n"
-                            )
-                        };
-                        stdout.extend_from_slice(msg.as_bytes());
+                    // A pending (triggered/scheduled) agent invocation: the plug-in cancels it.
+                    let mut clank = std::mem::take(&mut self.clank);
+                    let cancelled = clank.cancel_invocation(&mut SessionCtx::new(self), *pid);
+                    self.clank = clank;
+                    if let Some(message) = cancelled {
+                        stdout.extend_from_slice(message.as_bytes());
                         continue;
                     }
                     if let Some(bg) = self.bg_jobs.iter().find(|b| b.pid == *pid) {
