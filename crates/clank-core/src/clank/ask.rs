@@ -375,7 +375,7 @@ impl super::Clank {
     /// gate as `Confirm` (`sudo context summarize` pre-authorizes) and, once allowed, the async
     /// `run_context_summarize` — never the sync `dispatch_context`/`apply_context` engine. Its
     /// output is inspection-only: the row is reaped but NOT recorded back into the transcript (like
-    /// `context show`). Split out of the route match for its size, not for any reuse.
+    /// `context show`). Split out of `eval_line_inner`'s match for its size, not for any reuse.
     pub(crate) async fn dispatch_context_summarize(
         &mut self,
         ctx: &mut SessionCtx<'_>,

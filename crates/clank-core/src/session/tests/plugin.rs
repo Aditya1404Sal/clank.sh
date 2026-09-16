@@ -106,6 +106,67 @@ fn a_plugin_pause_is_resumed_by_answer_prompt() {
     });
 }
 
+/// The P-state kill of a plug-in-owned pause, driven through the REAL entry point.
+///
+/// `eval_line` takes the plug-in out of the slot before `eval_line_inner` runs, so by the time the
+/// `kills_pending` branch fires, `session.plugin` is `None` — routing the abort through the public
+/// `answer_prompt` (which takes from that now-empty slot) would hand `resume` no plug-in and answer
+/// "internal error: plug-in pause with no plug-in" instead. `eval_line_inner` therefore calls
+/// `answer_prompt_with_plugin` with the plug-in it already holds, and this test is what fails if
+/// that ever regresses.
+///
+/// It is also the one shape the rest of the suite misses: `kill_asks_the_plugin_first` kills a pid
+/// with nothing pending (so it never reaches `kills_pending`), the test above calls `answer_prompt`
+/// directly (so it never enters `eval_line_inner`), and `prompt::…` drives the real `kill <pid>`
+/// line but only against a `PendingKind::UserPrompt`.
+#[test]
+fn killing_a_paused_row_aborts_the_plugin_through_real_dispatch() {
+    on_rt(async {
+        let mut session = Session::new().await.unwrap();
+        session.set_plugin(Box::new(EchoPlugin::default()));
+        let prompt = crate::builtins::promptuser::PendingPrompt {
+            question: "go?".to_string(),
+            choices: None,
+            secret: false,
+        };
+        // The pause needs a real process row: `kills_pending` only matches a `kill` whose target pid
+        // is the PAUSED row's, so the surfaced pending must carry `Some(pid)`.
+        let (pid, surfaced) = {
+            let mut ctx = SessionCtx::new(&mut session);
+            let pid = ctx.proc_spawn_bg(
+                crate::runtime::proctable::ProcessKind::Builtin,
+                vec!["plug".to_string()],
+                crate::runtime::proctable::SHELL_ROOT_PID,
+            );
+            let surfaced = ctx.surface_pending(prompt, Some(pid), PluginPending(Box::new("tag-2")));
+            (pid, surfaced)
+        };
+        assert!(surfaced.pending_prompt.is_some());
+
+        // `eval_line`, not `answer_prompt`: the abort has to travel the whole dispatch spine.
+        let killed = session.eval_line(&format!("kill {pid}")).await;
+        assert_eq!(
+            killed.stdout,
+            b"resumed tag-2\n",
+            "the kill must reach the plug-in's `resume`; stderr: {}",
+            String::from_utf8_lossy(&killed.stderr)
+        );
+        assert_eq!(killed.exit_code, 0);
+        assert!(killed.pending_prompt.is_none());
+        assert!(
+            !session.has_pending_prompt(),
+            "the pause must be resolved, not left outstanding"
+        );
+        // It aborted the pause; it did not fall through to `run_kill`'s `cancel` hook.
+        assert_eq!(
+            session
+                .plugin_ref::<EchoPlugin>()
+                .map(|p| p.cancelled.clone()),
+            Some(Vec::new())
+        );
+    });
+}
+
 #[test]
 fn without_a_plugin_family_commands_are_not_found() {
     on_rt(async {
