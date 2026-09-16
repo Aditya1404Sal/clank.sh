@@ -14,7 +14,7 @@ impl Session {
         let Some(word) = prompt_leading_word(line) else {
             return false;
         };
-        self.grease.is_agent(&word)
+        self.clank.grease.is_agent(&word)
     }
 
     /// Run an installed Golem agent: parse the ctor/wrapper-flags/method/args, validate the method (or
@@ -34,7 +34,7 @@ impl Session {
             &words[..]
         };
         let name = rest[0].clone();
-        let Some(pkg) = self.grease.agent(&name).cloned() else {
+        let Some(pkg) = self.clank.grease.agent(&name).cloned() else {
             return LineResult::denied(); // is_agent_line gated it
         };
 
@@ -66,7 +66,7 @@ impl Session {
 
         // `--help` or no method → agent help.
         if parsed.method.is_empty() {
-            let help = self.grease.pkg_help(&name).unwrap_or_default();
+            let help = self.clank.grease.pkg_help(&name).unwrap_or_default();
             return LineResult::continue_with_stdout(help.into_bytes());
         }
 
@@ -107,7 +107,7 @@ impl Session {
             // The bare reserved word `help` (README:840) prints the agent's generated help, same as the
             // `--help` flag and the empty-method form above — it must not be treated as a method name.
             "help" => {
-                let help = self.grease.pkg_help(&name).unwrap_or_default();
+                let help = self.clank.grease.pkg_help(&name).unwrap_or_default();
                 return LineResult::continue_with_stdout(help.into_bytes());
             }
             _ => {}
@@ -158,7 +158,7 @@ impl Session {
             phantom: parsed.phantom,
         };
 
-        let Some(invoker) = self.agent_invoker.as_deref() else {
+        let Some(invoker) = self.clank.agent_invoker.as_deref() else {
             return LineResult::from_outcome(
                 Vec::new(),
                 format!(
@@ -263,7 +263,7 @@ impl Session {
                 2,
             );
         }
-        let Some(cluster) = self.golem_cluster.as_deref() else {
+        let Some(cluster) = self.clank.golem_cluster.as_deref() else {
             return LineResult::from_outcome(
                 Vec::new(),
                 b"golem: requires a configured Golem cluster (unavailable on this target)\n"
@@ -305,7 +305,7 @@ impl Session {
         parsed: &ParsedAgentLine,
         sub: &str,
     ) -> LineResult {
-        let Some(cluster) = self.golem_cluster.as_deref() else {
+        let Some(cluster) = self.clank.golem_cluster.as_deref() else {
             return LineResult::from_outcome(
                 Vec::new(),
                 format!(
@@ -365,7 +365,7 @@ impl Session {
         );
         table.set_agent_meta(pid, meta);
         drop(table);
-        self.pending_invocations
+        self.clank.pending_invocations
             .push(PendingInvocation { pid, cancel_token });
         // Bound the fire-and-forget tracking. A `--trigger`/`--schedule` invocation has no
         // remote-completion signal, so without this its `S` row and `pending_invocations` entry would
@@ -374,8 +374,8 @@ impl Session {
         // which the proc-table prune then bounds) and drop it from tracking. Deterministic (oldest
         // first), so oplog replay converges to the same bounded state. `kill` on an evicted pid then
         // reports "already dispatched", which is the honest answer for a fire-and-forget call.
-        while self.pending_invocations.len() > MAX_PENDING_INVOCATIONS {
-            let old = self.pending_invocations.remove(0);
+        while self.clank.pending_invocations.len() > MAX_PENDING_INVOCATIONS {
+            let old = self.clank.pending_invocations.remove(0);
             self.proc_table
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)

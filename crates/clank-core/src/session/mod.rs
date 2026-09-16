@@ -111,9 +111,9 @@ enum AskPauseKind {
 /// An active `ask repl` session: its isolated transcript and the model it targets. Held on the
 /// `Session` only while the native driver is inside the REPL loop. `:model` mutates `model`;
 /// `:new-session` clears `transcript`.
-struct ReplState {
-    transcript: Transcript,
-    model: String,
+pub(crate) struct ReplState {
+    pub(crate) transcript: Transcript,
+    pub(crate) model: String,
 }
 
 /// The carried state of an in-flight `ask` agentic loop, enough to resume it after a pause. Owned data
@@ -146,11 +146,11 @@ struct Pending {
 /// A per-line snapshot of the installed capability surface, keyed by the MCP + grease state versions.
 /// Rebuilt only when that key changes; otherwise the same `Arc`s are re-installed each line (a cheap
 /// clone) instead of re-rendering the manifests / resource index / system prompt every command.
-struct CapabilityCache {
-    key: (u64, u64),
-    dynreg: std::sync::Arc<std::sync::Mutex<Vec<crate::manifest::Manifest>>>,
-    mcpfs: std::sync::Arc<Vec<crate::runtime::mcpfs::ResourceEntry>>,
-    sysprompt: std::sync::Arc<String>,
+pub(crate) struct CapabilityCache {
+    pub(crate) key: (u64, u64),
+    pub(crate) dynreg: std::sync::Arc<std::sync::Mutex<Vec<crate::manifest::Manifest>>>,
+    pub(crate) mcpfs: std::sync::Arc<Vec<crate::runtime::mcpfs::ResourceEntry>>,
+    pub(crate) sysprompt: std::sync::Arc<String>,
 }
 
 /// One live background job: the Brush job manager's id and the clank process-table PID that
@@ -162,9 +162,9 @@ struct BgJob {
 
 /// A triggered/scheduled agent invocation awaiting a possible `kill`-cancel: its proc-table PID and
 /// the opaque cancel token the invoker understands (README:850). `None` token = not cancelable.
-struct PendingInvocation {
-    pid: u32,
-    cancel_token: Option<String>,
+pub(crate) struct PendingInvocation {
+    pub(crate) pid: u32,
+    pub(crate) cancel_token: Option<String>,
 }
 
 /// The result of evaluating one shell line.
@@ -271,46 +271,13 @@ pub struct Session {
     /// Deterministic under Golem replay — derived purely from the replayed line history, like the
     /// process table (the `JoinHandles` themselves are rebuilt by re-execution).
     bg_jobs: Vec<BgJob>,
-    /// The injected LLM provider for `ask`. Installed by the agent build (a durable Anthropic
-    /// provider); `None` on native and until injected, in which case `ask` degrades to a clean
-    /// "not configured" error. See [`crate::ai::ask`].
-    ask_provider: Option<Box<dyn crate::ai::ask::AskProvider>>,
-    /// The injected Golem-agent invoker (durable `WasmRpc` on the agent; a fake in tests). `None` on
-    /// native / until injected, in which case an agent invocation degrades to a clean "needs a cluster"
-    /// error. See [`crate::golem::agent`].
-    agent_invoker: Option<Box<dyn crate::golem::agent::AgentInvoker>>,
-    /// The injected Golem cluster interface backing the `golem` command + agent oplog/status (durable
-    /// `golem:api` bindings on the agent). `None` on native / until injected → the honest no-cluster
-    /// error. See [`crate::golem::cluster`].
-    golem_cluster: Option<Box<dyn crate::golem::cluster::GolemCluster>>,
-    /// Triggered/scheduled agent invocations awaiting a possible `kill`-cancel: PID → cancel token.
-    pending_invocations: Vec<PendingInvocation>,
-    /// Out-of-band stdin for the next `ask` dispatch: the captured stdout of an upstream pipeline
-    /// stage (`cat x | ask "…"`). Set by the pipe pre-extraction in `eval_line` (or restored on a
-    /// deferred-confirm resume) and `take()`n by `run_ask`. `None` for an ordinary `ask` line.
-    next_ask_stdin: Option<String>,
-    /// An active `ask repl` session's isolated transcript + model. `Some` only while the native
-    /// driver is inside a REPL; `run_repl_turn` renders/records against THIS transcript, not the main
-    /// one, giving the REPL its own context window. Never set on the durable agent (REPL is a
-    /// native-terminal feature there).
-    repl: Option<ReplState>,
-    /// Installed MCP servers + open sessions. Reconstructed deterministically under Golem replay.
-    mcp: crate::mcp::state::McpState,
-    /// The injected MCP HTTP transport. Installed by the agent build (a durable WASI-HTTP client);
-    /// `None` on native, in which case MCP degrades to a clean "not configured" error. Also used by
-    /// `grease` for registry fetches (it's a generic durable "fetch bytes over HTTPS" seam).
-    mcp_http: Option<Box<dyn crate::mcp::client::McpHttp>>,
-    /// Installed grease packages (prompts). Reconstructed from the durable agent FS on boot.
-    grease: crate::grease::state::GreaseState,
+    /// The clank plug-in's state (`ask`, `mcp`, `grease`, `golem`). A concrete field during the
+    /// crate split; it moves behind the `Plugin` slot once every family's glue is `impl Clank`.
+    clank: crate::clank::Clank,
     /// The log sink installed per-line (the `/var/log` observability layer). Defaults to the direct
     /// append sink (correct on native); the agent injects a whole-file-rewrite sink whose writes are
     /// idempotent under oplog replay, avoiding line duplication (see `logging` + `log_sink`).
     log_sink: std::sync::Arc<dyn crate::logging::LogSink>,
-    /// Cached capability views (dynamic manifests / MCP resource index / system prompt) installed per
-    /// line. These are functions of the MCP + grease state (registry is static), so they're rebuilt only
-    /// when `(mcp.version(), grease.version())` changes — most lines reuse the cache instead of
-    /// re-rendering the whole system prompt + manifests every command.
-    cap_cache: Option<CapabilityCache>,
     source: SourceInfo,
     /// Variables marked sensitive via `export --secret NAME=VALUE` (README "Sensitive environment
     /// variables"): `name → value`. The value is available to agents via the environment (set in
@@ -442,17 +409,8 @@ impl Session {
                 pending: None,
                 authz: AuthzState::default(),
                 bg_jobs: Vec::new(),
-                ask_provider: None,
-                agent_invoker: None,
-                golem_cluster: None,
-                pending_invocations: Vec::new(),
-                next_ask_stdin: None,
-                repl: None,
-                mcp: crate::mcp::state::McpState::default(),
-                mcp_http: None,
-                grease: crate::grease::state::GreaseState::load(),
+                clank: crate::clank::Clank::new(),
                 log_sink: std::sync::Arc::new(crate::logging::DefaultLogSink),
-                cap_cache: None,
                 source: SourceInfo::default(),
                 secret_env: std::collections::BTreeMap::new(),
                 rt,
@@ -474,17 +432,8 @@ impl Session {
                 pending: None,
                 authz: AuthzState::default(),
                 bg_jobs: Vec::new(),
-                ask_provider: None,
-                agent_invoker: None,
-                golem_cluster: None,
-                pending_invocations: Vec::new(),
-                next_ask_stdin: None,
-                repl: None,
-                mcp: crate::mcp::state::McpState::default(),
-                mcp_http: None,
-                grease: crate::grease::state::GreaseState::load(),
+                clank: crate::clank::Clank::new(),
                 log_sink: std::sync::Arc::new(crate::logging::DefaultLogSink),
-                cap_cache: None,
                 source: SourceInfo::default(),
                 secret_env: std::collections::BTreeMap::new(),
             };
@@ -509,7 +458,7 @@ impl Session {
     /// package durably cached its tool listing — so we rebuild the server + tool surface here without a
     /// live `tools/list` (the actual `tools/call` still goes to the server at invocation time).
     fn reconstruct_mcp_from_grease(&mut self) {
-        for m in self.grease.mcp_packages() {
+        for m in self.clank.grease.mcp_packages() {
             if !m.artifacts.tools {
                 continue;
             }
@@ -534,7 +483,7 @@ impl Session {
                         .unwrap_or(serde_json::json!({})),
                 })
                 .collect();
-            self.mcp.set_installed(&m.name, config, tools);
+            self.clank.mcp.set_installed(&m.name, config, tools);
         }
     }
 
@@ -552,7 +501,7 @@ impl Session {
             let Ok(Some(config)) = crate::mcp::config::load(&name) else {
                 continue;
             };
-            if !config.enabled || config.tools.is_empty() || self.mcp.is_server(&name) {
+            if !config.enabled || config.tools.is_empty() || self.clank.mcp.is_server(&name) {
                 continue;
             }
             let tools: Vec<crate::mcp::state::McpTool> = config
@@ -569,7 +518,7 @@ impl Session {
                         .unwrap_or(serde_json::json!({})),
                 })
                 .collect();
-            self.mcp.set_installed(&name, config, tools);
+            self.clank.mcp.set_installed(&name, config, tools);
         }
     }
 
@@ -583,26 +532,26 @@ impl Session {
     /// provider here after constructing the session; without one, `ask` reports "not configured".
     pub fn set_ask_provider(&mut self, provider: Box<dyn crate::ai::ask::AskProvider>) {
         // Wrap so each LLM turn is logged to http.log (the outbound Anthropic call).
-        self.ask_provider = Some(Box::new(crate::ai::ask::LoggingAskProvider::new(provider)));
+        self.clank.ask_provider = Some(Box::new(crate::ai::ask::LoggingAskProvider::new(provider)));
     }
 
     /// Install the Golem-agent invoker (a durable `WasmRpc` binding on the agent). Without one, an
     /// installed agent command reports "needs a cluster" (README:895). Injected after construction.
     pub fn set_agent_invoker(&mut self, invoker: Box<dyn crate::golem::agent::AgentInvoker>) {
-        self.agent_invoker = Some(invoker);
+        self.clank.agent_invoker = Some(invoker);
     }
 
     /// Install the Golem cluster interface backing the `golem` command + agent oplog/status (durable
     /// `golem:api` bindings on the agent). Without one, `golem` reports "needs a cluster".
     pub fn set_golem_cluster(&mut self, cluster: Box<dyn crate::golem::cluster::GolemCluster>) {
-        self.golem_cluster = Some(cluster);
+        self.clank.golem_cluster = Some(cluster);
     }
 
     /// Install the MCP HTTP transport (a durable WASI-HTTP client on the agent). Without one, MCP
     /// commands report "not configured" (exit 4). Injected after construction like the ask provider.
     pub fn set_mcp_http(&mut self, http: Box<dyn crate::mcp::client::McpHttp>) {
         // Wrap the transport so every MCP + grease-registry request is logged to http.log (redacted).
-        self.mcp_http = Some(Box::new(crate::mcp::client::LoggingMcpHttp::new(http)));
+        self.clank.mcp_http = Some(Box::new(crate::mcp::client::LoggingMcpHttp::new(http)));
     }
 
     /// Install the `/var/log` log sink. The agent injects a whole-file-rewrite sink (idempotent under
@@ -800,19 +749,19 @@ impl Session {
         // versions — so the dynamic manifests (`man`/`type` resolution), the MCP resource index (`ls
         // /mnt/mcp/...`), and the live system prompt (`cat /proc/clank/system-prompt`) are re-rendered
         // only when a package/server was installed or removed, not on every command line.
-        let cap_key = (self.mcp.version(), self.grease.version());
-        if self.cap_cache.as_ref().map(|c| c.key) != Some(cap_key) {
-            let mut manifests = self.mcp.all_manifests();
-            manifests.extend(self.grease.all_manifests());
-            self.cap_cache = Some(CapabilityCache {
+        let cap_key = (self.clank.mcp.version(), self.clank.grease.version());
+        if self.clank.cap_cache.as_ref().map(|c| c.key) != Some(cap_key) {
+            let mut manifests = self.clank.mcp.all_manifests();
+            manifests.extend(self.clank.grease.all_manifests());
+            self.clank.cap_cache = Some(CapabilityCache {
                 key: cap_key,
                 dynreg: std::sync::Arc::new(std::sync::Mutex::new(manifests)),
-                mcpfs: std::sync::Arc::new(self.grease.mcp_resource_index()),
+                mcpfs: std::sync::Arc::new(self.clank.grease.mcp_resource_index()),
                 sysprompt: std::sync::Arc::new(
                     crate::ai::ask::build_system_prompt_with_capabilities(
                         &self.registry,
-                        &self.mcp,
-                        &self.grease,
+                        &self.clank.mcp,
+                        &self.clank.grease,
                     ),
                 ),
             });
@@ -824,7 +773,7 @@ impl Session {
             // Invariant: Some by this point — the block just above sets it when the cap key changed,
             // and leaves the existing value otherwise.
             #[allow(clippy::expect_used)]
-            let cap = self.cap_cache.as_ref().expect("cap_cache just populated");
+            let cap = self.clank.cap_cache.as_ref().expect("cap_cache just populated");
             (cap.dynreg.clone(), cap.mcpfs.clone(), cap.sysprompt.clone())
         };
         let _install_dynreg = crate::runtime::dynreg::install(dynreg);
@@ -1377,8 +1326,8 @@ impl Session {
                     // best-effort cancel. (The scheduled-invocation token doesn't survive across the
                     // durable agent's serialized invocations, so a remote cancel-after-return isn't
                     // guaranteed — documented.)
-                    if let Some(idx) = self.pending_invocations.iter().position(|p| p.pid == *pid) {
-                        let inv = self.pending_invocations.remove(idx);
+                    if let Some(idx) = self.clank.pending_invocations.iter().position(|p| p.pid == *pid) {
+                        let inv = self.clank.pending_invocations.remove(idx);
                         self.proc_table
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1441,7 +1390,7 @@ impl Session {
         let Some(word) = prompt_leading_word(line) else {
             return false;
         };
-        self.grease.is_prompt(&word)
+        self.clank.grease.is_prompt(&word)
     }
 
     /// Whether `line`'s leading word is an installed grease script. Drives the `run_script` dispatch.
@@ -1451,7 +1400,7 @@ impl Session {
         let Some(word) = prompt_leading_word(line) else {
             return false;
         };
-        self.grease.is_script(&word)
+        self.clank.grease.is_script(&word)
     }
 
     /// Run an installed grease prompt: parse `--arg value` flags against the package's declared
@@ -1463,7 +1412,7 @@ impl Session {
             Ok(t) => t,
             Err(e) => return e,
         };
-        let Some(package) = self.grease.prompt(&name).cloned() else {
+        let Some(package) = self.clank.grease.prompt(&name).cloned() else {
             return LineResult::denied(); // shouldn't happen (is_prompt_line gated it)
         };
 
@@ -1501,7 +1450,7 @@ impl Session {
             Ok(t) => t,
             Err(e) => return e,
         };
-        let Some(package) = self.grease.script(&name).cloned() else {
+        let Some(package) = self.clank.grease.script(&name).cloned() else {
             return LineResult::denied(); // shouldn't happen (is_script_line gated it)
         };
         let filled = match package.fill(&provided) {
@@ -1535,13 +1484,13 @@ impl Session {
         let rest = crate::helpshim::skip_leading_sudo(&words);
         let name = rest.first()?;
         if crate::helpshim::asks_for_help(rest) {
-            return self.grease.pkg_help(name);
+            return self.clank.grease.pkg_help(name);
         }
         // `<agent> help` — the bare reserved help subcommand (README:840), for an installed AGENT
         // package only, as exactly `<name> help`. Resolved HERE, before the authz gate, so help never
         // triggers the agent's Confirm prompt (a prompt/script package's `help` is an ordinary arg).
-        if rest.len() == 2 && rest[1] == "help" && self.grease.is_agent(name) {
-            return self.grease.pkg_help(name);
+        if rest.len() == 2 && rest[1] == "help" && self.clank.grease.is_agent(name) {
+            return self.clank.grease.pkg_help(name);
         }
         None
     }
@@ -1566,7 +1515,7 @@ impl Session {
             // Bare `<server>` with no tool: show help (help path already handled this in eval_line, but
             // a direct run_command re-entry lands here).
             return LineResult::continue_with_stdout(
-                self.mcp
+                self.clank.mcp
                     .server_help(&inv.server)
                     .unwrap_or_default()
                     .into_bytes(),
@@ -1574,7 +1523,7 @@ impl Session {
         };
 
         // Resolve the tool + its schema.
-        let Some(tool) = self.mcp.tool(&inv.server, &tool_name).cloned() else {
+        let Some(tool) = self.clank.mcp.tool(&inv.server, &tool_name).cloned() else {
             return LineResult::from_outcome(
                 Vec::new(),
                 format!(
@@ -1610,7 +1559,7 @@ impl Session {
             },
         };
 
-        let Some(config) = self.mcp.get(&inv.server).map(|s| s.config.clone()) else {
+        let Some(config) = self.clank.mcp.get(&inv.server).map(|s| s.config.clone()) else {
             return LineResult::from_outcome(
                 Vec::new(),
                 format!("{}: server not installed\n", inv.server).into_bytes(),
@@ -1619,12 +1568,12 @@ impl Session {
         };
         // Reuse an explicit --session-id, else an open session for the server, else stateless.
         let session_id = inv.session_id.clone().or_else(|| {
-            self.mcp
+            self.clank.mcp
                 .session_for(&inv.server)
                 .and_then(|s| s.server_session_id.clone())
         });
 
-        let Some(http) = self.mcp_http.as_deref() else {
+        let Some(http) = self.clank.mcp_http.as_deref() else {
             return LineResult::from_outcome(
                 Vec::new(),
                 b"mcp: no HTTP transport configured (available on the Golem agent)\n".to_vec(),

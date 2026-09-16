@@ -23,10 +23,10 @@ impl Session {
         if let Some(m) = self.registry.get(name) {
             return Some(m.execution_scope);
         }
-        if let Some(m) = self.mcp.manifest_for(name) {
+        if let Some(m) = self.clank.mcp.manifest_for(name) {
             return Some(m.execution_scope);
         }
-        if let Some(m) = self.grease.manifest_for(name) {
+        if let Some(m) = self.clank.grease.manifest_for(name) {
             return Some(m.execution_scope);
         }
         None
@@ -55,11 +55,11 @@ impl Session {
 
         // Pick up any pipeline stdin captured for this dispatch (`cat x | ask "…"`). Taken so it
         // never leaks into an unrelated later `ask`.
-        if let Some(stdin) = self.next_ask_stdin.take() {
+        if let Some(stdin) = self.clank.next_ask_stdin.take() {
             args.stdin = Some(stdin);
         }
 
-        if self.ask_provider.is_none() {
+        if self.clank.ask_provider.is_none() {
             let err = crate::ai::Error::not_configured("ask");
             return LineResult::from_outcome(
                 Vec::new(),
@@ -107,14 +107,14 @@ impl Session {
         // MCP tool (mcp__<server>__<tool>) and per installed grease prompt (prompt__<name>). Every
         // `grease install`/`mcp add` thus expands what `ask` can do (README).
         let mut tools = crate::ai::ask::build_ask_tools(&self.registry);
-        tools.extend(crate::ai::ask::mcp_ask_tool_definitions(&self.mcp));
-        tools.extend(crate::ai::ask::grease_ask_tool_definitions(&self.grease));
+        tools.extend(crate::ai::ask::mcp_ask_tool_definitions(&self.clank.mcp));
+        tools.extend(crate::ai::ask::grease_ask_tool_definitions(&self.clank.grease));
 
         let system = crate::ai::ask::with_json_addendum(
             crate::ai::ask::build_system_prompt_with_capabilities(
                 &self.registry,
-                &self.mcp,
-                &self.grease,
+                &self.clank.mcp,
+                &self.clank.grease,
             ),
             args.json,
         );
@@ -179,7 +179,7 @@ impl Session {
 
         // Approved (allow / sudo / all): run the upstream, capture, and dispatch the ask with stdin.
         let captured = self.capture_upstream(&upstream).await;
-        self.next_ask_stdin = Some(captured);
+        self.clank.next_ask_stdin = Some(captured);
         let result = self.run_ask(args, blanket).await;
         if let Some(pid) = pid {
             self.proc_table
@@ -206,7 +206,7 @@ impl Session {
     // ---- ask repl (native-only interactive session with its own transcript) --------------------
 
     /// Start an `ask repl` session: resolve the model, seed the isolated transcript (empty for
-    /// `--fresh`, a copy of the parent for `--inherit`), and stash it on `self.repl`. Returns the
+    /// `--fresh`, a copy of the parent for `--inherit`), and stash it on `self.clank.repl`. Returns the
     /// resolved model id for the prompt banner, or an `Err` message (unknown provider / no provider).
     /// Native-only — the durable agent returns an honest message from `eval_line` instead.
     ///
@@ -220,7 +220,7 @@ impl Session {
         &mut self,
         args: &crate::ai::ask::ReplArgs,
     ) -> crate::ai::error::Result<String> {
-        if self.ask_provider.is_none() {
+        if self.clank.ask_provider.is_none() {
             return Err(crate::ai::Error::not_configured("ask repl"));
         }
         let (model, _warning) = self.resolve_ask_model(args.model.as_deref())?;
@@ -232,7 +232,7 @@ impl Session {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone(),
         };
-        self.repl = Some(ReplState {
+        self.clank.repl = Some(ReplState {
             transcript,
             model: model.clone(),
         });
@@ -242,7 +242,7 @@ impl Session {
     /// The active REPL's model id, for the `[model]>` prompt. `None` if no REPL is active.
     #[must_use]
     pub fn repl_model(&self) -> Option<String> {
-        self.repl.as_ref().map(|r| r.model.clone())
+        self.clank.repl.as_ref().map(|r| r.model.clone())
     }
 
     /// Handle a REPL meta-command (`:model <id>`, `:new-session`, `:exit`). Returns `Some(output)`
@@ -250,7 +250,7 @@ impl Session {
     /// isn't a meta-command (the caller then treats it as a prompt via [`Self::repl_turn`]).
     pub fn repl_meta(&mut self, line: &str) -> Option<(String, bool)> {
         let line = line.trim();
-        let repl = self.repl.as_mut()?;
+        let repl = self.clank.repl.as_mut()?;
         let mut words = line.split_whitespace();
         match words.next()? {
             ":exit" | ":quit" => Some((String::new(), true)),
@@ -278,14 +278,14 @@ impl Session {
     /// the REPL is a chat surface, distinct from agentic `ask`. Requires an active REPL.
     pub async fn repl_turn(&mut self, prompt: &str) -> String {
         use crate::ai::ask::AskTurn;
-        let Some(repl) = self.repl.as_ref() else {
+        let Some(repl) = self.clank.repl.as_ref() else {
             return "ask repl: no active session\n".to_string();
         };
         let model = repl.model.clone();
         let context = String::from_utf8_lossy(&repl.transcript.render()).into_owned();
 
         let state = AskLoopState {
-            system: crate::ai::ask::build_system_prompt_with_mcp(&self.registry, &self.mcp),
+            system: crate::ai::ask::build_system_prompt_with_mcp(&self.registry, &self.clank.mcp),
             tools: Vec::new(), // conversational: the REPL doesn't expose shell tools
             history: vec![AskTurn::User(crate::ai::ask::user_content(
                 &context, prompt,
@@ -299,7 +299,7 @@ impl Session {
         let reply = String::from_utf8_lossy(&result.stdout).into_owned();
 
         // Record the exchange into the REPL's own transcript so the next turn has context.
-        if let Some(repl) = self.repl.as_mut() {
+        if let Some(repl) = self.clank.repl.as_mut() {
             repl.transcript.record_command(&format!("> {prompt}"));
             repl.transcript.record_output(reply.as_bytes());
         }
@@ -307,9 +307,9 @@ impl Session {
     }
 
     /// End the REPL session: render its transcript to stdout (so it enters the parent transcript once
-    /// as rendered output, per the README) and clear `self.repl`. Returns the rendered session bytes.
+    /// as rendered output, per the README) and clear `self.clank.repl`. Returns the rendered session bytes.
     pub fn repl_end(&mut self) -> Vec<u8> {
-        match self.repl.take() {
+        match self.clank.repl.take() {
             Some(repl) => repl.transcript.render(),
             None => Vec::new(),
         }
@@ -382,7 +382,7 @@ impl Session {
     ) -> crate::ai::error::Result<Option<String>> {
         use crate::ai::ask::AskTurn;
 
-        let Some(provider) = self.ask_provider.take() else {
+        let Some(provider) = self.clank.ask_provider.take() else {
             return Ok(None);
         };
         let resp = provider
@@ -393,7 +393,7 @@ impl Session {
                 model,
             )
             .await;
-        self.ask_provider = Some(provider); // restore before returning
+        self.clank.ask_provider = Some(provider); // restore before returning
 
         match resp.error {
             Some(err) => Err(err),
@@ -493,11 +493,11 @@ impl Session {
         let (command, elevated) = authz::leading_command(line);
         if let Some(name) = command.as_deref() {
             if self.registry.get(name).is_none() {
-                if let Some(m) = self.mcp.manifest_for(name) {
+                if let Some(m) = self.clank.mcp.manifest_for(name) {
                     return (m.authorization_policy, elevated, command);
                 }
                 // An installed grease prompt: running it is an outbound LLM call ⇒ Confirm.
-                if let Some(m) = self.grease.manifest_for(name) {
+                if let Some(m) = self.clank.grease.manifest_for(name) {
                     return (m.authorization_policy, elevated, command);
                 }
             }
@@ -573,13 +573,13 @@ impl Session {
         let Ok(inv) = crate::mcp::cmd::parse_tool_invocation(line)? else {
             return None;
         };
-        if !self.mcp.is_server(&inv.server) {
+        if !self.clank.mcp.is_server(&inv.server) {
             return None;
         }
         // Bare `<server>` or `--help` ⇒ server help; a `<tool> --help` ⇒ the same (tool-level help is
         // the server help in MCP-lite).
         if inv.help || inv.tool.is_none() {
-            return self.mcp.server_help(&inv.server);
+            return self.clank.mcp.server_help(&inv.server);
         }
         None
     }
@@ -603,7 +603,7 @@ impl Session {
     ) -> LineResult {
         use crate::ai::ask::AskTurn;
 
-        let Some(mut provider) = self.ask_provider.take() else {
+        let Some(mut provider) = self.clank.ask_provider.take() else {
             let err = crate::ai::Error::not_configured("ask");
             return LineResult::from_outcome(
                 Vec::new(),
@@ -631,7 +631,7 @@ impl Session {
                 state.trace.extend_from_slice(
                     format!("[ask] tool-call limit ({ASK_MAX_ITERATIONS}) reached\n").as_bytes(),
                 );
-                self.ask_provider = Some(provider);
+                self.clank.ask_provider = Some(provider);
                 if let Some(pid) = pid {
                     self.proc_table
                         .lock()
@@ -663,7 +663,7 @@ impl Session {
                 .await;
 
             if let Some(err) = resp.error {
-                self.ask_provider = Some(provider);
+                self.clank.ask_provider = Some(provider);
                 if let Some(pid) = pid {
                     self.proc_table
                         .lock()
@@ -690,7 +690,7 @@ impl Session {
             // Restore the provider onto `self` for the duration of tool execution: a `prompt__<name>`
             // tool call re-enters `run_ask` (running the stored prompt through the model), which needs
             // the provider available. Re-take it after the batch, before the next `provider.turn`.
-            self.ask_provider = Some(provider);
+            self.clank.ask_provider = Some(provider);
             let calls = resp.tool_calls.clone();
             let mut results = std::mem::take(&mut pending_results);
             for (i, call) in calls.iter().enumerate() {
@@ -728,7 +728,7 @@ impl Session {
 
             // Re-take the provider for the next turn's `provider.turn` (it was restored on `self` for
             // tool execution above). A nested prompt tool call has already returned it to `self`.
-            let Some(p) = self.ask_provider.take() else {
+            let Some(p) = self.clank.ask_provider.take() else {
                 if let Some(pid) = pid {
                     self.proc_table
                         .lock()
@@ -744,7 +744,7 @@ impl Session {
             provider = p;
         }
 
-        self.ask_provider = Some(provider);
+        self.clank.ask_provider = Some(provider);
         if let Some(pid) = pid {
             self.proc_table
                 .lock()

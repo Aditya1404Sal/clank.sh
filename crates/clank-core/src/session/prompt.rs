@@ -71,7 +71,7 @@ impl Session {
                     .registry
                     .get(name)
                     .map(|m| m.synopsis.clone())
-                    .or_else(|| self.mcp.manifest_for(name).map(|m| m.synopsis))
+                    .or_else(|| self.clank.mcp.manifest_for(name).map(|m| m.synopsis))
                     .unwrap_or_else(|| "run this command".to_string());
                 authz::confirm_question(name, &synopsis, sudo_grant)
             };
@@ -232,7 +232,7 @@ impl Session {
             } => {
                 // Restore any pre-captured pipeline stdin so a deferred `cat x | ask` tail sees it
                 // when re-run (consumed by `run_ask` via `next_ask_stdin`).
-                self.next_ask_stdin = ask_stdin;
+                self.clank.next_ask_stdin = ask_stdin;
                 self.resolve_auth_confirm(resolution, &command, sudo_grant, pending.pid)
                     .await
             }
@@ -299,7 +299,7 @@ impl Session {
         if !approved {
             // "no" or abort → denied (exit 5). Reap the row. Drop any pre-captured pipeline stdin so
             // it can't leak into an unrelated later `ask`.
-            self.next_ask_stdin = None;
+            self.clank.next_ask_stdin = None;
             if let Some(pid) = pid {
                 self.proc_table
                     .lock()

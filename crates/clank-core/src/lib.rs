@@ -24,6 +24,7 @@
 pub mod ai;
 pub mod authz;
 pub mod builtins;
+pub mod clank;
 pub mod config;
 pub mod error;
 pub mod golem;
