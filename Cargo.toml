@@ -20,9 +20,9 @@ members = [
     # T2 FIXTURE: the tool every agent-tools ticket tests against. wasm-only cdylib, so like the
     # other component fixtures it stays out of default-members.
     "fixtures/echo-tool",
-    # SPIKE — the `bash` tool walking skeleton (component `clank:bash`). wasm-only cdylib, so like
-    # the component fixtures it stays out of default-members.
-    "crates/bash",
+    # the `bash` tool component (`clank:bash`). wasm-only cdylib, so like the component fixtures it
+    # stays out of default-members.
+    "crates/bash-tool",
 ]
 # main-rc-1: exclude the vendored golem clone so its crates (golem-schema, etc.) resolve their
 # `{ workspace = true }` deps against THEIR OWN workspace (golem-stuff/golem/), not clank's root.
