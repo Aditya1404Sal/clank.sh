@@ -3,12 +3,20 @@
 //! (`crate::grease`) and the `golem` cluster commands (`crate::golem`) — and the state they keep for
 //! a session.
 //!
-//! During the crate split this is a concrete field of [`crate::session::Session`]; it moves behind
-//! the `Plugin` slot once every family's glue is `impl Clank`.
+//! It reaches the shell through the [`crate::plugin::Plugin`] seam — [`Session`] holds it in an
+//! anonymous slot, hands it out at the public entry points, and passes it down dispatch, so an
+//! `ask` tool call can re-enter through [`SessionCtx::run_command`] by handing the plug-in back.
+//!
+//! [`Session`]: crate::session::Session
 
 pub mod agent;
+pub mod ask;
 pub mod grease;
 pub mod mcp;
+
+use crate::builtins::promptuser::Resolution;
+use crate::plugin::{Capabilities, LineAction, LinePhase, PluginPending, Route};
+use crate::session::{LineResult, SessionCtx};
 
 /// The per-session state of every clank command family.
 #[derive(Default)]
@@ -33,7 +41,7 @@ pub struct Clank {
     pub(crate) next_ask_stdin: Option<String>,
     /// An active `ask repl` session's isolated transcript + model. `Some` only while the native
     /// driver is inside a REPL. Never set on the durable agent.
-    pub(crate) repl: Option<crate::session::ReplState>,
+    pub(crate) repl: Option<ask::ReplState>,
     /// Installed MCP servers + open sessions. Reconstructed deterministically under Golem replay.
     pub(crate) mcp: crate::mcp::state::McpState,
     /// The injected MCP HTTP transport. `None` on native, in which case MCP degrades to a clean
@@ -41,9 +49,6 @@ pub struct Clank {
     pub(crate) mcp_http: Option<Box<dyn crate::mcp::client::McpHttp>>,
     /// Installed grease packages. Reconstructed from the durable agent filesystem on boot.
     pub(crate) grease: crate::grease::state::GreaseState,
-    /// Cached capability views (dynamic manifests / MCP resource index / system prompt), rebuilt
-    /// only when `(mcp.version(), grease.version())` changes.
-    pub(crate) cap_cache: Option<crate::session::CapabilityCache>,
 }
 
 impl Clank {
@@ -55,5 +60,259 @@ impl Clank {
             grease: crate::grease::state::GreaseState::load(),
             ..Self::default()
         }
+    }
+}
+
+/// A routed clank command, carried opaquely through the shell's dispatch.
+///
+/// The variants keep the order — and the doc comments — of the `LineRoute`/`CommandRoute` arms they
+/// were lifted from, because that order is the interception ladder and reordering it changes what
+/// the shell does. See `session/mod.rs`'s `LineRoute` doc.
+pub(crate) enum ClankRoute {
+    /// A top-level `context summarize` — needs the model, so it's routed through the authz gate to
+    /// the async `run_context_summarize` instead of the sync `context` engine.
+    ContextSummarize,
+    /// A deferred-confirm re-run of a top-level `context summarize`.
+    ContextSummarizeRerun,
+    /// `ask repl` reaching the durable-agent path (the interactive REPL is native-only there).
+    AskReplOnAgent,
+    /// `… | ask "…"` — a stdin-as-context pipeline; carries the parsed upstream/tail split.
+    AskPipe(crate::ai::ask::AskTailPipe),
+    /// `ask ...`, parsed.
+    Ask(crate::ai::ask::AskArgs),
+    /// `mcp ...` management, parsed (or a parse error to report).
+    Mcp(crate::mcp::error::Result<crate::mcp::cmd::McpCommand>),
+    /// `grease ...` package management, parsed (or a parse error to report).
+    Grease(crate::grease::error::Result<crate::grease::cmd::GreaseCommand>),
+    /// `golem ...` cluster command, parsed (or a parse error to report).
+    Golem(crate::golem::error::Result<crate::golem::cluster::GolemCommand>),
+    /// `<server> <tool> …` for an installed MCP server.
+    McpToolLine,
+    /// A grease-installed prompt invocation.
+    PromptLine,
+    /// A grease-installed script invocation.
+    ScriptLine,
+    /// A grease-installed Golem agent invocation.
+    AgentLine,
+    /// A grease-installed MCP resource-template invocation.
+    McpTemplateLine,
+    /// A top-level `cat /mnt/mcp/<server>/<dynamic>` read target; carries `(server, uri)`.
+    McpResourceRead(String, String),
+}
+
+#[async_trait::async_trait(?Send)]
+impl crate::plugin::Plugin for Clank {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn version(&self) -> u64 {
+        // The old `(mcp.version(), grease.version())` cache key, folded into one number: a large odd
+        // multiplier keeps the two counters from aliasing onto the same product.
+        self.mcp
+            .version()
+            .wrapping_mul(1_000_003)
+            .wrapping_add(self.grease.version())
+    }
+
+    fn capabilities(&self, registry: &crate::registry::CommandRegistry) -> Capabilities {
+        let mut manifests = self.mcp.all_manifests();
+        manifests.extend(self.grease.all_manifests());
+        Capabilities {
+            manifests,
+            resources: self.grease.mcp_resource_index(),
+            system_prompt: Some(crate::ai::ask::build_system_prompt_with_capabilities(
+                registry,
+                &self.mcp,
+                &self.grease,
+            )),
+        }
+    }
+
+    fn authz_manifest(&self, name: &str) -> Option<crate::manifest::Manifest> {
+        self.mcp
+            .manifest_for(name)
+            // An installed grease prompt: running it is an outbound LLM call ⇒ Confirm.
+            .or_else(|| self.grease.manifest_for(name))
+    }
+
+    fn confirm_question(&self, gated_command: &str, sudo_grant: bool) -> Option<String> {
+        self.grease_install_disclosure(gated_command, sudo_grant)
+    }
+
+    fn is_inspection(&self, line: &str) -> bool {
+        ask::is_context_summarize(line)
+    }
+
+    fn classify_line(&self, line: &str, phase: LinePhase) -> Option<LineAction> {
+        match phase {
+            // `context summarize` needs the model, so it's detected here — before the generic
+            // `context` dispatch — and routed (in [`Self::run`]'s match arm) through the authz gate
+            // to the async Session layer instead of the sync `dispatch_context`/`apply_context`
+            // engine. A nested `$(context summarize)`/pipe stays with Brush and hits the honest
+            // error in `apply_context`.
+            LinePhase::BeforeContext => ask::is_context_summarize(line)
+                .then(|| LineAction::Intercept(Route(Box::new(ClankRoute::ContextSummarize)))),
+            LinePhase::BeforeGate => {
+                // `<server> --help` / `<server> <tool> --help` for an installed MCP server (before
+                // the authz gate — help never confirms).
+                if let Some(help) = self.mcp_help_for(line) {
+                    return Some(LineAction::Help(help));
+                }
+                // `<name> --help` for an installed grease command package (prompt or script), same rule.
+                if let Some(help) = self.pkg_help_for(line) {
+                    return Some(LineAction::Help(help));
+                }
+                // `ask repl` reaching `eval_line` is the durable-agent path (the native driver
+                // intercepts it before `eval_line` and runs the interactive loop).
+                if crate::ai::ask::classify_repl(line).is_some() {
+                    return Some(LineAction::Intercept(Route(Box::new(
+                        ClankRoute::AskReplOnAgent,
+                    ))));
+                }
+                // stdin-as-context: `cat x | ask "…"`. The LLM call can't run inside Brush's pipeline
+                // (the reactor isn't live there — the "Wall C" wall), so the Session pre-extracts it:
+                // run the upstream, capture its stdout, and dispatch the `ask` tail at the session
+                // layer with those bytes as stdin. `ask` must be the FINAL stage; anywhere else it
+                // stays the honest stub error.
+                if let Some(pipe) = crate::ai::ask::split_ask_tail(line) {
+                    return Some(LineAction::Intercept(Route(Box::new(ClankRoute::AskPipe(
+                        pipe,
+                    )))));
+                }
+                None
+            }
+        }
+    }
+
+    fn classify_command(&self, line: &str) -> Option<Route> {
+        let route = if ask::is_context_summarize(line) {
+            ClankRoute::ContextSummarizeRerun
+        } else if let Some(args) = crate::ai::ask::classify(line) {
+            ClankRoute::Ask(args)
+        } else if let Some(parsed) = crate::mcp::cmd::classify(line) {
+            ClankRoute::Mcp(parsed)
+        } else if let Some(parsed) = crate::grease::cmd::classify(line) {
+            ClankRoute::Grease(parsed)
+        } else if let Some(parsed) = crate::golem::cluster::classify(line) {
+            ClankRoute::Golem(parsed)
+        } else if self.is_mcp_tool_line(line) {
+            ClankRoute::McpToolLine
+        } else if self.is_prompt_line(line) {
+            ClankRoute::PromptLine
+        } else if self.is_script_line(line) {
+            ClankRoute::ScriptLine
+        } else if self.is_agent_line(line) {
+            ClankRoute::AgentLine
+        } else if self.is_mcp_template_line(line) {
+            ClankRoute::McpTemplateLine
+        } else if let Some((server, uri)) = self.dynamic_mcp_read_target(line) {
+            ClankRoute::McpResourceRead(server, uri)
+        } else {
+            return None;
+        };
+        Some(Route(Box::new(route)))
+    }
+
+    async fn run(
+        &mut self,
+        route: Route,
+        line: &str,
+        pid: Option<u32>,
+        blanket_authorized: bool,
+        ctx: &mut SessionCtx<'_>,
+    ) -> LineResult {
+        let Ok(route) = route.0.downcast::<ClankRoute>() else {
+            return LineResult::stderr("clank: internal error: foreign route\n");
+        };
+        match *route {
+            ClankRoute::ContextSummarize => self.dispatch_context_summarize(ctx, line, pid).await,
+            // Reached here only on a deferred-confirm re-run (top-level `context summarize` is
+            // intercepted in `eval_line`). Route to the async summarizer; the caller
+            // (`resolve_auth_confirm`) skips recording its inspection output.
+            ClankRoute::ContextSummarizeRerun => self.run_context_summarize(ctx).await,
+            ClankRoute::AskReplOnAgent => {
+                // The native driver intercepts `ask repl` before `eval_line` and runs the
+                // interactive loop; the durable agent can't own a blocking read-loop (Golem
+                // serializes invocations). Return an honest pointer to the working forms.
+                let msg = b"ask repl: interactive REPL is a native-terminal feature; on the durable \
+                            agent, drive a conversation with repeated `ask` calls (each is one turn)\n";
+                ctx.finish(pid, LineResult::from_outcome(Vec::new(), msg.to_vec(), 2))
+            }
+            ClankRoute::AskPipe(pipe) => self.run_ask_pipe(ctx, pipe, pid).await,
+            // `ask` dispatches to the injected LLM provider — same "await at the Session layer, never
+            // through `execute`'s nested runtime" rule as curl/wget. The provider's async `complete`
+            // is awaited here, one level under the Golem SDK's executor, where the durable context
+            // is live and WASI-HTTP futures actually complete. See `askcmd`.
+            ClankRoute::Ask(args) => self.run_ask(ctx, args, blanket_authorized).await,
+            // `mcp` management runs at the Session layer — its add/reload/session subcommands do
+            // HTTP, which must await under the live reactor (same rule as curl/ask).
+            ClankRoute::Mcp(Ok(cmd)) => self.run_mcp(ctx, cmd).await,
+            ClankRoute::Mcp(Err(e)) => {
+                LineResult::from_outcome(Vec::new(), format!("{e}\n").into_bytes(), 2)
+            }
+            // `grease` package management runs at the Session layer — install/search/update do HTTP.
+            ClankRoute::Grease(Ok(cmd)) => self.run_grease(ctx, cmd).await,
+            ClankRoute::Grease(Err(e)) => {
+                LineResult::from_outcome(Vec::new(), format!("{e}\n").into_bytes(), 2)
+            }
+            // `golem` cluster command — runtime API calls await under the reactor (like mcp/ask).
+            ClankRoute::Golem(Ok(cmd)) => self.run_golem(cmd).await,
+            ClankRoute::Golem(Err(e)) => {
+                LineResult::from_outcome(Vec::new(), format!("{e}\n").into_bytes(), 2)
+            }
+            // `<server> <tool> …` for an installed MCP server: an outbound HTTP tool call (its authz
+            // Confirm was already resolved via the dynamic manifest at the gate).
+            ClankRoute::McpToolLine => self.run_mcp_tool(line).await,
+            // A grease-installed prompt: fill its body from args and run it through the model (its
+            // Confirm was resolved via the dynamic manifest at the gate; sudo pre-authorizes).
+            ClankRoute::PromptLine => self.run_prompt(ctx, line, blanket_authorized).await,
+            // A grease-installed script: fill its body from args and run the shell source locally
+            // (its Confirm was resolved via the dynamic manifest at the gate; sudo pre-authorizes).
+            ClankRoute::ScriptLine => self.run_script(ctx, line).await,
+            // A grease-installed Golem agent: parse the ctor/method/args and invoke it via wRPC in the
+            // cluster (Confirm resolved at the gate; sudo pre-authorizes). Await mode only in v1.
+            ClankRoute::AgentLine => self.run_agent(ctx, line).await,
+            // A grease-installed MCP resource-template executable: substitute the args into the URI
+            // template and read the constructed resource live (top-level only, Wall-C).
+            ClankRoute::McpTemplateLine => self.run_mcp_template(line).await,
+            // A top-level `cat /mnt/mcp/<server>/<dynamic>`: fetch the resource live via
+            // `resources/read` (the read can't run in Brush's synchronous `cat` — the Wall-C wall — so
+            // it's served here at the Session layer for top-level lines only; inside $()/pipes it falls
+            // through to Brush and hits the honest "no such file").
+            ClankRoute::McpResourceRead(server, uri) => {
+                self.run_mcp_resource_read(&server, &uri).await
+            }
+        }
+    }
+
+    async fn resume(
+        &mut self,
+        pending: PluginPending,
+        resolution: Resolution,
+        pid: Option<u32>,
+        ctx: &mut SessionCtx<'_>,
+    ) -> LineResult {
+        let Ok(paused) = pending.0.downcast::<ask::AgentLoopPause>() else {
+            return LineResult::stderr("clank: internal error: foreign pending\n");
+        };
+        let ask::AgentLoopPause { state, pause } = *paused;
+        self.resolve_agent_loop(ctx, resolution, state, pause, pid)
+            .await
+    }
+
+    fn cancel(&mut self, pid: u32, ctx: &mut SessionCtx<'_>) -> Option<String> {
+        self.cancel_invocation(ctx, pid)
+    }
+
+    async fn after_record(&mut self, ctx: &mut SessionCtx<'_>) {
+        // If recording just evicted old entries to stay under the cap, upgrade the leading count
+        // marker into a model-generated summary block (no-op when nothing was dropped or no
+        // provider exists).
+        self.compact_dropped_span(ctx).await;
     }
 }

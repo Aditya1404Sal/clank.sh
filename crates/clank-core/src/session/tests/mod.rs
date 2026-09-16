@@ -52,6 +52,7 @@ mod grease;
 mod http;
 mod logging;
 mod mcp;
+mod plugin;
 mod prompt;
 mod resolution;
 mod secrets;

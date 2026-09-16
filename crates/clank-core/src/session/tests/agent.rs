@@ -43,7 +43,11 @@ fn grease_install_then_invoke_a_golem_agent() {
             String::from_utf8_lossy(&inst.stderr)
         );
         assert!(String::from_utf8(inst.stdout).unwrap().contains("[agent]"));
-        assert!(session.clank.grease.is_agent("shopping-cart"));
+        assert!(session
+            .plugin_ref::<crate::clank::Clank>()
+            .unwrap()
+            .grease
+            .is_agent("shopping-cart"));
         // The agent bin stub landed in the agents bin dir.
         assert!(crate::grease::config::agent_bin_dir()
             .join("shopping-cart")
@@ -148,7 +152,11 @@ fn grease_install_then_invoke_a_golem_agent() {
         // Remove deregisters + deletes the stub.
         let rm = session.eval_line("sudo grease remove shopping-cart").await;
         assert_eq!(rm.exit_code, 0);
-        assert!(!session.clank.grease.is_agent("shopping-cart"));
+        assert!(!session
+            .plugin_ref::<crate::clank::Clank>()
+            .unwrap()
+            .grease
+            .is_agent("shopping-cart"));
         assert!(!crate::grease::config::agent_bin_dir()
             .join("shopping-cart")
             .exists());
@@ -262,9 +270,18 @@ fn trigger_invocation_tracking_is_bounded() {
             );
         }
         assert!(
-            session.clank.pending_invocations.len() <= 64,
+            session
+                .plugin_ref::<crate::clank::Clank>()
+                .unwrap()
+                .pending_invocations
+                .len()
+                <= 64,
             "fire-and-forget tracking must stay bounded, got {}",
-            session.clank.pending_invocations.len()
+            session
+                .plugin_ref::<crate::clank::Clank>()
+                .unwrap()
+                .pending_invocations
+                .len()
         );
     });
 }

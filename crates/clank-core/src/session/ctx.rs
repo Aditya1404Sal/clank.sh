@@ -13,9 +13,85 @@ pub struct SessionCtx<'a> {
 }
 
 impl<'a> SessionCtx<'a> {
-    #[allow(dead_code, reason = "used from Task 4 onward")]
     pub(crate) fn new(session: &'a mut Session) -> Self {
         Self { session }
+    }
+
+    /// Re-enter command dispatch for `line`. The plug-in passes itself back as `plugin`, so a
+    /// plug-in command reached from inside it (an `ask` tool call running `mcp list`) still routes.
+    pub async fn run_command(
+        &mut self,
+        plugin: &mut dyn crate::plugin::Plugin,
+        line: &str,
+        pid: Option<u32>,
+        blanket_authorized: bool,
+    ) -> LineResult {
+        Box::pin(
+            self.session
+                .run_command(Some(plugin), line, pid, blanket_authorized),
+        )
+        .await
+    }
+
+    /// Pause for a human with a plug-in-owned continuation.
+    pub fn surface_pending(
+        &mut self,
+        prompt: crate::builtins::promptuser::PendingPrompt,
+        pid: Option<u32>,
+        pending: crate::plugin::PluginPending,
+    ) -> LineResult {
+        self.session
+            .surface_pending(prompt, pid, super::PendingKind::Plugin(pending))
+    }
+
+    /// Pause for an authorization confirmation of `gated_command`.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "mirrors Session::surface_auth_confirm"
+    )]
+    pub fn surface_auth_confirm(
+        &mut self,
+        plugin: &dyn crate::plugin::Plugin,
+        command_name: Option<&str>,
+        gated_command: String,
+        pid: Option<u32>,
+        sudo_grant: bool,
+        rerun_stdin: Option<String>,
+        multi_summary: Option<String>,
+    ) -> LineResult {
+        self.session.surface_auth_confirm(
+            Some(plugin),
+            command_name,
+            gated_command,
+            pid,
+            sudo_grant,
+            rerun_stdin,
+            multi_summary,
+        )
+    }
+
+    /// Stdin captured for the line now re-running after a confirmation, if any.
+    pub fn take_rerun_stdin(&mut self) -> Option<String> {
+        self.session.rerun_stdin.take()
+    }
+
+    /// Resolve `line`'s authorization by its strictest top-level command segment, consulting
+    /// `plugin`'s run-time manifests after the static registry. The plug-in hands itself back the
+    /// way [`run_command`](Self::run_command) takes it, since the resolver is shell-core state.
+    #[must_use]
+    pub fn resolve_authz_strictest(
+        &self,
+        plugin: &dyn crate::plugin::Plugin,
+        line: &str,
+        allow_all: bool,
+    ) -> (
+        crate::manifest::AuthorizationPolicy,
+        bool,
+        Option<String>,
+        Vec<(String, crate::manifest::AuthorizationPolicy)>,
+    ) {
+        self.session
+            .resolve_authz_strictest(Some(plugin), line, allow_all)
     }
 
     /// Run `line` through Brush and capture its output (no authorization, no plug-in routing).

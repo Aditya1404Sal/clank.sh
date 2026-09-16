@@ -229,7 +229,7 @@ impl CommandRegistry {
 
     /// Insert a manifest, panicking on a duplicate name — two commands with the same name is a
     /// programming error (the same name can't resolve to two manifests).
-    fn insert(&mut self, manifest: Manifest) {
+    pub(crate) fn insert(&mut self, manifest: Manifest) {
         let name = manifest.name.clone();
         assert!(
             self.by_name.insert(name.clone(), manifest).is_none(),

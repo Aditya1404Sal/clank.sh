@@ -71,11 +71,22 @@ fn grease_install_an_mcp_server_registers_tools_prompts_resources() {
         );
 
         // The server is registered in McpState: `<server> <tool>` is a recognized tool line.
-        assert!(session.clank.is_mcp_tool_line("demo echo --text hi"));
-        assert!(session.clank.grease.is_mcp("demo"));
+        assert!(session
+            .plugin_ref::<crate::clank::Clank>()
+            .unwrap()
+            .is_mcp_tool_line("demo echo --text hi"));
+        assert!(session
+            .plugin_ref::<crate::clank::Clank>()
+            .unwrap()
+            .grease
+            .is_mcp("demo"));
 
         // The prompt was materialized as a standalone $PATH prompt.
-        assert!(session.clank.grease.is_prompt("summarize-diff"));
+        assert!(session
+            .plugin_ref::<crate::clank::Clank>()
+            .unwrap()
+            .grease
+            .is_prompt("summarize-diff"));
 
         // The static resource was materialized under /mnt/mcp/demo/.
         let res_path = crate::grease::config::mcp_mount_dir().join("demo/repo/README.md");
@@ -98,15 +109,25 @@ fn grease_install_an_mcp_server_registers_tools_prompts_resources() {
         // A FRESH Session rebuilds the tool surface from the cached payload (no live fetch).
         let session2 = Session::new().await.unwrap();
         assert!(
-            session2.clank.is_mcp_tool_line("demo echo --text hi"),
+            session2
+                .plugin_ref::<crate::clank::Clank>()
+                .unwrap()
+                .is_mcp_tool_line("demo echo --text hi"),
             "boot reconstruction failed"
         );
 
         // Remove deregisters from McpState + deletes the resource mount.
         let rm = session.eval_line("sudo grease remove demo").await;
         assert_eq!(rm.exit_code, 0);
-        assert!(!session.clank.grease.is_mcp("demo"));
-        assert!(!session.clank.is_mcp_tool_line("demo echo --text hi"));
+        assert!(!session
+            .plugin_ref::<crate::clank::Clank>()
+            .unwrap()
+            .grease
+            .is_mcp("demo"));
+        assert!(!session
+            .plugin_ref::<crate::clank::Clank>()
+            .unwrap()
+            .is_mcp_tool_line("demo echo --text hi"));
     });
 }
 
@@ -230,7 +251,11 @@ fn grease_install_then_run_a_prompt() {
         // Remove deregisters: the name is no longer an installed prompt.
         let rm = session.eval_line("sudo grease remove tldr").await;
         assert_eq!(rm.exit_code, 0);
-        assert!(!session.clank.grease.is_prompt("tldr"));
+        assert!(!session
+            .plugin_ref::<crate::clank::Clank>()
+            .unwrap()
+            .grease
+            .is_prompt("tldr"));
     });
 }
 
@@ -382,8 +407,16 @@ fn grease_install_then_run_a_script() {
         );
 
         // It's an installed SCRIPT (not a prompt), and its stub is in the script bin dir.
-        assert!(session.clank.grease.is_script("greet"));
-        assert!(!session.clank.grease.is_prompt("greet"));
+        assert!(session
+            .plugin_ref::<crate::clank::Clank>()
+            .unwrap()
+            .grease
+            .is_script("greet"));
+        assert!(!session
+            .plugin_ref::<crate::clank::Clank>()
+            .unwrap()
+            .grease
+            .is_prompt("greet"));
         assert!(crate::grease::config::script_bin_dir()
             .join("greet")
             .exists());
@@ -437,7 +470,11 @@ fn grease_install_then_run_a_script() {
         // Remove deregisters and deletes the script stub.
         let rm = session.eval_line("sudo grease remove greet").await;
         assert_eq!(rm.exit_code, 0);
-        assert!(!session.clank.grease.is_script("greet"));
+        assert!(!session
+            .plugin_ref::<crate::clank::Clank>()
+            .unwrap()
+            .grease
+            .is_script("greet"));
         assert!(!crate::grease::config::script_bin_dir()
             .join("greet")
             .exists());
@@ -494,11 +531,31 @@ fn grease_install_a_skill_materializes_and_surfaces_it() {
         );
 
         // A skill is NOT a command: not a script/prompt, no manifest, no ask tool.
-        assert!(session.clank.grease.is_skill("code-review"));
-        assert!(!session.clank.grease.is_script("code-review"));
-        assert!(!session.clank.grease.is_prompt("code-review"));
-        assert!(session.clank.grease.manifest_for("code-review").is_none());
-        assert!(crate::ai::ask::grease_ask_tool_definitions(&session.clank.grease).is_empty());
+        assert!(session
+            .plugin_ref::<crate::clank::Clank>()
+            .unwrap()
+            .grease
+            .is_skill("code-review"));
+        assert!(!session
+            .plugin_ref::<crate::clank::Clank>()
+            .unwrap()
+            .grease
+            .is_script("code-review"));
+        assert!(!session
+            .plugin_ref::<crate::clank::Clank>()
+            .unwrap()
+            .grease
+            .is_prompt("code-review"));
+        assert!(session
+            .plugin_ref::<crate::clank::Clank>()
+            .unwrap()
+            .grease
+            .manifest_for("code-review")
+            .is_none());
+        assert!(crate::ai::ask::grease_ask_tool_definitions(
+            &session.plugin_ref::<crate::clank::Clank>().unwrap().grease
+        )
+        .is_empty());
 
         // `grease info` describes the envelope + bundles.
         let info =
@@ -511,8 +568,8 @@ fn grease_install_a_skill_materializes_and_surfaces_it() {
         // The skill is surfaced in the agentic system prompt (context, not a callable tool).
         let sys = crate::ai::ask::build_system_prompt_with_capabilities(
             &session.registry,
-            &session.clank.mcp,
-            &session.clank.grease,
+            &session.plugin_ref::<crate::clank::Clank>().unwrap().mcp,
+            &session.plugin_ref::<crate::clank::Clank>().unwrap().grease,
         );
         assert!(
             sys.contains("Installed skills"),
@@ -525,7 +582,11 @@ fn grease_install_a_skill_materializes_and_surfaces_it() {
         // Remove deletes the dir tree and deregisters.
         let rm = session.eval_line("sudo grease remove code-review").await;
         assert_eq!(rm.exit_code, 0);
-        assert!(!session.clank.grease.is_skill("code-review"));
+        assert!(!session
+            .plugin_ref::<crate::clank::Clank>()
+            .unwrap()
+            .grease
+            .is_skill("code-review"));
         assert!(!skill_root.exists());
     });
 }
@@ -577,7 +638,11 @@ fn grease_install_verifies_a_valid_signature() {
         );
         let out = String::from_utf8(inst.stdout).unwrap();
         assert!(out.contains("signed"), "install reports signed: {out}");
-        assert!(session.clank.grease.is_prompt("signed-pkg"));
+        assert!(session
+            .plugin_ref::<crate::clank::Clank>()
+            .unwrap()
+            .grease
+            .is_prompt("signed-pkg"));
         // `grease info` shows the signer.
         let info =
             String::from_utf8(session.eval_line("grease info signed-pkg").await.stdout).unwrap();
@@ -633,7 +698,11 @@ fn grease_install_rejects_a_bad_signature() {
             .unwrap()
             .contains("signature verification failed"));
         assert!(
-            !session.clank.grease.is_prompt("bad-sig"),
+            !session
+                .plugin_ref::<crate::clank::Clank>()
+                .unwrap()
+                .grease
+                .is_prompt("bad-sig"),
             "nothing installed on sig failure"
         );
     });
@@ -677,7 +746,11 @@ fn grease_install_rejects_unsigned_package_from_signed_registry() {
         assert!(String::from_utf8(inst.stderr)
             .unwrap()
             .contains("no signature"));
-        assert!(!session.clank.grease.is_prompt("nosig"));
+        assert!(!session
+            .plugin_ref::<crate::clank::Clank>()
+            .unwrap()
+            .grease
+            .is_prompt("nosig"));
     });
 }
 
@@ -705,7 +778,11 @@ fn grease_install_from_unsigned_registry_is_record_only() {
             "install stderr: {}",
             String::from_utf8_lossy(&inst.stderr)
         );
-        assert!(session.clank.grease.is_prompt("plain"));
+        assert!(session
+            .plugin_ref::<crate::clank::Clank>()
+            .unwrap()
+            .grease
+            .is_prompt("plain"));
         let info = String::from_utf8(session.eval_line("grease info plain").await.stdout).unwrap();
         assert!(info.contains("unsigned"), "info shows unsigned: {info}");
     });
@@ -832,7 +909,11 @@ fn grease_install_rejects_bad_transparency_log_proof() {
             .unwrap()
             .contains("transparency-log check failed"));
         assert!(
-            !session.clank.grease.is_prompt("badlog"),
+            !session
+                .plugin_ref::<crate::clank::Clank>()
+                .unwrap()
+                .grease
+                .is_prompt("badlog"),
             "nothing installed on log failure"
         );
     });
@@ -906,7 +987,11 @@ fn grease_install_verifies_matching_sha256() {
             String::from_utf8_lossy(&inst.stderr)
         );
         assert!(String::from_utf8(inst.stdout).unwrap().contains("verified"));
-        assert!(session.clank.grease.is_prompt("vpkg"));
+        assert!(session
+            .plugin_ref::<crate::clank::Clank>()
+            .unwrap()
+            .grease
+            .is_prompt("vpkg"));
     });
 }
 
@@ -933,7 +1018,11 @@ fn grease_install_rejects_sha256_mismatch() {
             .unwrap()
             .contains("integrity check failed"));
         assert!(
-            !session.clank.grease.is_prompt("vpkg"),
+            !session
+                .plugin_ref::<crate::clank::Clank>()
+                .unwrap()
+                .grease
+                .is_prompt("vpkg"),
             "a mismatched package must not install"
         );
         assert!(!crate::grease::config::store_dir().join("vpkg").exists());
@@ -961,7 +1050,14 @@ fn grease_install_rejects_indexed_package_without_hash() {
         assert_eq!(inst.exit_code, 4, "indexed-but-unhashed must be refused");
         let err = String::from_utf8(inst.stderr).unwrap();
         assert!(err.contains("without a sha256"), "got: {err}");
-        assert!(!session.clank.grease.is_prompt("loose"), "must not install");
+        assert!(
+            !session
+                .plugin_ref::<crate::clank::Clank>()
+                .unwrap()
+                .grease
+                .is_prompt("loose"),
+            "must not install"
+        );
     });
 }
 
@@ -1213,7 +1309,12 @@ fn a_half_installed_package_is_reported_and_can_be_removed() {
 
         let mut session = Session::new().await.unwrap();
         assert_eq!(
-            session.clank.grease.broken().len(),
+            session
+                .plugin_ref::<crate::clank::Clank>()
+                .unwrap()
+                .grease
+                .broken()
+                .len(),
             1,
             "the orphan marker must be detected, not skipped"
         );
@@ -1236,7 +1337,12 @@ fn a_half_installed_package_is_reported_and_can_be_removed() {
             String::from_utf8_lossy(&removed.stderr)
         );
         assert!(!etc.join("ghost.toml").exists(), "marker must be gone");
-        assert!(session.clank.grease.broken().is_empty());
+        assert!(session
+            .plugin_ref::<crate::clank::Clank>()
+            .unwrap()
+            .grease
+            .broken()
+            .is_empty());
     });
 }
 
@@ -1258,7 +1364,11 @@ fn a_corrupt_payload_is_reported_not_silently_skipped() {
         .unwrap();
 
         let session = Session::new().await.unwrap();
-        let broken = session.clank.grease.broken();
+        let broken = session
+            .plugin_ref::<crate::clank::Clank>()
+            .unwrap()
+            .grease
+            .broken();
         assert_eq!(broken.len(), 1, "a corrupt payload must be reported");
         assert!(
             broken[0].1.contains("not a valid prompt package"),

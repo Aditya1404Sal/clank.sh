@@ -1,32 +1,105 @@
-//! `Session` methods for the AI layer: the `ask` command + agentic tool loop, `ask repl`,
-//! `context summarize`/auto-compaction summarization, and model resolution. A few core helpers
-//! (`shell_home`, `resolve_authz`) ride along here and are re-exported to `super`.
+//! `Clank` methods for the AI layer: the `ask` command + agentic tool loop, `ask repl`,
+//! `context summarize`/auto-compaction summarization, and model resolution. The loop's carried
+//! state (`AskLoopState`, `AskPause`, `AskPauseKind`, `ToolStep`) and the REPL's isolated session
+//! (`ReplState`) ride along here too — only this module builds and resolves them.
 
 use std::fmt::Write as _;
 
-use super::{
-    authz, strip_sudo_prefix, AskLoopState, AskPause, AskPauseKind, Decision, LineResult,
-    PendingKind, PendingPrompt, ReplState, Resolution, Session, ToolStep, Transcript,
-};
+use crate::authz::{self, Decision};
+use crate::builtins::promptuser::{PendingPrompt, Resolution};
 use crate::config::limits::{ASK_MAX_ITERATIONS, ASK_TOOL_RESULT_CAP};
+use crate::session::{strip_sudo_prefix, LineResult, SessionCtx};
+use crate::Transcript;
 
 /// Read-only Brush builtins the model may call as tools even though clank keeps no manifest for them.
 /// They don't mutate parent-shell state, so the model-tool scope gate allows them explicitly rather
 /// than default-denying (see `run_ask`'s scope check). Everything else unregistered is refused.
 const MODEL_SAFE_BUILTINS: &[&str] = &["echo", "pwd", "test", "[", "true", "false", ":"];
 
-impl Session {
+/// A tool call in an `ask` loop that paused for the human, plus the sibling calls in the same turn
+/// still to run and the results already computed — everything needed to resume the loop after the
+/// human answers.
+pub(crate) struct AskPause {
+    /// The tool call awaiting the human's answer.
+    call: crate::ai::ask::AskToolCall,
+    /// The kind of pause, which decides how the human's answer resolves the call.
+    kind: AskPauseKind,
+    /// Sibling calls from the same assistant turn, not yet executed.
+    remaining: Vec<crate::ai::ask::AskToolCall>,
+    /// Results already computed for earlier calls in this turn.
+    completed: Vec<crate::ai::ask::AskToolResult>,
+}
+
+/// The outcome of attempting one tool call in the loop: either a finished result to feed back, or a
+/// pause requiring the human before the call can be resolved.
+enum ToolStep {
+    Done(crate::ai::ask::AskToolResult),
+    Pause(AskPauseKind),
+}
+
+/// How a paused `ask` tool call is resolved by the human's answer.
+enum AskPauseKind {
+    /// An authorization confirmation for a `shell` command line. On approval the line runs; on denial
+    /// a refusal tool result is fed back. `sudo_grant` marks a sudo-only gate (no "all" offered).
+    Confirm { command: String, sudo_grant: bool },
+    /// The `prompt_user` tool: the human's answer text becomes the tool result verbatim.
+    PromptUser,
+}
+
+/// An active `ask repl` session: its isolated transcript and the model it targets. Held on the
+/// `Clank` plug-in only while the native driver is inside the REPL loop. `:model` mutates `model`;
+/// `:new-session` clears `transcript`.
+pub(crate) struct ReplState {
+    pub(crate) transcript: Transcript,
+    pub(crate) model: String,
+}
+
+/// The carried state of an in-flight `ask` agentic loop, enough to resume it after a pause. Owned data
+/// only (replay-safe).
+pub(crate) struct AskLoopState {
+    /// The system prompt (rebuilt once at loop start; stable across turns).
+    system: String,
+    /// The tool definitions offered each turn (stable across turns).
+    tools: Vec<crate::ai::ask::AskTool>,
+    /// The conversation so far: `User`, then alternating `Assistant`/`ToolResults`.
+    history: Vec<crate::ai::ask::AskTurn>,
+    /// The model id.
+    model: String,
+    /// Accumulated tool trace (→ the final result's stderr).
+    trace: Vec<u8>,
+    /// Blanket confirm-tier authorization for the rest of this loop (upgraded to true on "all").
+    blanket_authorized: bool,
+    /// `--json`: the final answer must validate as JSON (exit 0) or the loop exits 6 with the raw
+    /// text on stderr (README's `--json` contract).
+    json: bool,
+}
+
+/// An `ask` agentic loop paused mid-flight: the model requested a tool call that needs the human (an
+/// authorization confirmation, or the `prompt_user` tool). This is what the plug-in hands the shell
+/// as its [`crate::plugin::PluginPending`] continuation, and gets back in `resume`.
+pub(crate) struct AgentLoopPause {
+    /// The whole conversation-so-far, enough to resume the loop where it stopped.
+    pub(crate) state: Box<AskLoopState>,
+    /// The pause under resolution: what the human is being asked and how to resolve it.
+    pub(crate) pause: AskPause,
+}
+
+impl super::Clank {
     /// The execution scope of `name` across all manifest sources — the static registry, then MCP
     /// servers, then grease packages (the same order [`Self::resolve_authz`] uses). `None` if no
     /// manifest exists for it anywhere.
-    fn resolve_command_scope(&self, name: &str) -> Option<crate::manifest::ExecutionScope> {
-        if let Some(m) = self.registry.get(name) {
+    fn resolve_command_scope(
+        &self,
+        ctx: &SessionCtx<'_>,
+        name: &str,
+    ) -> Option<crate::manifest::ExecutionScope> {
+        if let Some(m) = ctx.manifest(name) {
             return Some(m.execution_scope);
         }
-        if let Some(m) = self.clank.mcp.manifest_for(name) {
+        if let Some(m) = self.mcp.manifest_for(name) {
             return Some(m.execution_scope);
         }
-        if let Some(m) = self.clank.grease.manifest_for(name) {
+        if let Some(m) = self.grease.manifest_for(name) {
             return Some(m.execution_scope);
         }
         None
@@ -46,8 +119,9 @@ impl Session {
     /// `blanket_authorized` is the `sudo ask` (or session `allow_all`) grant: when set, the model's
     /// tool calls that hit a `confirm`-policy command run without a per-call refusal. It never
     /// satisfies `sudo-only` (destructive ops still refuse), matching [`authz::decide`].
-    pub(super) async fn run_ask(
+    pub(crate) async fn run_ask(
         &mut self,
+        ctx: &mut SessionCtx<'_>,
         mut args: crate::ai::ask::AskArgs,
         blanket_authorized: bool,
     ) -> LineResult {
@@ -55,11 +129,14 @@ impl Session {
 
         // Pick up any pipeline stdin captured for this dispatch (`cat x | ask "…"`). Taken so it
         // never leaks into an unrelated later `ask`.
-        if let Some(stdin) = self.clank.next_ask_stdin.take() {
+        if let Some(stdin) = ctx
+            .take_rerun_stdin()
+            .or_else(|| self.next_ask_stdin.take())
+        {
             args.stdin = Some(stdin);
         }
 
-        if self.clank.ask_provider.is_none() {
+        if self.ask_provider.is_none() {
             let err = crate::ai::Error::not_configured("ask");
             return LineResult::from_outcome(
                 Vec::new(),
@@ -74,20 +151,14 @@ impl Session {
         let base_transcript = if args.fresh {
             String::new()
         } else {
-            String::from_utf8_lossy(
-                &self
-                    .transcript
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .render(),
-            )
-            .into_owned()
+            let rendered = ctx.with_transcript(|t| t.render());
+            String::from_utf8_lossy(&rendered).into_owned()
         };
 
         // Resolve the model: `--model` > ask.toml default > built-in DEFAULT_MODEL. Strip the
         // `anthropic/` prefix for the provider (it wants the bare id); an unknown provider prefix is
         // an error before any model call.
-        let (model, model_warning) = match self.resolve_ask_model(args.model.as_deref()) {
+        let (model, model_warning) = match self.resolve_ask_model(ctx, args.model.as_deref()) {
             Ok(pair) => pair,
             Err(msg) => {
                 return LineResult::from_outcome(
@@ -106,17 +177,15 @@ impl Session {
         // The tool surface = the generic shell/prompt_user tools, plus one ToolDefinition per installed
         // MCP tool (mcp__<server>__<tool>) and per installed grease prompt (prompt__<name>). Every
         // `grease install`/`mcp add` thus expands what `ask` can do (README).
-        let mut tools = crate::ai::ask::build_ask_tools(&self.registry);
-        tools.extend(crate::ai::ask::mcp_ask_tool_definitions(&self.clank.mcp));
-        tools.extend(crate::ai::ask::grease_ask_tool_definitions(
-            &self.clank.grease,
-        ));
+        let mut tools = crate::ai::ask::build_ask_tools(ctx.registry());
+        tools.extend(crate::ai::ask::mcp_ask_tool_definitions(&self.mcp));
+        tools.extend(crate::ai::ask::grease_ask_tool_definitions(&self.grease));
 
         let system = crate::ai::ask::with_json_addendum(
             crate::ai::ask::build_system_prompt_with_capabilities(
-                &self.registry,
-                &self.clank.mcp,
-                &self.clank.grease,
+                ctx.registry(),
+                &self.mcp,
+                &self.grease,
             ),
             args.json,
         );
@@ -134,7 +203,7 @@ impl Session {
             json: args.json,
         };
         // `resume` is empty on a fresh loop; the pid carries the paused row on a resume.
-        self.drive_ask_loop(state, Vec::new(), None).await
+        self.drive_ask_loop(ctx, state, Vec::new(), None).await
     }
 
     /// Handle an ask-tail pipeline (`… | ask "q"`): run the upstream, capture its stdout, and
@@ -143,8 +212,9 @@ impl Session {
     /// survives the pause); `… | sudo ask` pre-authorizes. The upstream runs through the normal
     /// `execute` capture path — its own commands carry whatever policy they have (`cat`/`grep` are
     /// Allow); this gates only the `ask` itself.
-    pub(super) async fn run_ask_pipe(
+    pub(crate) async fn run_ask_pipe(
         &mut self,
+        ctx: &mut SessionCtx<'_>,
         pipe: crate::ai::ask::AskTailPipe,
         pid: Option<u32>,
     ) -> LineResult {
@@ -158,17 +228,18 @@ impl Session {
         // producer for nothing and matches the top-level `ask` gate. `ask` ⇒ Confirm; a `sudo` on the
         // tail (`elevated`) or a session "all" grant pre-authorizes.
         let policy = crate::manifest::AuthorizationPolicy::Confirm; // the `ask` manifest's policy
-        let blanket = elevated || self.authz.allow_all;
-        match authz::decide(policy, elevated, self.authz.allow_all) {
+        let blanket = elevated || ctx.allow_all();
+        match authz::decide(policy, elevated, ctx.allow_all()) {
             Decision::Allow => {}
             Decision::Deny => {
-                return self.finish_intercepted(pid, LineResult::denied());
+                return ctx.finish(pid, LineResult::denied());
             }
             Decision::Confirm { sudo_grant } => {
                 // Capture the upstream now so the piped context is preserved across the pause, then
                 // defer the ask with that stdin stashed on the pending confirmation.
-                let captured = self.capture_upstream(&upstream).await;
-                return self.surface_auth_confirm(
+                let captured = capture_upstream(ctx, &upstream).await;
+                return ctx.surface_auth_confirm(
+                    self,
                     Some("ask"),
                     ask_reconstruct(&args),
                     pid,
@@ -180,35 +251,20 @@ impl Session {
         }
 
         // Approved (allow / sudo / all): run the upstream, capture, and dispatch the ask with stdin.
-        let captured = self.capture_upstream(&upstream).await;
-        self.clank.next_ask_stdin = Some(captured);
-        let result = self.run_ask(args, blanket).await;
+        let captured = capture_upstream(ctx, &upstream).await;
+        self.next_ask_stdin = Some(captured);
+        let result = self.run_ask(ctx, args, blanket).await;
         if let Some(pid) = pid {
-            self.proc_table
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .complete(pid);
+            ctx.proc_complete(pid);
         }
-        self.transcript
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .record_output(&result.terminal_output());
+        ctx.record_output(&result.terminal_output());
         result
-    }
-
-    /// Run an upstream pipeline stage and return its stdout as a lossy String (the stdin payload for
-    /// an ask-tail pipeline). A nonzero exit is not fatal — pipes feed whatever the producer emitted.
-    /// The upstream is not recorded as its own transcript line (the whole `… | ask` line is recorded
-    /// by the caller).
-    async fn capture_upstream(&mut self, upstream: &str) -> String {
-        let result = self.execute(upstream).await;
-        String::from_utf8_lossy(&result.stdout).into_owned()
     }
 
     // ---- ask repl (native-only interactive session with its own transcript) --------------------
 
     /// Start an `ask repl` session: resolve the model, seed the isolated transcript (empty for
-    /// `--fresh`, a copy of the parent for `--inherit`), and stash it on `self.clank.repl`. Returns the
+    /// `--fresh`, a copy of the parent for `--inherit`), and stash it on `self.repl`. Returns the
     /// resolved model id for the prompt banner, or an `Err` message (unknown provider / no provider).
     /// Native-only — the durable agent returns an honest message from `eval_line` instead.
     ///
@@ -218,23 +274,20 @@ impl Session {
     ///
     /// # Panics
     /// Panics if the transcript mutex is poisoned (a thread panicked while holding it).
-    pub fn repl_start(
+    pub(crate) fn repl_start(
         &mut self,
+        ctx: &SessionCtx<'_>,
         args: &crate::ai::ask::ReplArgs,
     ) -> crate::ai::error::Result<String> {
-        if self.clank.ask_provider.is_none() {
+        if self.ask_provider.is_none() {
             return Err(crate::ai::Error::not_configured("ask repl"));
         }
-        let (model, _warning) = self.resolve_ask_model(args.model.as_deref())?;
+        let (model, _warning) = self.resolve_ask_model(ctx, args.model.as_deref())?;
         let transcript = match args.seed {
             crate::ai::ask::ReplSeed::Fresh => Transcript::new(),
-            crate::ai::ask::ReplSeed::Inherit => self
-                .transcript
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone(),
+            crate::ai::ask::ReplSeed::Inherit => ctx.with_transcript(|t| t.clone()),
         };
-        self.clank.repl = Some(ReplState {
+        self.repl = Some(ReplState {
             transcript,
             model: model.clone(),
         });
@@ -242,17 +295,16 @@ impl Session {
     }
 
     /// The active REPL's model id, for the `[model]>` prompt. `None` if no REPL is active.
-    #[must_use]
-    pub fn repl_model(&self) -> Option<String> {
-        self.clank.repl.as_ref().map(|r| r.model.clone())
+    pub(crate) fn repl_model(&self) -> Option<String> {
+        self.repl.as_ref().map(|r| r.model.clone())
     }
 
     /// Handle a REPL meta-command (`:model <id>`, `:new-session`, `:exit`). Returns `Some(output)`
     /// for a handled meta-command (the bool is whether the REPL should exit), or `None` if `line`
     /// isn't a meta-command (the caller then treats it as a prompt via [`Self::repl_turn`]).
-    pub fn repl_meta(&mut self, line: &str) -> Option<(String, bool)> {
+    pub(crate) fn repl_meta(&mut self, line: &str) -> Option<(String, bool)> {
         let line = line.trim();
-        let repl = self.clank.repl.as_mut()?;
+        let repl = self.repl.as_mut()?;
         let mut words = line.split_whitespace();
         match words.next()? {
             ":exit" | ":quit" => Some((String::new(), true)),
@@ -278,16 +330,16 @@ impl Session {
     /// Run one REPL turn: send the isolated transcript + `prompt` to the model, record the exchange
     /// into the REPL transcript, and return the reply text. Conversational only (no shell tools) —
     /// the REPL is a chat surface, distinct from agentic `ask`. Requires an active REPL.
-    pub async fn repl_turn(&mut self, prompt: &str) -> String {
+    pub(crate) async fn repl_turn(&mut self, ctx: &mut SessionCtx<'_>, prompt: &str) -> String {
         use crate::ai::ask::AskTurn;
-        let Some(repl) = self.clank.repl.as_ref() else {
+        let Some(repl) = self.repl.as_ref() else {
             return "ask repl: no active session\n".to_string();
         };
         let model = repl.model.clone();
         let context = String::from_utf8_lossy(&repl.transcript.render()).into_owned();
 
         let state = AskLoopState {
-            system: crate::ai::ask::build_system_prompt_with_mcp(&self.registry, &self.clank.mcp),
+            system: crate::ai::ask::build_system_prompt_with_mcp(ctx.registry(), &self.mcp),
             tools: Vec::new(), // conversational: the REPL doesn't expose shell tools
             history: vec![AskTurn::User(crate::ai::ask::user_content(
                 &context, prompt,
@@ -297,11 +349,11 @@ impl Session {
             blanket_authorized: false,
             json: false,
         };
-        let result = self.drive_ask_loop(state, Vec::new(), None).await;
+        let result = self.drive_ask_loop(ctx, state, Vec::new(), None).await;
         let reply = String::from_utf8_lossy(&result.stdout).into_owned();
 
         // Record the exchange into the REPL's own transcript so the next turn has context.
-        if let Some(repl) = self.clank.repl.as_mut() {
+        if let Some(repl) = self.repl.as_mut() {
             repl.transcript.record_command(&format!("> {prompt}"));
             repl.transcript.record_output(reply.as_bytes());
         }
@@ -309,9 +361,9 @@ impl Session {
     }
 
     /// End the REPL session: render its transcript to stdout (so it enters the parent transcript once
-    /// as rendered output, per the README) and clear `self.clank.repl`. Returns the rendered session bytes.
-    pub fn repl_end(&mut self) -> Vec<u8> {
-        match self.clank.repl.take() {
+    /// as rendered output, per the README) and clear `self.repl`. Returns the rendered session bytes.
+    pub(crate) fn repl_end(&mut self) -> Vec<u8> {
+        match self.repl.take() {
             Some(repl) => repl.transcript.render(),
             None => Vec::new(),
         }
@@ -319,27 +371,58 @@ impl Session {
 
     // ---- context summarize (LLM one-shot; inspection only, never mutates the transcript) ---------
 
+    /// `context summarize`: needs the model (an outbound LLM call), so it goes through the authz
+    /// gate as `Confirm` (`sudo context summarize` pre-authorizes) and, once allowed, the async
+    /// `run_context_summarize` — never the sync `dispatch_context`/`apply_context` engine. Its
+    /// output is inspection-only: the row is reaped but NOT recorded back into the transcript (like
+    /// `context show`). Split out of the route match for its size, not for any reuse.
+    pub(crate) async fn dispatch_context_summarize(
+        &mut self,
+        ctx: &mut SessionCtx<'_>,
+        line: &str,
+        pid: Option<u32>,
+    ) -> LineResult {
+        let elevated = authz::leading_command(line).1;
+        match authz::decide(
+            crate::manifest::AuthorizationPolicy::Confirm,
+            elevated,
+            ctx.allow_all(),
+        ) {
+            Decision::Allow => {
+                let result = self.run_context_summarize(ctx).await;
+                if let Some(pid) = pid {
+                    ctx.proc_complete(pid);
+                }
+                result
+            }
+            Decision::Deny => ctx.finish(pid, LineResult::denied()),
+            Decision::Confirm { sudo_grant } => ctx.surface_auth_confirm(
+                self,
+                Some("context"),
+                "context summarize".to_string(),
+                pid,
+                sudo_grant,
+                None,
+                None,
+            ),
+        }
+    }
+
     /// `context summarize`: send the rendered transcript to the model and print an AI summary on
     /// stdout. A single tool-less provider `turn` (the [`Self::repl_turn`] shape, not the agentic
     /// `drive_ask_loop`). **Inspection only** — it does NOT mutate the transcript, and the caller
     /// must NOT record its output back (matching `context show`). Runs at the Session async layer
     /// (like `ask`), so it's only reachable from a top-level `context summarize` line — a nested one
     /// (`$(...)`/pipe) hits the honest error in `apply_context`.
-    pub(super) async fn run_context_summarize(&mut self) -> LineResult {
+    pub(crate) async fn run_context_summarize(&mut self, ctx: &mut SessionCtx<'_>) -> LineResult {
         // Render before awaiting so the transcript lock is never held across the model call.
-        let rendered = String::from_utf8_lossy(
-            &self
-                .transcript
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .render(),
-        )
-        .into_owned();
+        let rendered_bytes = ctx.with_transcript(|t| t.render());
+        let rendered = String::from_utf8_lossy(&rendered_bytes).into_owned();
         if rendered.trim().is_empty() {
             return LineResult::from_outcome(b"(transcript is empty)\n".to_vec(), Vec::new(), 0);
         }
 
-        let (model, _warning) = match self.resolve_ask_model(None) {
+        let (model, _warning) = match self.resolve_ask_model(ctx, None) {
             Ok(pair) => pair,
             Err(msg) => {
                 return LineResult::from_outcome(
@@ -384,7 +467,7 @@ impl Session {
     ) -> crate::ai::error::Result<Option<String>> {
         use crate::ai::ask::AskTurn;
 
-        let Some(provider) = self.clank.ask_provider.take() else {
+        let Some(provider) = self.ask_provider.take() else {
             return Ok(None);
         };
         let resp = provider
@@ -395,7 +478,7 @@ impl Session {
                 model,
             )
             .await;
-        self.clank.ask_provider = Some(provider); // restore before returning
+        self.ask_provider = Some(provider); // restore before returning
 
         match resp.error {
             Some(err) => Err(err),
@@ -408,34 +491,24 @@ impl Session {
     /// summary block. Runs at most once per line, only when eviction actually happened AND a provider is
     /// configured (agent, or a Fake in tests). On native / no provider / model error, the count marker is
     /// left as-is — the decided fallback, so recording never blocks or fails.
-    pub(super) async fn compact_dropped_span(&mut self) {
+    pub(crate) async fn compact_dropped_span(&mut self, ctx: &mut SessionCtx<'_>) {
         // Snapshot the pending dropped span without holding the lock across the await.
-        let pending = self
-            .transcript
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .pending_summary();
+        let pending = ctx.with_transcript(|t| t.pending_summary());
         let Some((_count, dropped_text)) = pending else {
             return;
         };
         if dropped_text.trim().is_empty() {
             return;
         }
-        let Ok((model, _warning)) = self.resolve_ask_model(None) else {
+        let Ok((model, _warning)) = self.resolve_ask_model(ctx, None) else {
             // No model to summarize with (no provider / no key / bad model id). Discard the
             // pending text so a durable agent doesn't hold it forever; keep the count marker.
             // See audit P1-3.
-            self.transcript
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .discard_dropped_span();
+            ctx.with_transcript(Transcript::discard_dropped_span);
             return;
         };
         if let Ok(Some(summary)) = self.summarize_text(&dropped_text, &model).await {
-            self.transcript
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .set_marker_summary(summary);
+            ctx.with_transcript(|t| t.set_marker_summary(summary));
         }
     }
 
@@ -444,15 +517,19 @@ impl Session {
     /// `anthropic/` prefix is stripped for the provider. An unknown `provider/` prefix is an `Err`
     /// (surfaced before any model call). An ask.toml parse error is a non-fatal warning that falls
     /// back to the built-in default.
+    // Kept a method for call-site symmetry with the rest of the `ask` glue; `$HOME`, the one piece
+    // of state it reads, now comes from the shell through `ctx` rather than off `Clank`.
+    #[allow(clippy::unused_self)]
     fn resolve_ask_model(
         &self,
+        ctx: &SessionCtx<'_>,
         cli_model: Option<&str>,
     ) -> crate::ai::error::Result<(String, Option<String>)> {
         let mut warning = None;
         let chosen = if let Some(m) = cli_model {
             m.to_string()
         } else {
-            let home = self.shell_home();
+            let home = ctx.home();
             match crate::ai::config::default_model(&home) {
                 Ok(Some(m)) => m,
                 Ok(None) => crate::config::model::DEFAULT_MODEL.to_string(),
@@ -477,110 +554,27 @@ impl Session {
         Ok((chosen, warning))
     }
 
-    /// Resolve a line's authorization policy, consulting the static registry AND the dynamic MCP
-    /// server manifests. Mirrors [`authz::resolve`] but adds the MCP layer: an installed server name
-    /// (leading command) resolves to its `Confirm` manifest. Returns `(policy, elevated, command)`.
-    pub(super) fn resolve_authz(
-        &self,
-        line: &str,
-    ) -> (crate::manifest::AuthorizationPolicy, bool, Option<String>) {
-        let (command, elevated) = authz::leading_command(line);
-        if let Some(name) = command.as_deref() {
-            if self.registry.get(name).is_none() {
-                if let Some(m) = self.clank.mcp.manifest_for(name) {
-                    return (m.authorization_policy, elevated, command);
-                }
-                // An installed grease prompt: running it is an outbound LLM call ⇒ Confirm.
-                if let Some(m) = self.clank.grease.manifest_for(name) {
-                    return (m.authorization_policy, elevated, command);
-                }
-            }
-        }
-        authz::resolve(&self.registry, line)
-    }
-
-    /// Resolve authorization for a whole line by its STRICTEST top-level command segment (README
-    /// "Authorization" — a `confirm`/`sudo-only` command hidden behind `&&`/`;`/`|`/`&` after a
-    /// harmless leading command must still gate). Splits the line with [`authz::split_segments`],
-    /// resolves each segment with the MCP-aware [`Self::resolve_authz`], `decide`s each against
-    /// `allow_all`, and returns the most-restrictive segment's `(policy, elevated, command)` — so the
-    /// caller's existing `authz::decide(policy, elevated, allow_all)` reproduces the strictest
-    /// `Decision` unchanged. Also returns every non-`Allow` command with its tier, so the confirmation
-    /// can name all of them (approving the strictest runs the whole line).
-    ///
-    /// A single-segment line short-circuits to [`Self::resolve_authz`] — identical behavior, no
-    /// overhead — so nothing changes for the overwhelmingly common plain command.
-    pub(super) fn resolve_authz_strictest(
-        &self,
-        line: &str,
-        allow_all: bool,
-    ) -> (
-        crate::manifest::AuthorizationPolicy,
-        bool,
-        Option<String>,
-        Vec<(String, crate::manifest::AuthorizationPolicy)>,
-    ) {
-        let segments = authz::split_segments(line);
-        if segments.len() <= 1 {
-            let (policy, elevated, command) = self.resolve_authz(line);
-            let gated = match authz::decide(policy, elevated, allow_all) {
-                Decision::Allow => Vec::new(),
-                _ => command
-                    .clone()
-                    .map(|c| vec![(c, policy)])
-                    .unwrap_or_default(),
-            };
-            return (policy, elevated, command, gated);
-        }
-
-        // Multi-segment: resolve+decide each, track the strictest, and collect every gated command.
-        let mut strictest: Option<(
-            u8,
-            crate::manifest::AuthorizationPolicy,
-            bool,
-            Option<String>,
-        )> = None;
-        let mut gated: Vec<(String, crate::manifest::AuthorizationPolicy)> = Vec::new();
-        for seg in segments {
-            let (policy, elevated, command) = self.resolve_authz(seg);
-            let decision = authz::decide(policy, elevated, allow_all);
-            if !matches!(decision, Decision::Allow) {
-                if let Some(name) = command.clone() {
-                    gated.push((name, policy));
-                }
-            }
-            let rank = authz::decision_rank(decision);
-            if strictest.as_ref().is_none_or(|(r, ..)| rank > *r) {
-                strictest = Some((rank, policy, elevated, command));
-            }
-        }
-        // Invariant: `split_segments` never returns empty, so the loop above set `strictest` at
-        // least once.
-        #[allow(clippy::expect_used)]
-        let (_, policy, elevated, command) = strictest.expect("split_segments never returns empty");
-        (policy, elevated, command, gated)
-    }
-
     /// Drive the `ask` agentic loop from `state` until it completes (model answers, transport error,
     /// or the cap) or pauses for the human. `pending_results` are results already accumulated for the
     /// *current* assistant turn (non-empty only on resume, after a pause mid-batch); `pid` is the
     /// process-table row to pause on surfacing (the ask's own row, threaded through on resume).
     ///
     /// The provider is `take()`n and restored before every return. On a pause, the whole `state` is
-    /// stashed in `PendingKind::AgentLoop` and a `pending_prompt` is returned; `answer_prompt` calls
+    /// stashed in an [`AgentLoopPause`] and a `pending_prompt` is returned; `answer_prompt` calls
     /// back into this helper to continue.
     // The agentic turn loop is one cohesive state machine (turn budget, tool batch, pause/restore);
     // splitting it would scatter the provider take/restore invariant across helpers.
     #[allow(clippy::too_many_lines)]
     async fn drive_ask_loop(
         &mut self,
+        ctx: &mut SessionCtx<'_>,
         mut state: AskLoopState,
         mut pending_results: Vec<crate::ai::ask::AskToolResult>,
         pid: Option<u32>,
     ) -> LineResult {
         use crate::ai::ask::AskTurn;
 
-        let Some(mut provider) = self.clank.ask_provider.take() else {
+        let Some(mut provider) = self.ask_provider.take() else {
             let err = crate::ai::Error::not_configured("ask");
             return LineResult::from_outcome(
                 Vec::new(),
@@ -608,12 +602,9 @@ impl Session {
                 state.trace.extend_from_slice(
                     format!("[ask] tool-call limit ({ASK_MAX_ITERATIONS}) reached\n").as_bytes(),
                 );
-                self.clank.ask_provider = Some(provider);
+                self.ask_provider = Some(provider);
                 if let Some(pid) = pid {
-                    self.proc_table
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .complete(pid);
+                    ctx.proc_complete(pid);
                 }
                 // Under `--json` a truncated loop can't have produced a validated JSON answer, so
                 // honor the exit-6 contract rather than a bare exit 0.
@@ -640,12 +631,9 @@ impl Session {
                 .await;
 
             if let Some(err) = resp.error {
-                self.clank.ask_provider = Some(provider);
+                self.ask_provider = Some(provider);
                 if let Some(pid) = pid {
-                    self.proc_table
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .complete(pid);
+                    ctx.proc_complete(pid);
                 }
                 let mut stderr = state.trace;
                 stderr.extend_from_slice(err.to_string().as_bytes());
@@ -667,11 +655,12 @@ impl Session {
             // Restore the provider onto `self` for the duration of tool execution: a `prompt__<name>`
             // tool call re-enters `run_ask` (running the stored prompt through the model), which needs
             // the provider available. Re-take it after the batch, before the next `provider.turn`.
-            self.clank.ask_provider = Some(provider);
+            self.ask_provider = Some(provider);
             let calls = resp.tool_calls.clone();
             let mut results = std::mem::take(&mut pending_results);
             for (i, call) in calls.iter().enumerate() {
                 let step = Box::pin(self.execute_ask_tool(
+                    ctx,
                     call,
                     state.blanket_authorized,
                     &mut state.trace,
@@ -692,7 +681,7 @@ impl Session {
                             completed: results,
                         };
                         // Provider already restored on `self` above; leave it there for the resume.
-                        return self.surface_agent_pause(state, pause, pid);
+                        return surface_agent_pause(ctx, state, pause, pid);
                     }
                 }
             }
@@ -705,12 +694,9 @@ impl Session {
 
             // Re-take the provider for the next turn's `provider.turn` (it was restored on `self` for
             // tool execution above). A nested prompt tool call has already returned it to `self`.
-            let Some(p) = self.clank.ask_provider.take() else {
+            let Some(p) = self.ask_provider.take() else {
                 if let Some(pid) = pid {
-                    self.proc_table
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .complete(pid);
+                    ctx.proc_complete(pid);
                 }
                 return LineResult::from_outcome(
                     Vec::new(),
@@ -721,12 +707,9 @@ impl Session {
             provider = p;
         }
 
-        self.clank.ask_provider = Some(provider);
+        self.ask_provider = Some(provider);
         if let Some(pid) = pid {
-            self.proc_table
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .complete(pid);
+            ctx.proc_complete(pid);
         }
 
         // `--json`: enforce the output contract. Valid JSON (after stripping a stray code fence) ⇒
@@ -750,66 +733,19 @@ impl Session {
         // box around the tool trace, so the two stop blending. Non-interactive (scripts, `agent
         // invoke`, conformance — COLUMNS unset) keeps the plain answer/`[tool]` bytes. `--json`
         // returned above, so it never reaches here.
-        let (stdout, stderr) = match self.columns() {
+        let (stdout, stderr) = match ctx.columns() {
             Some(width) => render_ask_boxes(&final_text, &state.trace, width),
             None => (final_text.into_bytes(), state.trace),
         };
         LineResult::from_outcome(stdout, stderr, 0)
     }
 
-    /// Surface the human-facing prompt for a paused `ask` loop and stash the loop state. Returns a
-    /// `pending_prompt` result; the shell does not block. For a `Confirm` pause the prompt is the
-    /// README's authorization copy; for `prompt_user` it's the model's question.
-    fn surface_agent_pause(
-        &mut self,
-        state: AskLoopState,
-        pause: AskPause,
-        pid: Option<u32>,
-    ) -> LineResult {
-        let prompt = match &pause.kind {
-            AskPauseKind::Confirm {
-                command,
-                sudo_grant,
-            } => {
-                let name = authz::leading_command(command)
-                    .0
-                    .unwrap_or_else(|| command.clone());
-                let synopsis = format!("run `{command}`");
-                PendingPrompt {
-                    question: authz::confirm_question(&name, &synopsis, *sudo_grant),
-                    choices: Some(authz::confirm_choices(*sudo_grant)),
-                    secret: false,
-                }
-            }
-            AskPauseKind::PromptUser => {
-                // The model's question is the first user-facing text; re-derive it from the call args.
-                let question =
-                    serde_json::from_str::<serde_json::Value>(&pause.call.arguments_json)
-                        .ok()
-                        .and_then(|v| v.get("question").and_then(|q| q.as_str()).map(String::from))
-                        .unwrap_or_else(|| "the model has a question".to_string());
-                PendingPrompt {
-                    question,
-                    choices: None,
-                    secret: false,
-                }
-            }
-        };
-        self.surface_pending(
-            prompt,
-            pid,
-            PendingKind::AgentLoop {
-                state: Box::new(state),
-                pause,
-            },
-        )
-    }
-
     /// Resume a paused `ask` loop after the human answers. Resolves the paused tool call per its kind,
     /// drains any sibling calls from the same turn (each may pause again), then re-enters
-    /// [`Session::drive_ask_loop`] to continue the conversation.
-    pub(super) async fn resolve_agent_loop(
+    /// [`Self::drive_ask_loop`] to continue the conversation.
+    pub(crate) async fn resolve_agent_loop(
         &mut self,
+        ctx: &mut SessionCtx<'_>,
         resolution: Resolution,
         mut state: Box<AskLoopState>,
         pause: AskPause,
@@ -821,10 +757,7 @@ impl Session {
         // exit 130 with the trace so far. The paused row is reaped here.
         if matches!(resolution, Resolution::Aborted) {
             if let Some(pid) = pid {
-                self.proc_table
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .complete(pid);
+                ctx.proc_complete(pid);
             }
             state.trace.extend_from_slice(b"[ask] aborted by user\n");
             return LineResult::from_outcome(Vec::new(), state.trace, 130);
@@ -852,6 +785,7 @@ impl Session {
                 }
                 if approved {
                     Box::pin(self.run_shell_tool(
+                        ctx,
                         &pause.call,
                         &command,
                         state.blanket_authorized,
@@ -884,9 +818,13 @@ impl Session {
 
         // Drain the sibling calls from the same turn; any may pause again (re-stashing AgentLoop).
         for (i, call) in pause.remaining.iter().enumerate() {
-            let step =
-                Box::pin(self.execute_ask_tool(call, state.blanket_authorized, &mut state.trace))
-                    .await;
+            let step = Box::pin(self.execute_ask_tool(
+                ctx,
+                call,
+                state.blanket_authorized,
+                &mut state.trace,
+            ))
+            .await;
             match step {
                 ToolStep::Done(r) => results.push(r),
                 ToolStep::Pause(kind) => {
@@ -896,14 +834,14 @@ impl Session {
                         remaining: pause.remaining[i + 1..].to_vec(),
                         completed: results,
                     };
-                    return self.surface_agent_pause(*state, next, pid);
+                    return surface_agent_pause(ctx, *state, next, pid);
                 }
             }
         }
 
         // All calls in the paused turn are resolved: append their results and continue the loop.
         state.history.push(AskTurn::ToolResults(results));
-        self.drive_ask_loop(*state, Vec::new(), pid).await
+        self.drive_ask_loop(ctx, *state, Vec::new(), pid).await
     }
 
     /// Attempt one tool call from the agentic loop. Returns either a finished [`AskToolResult`] (the
@@ -921,6 +859,7 @@ impl Session {
     #[allow(clippy::too_many_lines, clippy::items_after_statements)]
     async fn execute_ask_tool(
         &mut self,
+        ctx: &mut SessionCtx<'_>,
         call: &crate::ai::ask::AskToolCall,
         blanket_authorized: bool,
         trace: &mut Vec<u8>,
@@ -1048,11 +987,11 @@ impl Session {
         // reaches the human through the dedicated `prompt_user` tool above instead.)
         use crate::manifest::ExecutionScope;
         for segment in authz::split_segments(&command) {
-            let (_policy, _elevated, seg_cmd) = authz::resolve(&self.registry, segment);
+            let (_policy, _elevated, seg_cmd) = authz::resolve(ctx.registry(), segment);
             let Some(name) = seg_cmd.as_deref() else {
                 continue;
             };
-            match self.resolve_command_scope(name) {
+            match self.resolve_command_scope(ctx, name) {
                 // Isolated command — safe to run as a tool.
                 Some(ExecutionScope::Subprocess) => {}
                 // Mutates parent-shell state the isolated tool can't reach — refuse.
@@ -1090,7 +1029,7 @@ impl Session {
         // entirely by `blanket_authorized` (confirm-tier only). Gates on the STRICTEST segment so a
         // compound model tool call (`echo ok && rm -rf /x`) is caught on `rm`, not the leading `echo`.
         let (policy, elevated, _, _gated) =
-            self.resolve_authz_strictest(&command, blanket_authorized);
+            ctx.resolve_authz_strictest(self, &command, blanket_authorized);
         match authz::decide(policy, elevated, blanket_authorized) {
             Decision::Allow => {}
             Decision::Confirm { sudo_grant } => {
@@ -1112,7 +1051,7 @@ impl Session {
         }
 
         ToolStep::Done(
-            self.run_shell_tool(call, &command, blanket_authorized, trace)
+            self.run_shell_tool(ctx, call, &command, blanket_authorized, trace)
                 .await,
         )
     }
@@ -1121,12 +1060,15 @@ impl Session {
     /// truncated). Shared by the inline path and the post-approval resume. Emits the `[tool]` trace.
     async fn run_shell_tool(
         &mut self,
+        ctx: &mut SessionCtx<'_>,
         call: &crate::ai::ask::AskToolCall,
         command: &str,
         blanket_authorized: bool,
         trace: &mut Vec<u8>,
     ) -> crate::ai::ask::AskToolResult {
-        let result = self.run_command(command, None, blanket_authorized).await;
+        let result = ctx
+            .run_command(self, command, None, blanket_authorized)
+            .await;
         trace.extend_from_slice(
             format!("[tool] $ {command}\n[tool] exit {}\n", result.exit_code).as_bytes(),
         );
@@ -1141,6 +1083,104 @@ impl Session {
             outcome: Ok(payload.to_string()),
         }
     }
+
+    /// Run an installed grease prompt: parse `--arg value` flags against the package's declared
+    /// arguments, fill the body's `{{arg}}` placeholders, and dispatch the filled prompt through
+    /// `run_ask`. `--model` on the prompt line overrides the package model. Missing required args are
+    /// an exit-2 usage error (no model call).
+    pub(crate) async fn run_prompt(
+        &mut self,
+        ctx: &mut SessionCtx<'_>,
+        line: &str,
+        blanket_authorized: bool,
+    ) -> LineResult {
+        let (name, provided, model_override) =
+            match crate::clank::grease::parse_pkg_invocation(line) {
+                Ok(t) => t,
+                Err(e) => return e,
+            };
+        let Some(package) = self.grease.prompt(&name).cloned() else {
+            return LineResult::denied(); // shouldn't happen (is_prompt_line gated it)
+        };
+
+        // Fill the template; a missing required arg is a clean usage error.
+        let filled = match package.fill(&provided) {
+            Ok(f) => f,
+            Err(e) => {
+                return LineResult::from_outcome(
+                    Vec::new(),
+                    format!("{name}: {e}\n").into_bytes(),
+                    2,
+                )
+            }
+        };
+
+        let model = model_override.or_else(|| package.model.clone());
+        let args = crate::ai::ask::AskArgs {
+            prompt: filled,
+            model,
+            fresh: false,
+            json: false,
+            stdin: None,
+        };
+        self.run_ask(ctx, args, blanket_authorized).await
+    }
+}
+
+/// Run an upstream pipeline stage and return its stdout as a lossy String (the stdin payload for
+/// an ask-tail pipeline). A nonzero exit is not fatal — pipes feed whatever the producer emitted.
+/// The upstream is not recorded as its own transcript line (the whole `… | ask` line is recorded
+/// by the caller).
+async fn capture_upstream(ctx: &mut SessionCtx<'_>, upstream: &str) -> String {
+    let result = ctx.execute(upstream).await;
+    String::from_utf8_lossy(&result.stdout).into_owned()
+}
+
+/// Surface the human-facing prompt for a paused `ask` loop and stash the loop state. Returns a
+/// `pending_prompt` result; the shell does not block. For a `Confirm` pause the prompt is the
+/// README's authorization copy; for `prompt_user` it's the model's question.
+fn surface_agent_pause(
+    ctx: &mut SessionCtx<'_>,
+    state: AskLoopState,
+    pause: AskPause,
+    pid: Option<u32>,
+) -> LineResult {
+    let prompt = match &pause.kind {
+        AskPauseKind::Confirm {
+            command,
+            sudo_grant,
+        } => {
+            let name = authz::leading_command(command)
+                .0
+                .unwrap_or_else(|| command.clone());
+            let synopsis = format!("run `{command}`");
+            PendingPrompt {
+                question: authz::confirm_question(&name, &synopsis, *sudo_grant),
+                choices: Some(authz::confirm_choices(*sudo_grant)),
+                secret: false,
+            }
+        }
+        AskPauseKind::PromptUser => {
+            // The model's question is the first user-facing text; re-derive it from the call args.
+            let question = serde_json::from_str::<serde_json::Value>(&pause.call.arguments_json)
+                .ok()
+                .and_then(|v| v.get("question").and_then(|q| q.as_str()).map(String::from))
+                .unwrap_or_else(|| "the model has a question".to_string());
+            PendingPrompt {
+                question,
+                choices: None,
+                secret: false,
+            }
+        }
+    };
+    ctx.surface_pending(
+        prompt,
+        pid,
+        crate::plugin::PluginPending(Box::new(AgentLoopPause {
+            state: Box::new(state),
+            pause,
+        })),
+    )
 }
 
 // ---- `ask` output framing: box the answer and the tool trace ----------------------------------
@@ -1298,7 +1338,7 @@ fn truncate_to(line: &str, width: usize) -> String {
 /// so `$(context summarize)` / `context summarize | …` fall through to Brush and hit the honest error
 /// in `apply_context` (the LLM can't run in Brush's nested runtime — the "Wall C" wall). Matches the
 /// operator-bail in [`crate::dispatch_context`].
-pub(super) fn is_context_summarize(line: &str) -> bool {
+pub(crate) fn is_context_summarize(line: &str) -> bool {
     if line.chars().any(|c| "|&;<>`$".contains(c)) {
         return false;
     }
@@ -1311,7 +1351,7 @@ pub(super) fn is_context_summarize(line: &str) -> bool {
 /// pipeline's confirmation (the deferred path re-runs a line string). Flags come first, then the
 /// single-quoted prompt. The captured stdin travels separately via `next_ask_stdin`, so it is NOT
 /// embedded here. Single quotes in the prompt are escaped bash-style (`'\''`).
-pub(super) fn ask_reconstruct(args: &crate::ai::ask::AskArgs) -> String {
+pub(crate) fn ask_reconstruct(args: &crate::ai::ask::AskArgs) -> String {
     let mut line = String::from("ask");
     if args.fresh {
         line.push_str(" --fresh");
@@ -1329,7 +1369,7 @@ pub(super) fn ask_reconstruct(args: &crate::ai::ask::AskArgs) -> String {
 
 /// Truncate a tool-output stream to [`ASK_TOOL_RESULT_CAP`] bytes (on a UTF-8 boundary), appending a
 /// marker when clipped. Returns a `String` (lossy) for JSON embedding.
-pub(super) fn truncate_tool_output(bytes: &[u8]) -> String {
+pub(crate) fn truncate_tool_output(bytes: &[u8]) -> String {
     if bytes.len() <= ASK_TOOL_RESULT_CAP {
         return String::from_utf8_lossy(bytes).into_owned();
     }

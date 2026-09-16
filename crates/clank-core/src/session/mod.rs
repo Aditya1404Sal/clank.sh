@@ -33,7 +33,6 @@ use crate::runtime::proctable::ProcessTable;
 
 type BoxError = Box<dyn std::error::Error>;
 
-mod ask;
 mod ctx;
 mod env;
 mod prompt;
@@ -41,10 +40,11 @@ mod streams;
 
 pub use ctx::SessionCtx;
 
+use crate::plugin::Plugin;
+
 // What the eval pipeline still reaches for after the relocation. Everything else that used to live
 // here moved to the module that owns it AND is now only called from there — the short length of this
 // list is the evidence that the split fell along a real seam rather than an arbitrary one.
-use ask::is_context_summarize;
 use env::{build_shell, ensure_fs_layout};
 use streams::finish;
 // The wasm capture adapters; the code that constructs them is `cfg`-gated the same way.
@@ -57,81 +57,18 @@ enum PendingKind {
     UserPrompt,
     /// An authorization confirmation gating a command: on approval the stashed `command` runs; on
     /// denial the caller gets exit `5`. `all` (when offered) also sets the session `allow_all` grant.
-    /// `ask_stdin` carries a pre-captured pipeline stdin payload for a deferred `cat x | ask` tail, so
-    /// the piped context survives the pause/resume (restored into `next_ask_stdin` before re-running).
+    /// `rerun_stdin` carries a pre-captured pipeline stdin payload for a deferred `cat x | ask` tail, so
+    /// the piped context survives the pause/resume (restored into `rerun_stdin` before re-running).
     AuthConfirm {
         command: String,
         sudo_grant: bool,
-        ask_stdin: Option<String>,
+        rerun_stdin: Option<String>,
     },
-    /// An `ask` agentic loop paused mid-flight: the model requested a tool call that needs the human
-    /// (an authorization confirmation, or the `prompt_user` tool). The whole conversation-so-far is
-    /// carried in `state`; `answer_prompt` resolves the paused tool call and resumes the loop. This is
-    /// in-memory but replay-safe — Golem rebuilds it by deterministic replay, and each model `turn`
-    /// replays from the oplog.
-    AgentLoop {
-        state: Box<AskLoopState>,
-        /// The pause under resolution: what the human is being asked and how to resolve it.
-        pause: AskPause,
-    },
-}
-
-/// A tool call in an `ask` loop that paused for the human, plus the sibling calls in the same turn
-/// still to run and the results already computed — everything needed to resume the loop after the
-/// human answers.
-struct AskPause {
-    /// The tool call awaiting the human's answer.
-    call: crate::ai::ask::AskToolCall,
-    /// The kind of pause, which decides how the human's answer resolves the call.
-    kind: AskPauseKind,
-    /// Sibling calls from the same assistant turn, not yet executed.
-    remaining: Vec<crate::ai::ask::AskToolCall>,
-    /// Results already computed for earlier calls in this turn.
-    completed: Vec<crate::ai::ask::AskToolResult>,
-}
-
-/// The outcome of attempting one tool call in the loop: either a finished result to feed back, or a
-/// pause requiring the human before the call can be resolved.
-enum ToolStep {
-    Done(crate::ai::ask::AskToolResult),
-    Pause(AskPauseKind),
-}
-
-/// How a paused `ask` tool call is resolved by the human's answer.
-enum AskPauseKind {
-    /// An authorization confirmation for a `shell` command line. On approval the line runs; on denial
-    /// a refusal tool result is fed back. `sudo_grant` marks a sudo-only gate (no "all" offered).
-    Confirm { command: String, sudo_grant: bool },
-    /// The `prompt_user` tool: the human's answer text becomes the tool result verbatim.
-    PromptUser,
-}
-
-/// An active `ask repl` session: its isolated transcript and the model it targets. Held on the
-/// `Session` only while the native driver is inside the REPL loop. `:model` mutates `model`;
-/// `:new-session` clears `transcript`.
-pub(crate) struct ReplState {
-    pub(crate) transcript: Transcript,
-    pub(crate) model: String,
-}
-
-/// The carried state of an in-flight `ask` agentic loop, enough to resume it after a pause. Owned data
-/// only (replay-safe).
-struct AskLoopState {
-    /// The system prompt (rebuilt once at loop start; stable across turns).
-    system: String,
-    /// The tool definitions offered each turn (stable across turns).
-    tools: Vec<crate::ai::ask::AskTool>,
-    /// The conversation so far: `User`, then alternating `Assistant`/`ToolResults`.
-    history: Vec<crate::ai::ask::AskTurn>,
-    /// The model id.
-    model: String,
-    /// Accumulated tool trace (→ the final result's stderr).
-    trace: Vec<u8>,
-    /// Blanket confirm-tier authorization for the rest of this loop (upgraded to true on "all").
-    blanket_authorized: bool,
-    /// `--json`: the final answer must validate as JSON (exit 0) or the loop exits 6 with the raw
-    /// text on stderr (README's `--json` contract).
-    json: bool,
+    /// A plug-in paused mid-flight and owns the continuation (an `ask` agentic loop whose tool call
+    /// needs the human, say). The shell carries the opaque payload and hands it straight back to
+    /// [`crate::plugin::Plugin::resume`] when the human answers. Replay-safe on the durable agent —
+    /// Golem rebuilds it by deterministic replay.
+    Plugin(crate::plugin::PluginPending),
 }
 
 /// The shell's paused state: the surfaced prompt, the process-table row it belongs to, and why.
@@ -141,14 +78,14 @@ struct Pending {
     kind: PendingKind,
 }
 
-/// A per-line snapshot of the installed capability surface, keyed by the MCP + grease state versions.
+/// A per-line snapshot of the installed capability surface, keyed by the plug-in's version.
 /// Rebuilt only when that key changes; otherwise the same `Arc`s are re-installed each line (a cheap
 /// clone) instead of re-rendering the manifests / resource index / system prompt every command.
-pub(crate) struct CapabilityCache {
-    pub(crate) key: (u64, u64),
-    pub(crate) dynreg: std::sync::Arc<std::sync::Mutex<Vec<crate::manifest::Manifest>>>,
-    pub(crate) mcpfs: std::sync::Arc<Vec<crate::runtime::mcpfs::ResourceEntry>>,
-    pub(crate) sysprompt: std::sync::Arc<String>,
+struct CapabilityView {
+    version: u64,
+    dynreg: std::sync::Arc<std::sync::Mutex<Vec<crate::manifest::Manifest>>>,
+    mcpfs: std::sync::Arc<Vec<crate::runtime::mcpfs::ResourceEntry>>,
+    sysprompt: std::sync::Arc<String>,
 }
 
 /// One live background job: the Brush job manager's id and the clank process-table PID that
@@ -262,9 +199,14 @@ pub struct Session {
     /// Deterministic under Golem replay — derived purely from the replayed line history, like the
     /// process table (the `JoinHandles` themselves are rebuilt by re-execution).
     bg_jobs: Vec<BgJob>,
-    /// The clank plug-in's state (`ask`, `mcp`, `grease`, `golem`). A concrete field during the
-    /// crate split; it moves behind the `Plugin` slot once every family's glue is `impl Clank`.
-    clank: crate::clank::Clank,
+    /// The installed plug-in (clank's command families), if any. Taken out for the duration of a
+    /// line by `eval_line`/`answer_prompt` and passed down dispatch, so it can re-enter through
+    /// `SessionCtx::run_command` by handing itself back.
+    plugin: Option<Box<dyn crate::plugin::Plugin>>,
+    /// Stdin captured for a confirmed line to replay when it re-runs (`cat x | ask` confirmed later).
+    rerun_stdin: Option<String>,
+    /// The per-line capability view, rebuilt when the plug-in's version changes.
+    capabilities: Option<CapabilityView>,
     /// The log sink installed per-line (the `/var/log` observability layer). Defaults to the direct
     /// append sink (correct on native); the agent injects a whole-file-rewrite sink whose writes are
     /// idempotent under oplog replay, avoiding line duplication (see `logging` + `log_sink`).
@@ -290,18 +232,19 @@ pub struct Session {
 /// **This order is a behavioural contract, not a style choice.** `classify_line` tests these in the
 /// exact order the ladder always has, and `eval_line_inner`'s `match` on the result must keep that
 /// order — reordering either changes what the shell does. Concretely: `Help` must resolve before
-/// `ContextSummarize`/`Brush` (the authz gate) so `<cmd> --help` never triggers a confirmation;
-/// `ContextSummarize` must resolve before `ContextDispatch` so `context summarize` routes to the
-/// model instead of `context`'s "unknown subcommand"; every variant here must resolve before
+/// `Plugin`/`Brush` (the authz gate) so `<cmd> --help` never triggers a confirmation; the
+/// `BeforeContext` `Plugin` ask must resolve before `ContextDispatch` so `context summarize` routes
+/// to the model instead of `context`'s "unknown subcommand"; every variant here must resolve before
 /// `Brush` so inspecting/help-ing a command never confirms it.
 enum LineRoute {
     /// Syntactically incomplete input (an unterminated heredoc/quote/substitution).
     IncompleteInput,
     /// `<cmd> --help` for a clank-intercepted command; carries the rendered help text.
     Help(String),
-    /// A top-level `context summarize` — needs the model, so it's routed through the authz gate to
-    /// the async `run_context_summarize` instead of the sync `context` engine.
-    ContextSummarize,
+    /// A line the installed plug-in claimed — its own help text, or a route it will run itself. The
+    /// plug-in is asked twice (see [`crate::plugin::LinePhase`]), so this variant stands in at BOTH
+    /// of the positions its family checks used to occupy.
+    Plugin(crate::plugin::LineAction),
     /// `context show`/`clear`/`trim` (not `summarize`); carries the already-rendered output. The
     /// one variant here that mutates as part of deciding (`clear`/`trim` change the transcript) —
     /// still safe in a `&self` classifier because the mutation goes through `self.transcript`'s
@@ -320,16 +263,6 @@ enum LineRoute {
     /// A `type` line resolved entirely against clank-intercepted names; carries the rendered output
     /// and exit code.
     TypeDispatch(String, u8),
-    /// `<server> --help` / `<server> <tool> --help` for an installed MCP server; carries the
-    /// rendered help text.
-    McpHelp(String),
-    /// `<name> --help` / `<agent> help` for an installed grease command package; carries the
-    /// rendered help text.
-    PkgHelp(String),
-    /// `ask repl` reaching the durable-agent path (the interactive REPL is native-only there).
-    AskReplOnAgent,
-    /// `… | ask "…"` — a stdin-as-context pipeline; carries the parsed upstream/tail split.
-    AskPipe(crate::ai::ask::AskTailPipe),
     /// None of the above: falls through to the authorization gate, then `run_command`.
     Brush,
 }
@@ -338,30 +271,10 @@ enum LineRoute {
 /// gate has already resolved. Same order-is-behaviour contract as [`LineRoute`] — see that enum's
 /// doc and `classify_command`'s.
 enum CommandRoute {
-    /// A deferred-confirm re-run of a top-level `context summarize`.
-    ContextSummarize,
     /// `kill ...`, parsed (or a parse error to report).
     Kill(crate::error::Result<crate::builtins::kill::KillArgs>),
-    /// `ask ...`, parsed.
-    Ask(crate::ai::ask::AskArgs),
-    /// `mcp ...` management, parsed (or a parse error to report).
-    Mcp(crate::mcp::error::Result<crate::mcp::cmd::McpCommand>),
-    /// `grease ...` package management, parsed (or a parse error to report).
-    Grease(crate::grease::error::Result<crate::grease::cmd::GreaseCommand>),
-    /// `golem ...` cluster command, parsed (or a parse error to report).
-    Golem(crate::golem::error::Result<crate::golem::cluster::GolemCommand>),
-    /// `<server> <tool> …` for an installed MCP server.
-    McpToolLine,
-    /// A grease-installed prompt invocation.
-    PromptLine,
-    /// A grease-installed script invocation.
-    ScriptLine,
-    /// A grease-installed Golem agent invocation.
-    AgentLine,
-    /// A grease-installed MCP resource-template invocation.
-    McpTemplateLine,
-    /// A top-level `cat /mnt/mcp/<server>/<dynamic>` read target; carries `(server, uri)`.
-    McpResourceRead(String, String),
+    /// A line the installed plug-in claimed; carries its own opaque route back to it.
+    Plugin(crate::plugin::Route),
     /// A curl/wget-headed pipeline (`curl … | rest…`).
     HttpPipe(crate::builtins::http::HttpHeadPipe),
     /// A bare (unpiped) curl/wget invocation; carries its argv tail.
@@ -400,13 +313,17 @@ impl Session {
                 pending: None,
                 authz: AuthzState::default(),
                 bg_jobs: Vec::new(),
-                clank: crate::clank::Clank::new(),
+                plugin: None,
+                rerun_stdin: None,
+                capabilities: None,
                 log_sink: std::sync::Arc::new(crate::logging::DefaultLogSink),
                 source: SourceInfo::default(),
                 secret_env: std::collections::BTreeMap::new(),
                 rt,
             };
-            session.clank.reconstruct_mcp();
+            let mut clank = crate::clank::Clank::new();
+            clank.reconstruct_mcp();
+            session.set_plugin(Box::new(clank));
             Ok(session)
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -422,12 +339,16 @@ impl Session {
                 pending: None,
                 authz: AuthzState::default(),
                 bg_jobs: Vec::new(),
-                clank: crate::clank::Clank::new(),
+                plugin: None,
+                rerun_stdin: None,
+                capabilities: None,
                 log_sink: std::sync::Arc::new(crate::logging::DefaultLogSink),
                 source: SourceInfo::default(),
                 secret_env: std::collections::BTreeMap::new(),
             };
-            session.clank.reconstruct_mcp();
+            let mut clank = crate::clank::Clank::new();
+            clank.reconstruct_mcp();
+            session.set_plugin(Box::new(clank));
             Ok(session)
         }
     }
@@ -448,30 +369,124 @@ impl Session {
         &self.registry
     }
 
+    /// Install `plugin`: its builtins join the shell, its manifests join the registry, and its
+    /// `on_start` runs. Replaces any previous plug-in.
+    pub fn set_plugin(&mut self, mut plugin: Box<dyn crate::plugin::Plugin>) {
+        for (name, registration) in plugin.builtins() {
+            self.shell.register_builtin(name, registration);
+        }
+        for manifest in plugin.manifests() {
+            self.registry.insert(manifest);
+        }
+        plugin.on_start();
+        self.capabilities = None;
+        self.plugin = Some(plugin);
+    }
+
+    /// The installed plug-in as `T`, if it is one.
+    #[must_use]
+    pub fn plugin_ref<T: crate::plugin::Plugin>(&self) -> Option<&T> {
+        self.plugin.as_deref()?.as_any().downcast_ref::<T>()
+    }
+
+    /// The installed plug-in as mutable `T`, if it is one.
+    pub fn plugin_mut<T: crate::plugin::Plugin>(&mut self) -> Option<&mut T> {
+        self.plugin.as_deref_mut()?.as_any_mut().downcast_mut::<T>()
+    }
+
+    /// Test-only: uninstall the plug-in, so the contract tests can see what the bare shell core
+    /// does. There is no user command for this — `Session::new` always installs clank until Task 11
+    /// makes that the embedder's job.
+    #[cfg(test)]
+    pub(crate) fn clear_plugin_for_test(&mut self) {
+        self.plugin = None;
+        self.capabilities = None;
+    }
+
     /// Install the LLM provider that backs `ask`. The agent build injects a durable Anthropic
     /// provider here after constructing the session; without one, `ask` reports "not configured".
     pub fn set_ask_provider(&mut self, provider: Box<dyn crate::ai::ask::AskProvider>) {
-        // Wrap so each LLM turn is logged to http.log (the outbound Anthropic call).
-        self.clank.ask_provider = Some(Box::new(crate::ai::ask::LoggingAskProvider::new(provider)));
+        if let Some(clank) = self.plugin_mut::<crate::clank::Clank>() {
+            // Wrap so each LLM turn is logged to http.log (the outbound Anthropic call).
+            clank.ask_provider = Some(Box::new(crate::ai::ask::LoggingAskProvider::new(provider)));
+        }
     }
 
     /// Install the Golem-agent invoker (a durable `WasmRpc` binding on the agent). Without one, an
     /// installed agent command reports "needs a cluster" (README:895). Injected after construction.
     pub fn set_agent_invoker(&mut self, invoker: Box<dyn crate::golem::agent::AgentInvoker>) {
-        self.clank.agent_invoker = Some(invoker);
+        if let Some(clank) = self.plugin_mut::<crate::clank::Clank>() {
+            clank.agent_invoker = Some(invoker);
+        }
     }
 
     /// Install the Golem cluster interface backing the `golem` command + agent oplog/status (durable
     /// `golem:api` bindings on the agent). Without one, `golem` reports "needs a cluster".
     pub fn set_golem_cluster(&mut self, cluster: Box<dyn crate::golem::cluster::GolemCluster>) {
-        self.clank.golem_cluster = Some(cluster);
+        if let Some(clank) = self.plugin_mut::<crate::clank::Clank>() {
+            clank.golem_cluster = Some(cluster);
+        }
     }
 
     /// Install the MCP HTTP transport (a durable WASI-HTTP client on the agent). Without one, MCP
     /// commands report "not configured" (exit 4). Injected after construction like the ask provider.
     pub fn set_mcp_http(&mut self, http: Box<dyn crate::mcp::client::McpHttp>) {
-        // Wrap the transport so every MCP + grease-registry request is logged to http.log (redacted).
-        self.clank.mcp_http = Some(Box::new(crate::mcp::client::LoggingMcpHttp::new(http)));
+        if let Some(clank) = self.plugin_mut::<crate::clank::Clank>() {
+            // Wrap the transport so every MCP + grease-registry request is logged to http.log (redacted).
+            clank.mcp_http = Some(Box::new(crate::mcp::client::LoggingMcpHttp::new(http)));
+        }
+    }
+
+    /// Start an `ask repl` session (see [`crate::clank::Clank::repl_start`]).
+    ///
+    /// # Errors
+    /// Returns `Err` when no plug-in owns `ask`, no provider is configured, or the resolved model
+    /// carries an unknown `provider/` prefix.
+    pub fn repl_start(
+        &mut self,
+        args: &crate::ai::ask::ReplArgs,
+    ) -> crate::ai::error::Result<String> {
+        let Some(mut clank) = self.plugin.take() else {
+            return Err(crate::ai::Error::not_configured("ask repl"));
+        };
+        let result = match clank.as_any_mut().downcast_mut::<crate::clank::Clank>() {
+            Some(clank) => clank.repl_start(&SessionCtx::new(self), args),
+            None => Err(crate::ai::Error::not_configured("ask repl")),
+        };
+        self.plugin = Some(clank);
+        result
+    }
+
+    /// The active REPL's model id, for the `[model]>` prompt. `None` if no REPL is active.
+    #[must_use]
+    pub fn repl_model(&self) -> Option<String> {
+        self.plugin_ref::<crate::clank::Clank>()?.repl_model()
+    }
+
+    /// Handle a REPL meta-command (see [`crate::clank::Clank::repl_meta`]).
+    pub fn repl_meta(&mut self, line: &str) -> Option<(String, bool)> {
+        self.plugin_mut::<crate::clank::Clank>()?.repl_meta(line)
+    }
+
+    /// Run one REPL turn (see [`crate::clank::Clank::repl_turn`]).
+    pub async fn repl_turn(&mut self, prompt: &str) -> String {
+        let Some(mut clank) = self.plugin.take() else {
+            return "ask repl: no active session\n".to_string();
+        };
+        let reply = match clank.as_any_mut().downcast_mut::<crate::clank::Clank>() {
+            Some(clank) => clank.repl_turn(&mut SessionCtx::new(self), prompt).await,
+            None => "ask repl: no active session\n".to_string(),
+        };
+        self.plugin = Some(clank);
+        reply
+    }
+
+    /// End the REPL session and return its rendered transcript (see
+    /// [`crate::clank::Clank::repl_end`]).
+    pub fn repl_end(&mut self) -> Vec<u8> {
+        self.plugin_mut::<crate::clank::Clank>()
+            .map(crate::clank::Clank::repl_end)
+            .unwrap_or_default()
     }
 
     /// Install the `/var/log` log sink. The agent injects a whole-file-rewrite sink (idempotent under
@@ -550,7 +565,12 @@ impl Session {
                 .field("line", log_safe_line(line).as_ref())
                 .emit(crate::logging::LogFile::Shell);
         }
-        let result = self.eval_line_inner(line).await;
+        // The plug-in rides out of the slot for the whole line and back in at the end, so dispatch
+        // can hand it a `&mut Session` (as a `SessionCtx`) and the plug-in itself at the same time —
+        // which is what lets an `ask` tool call re-enter `run_command` through the plug-in.
+        let mut plugin = self.plugin.take();
+        let result = self.eval_line_inner(plugin.as_deref_mut(), line).await;
+        self.plugin = plugin;
         self.log_line_outcome(line, &result);
         result
     }
@@ -585,10 +605,10 @@ impl Session {
     // read. The guard clauses below all either mutate `Session` state directly or must run
     // unconditionally before any classification, which is why they stay here rather than moving
     // into `classify_line` — see that function's doc for the rule. Still over clippy's 100-line
-    // default after extracting `classify_line`/`dispatch_context_summarize`/
-    // `dispatch_via_authz_gate`: the ~130 mandatory setup lines above the `match` are a hard floor.
+    // default after extracting `classify_line`/`dispatch_via_authz_gate`: the ~130 mandatory setup
+    // lines above the `match` are a hard floor.
     #[allow(clippy::too_many_lines)]
-    async fn eval_line_inner(&mut self, line: &str) -> LineResult {
+    async fn eval_line_inner(&mut self, plugin: Option<&mut dyn Plugin>, line: &str) -> LineResult {
         // A prompt is already outstanding: the caller must answer it (via `answer_prompt`), not run
         // a new command. The shell never blocks, so it's the caller's job to notice `pending_prompt`
         // and respond. Reject the command with a clear message rather than silently interleaving.
@@ -608,7 +628,10 @@ impl Session {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .record_command(line);
-                return self.answer_prompt(None).await;
+                // The plug-in is already out of the slot for this line, so hand it straight to the
+                // resolver rather than going through `answer_prompt` (which would find an empty
+                // slot and fail to resume a plug-in-owned pause).
+                return self.answer_prompt_with_plugin(plugin, None).await;
             }
             // Re-surface the still-outstanding prompt (NOT a bare stderr, which carries
             // pending_prompt=None): a caller that saw an empty pending_prompt here would believe the
@@ -673,44 +696,33 @@ impl Session {
         // Brush-registered `context` builtin in nested contexts ($(context show), context | head).
         let _install = crate::runtime::proctable::install(self.proc_table.clone());
         let _install_transcript = crate::install_transcript(self.transcript.clone());
-        // Build (or reuse a cached) view of the installed capabilities, keyed by the MCP + grease state
-        // versions — so the dynamic manifests (`man`/`type` resolution), the MCP resource index (`ls
+        // Build (or reuse a cached) view of the installed capabilities, keyed by the plug-in's own
+        // version — so the dynamic manifests (`man`/`type` resolution), the MCP resource index (`ls
         // /mnt/mcp/...`), and the live system prompt (`cat /proc/clank/system-prompt`) are re-rendered
         // only when a package/server was installed or removed, not on every command line.
-        let cap_key = (self.clank.mcp.version(), self.clank.grease.version());
-        if self.clank.cap_cache.as_ref().map(|c| c.key) != Some(cap_key) {
-            let mut manifests = self.clank.mcp.all_manifests();
-            manifests.extend(self.clank.grease.all_manifests());
-            self.clank.cap_cache = Some(CapabilityCache {
-                key: cap_key,
-                dynreg: std::sync::Arc::new(std::sync::Mutex::new(manifests)),
-                mcpfs: std::sync::Arc::new(self.clank.grease.mcp_resource_index()),
-                sysprompt: std::sync::Arc::new(
-                    crate::ai::ask::build_system_prompt_with_capabilities(
-                        &self.registry,
-                        &self.clank.mcp,
-                        &self.clank.grease,
-                    ),
-                ),
-            });
+        if let Some(p) = plugin.as_deref() {
+            let version = p.version();
+            if self.capabilities.as_ref().map(|c| c.version) != Some(version) {
+                let caps = p.capabilities(&self.registry);
+                self.capabilities = Some(CapabilityView {
+                    version,
+                    dynreg: std::sync::Arc::new(std::sync::Mutex::new(caps.manifests)),
+                    mcpfs: std::sync::Arc::new(caps.resources),
+                    sysprompt: std::sync::Arc::new(caps.system_prompt.unwrap_or_default()),
+                });
+            }
         }
         // Clone the cached `Arc`s into the per-line thread-local slots (cheap ref-count bumps); the
         // guards clear the slots on drop. The manifests/index/prompt are read-only surfaces, so sharing
         // one `Arc` across lines is safe.
-        let (dynreg, mcpfs, sysprompt) = {
-            // Invariant: Some by this point — the block just above sets it when the cap key changed,
-            // and leaves the existing value otherwise.
-            #[allow(clippy::expect_used)]
-            let cap = self
-                .clank
-                .cap_cache
-                .as_ref()
-                .expect("cap_cache just populated");
-            (cap.dynreg.clone(), cap.mcpfs.clone(), cap.sysprompt.clone())
+        let (dynreg, mcpfs, sysprompt) = match self.capabilities.as_ref() {
+            Some(c) => (c.dynreg.clone(), c.mcpfs.clone(), c.sysprompt.clone()),
+            None => Default::default(),
         };
         let _install_dynreg = crate::runtime::dynreg::install(dynreg);
         let _install_mcpfs = crate::runtime::mcpfs::install(mcpfs);
-        let _install_sysprompt = crate::runtime::sysprompt::install(sysprompt);
+        let _install_sysprompt =
+            (!sysprompt.is_empty()).then(|| crate::runtime::sysprompt::install(sysprompt));
 
         // Record this line as a process (one PID per executed line). Blank lines get no row, matching
         // the "empty line re-prompts" behavior. `context` lines DO get a row — they're real typed
@@ -734,7 +746,8 @@ impl Session {
         // Classify the line, then dispatch on the result — see `classify_line`/`LineRoute` for the
         // order contract. Every arm below is a straight relocation of what used to be this
         // function's own sequential ladder; only the CONDITION moved to `classify_line`.
-        match self.classify_line(line) {
+        let route = self.classify_line(plugin.as_deref(), line);
+        match route {
             LineRoute::IncompleteInput => {
                 // clank's Brush shell is non-interactive, so an unterminated heredoc/quote/
                 // substitution would otherwise hit Brush's fatal-parse path (`finish` turns it into
@@ -748,11 +761,20 @@ impl Session {
                 );
                 self.finish_intercepted(pid, result)
             }
-            LineRoute::Help(help) | LineRoute::McpHelp(help) | LineRoute::PkgHelp(help) => {
+            LineRoute::Help(help) | LineRoute::Plugin(crate::plugin::LineAction::Help(help)) => {
                 let result = LineResult::from_outcome(help.into_bytes(), Vec::new(), 0);
                 self.finish_intercepted(pid, result)
             }
-            LineRoute::ContextSummarize => self.dispatch_context_summarize(line, pid).await,
+            LineRoute::Plugin(crate::plugin::LineAction::Intercept(route)) => match plugin {
+                Some(p) => {
+                    p.run(route, line, pid, false, &mut SessionCtx::new(self))
+                        .await
+                }
+                None => self.finish_intercepted(
+                    pid,
+                    LineResult::stderr("clank: internal error: plug-in route with no plug-in\n"),
+                ),
+            },
             LineRoute::ContextDispatch(bytes) => {
                 // `context show` output is intentionally not recorded back into the transcript.
                 if let Some(pid) = pid {
@@ -782,50 +804,7 @@ impl Session {
                 let result = LineResult::from_outcome(stdout.into_bytes(), Vec::new(), exit_code);
                 self.finish_intercepted(pid, result)
             }
-            LineRoute::AskReplOnAgent => {
-                // The native driver intercepts `ask repl` before `eval_line` and runs the
-                // interactive loop; the durable agent can't own a blocking read-loop (Golem
-                // serializes invocations). Return an honest pointer to the working forms.
-                let msg = b"ask repl: interactive REPL is a native-terminal feature; on the durable \
-                            agent, drive a conversation with repeated `ask` calls (each is one turn)\n";
-                self.finish_intercepted(pid, LineResult::from_outcome(Vec::new(), msg.to_vec(), 2))
-            }
-            LineRoute::AskPipe(pipe) => self.run_ask_pipe(pipe, pid).await,
-            LineRoute::Brush => self.dispatch_via_authz_gate(line, pid).await,
-        }
-    }
-
-    /// `context summarize`: needs the model (an outbound LLM call), so it goes through the authz
-    /// gate as `Confirm` (`sudo context summarize` pre-authorizes) and, once allowed, the async
-    /// `run_context_summarize` — never the sync `dispatch_context`/`apply_context` engine. Its
-    /// output is inspection-only: the row is reaped but NOT recorded back into the transcript (like
-    /// `context show`). Split out of `eval_line_inner`'s match for its size, not for any reuse.
-    async fn dispatch_context_summarize(&mut self, line: &str, pid: Option<u32>) -> LineResult {
-        let elevated = authz::leading_command(line).1;
-        match authz::decide(
-            crate::manifest::AuthorizationPolicy::Confirm,
-            elevated,
-            self.authz.allow_all,
-        ) {
-            Decision::Allow => {
-                let result = self.run_context_summarize().await;
-                if let Some(pid) = pid {
-                    self.proc_table
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .complete(pid);
-                }
-                result
-            }
-            Decision::Deny => self.finish_intercepted(pid, LineResult::denied()),
-            Decision::Confirm { sudo_grant } => self.surface_auth_confirm(
-                Some("context"),
-                "context summarize".to_string(),
-                pid,
-                sudo_grant,
-                None,
-                None,
-            ),
+            LineRoute::Brush => self.dispatch_via_authz_gate(plugin, line, pid).await,
         }
     }
 
@@ -844,9 +823,14 @@ impl Session {
     /// covers EVERY top-level command segment of a compound line (`echo ok && rm -rf /x` gates on
     /// `rm`, not the harmless leading `echo`) and returns the strictest segment's tuple plus the
     /// full list of gated commands.
-    async fn dispatch_via_authz_gate(&mut self, line: &str, pid: Option<u32>) -> LineResult {
+    async fn dispatch_via_authz_gate(
+        &mut self,
+        mut plugin: Option<&mut dyn Plugin>,
+        line: &str,
+        pid: Option<u32>,
+    ) -> LineResult {
         let (policy, elevated, command, gated) =
-            self.resolve_authz_strictest(line, self.authz.allow_all);
+            self.resolve_authz_strictest(plugin.as_deref(), line, self.authz.allow_all);
         let effective = strip_sudo_prefix(line);
         let decision = authz::decide(policy, elevated, self.authz.allow_all);
         // ops.log: a `sudo-only` command is the destructive tier (rm / overwrite). Log the attempt with
@@ -876,6 +860,7 @@ impl Session {
                 let multi_summary =
                     (gated.len() > 1).then(|| authz::gated_commands_summary(&gated));
                 return self.surface_auth_confirm(
+                    plugin.as_deref(),
                     command.as_deref(),
                     effective,
                     pid,
@@ -891,21 +876,25 @@ impl Session {
         // session-wide "all" grant qualifies — approving a bare `ask` later does NOT (see
         // `resolve_auth_confirm`, which passes `false`).
         let blanket = elevated || self.authz.allow_all;
-        let result = self.run_command(&effective, pid, blanket).await;
+        let result = self
+            .run_command(plugin.as_deref_mut(), &effective, pid, blanket)
+            .await;
         self.transcript
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .record_output(&result.terminal_output());
-        // If recording just evicted old entries to stay under the cap, upgrade the leading count marker
-        // into a model-generated summary block (no-op when nothing was dropped or no provider exists).
-        self.compact_dropped_span().await;
+        // Tell the plug-in the line's output has been recorded — recording may just have evicted old
+        // entries to stay under the cap, which is clank's cue to auto-compact them.
+        if let Some(p) = plugin {
+            p.after_record(&mut SessionCtx::new(self)).await;
+        }
         result
     }
 
     /// Classify `line` into a [`LineRoute`] — the pure "what kind of line is this" decision, run
     /// after the guard clauses in `eval_line_inner`. See [`LineRoute`]'s doc for why the order below
     /// can't change.
-    fn classify_line(&self, line: &str) -> LineRoute {
+    fn classify_line(&self, plugin: Option<&dyn Plugin>, line: &str) -> LineRoute {
         // Syntactically incomplete input must not reach Brush's fatal-parse path (which would end
         // the whole session over an unterminated heredoc/quote/substitution). Checked first so no
         // classifier below ever sees a half-construct.
@@ -921,12 +910,12 @@ impl Session {
         if let Some(help) = typecmd::help_for(line, &self.registry) {
             return LineRoute::Help(help);
         }
-        // `context summarize` needs the model, so it's detected here — before the generic `context`
-        // dispatch below — and routed (in the match arm) through the authz gate to the async Session
-        // layer instead of the sync `dispatch_context`/`apply_context` engine. A nested
-        // `$(context summarize)`/pipe stays with Brush and hits the honest error in `apply_context`.
-        if is_context_summarize(line) {
-            return LineRoute::ContextSummarize;
+        // The plug-in's first look, at the rung its `context summarize` check used to occupy: after
+        // core `--help`, before the generic `context` dispatch below.
+        if let Some(action) =
+            plugin.and_then(|p| p.classify_line(line, crate::plugin::LinePhase::BeforeContext))
+        {
+            return LineRoute::Plugin(action);
         }
         // `context show`/`clear`/`trim`.
         if let Some(bytes) = dispatch_context(
@@ -964,26 +953,13 @@ impl Session {
         if let Some((stdout, exit_code)) = typecmd::dispatch(line, &self.registry) {
             return LineRoute::TypeDispatch(stdout, exit_code);
         }
-        // `<server> --help` / `<server> <tool> --help` for an installed MCP server (before the authz
-        // gate — help never confirms).
-        if let Some(help) = self.clank.mcp_help_for(line) {
-            return LineRoute::McpHelp(help);
-        }
-        // `<name> --help` for an installed grease command package (prompt or script), same rule.
-        if let Some(help) = self.clank.pkg_help_for(line) {
-            return LineRoute::PkgHelp(help);
-        }
-        // `ask repl` reaching `eval_line` is the durable-agent path (the native driver intercepts it
-        // before `eval_line` and runs the interactive loop).
-        if crate::ai::ask::classify_repl(line).is_some() {
-            return LineRoute::AskReplOnAgent;
-        }
-        // stdin-as-context: `cat x | ask "…"`. The LLM call can't run inside Brush's pipeline (the
-        // reactor isn't live there — the "Wall C" wall), so the Session pre-extracts it: run the
-        // upstream, capture its stdout, and dispatch the `ask` tail at the session layer with those
-        // bytes as stdin. `ask` must be the FINAL stage; anywhere else it stays the honest stub error.
-        if let Some(pipe) = crate::ai::ask::split_ask_tail(line) {
-            return LineRoute::AskPipe(pipe);
+        // The plug-in's second look, at the rung its MCP-help / package-help / `ask repl` / ask-pipe
+        // checks used to occupy: after `type`, as the last thing before the authorization gate (so
+        // a plug-in's help never confirms, and its own gating runs instead of the core one).
+        if let Some(action) =
+            plugin.and_then(|p| p.classify_line(line, crate::plugin::LinePhase::BeforeGate))
+        {
+            return LineRoute::Plugin(action);
         }
         LineRoute::Brush
     }
@@ -1000,103 +976,37 @@ impl Session {
     /// post-approval-deferred routes both reach the HTTP correctly. See `httpcmd`.
     async fn run_command(
         &mut self,
+        mut plugin: Option<&mut dyn Plugin>,
         line: &str,
         pid: Option<u32>,
         blanket_authorized: bool,
     ) -> LineResult {
-        let result = match self.classify_command(line) {
-            // Reached here only on a deferred-confirm re-run (top-level `context summarize` is
-            // intercepted in `eval_line`). Route to the async summarizer; the caller
-            // (`resolve_auth_confirm`) skips recording its inspection output.
-            CommandRoute::ContextSummarize => self.run_context_summarize().await,
+        let route = self.classify_command(plugin.as_deref(), line);
+        let result = match route {
             // `kill` is Session-owned (it mutates the job table + proc table + pending state) and
             // MUST be tick-free: driving the runtime here could first-poll another parked
             // background job and wedge the invocation on its synchronous body.
-            CommandRoute::Kill(Ok(args)) => self.run_kill(&args),
+            CommandRoute::Kill(Ok(args)) => self.run_kill(plugin.as_deref_mut(), &args),
             CommandRoute::Kill(Err(e)) => {
                 LineResult::from_outcome(Vec::new(), format!("kill: {e}\n").into_bytes(), 2)
             }
-            // `ask` dispatches to the injected LLM provider — same "await at the Session layer, never
-            // through `execute`'s nested runtime" rule as curl/wget. The provider's async `complete`
-            // is awaited here, one level under the Golem SDK's executor, where the durable context
-            // is live and WASI-HTTP futures actually complete. See `askcmd`.
-            CommandRoute::Ask(args) => self.run_ask(args, blanket_authorized).await,
-            // `mcp` management runs at the Session layer — its add/reload/session subcommands do
-            // HTTP, which must await under the live reactor (same rule as curl/ask).
-            CommandRoute::Mcp(Ok(cmd)) => {
-                let mut clank = std::mem::take(&mut self.clank);
-                let result = clank.run_mcp(&mut SessionCtx::new(self), cmd).await;
-                self.clank = clank;
-                result
-            }
-            CommandRoute::Mcp(Err(e)) => {
-                LineResult::from_outcome(Vec::new(), format!("{e}\n").into_bytes(), 2)
-            }
-            // `grease` package management runs at the Session layer — install/search/update do HTTP.
-            CommandRoute::Grease(Ok(cmd)) => {
-                let mut clank = std::mem::take(&mut self.clank);
-                let result = clank.run_grease(&mut SessionCtx::new(self), cmd).await;
-                self.clank = clank;
-                result
-            }
-            CommandRoute::Grease(Err(e)) => {
-                LineResult::from_outcome(Vec::new(), format!("{e}\n").into_bytes(), 2)
-            }
-            // `golem` cluster command — runtime API calls await under the reactor (like mcp/ask).
-            CommandRoute::Golem(Ok(cmd)) => {
-                let mut clank = std::mem::take(&mut self.clank);
-                let result = clank.run_golem(cmd).await;
-                self.clank = clank;
-                result
-            }
-            CommandRoute::Golem(Err(e)) => {
-                LineResult::from_outcome(Vec::new(), format!("{e}\n").into_bytes(), 2)
-            }
-            // `<server> <tool> …` for an installed MCP server: an outbound HTTP tool call (its authz
-            // Confirm was already resolved via the dynamic manifest at the gate).
-            CommandRoute::McpToolLine => {
-                let mut clank = std::mem::take(&mut self.clank);
-                let result = clank.run_mcp_tool(line).await;
-                self.clank = clank;
-                result
-            }
-            // A grease-installed prompt: fill its body from args and run it through the model (its
-            // Confirm was resolved via the dynamic manifest at the gate; sudo pre-authorizes).
-            CommandRoute::PromptLine => self.run_prompt(line, blanket_authorized).await,
-            // A grease-installed script: fill its body from args and run the shell source locally
-            // (its Confirm was resolved via the dynamic manifest at the gate; sudo pre-authorizes).
-            CommandRoute::ScriptLine => {
-                let mut clank = std::mem::take(&mut self.clank);
-                let result = clank.run_script(&mut SessionCtx::new(self), line).await;
-                self.clank = clank;
-                result
-            }
-            // A grease-installed Golem agent: parse the ctor/method/args and invoke it via wRPC in the
-            // cluster (Confirm resolved at the gate; sudo pre-authorizes). Await mode only in v1.
-            CommandRoute::AgentLine => {
-                let mut clank = std::mem::take(&mut self.clank);
-                let result = clank.run_agent(&mut SessionCtx::new(self), line).await;
-                self.clank = clank;
-                result
-            }
-            // A grease-installed MCP resource-template executable: substitute the args into the URI
-            // template and read the constructed resource live (top-level only, Wall-C).
-            CommandRoute::McpTemplateLine => {
-                let mut clank = std::mem::take(&mut self.clank);
-                let result = clank.run_mcp_template(line).await;
-                self.clank = clank;
-                result
-            }
-            // A top-level `cat /mnt/mcp/<server>/<dynamic>`: fetch the resource live via
-            // `resources/read` (the read can't run in Brush's synchronous `cat` — the Wall-C wall — so
-            // it's served here at the Session layer for top-level lines only; inside $()/pipes it falls
-            // through to Brush and hits the honest "no such file").
-            CommandRoute::McpResourceRead(server, uri) => {
-                let mut clank = std::mem::take(&mut self.clank);
-                let result = clank.run_mcp_resource_read(&server, &uri).await;
-                self.clank = clank;
-                result
-            }
+            // A line the plug-in claimed: it runs it itself, with a `SessionCtx` for the shell
+            // surface and itself in hand, so a plug-in command reached from inside it still routes.
+            CommandRoute::Plugin(route) => match plugin {
+                Some(p) => {
+                    p.run(
+                        route,
+                        line,
+                        pid,
+                        blanket_authorized,
+                        &mut SessionCtx::new(self),
+                    )
+                    .await
+                }
+                None => {
+                    LineResult::stderr("clank: internal error: plug-in route with no plug-in\n")
+                }
+            },
             // A curl/wget-HEADED pipeline: the head's HTTP runs here at the Session layer (Wall C),
             // and the downstream runs through Brush with the response bytes as stdin. Reached only
             // from run_command, i.e. AFTER the line's authorization resolved (the gate reads the
@@ -1136,42 +1046,18 @@ impl Session {
     /// is tested in the exact order the historical ladder always has, and reordering it changes
     /// what the shell does (e.g. a curl/wget-headed PIPELINE must be recognized before a bare
     /// curl/wget invocation, since the pipeline form is also a superset-ish shape).
-    fn classify_command(&self, line: &str) -> CommandRoute {
-        if is_context_summarize(line) {
-            return CommandRoute::ContextSummarize;
-        }
+    // Kept a method for symmetry with `classify_line`, which does read `Session` state — the two are
+    // one ladder and read as one. Nothing left in this body needs `Session` now that the family
+    // checks belong to the plug-in.
+    #[allow(clippy::unused_self)]
+    fn classify_command(&self, plugin: Option<&dyn Plugin>, line: &str) -> CommandRoute {
         if let Some(parsed) = crate::builtins::kill::classify(line) {
             return CommandRoute::Kill(parsed);
         }
-        if let Some(args) = crate::ai::ask::classify(line) {
-            return CommandRoute::Ask(args);
-        }
-        if let Some(parsed) = crate::mcp::cmd::classify(line) {
-            return CommandRoute::Mcp(parsed);
-        }
-        if let Some(parsed) = crate::grease::cmd::classify(line) {
-            return CommandRoute::Grease(parsed);
-        }
-        if let Some(parsed) = crate::golem::cluster::classify(line) {
-            return CommandRoute::Golem(parsed);
-        }
-        if self.clank.is_mcp_tool_line(line) {
-            return CommandRoute::McpToolLine;
-        }
-        if self.clank.is_prompt_line(line) {
-            return CommandRoute::PromptLine;
-        }
-        if self.clank.is_script_line(line) {
-            return CommandRoute::ScriptLine;
-        }
-        if self.clank.is_agent_line(line) {
-            return CommandRoute::AgentLine;
-        }
-        if self.clank.is_mcp_template_line(line) {
-            return CommandRoute::McpTemplateLine;
-        }
-        if let Some((server, uri)) = self.clank.dynamic_mcp_read_target(line) {
-            return CommandRoute::McpResourceRead(server, uri);
+        // The plug-in's look, at the rung its eleven family checks used to occupy. (`context
+        // summarize` moves from before `kill` to after it; no line parses as both.)
+        if let Some(route) = plugin.and_then(|p| p.classify_command(line)) {
+            return CommandRoute::Plugin(route);
         }
         if let Some(pipe) = crate::builtins::http::split_http_head(line) {
             return CommandRoute::HttpPipe(pipe);
@@ -1265,7 +1151,11 @@ impl Session {
     /// aborts its future (dropped at its next await point — or never polled at all), and flips its
     /// row to `Z`. **Tick-free by design** (see `run_command`). Exit 0 when every target was
     /// killed, 1 on any miss (README exit-code table).
-    fn run_kill(&mut self, args: &crate::builtins::kill::KillArgs) -> LineResult {
+    fn run_kill(
+        &mut self,
+        mut plugin: Option<&mut dyn Plugin>,
+        args: &crate::builtins::kill::KillArgs,
+    ) -> LineResult {
         use crate::builtins::kill::Target;
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -1291,9 +1181,9 @@ impl Session {
                         continue;
                     }
                     // A pending (triggered/scheduled) agent invocation: the plug-in cancels it.
-                    let mut clank = std::mem::take(&mut self.clank);
-                    let cancelled = clank.cancel_invocation(&mut SessionCtx::new(self), *pid);
-                    self.clank = clank;
+                    let cancelled = plugin
+                        .as_deref_mut()
+                        .and_then(|p| p.cancel(*pid, &mut SessionCtx::new(self)));
                     if let Some(message) = cancelled {
                         stdout.extend_from_slice(message.as_bytes());
                         continue;
@@ -1338,41 +1228,88 @@ impl Session {
         LineResult::from_outcome(stdout, stderr, u8::from(any_missed))
     }
 
-    /// Run an installed grease prompt: parse `--arg value` flags against the package's declared
-    /// arguments, fill the body's `{{arg}}` placeholders, and dispatch the filled prompt through
-    /// `run_ask`. `--model` on the prompt line overrides the package model. Missing required args are
-    /// an exit-2 usage error (no model call).
-    async fn run_prompt(&mut self, line: &str, blanket_authorized: bool) -> LineResult {
-        let (name, provided, model_override) =
-            match crate::clank::grease::parse_pkg_invocation(line) {
-                Ok(t) => t,
-                Err(e) => return e,
-            };
-        let Some(package) = self.clank.grease.prompt(&name).cloned() else {
-            return LineResult::denied(); // shouldn't happen (is_prompt_line gated it)
-        };
-
-        // Fill the template; a missing required arg is a clean usage error.
-        let filled = match package.fill(&provided) {
-            Ok(f) => f,
-            Err(e) => {
-                return LineResult::from_outcome(
-                    Vec::new(),
-                    format!("{name}: {e}\n").into_bytes(),
-                    2,
-                )
+    /// Resolve a line's authorization policy, consulting the static registry AND the plug-in's
+    /// run-time manifests. Mirrors [`authz::resolve`] but adds the plug-in layer: an installed MCP
+    /// server name (leading command) resolves to its `Confirm` manifest. Returns
+    /// `(policy, elevated, command)`.
+    fn resolve_authz(
+        &self,
+        plugin: Option<&dyn Plugin>,
+        line: &str,
+    ) -> (crate::manifest::AuthorizationPolicy, bool, Option<String>) {
+        let (command, elevated) = authz::leading_command(line);
+        if let Some(name) = command.as_deref() {
+            if self.registry.get(name).is_none() {
+                // An installed grease prompt: running it is an outbound LLM call ⇒ Confirm.
+                if let Some(m) = plugin.and_then(|p| p.authz_manifest(name)) {
+                    return (m.authorization_policy, elevated, command);
+                }
             }
-        };
+        }
+        authz::resolve(&self.registry, line)
+    }
 
-        let model = model_override.or_else(|| package.model.clone());
-        let args = crate::ai::ask::AskArgs {
-            prompt: filled,
-            model,
-            fresh: false,
-            json: false,
-            stdin: None,
-        };
-        self.run_ask(args, blanket_authorized).await
+    /// Resolve authorization for a whole line by its STRICTEST top-level command segment (README
+    /// "Authorization" — a `confirm`/`sudo-only` command hidden behind `&&`/`;`/`|`/`&` after a
+    /// harmless leading command must still gate). Splits the line with [`authz::split_segments`],
+    /// resolves each segment with the plug-in-aware [`Self::resolve_authz`], `decide`s each against
+    /// `allow_all`, and returns the most-restrictive segment's `(policy, elevated, command)` — so the
+    /// caller's existing `authz::decide(policy, elevated, allow_all)` reproduces the strictest
+    /// `Decision` unchanged. Also returns every non-`Allow` command with its tier, so the confirmation
+    /// can name all of them (approving the strictest runs the whole line).
+    ///
+    /// A single-segment line short-circuits to [`Self::resolve_authz`] — identical behavior, no
+    /// overhead — so nothing changes for the overwhelmingly common plain command.
+    pub(super) fn resolve_authz_strictest(
+        &self,
+        plugin: Option<&dyn Plugin>,
+        line: &str,
+        allow_all: bool,
+    ) -> (
+        crate::manifest::AuthorizationPolicy,
+        bool,
+        Option<String>,
+        Vec<(String, crate::manifest::AuthorizationPolicy)>,
+    ) {
+        let segments = authz::split_segments(line);
+        if segments.len() <= 1 {
+            let (policy, elevated, command) = self.resolve_authz(plugin, line);
+            let gated = match authz::decide(policy, elevated, allow_all) {
+                Decision::Allow => Vec::new(),
+                _ => command
+                    .clone()
+                    .map(|c| vec![(c, policy)])
+                    .unwrap_or_default(),
+            };
+            return (policy, elevated, command, gated);
+        }
+
+        // Multi-segment: resolve+decide each, track the strictest, and collect every gated command.
+        let mut strictest: Option<(
+            u8,
+            crate::manifest::AuthorizationPolicy,
+            bool,
+            Option<String>,
+        )> = None;
+        let mut gated: Vec<(String, crate::manifest::AuthorizationPolicy)> = Vec::new();
+        for seg in segments {
+            let (policy, elevated, command) = self.resolve_authz(plugin, seg);
+            let decision = authz::decide(policy, elevated, allow_all);
+            if !matches!(decision, Decision::Allow) {
+                if let Some(name) = command.clone() {
+                    gated.push((name, policy));
+                }
+            }
+            let rank = authz::decision_rank(decision);
+            if strictest.as_ref().is_none_or(|(r, ..)| rank > *r) {
+                strictest = Some((rank, policy, elevated, command));
+            }
+        }
+        // Invariant: `split_segments` never returns empty, so the loop above set `strictest` at
+        // least once.
+        #[allow(clippy::expect_used)]
+        let (_, policy, elevated, command) = strictest.expect("split_segments never returns empty");
+        (policy, elevated, command, gated)
     }
 
     /// Complete an intercepted line's row and record its output (for intercepted paths that don't go
@@ -1620,7 +1557,7 @@ fn log_safe_line(line: &str) -> std::borrow::Cow<'_, str> {
 /// Strip a leading `sudo ` token from a line (the command to actually run once `sudo`-elevated
 /// authorization is satisfied). Whitespace-based — sufficient for the leading-word scope of this
 /// increment. If the line isn't `sudo`-prefixed, it's returned unchanged.
-fn strip_sudo_prefix(line: &str) -> String {
+pub(crate) fn strip_sudo_prefix(line: &str) -> String {
     let trimmed = line.trim_start();
     match trimmed.strip_prefix("sudo") {
         // Only a `sudo` token followed by whitespace (not `sudoedit`, etc.).

@@ -1,11 +1,11 @@
 //! `Session` methods for the human-in-the-loop pause machinery: surfacing `prompt-user` and
 //! authorization-confirmation pauses (`P` state), and resolving them via `answer_prompt`.
 
-use super::ask::is_context_summarize;
 use super::{
     authz, promptuser, AnswerInput, Flow, LineResult, Pending, PendingKind, PendingPrompt,
-    Resolution, Session,
+    Resolution, Session, SessionCtx,
 };
+use crate::plugin::Plugin;
 
 impl Session {
     /// Handle a `prompt-user` line: parse it, record the pending prompt (durable state), leave the
@@ -42,13 +42,18 @@ impl Session {
 
     /// Surface an authorization confirmation for a gated command: pause, record the pending
     /// confirmation (with the command to run on approval), and return `pending_prompt` immediately.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the confirmation's copy needs every one of them"
+    )]
     pub(super) fn surface_auth_confirm(
         &mut self,
+        plugin: Option<&dyn Plugin>,
         command_name: Option<&str>,
         gated_command: String,
         pid: Option<u32>,
         sudo_grant: bool,
-        ask_stdin: Option<String>,
+        rerun_stdin: Option<String>,
         // When the line has more than one gated command, the pre-rendered "rm [sudo-only], curl
         // [confirm]" summary (from `authz::gated_commands_summary`) so the prompt names them all —
         // approving the strictest runs the whole line. `None` for single-command lines.
@@ -60,9 +65,8 @@ impl Session {
         // per-command authz) BEFORE the human approves — README "discloses capability requests before
         // completing". Only what's knowable pre-fetch is shown; declared args are one `grease info`
         // away after install.
-        let question = if let Some(question) = self
-            .clank
-            .grease_install_disclosure(&gated_command, sudo_grant)
+        let question = if let Some(question) =
+            plugin.and_then(|p| p.confirm_question(&gated_command, sudo_grant))
         {
             question
         } else if let Some(summary) = multi_summary {
@@ -73,7 +77,11 @@ impl Session {
                 .registry
                 .get(name)
                 .map(|m| m.synopsis.clone())
-                .or_else(|| self.clank.mcp.manifest_for(name).map(|m| m.synopsis))
+                .or_else(|| {
+                    plugin
+                        .and_then(|p| p.authz_manifest(name))
+                        .map(|m| m.synopsis)
+                })
                 .unwrap_or_else(|| "run this command".to_string());
             authz::confirm_question(name, &synopsis, sudo_grant)
         };
@@ -88,7 +96,7 @@ impl Session {
             PendingKind::AuthConfirm {
                 command: gated_command,
                 sudo_grant,
-                ask_stdin,
+                rerun_stdin,
             },
         )
     }
@@ -141,10 +149,27 @@ impl Session {
     /// terminal `end` event to shell.log once it finishes (a resolution can itself re-pause — an approved
     /// `ask` whose tool call prompts again — in which case the `end` is deferred to the next resolution).
     pub async fn answer_prompt(&mut self, response: Option<String>) -> LineResult {
+        // Take the plug-in out of the slot for the duration, exactly as `eval_line` does — a
+        // plug-in-owned pause resumes inside the plug-in, which may re-enter dispatch.
+        let mut plugin = self.plugin.take();
+        let result = self
+            .answer_prompt_with_plugin(plugin.as_deref_mut(), response)
+            .await;
+        self.plugin = plugin;
+        result
+    }
+
+    /// [`answer_prompt`](Self::answer_prompt) with the plug-in already in hand — the form
+    /// `eval_line_inner` uses for the `kill <paused-pid>` abort, where the slot is already empty.
+    pub(super) async fn answer_prompt_with_plugin(
+        &mut self,
+        plugin: Option<&mut dyn Plugin>,
+        response: Option<String>,
+    ) -> LineResult {
         let _log = crate::logging::install(self.log_sink.clone());
         // The paused row's PID, for the shell.log end event (its `start` was logged under this PID).
         let paused_pid = self.pending.as_ref().and_then(|p| p.pid);
-        let result = self.answer_prompt_inner(response).await;
+        let result = self.answer_prompt_inner(plugin, response).await;
         // Only a truly-resolved line (no longer pending) gets its terminal event; a re-pause defers.
         if paused_pid.is_some() && result.pending_prompt.is_none() {
             let mut rec = crate::logging::Record::new("end");
@@ -157,7 +182,11 @@ impl Session {
         result
     }
 
-    async fn answer_prompt_inner(&mut self, response: Option<String>) -> LineResult {
+    async fn answer_prompt_inner(
+        &mut self,
+        plugin: Option<&mut dyn Plugin>,
+        response: Option<String>,
+    ) -> LineResult {
         let Some(pending) = self.pending.take() else {
             self.pending = None;
             return LineResult::stderr("clank: no prompt-user question is awaiting a response\n");
@@ -198,17 +227,22 @@ impl Session {
             PendingKind::AuthConfirm {
                 command,
                 sudo_grant,
-                ask_stdin,
+                rerun_stdin,
             } => {
                 // Restore any pre-captured pipeline stdin so a deferred `cat x | ask` tail sees it
-                // when re-run (consumed by `run_ask` via `next_ask_stdin`).
-                self.clank.next_ask_stdin = ask_stdin;
-                self.resolve_auth_confirm(resolution, &command, sudo_grant, pending.pid)
+                // when re-run (consumed by `run_ask` via `SessionCtx::take_rerun_stdin`).
+                self.rerun_stdin = rerun_stdin;
+                self.resolve_auth_confirm(plugin, resolution, &command, sudo_grant, pending.pid)
                     .await
             }
-            PendingKind::AgentLoop { state, pause } => {
-                let result = self
-                    .resolve_agent_loop(resolution, state, pause, pending.pid)
+            PendingKind::Plugin(p) => {
+                let Some(plugin) = plugin else {
+                    return LineResult::stderr(
+                        "clank: internal error: plug-in pause with no plug-in\n",
+                    );
+                };
+                let result = plugin
+                    .resume(p, resolution, pending.pid, &mut SessionCtx::new(self))
                     .await;
                 // A resumed ask that completes (not re-paused) records its output like the direct
                 // path. A re-pause returns a fresh `pending_prompt`; don't record that as final.
@@ -256,6 +290,7 @@ impl Session {
     /// denial reap the row and return exit `5`. A response of "all" also sets the session grant.
     async fn resolve_auth_confirm(
         &mut self,
+        mut plugin: Option<&mut dyn Plugin>,
         resolution: Resolution,
         command: &str,
         _sudo_grant: bool,
@@ -269,7 +304,7 @@ impl Session {
         if !approved {
             // "no" or abort → denied (exit 5). Reap the row. Drop any pre-captured pipeline stdin so
             // it can't leak into an unrelated later `ask`.
-            self.clank.next_ask_stdin = None;
+            self.rerun_stdin = None;
             if let Some(pid) = pid {
                 self.proc_table
                     .lock()
@@ -293,10 +328,12 @@ impl Session {
         // not the same as `sudo ask` — the ask's own tool calls still gate individually. A prior "all"
         // grant (now on `self.authz.allow_all`) is separately honored inside the tool executor.
         let blanket = self.authz.allow_all;
-        let result = self.run_command(command, pid, blanket).await;
+        let result = self
+            .run_command(plugin.as_deref_mut(), command, pid, blanket)
+            .await;
         // `context summarize` is inspection output — never recorded back (like `context show`). Every
         // other gated command records normally.
-        if !is_context_summarize(command) {
+        if !plugin.is_some_and(|p| p.is_inspection(command)) {
             self.transcript
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)

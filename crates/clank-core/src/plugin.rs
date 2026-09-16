@@ -44,7 +44,8 @@ pub enum LineAction {
 
 /// A command family plugged into a shell session.
 ///
-/// Every hook has a default except `run` and `resume`, so a plug-in implements only what it uses.
+/// Every hook has a default except `as_any`, `as_any_mut`, `run` and `resume`, so a plug-in
+/// implements only what it uses.
 #[async_trait::async_trait(?Send)]
 pub trait Plugin: Any {
     /// `self` as `Any`, for [`Session::plugin_ref`](crate::session::Session::plugin_ref).
