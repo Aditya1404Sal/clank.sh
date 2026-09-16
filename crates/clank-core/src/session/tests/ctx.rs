@@ -14,6 +14,9 @@ fn ctx_reaches_the_process_table_the_transcript_and_the_registry() {
             crate::runtime::proctable::SHELL_ROOT_PID,
         );
         ctx.proc_complete(pid);
+        // Output lands in the transcript's trailing command entry, so record the command first —
+        // the order `eval_line` itself uses.
+        ctx.with_transcript(|t| t.record_command("plug demo"));
         ctx.record_output(b"from-a-plugin\n");
 
         assert!(ctx.manifest("cat").is_some());
