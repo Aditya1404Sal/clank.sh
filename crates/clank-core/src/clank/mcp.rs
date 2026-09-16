@@ -640,8 +640,10 @@ impl super::Clank {
         }
     }
 
-    /// Reconstruct grease-installed MCP servers from their cached tool payloads (no network).
-    /// Runs once per session start.
+    /// Re-register grease-installed MCP servers into `McpState` from their cached grease payloads.
+    /// `McpState` is empty on boot (it's replay-rebuilt, not FS-backed), but a grease-installed MCP
+    /// package durably cached its tool listing — so we rebuild the server + tool surface here without a
+    /// live `tools/list` (the actual `tools/call` still goes to the server at invocation time).
     fn reconstruct_mcp_from_grease(&mut self) {
         for m in self.grease.mcp_packages() {
             if !m.artifacts.tools {
@@ -714,7 +716,9 @@ impl super::Clank {
         self.reconstruct_mcp_from_configs();
     }
 
-    /// Run a tool invocation for an installed MCP server. Called by session on `McpToolLine`.
+    /// Execute a `<server> <tool> …` MCP tool call: build the arguments from the tool's inputSchema
+    /// (or `--args '<json>'`), issue `tools/call` (reusing an open session or initializing one), and
+    /// render the result (text content joined, or raw JSON with `--json`).
     pub(crate) async fn run_mcp_tool(&mut self, line: &str) -> LineResult {
         let inv = match crate::mcp::cmd::parse_tool_invocation(line) {
             Some(Ok(inv)) => inv,
@@ -823,7 +827,8 @@ impl super::Clank {
         }
     }
 
-    /// Provide help text for an MCP server or tool command line for autocomplete/help display.
+    /// Generated help for an MCP tool line ending in `--help` (or a bare `<server>`): the server's
+    /// tool list. `None` if the line isn't an installed-server line or doesn't request help.
     pub(crate) fn mcp_help_for(&self, line: &str) -> Option<String> {
         let Ok(inv) = crate::mcp::cmd::parse_tool_invocation(line)? else {
             return None;
