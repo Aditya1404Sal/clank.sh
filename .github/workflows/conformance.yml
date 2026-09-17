@@ -2,7 +2,7 @@
 #
 # - `native` runs on every push/PR: scenarios against the in-process Session, plus the
 #   suite's own unit tests. No server, no network beyond crates.io.
-# - `golem` runs nightly + on demand: downloads the pinned golem 1.5.x release binary,
+# - `golem` runs nightly + on demand: builds a pinned compatible Golem development binary,
 #   builds the wasm agent, stands up a throwaway local server, and drives every scenario
 #   through `golem agent invoke` against a real deployed clank (scripts/conformance-golem.sh).
 
@@ -26,7 +26,7 @@ jobs:
         with:
           submodules: true # fork/coreutils — the uutils fork, consumed by path (see Cargo.toml)
       # rustup picks up rust-toolchain.toml (stable + wasm32-wasip2) automatically.
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-golem
       # The library suites — the bulk of the repo's tests (ed25519/Merkle vectors, redirect
       # policy, the session suite). Enumerated with `-p` rather than `--workspace` because the
       # wasm cdylib crates (clank-agent, greeter-agent) don't link natively.
@@ -40,7 +40,7 @@ jobs:
       - name: Unit tests (library crates)
         run: >-
           cargo test
-          -p bash -p clank-core -p clank-cli -p whttp -p wcurl -p waget -p grease-tool
+          -p bash -p bash-golem -p clank-core -p clank-cli -p whttp -p wcurl -p waget -p grease-tool
           -- --test-threads=1
       # clank-embed needs its own step: 8 of its 13 tests live behind the non-default `providers`
       # feature (the wRPC argument encoding, result rendering, phantom-UUID parsing). Neither a
@@ -76,7 +76,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true # fork/coreutils — the uutils fork, consumed by path (see Cargo.toml)
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-golem
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny,cargo-audit
@@ -85,13 +85,13 @@ jobs:
       - name: Clippy — native crates (warnings are errors)
         run: >-
           cargo clippy
-          -p clank-core -p clank-cli -p clank-embed -p whttp -p wcurl -p waget
+          -p bash -p bash-golem -p clank-core -p clank-cli -p clank-embed -p whttp -p wcurl -p waget
           -p clank-conformance -p grease-tool -p fork-inventory
           --all-targets -- -D warnings
       - name: Clippy — wasm guest crates (warnings are errors)
         # echo-tool is the agent-tools fixture component; probe-tool is throwaway and deliberately
         # not listed (it goes with agent-tools ticket T2).
-        run: cargo clippy --target wasm32-wasip2 -p clank-agent -p greeter-agent -p echo-tool -p bash-tool -- -D warnings
+        run: cargo clippy --target wasm32-wasip2 -p bash-golem -p clank-agent -p greeter-agent -p echo-tool -p bash-tool -- -D warnings
       - name: Fork inventory is up to date (check-forks)
         # docs/FORKS.md is generated (dev-tools/fork-inventory) from Cargo.toml/Cargo.lock, never
         # hand-edited. Regenerate and diff: a pin change (or a drifted rev) that lands without a
@@ -108,21 +108,14 @@ jobs:
   golem:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true # fork/coreutils — the uutils fork, consumed by path (see Cargo.toml)
-      - uses: Swatinem/rust-cache@v2
-      - name: Install the pinned golem release binary
-        # The full `golem` binary (includes the local server) — NOT the client-only
-        # `golem-cli-*` asset. Fallback if the asset route ever breaks:
-        # `cargo install golem-cli --locked` (slow).
-        run: |
-          curl -fsSL -o /usr/local/bin/golem \
-            https://github.com/golemcloud/golem/releases/download/v1.5.1/golem-x86_64-unknown-linux-gnu
-          chmod +x /usr/local/bin/golem
-          golem --version
+      - uses: ./.github/actions/setup-golem
+        with:
+          build-cli: 'true'
       - name: Golem conformance tier (throwaway server + deploy)
         run: scripts/conformance-golem.sh
 
@@ -135,25 +128,38 @@ jobs:
     # Nightly rather than per-push: it builds a ~318 MB debug wasm, stands up a server and deploys,
     # which is minutes, not seconds. Nightly is worse than per-push and far better than never.
     #
-    # KNOWN LIMITATION on main-rc-1: this branch's golem.yaml is `manifestVersion: 1.6.0`, which the
-    # pinned 1.5.1 binary below refuses to parse — so this job (like the `golem` job above) cannot
-    # pass here until a 1.6 CLI is released. Point GOLEM_BIN at a 1.6 binary to run it locally:
-    #   GOLEM_BIN=/path/to/dev/golem scripts/golem-e2e.sh --takeover
     # The live-model / live-registry / live-MCP assertions stay off: they need real credentials and
     # bill real money. This runs the ~264 unconditional ones.
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: true # fork/coreutils — the uutils fork, consumed by path (see Cargo.toml)
-      - uses: Swatinem/rust-cache@v2
-      - name: Install the pinned golem release binary
-        run: |
-          curl -fsSL -o /usr/local/bin/golem \
-            https://github.com/golemcloud/golem/releases/download/v1.5.1/golem-x86_64-unknown-linux-gnu
-          chmod +x /usr/local/bin/golem
-          golem --version
+      - uses: ./.github/actions/setup-golem
+        with:
+          build-cli: 'true'
       - name: Agent e2e (throwaway server + deploy + ~274 assertions)
         run: scripts/golem-e2e.sh --takeover
+
+  bash-tool:
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: ./.github/actions/setup-golem
+        with:
+          build-cli: 'true'
+      - name: Tools as commands release acceptance
+        env:
+          GOLEM_PROBE_PRESET: release
+        run: scripts/bash-tool-live.sh ci
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bash-tool-acceptance
+          path: target/bash-split/

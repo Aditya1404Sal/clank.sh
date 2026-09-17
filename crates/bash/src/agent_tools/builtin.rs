@@ -1,4 +1,4 @@
-use super::{parse, Projection, ToolRequest, ToolRuntime, MAX_ATTACHMENT_BYTES};
+use super::{parse, parse_with_stdin, Projection, ToolRequest, ToolRuntime, MAX_ATTACHMENT_BYTES};
 use brush_core::{
     builtins::{ContentOptions, ContentType, SimpleCommand},
     commands::ExecutionContext,
@@ -73,7 +73,11 @@ pub(crate) fn words(line: &str) -> Vec<String> {
     }
     words
 }
-pub(crate) fn install(runtime: Arc<ToolRuntime>, line: &str) -> InstallGuard {
+pub(crate) fn install(
+    runtime: Arc<ToolRuntime>,
+    line: &str,
+    env: impl Fn(&str) -> Option<String>,
+) -> InstallGuard {
     let mut approved = BTreeSet::new();
     for segment in crate::authz::split_segments(line) {
         let mut argv = words(segment);
@@ -81,7 +85,9 @@ pub(crate) fn install(runtime: Arc<ToolRuntime>, line: &str) -> InstallGuard {
             argv.remove(0);
         }
         if let Some(definition) = argv.first().and_then(|n| runtime.definitions.get(n)) {
-            if let Ok(Projection::Call { command, .. }) = parse(definition, &argv[1..], |_| None) {
+            if let Ok(Projection::Call { command, .. } | Projection::Stdin { command }) =
+                parse(definition, &argv[1..], &env)
+            {
                 approved.insert((definition.name.clone(), command.path));
             }
         }
@@ -132,61 +138,57 @@ impl SimpleCommand for ToolBuiltin {
                     .map(|v| v.1.value().to_cow_str(context.shell).to_string())
             })
             .map_err(|e| super::ToolFailure::new(2, e))?;
-            match projection {
-                Projection::Help(help) => Ok(super::ToolOutput {
-                    stdout: help.into_bytes(),
-                    ..Default::default()
-                }),
-                Projection::Call { command, input } => {
-                    // Nested functions/eval/source/substitutions cannot inherit a visible command's grant.
-                    if !command.read_only
-                        && (context.shell.call_stack().in_function()
-                            || context.shell.call_stack().depth() > 1
-                            || !current
-                                .approved
-                                .contains(&(definition.name.clone(), command.path.clone())))
-                    {
-                        crate::logging::Record::new("tool-denied")
-                            .field("tool", &definition.name)
-                            .field("path", command.path.join("/"))
-                            .field("exit", "3")
-                            .emit(crate::logging::LogFile::Rpc);
-                        return Err(super::ToolFailure::new(3, "confirmation cannot be requested here; invoke this tool command directly"));
-                    }
-                    let stdin = if command.stdin {
-                        let mut bytes = Vec::new();
-                        context
-                            .stdin()
-                            .take((MAX_ATTACHMENT_BYTES + 1) as u64)
-                            .read_to_end(&mut bytes)
-                            .map_err(|e| super::ToolFailure::new(1, format!("stdin: {e}")))?;
-                        if bytes.len() > MAX_ATTACHMENT_BYTES {
-                            return Err(super::ToolFailure::new(
-                                1,
-                                "stdin attachment limit exceeded",
-                            ));
-                        }
-                        Some(bytes)
-                    } else {
-                        None
-                    };
-                    let outcome = current.runtime.invoker.invoke_blocking(ToolRequest {
-                        name: definition.name.clone(),
-                        path: command.path.clone(),
-                        input,
-                        stdin,
-                    });
-                    let code = outcome
-                        .as_ref()
-                        .map_or_else(|e| e.exit_code, |o| o.exit_code);
-                    crate::logging::Record::new("tool-invoke")
-                        .field("tool", &definition.name)
-                        .field("path", command.path.join("/"))
-                        .field("exit", code.to_string())
-                        .emit(crate::logging::LogFile::Rpc);
-                    outcome
+            let (command, input, from_stdio) = match projection {
+                Projection::Help(help) => {
+                    return Ok(super::ToolOutput {
+                        stdout: help.into_bytes(),
+                        ..Default::default()
+                    })
                 }
+                Projection::Call { command, input } => (command, input, false),
+                Projection::Stdin { command } => (command, serde_json::Value::Null, true),
+            };
+            // Nested functions/eval/source/substitutions cannot inherit a visible command's grant.
+            if !command.read_only
+                && (context.shell.call_stack().in_function()
+                    || context.shell.call_stack().depth() > 1
+                    || !current
+                        .approved
+                        .contains(&(definition.name.clone(), command.path.clone())))
+            {
+                crate::logging::Record::new("tool-denied")
+                    .field("tool", &definition.name)
+                    .field("path", command.path.join("/"))
+                    .field("exit", "3")
+                    .emit(crate::logging::LogFile::Rpc);
+                return Err(super::ToolFailure::new(
+                    3,
+                    "confirmation cannot be requested here; invoke this tool command directly",
+                ));
             }
+            let (input, stdin) = resolve_stdin(
+                &context,
+                definition,
+                &argv[1..],
+                &command,
+                input,
+                from_stdio,
+            )?;
+            let outcome = current.runtime.invoker.invoke_blocking(ToolRequest {
+                name: definition.name.clone(),
+                path: command.path.clone(),
+                input,
+                stdin,
+            });
+            let code = outcome
+                .as_ref()
+                .map_or_else(|e| e.exit_code, |o| o.exit_code);
+            crate::logging::Record::new("tool-invoke")
+                .field("tool", &definition.name)
+                .field("path", command.path.join("/"))
+                .field("exit", code.to_string())
+                .emit(crate::logging::LogFile::Rpc);
+            outcome
         })();
         let code = match result {
             Ok(output) => {
@@ -206,4 +208,54 @@ impl SimpleCommand for ToolBuiltin {
         };
         Ok(ExecutionResult::new(code))
     }
+}
+
+fn resolve_stdin<SE: ShellExtensions>(
+    context: &ExecutionContext<'_, SE>,
+    definition: &super::ToolDefinition,
+    argv: &[String],
+    command: &super::ToolCommand,
+    mut input: serde_json::Value,
+    from_stdio: bool,
+) -> Result<(serde_json::Value, Option<Vec<u8>>), super::ToolFailure> {
+    let stdin = if command.stdin || from_stdio {
+        let mut bytes = Vec::new();
+        context
+            .stdin()
+            .take((MAX_ATTACHMENT_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|e| super::ToolFailure::new(1, format!("stdin: {e}")))?;
+        if bytes.len() > MAX_ATTACHMENT_BYTES {
+            return Err(super::ToolFailure::new(
+                1,
+                "stdin attachment limit exceeded",
+            ));
+        }
+        Some(bytes)
+    } else {
+        None
+    };
+    if from_stdio {
+        let resolved = parse_with_stdin(
+            definition,
+            argv,
+            |name| {
+                context
+                    .shell
+                    .env()
+                    .get(name)
+                    .map(|v| v.1.value().to_cow_str(context.shell).to_string())
+            },
+            stdin.as_deref(),
+        )
+        .map_err(|e| super::ToolFailure::new(2, e))?;
+        let Projection::Call {
+            input: canonical, ..
+        } = resolved
+        else {
+            return Err(super::ToolFailure::new(2, "cannot resolve stdin arguments"));
+        };
+        input = canonical;
+    }
+    Ok((input, command.stdin.then_some(stdin).flatten()))
 }

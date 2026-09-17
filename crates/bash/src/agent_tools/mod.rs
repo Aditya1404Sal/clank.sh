@@ -20,7 +20,7 @@ pub(crate) use builtin::install;
 pub(crate) use builtin::registration;
 pub(crate) use builtin::suspend;
 pub(crate) use builtin::words;
-pub use parser::{parse, Projection};
+pub use parser::{parse, parse_with_stdin, Projection};
 
 /// Maximum retained bytes in one tool attachment.
 pub const MAX_ATTACHMENT_BYTES: usize = 16 * 1024 * 1024;
@@ -287,15 +287,20 @@ impl ToolRuntime {
         &self,
         name: &str,
         words: &[String],
+        env: impl Fn(&str) -> Option<String>,
     ) -> Option<crate::manifest::AuthorizationPolicy> {
         use crate::manifest::AuthorizationPolicy::{Allow, Confirm};
         let definition = self.definitions.get(name)?;
         if self.shadowed.contains(name) {
             return None;
         }
-        Some(match parse(definition, words, |_| None) {
+        Some(match parse(definition, words, env) {
             Ok(Projection::Help(_)) | Err(_) => Allow,
-            Ok(Projection::Call { command, .. }) if command.read_only => Allow,
+            Ok(Projection::Call { command, .. } | Projection::Stdin { command })
+                if command.read_only =>
+            {
+                Allow
+            }
             Ok(_) => Confirm,
         })
     }

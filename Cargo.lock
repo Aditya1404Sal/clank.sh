@@ -237,7 +237,6 @@ dependencies = [
  "base64",
  "bash",
  "bash-golem",
- "brush-parser",
  "golem-rust",
  "serde",
  "serde_json",

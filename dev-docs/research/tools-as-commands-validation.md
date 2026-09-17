@@ -53,3 +53,33 @@ blockers first, then profile cold loading separately if that latency matters to 
 The first timing attempt used separate Python monotonic clocks, which have process-relative epochs
 on this machine and produced invalid samples. Those samples were discarded. The recorded run uses
 shared wall-clock timestamps around each CLI call.
+
+## Parser and finite-invocation follow-up
+
+Release acceptance passed 38 checks after completing environment flag coercion, stdin-backed
+positionals/tails, custom separator semantics, and canonicalization of constraint aliases. Scalar
+defaults take precedence over implicit stdin; explicit dash selects stdin. Typed scalars trim
+whitespace, strings preserve UTF-8 bytes, tails consume lines and enforce min/max after reading.
+
+The shell's stateless profile checks nested command lists and expansions, validates expanded eval/
+source/trap/alias code and restored function bodies, and refuses job-control/history execution.
+Dynamic prompt expansion is disabled, including PS4 trace strings; sourcing requires bounded
+regular UTF-8 files and descriptor paths are refused. Native tests verify safe eval, source
+positional parameters and return codes, arithmetic bitwise operators, and forged state rejection.
+
+505 unit/integration tests plus one compile doctest passed in a fresh Clank clone using upstream
+SDK commit 541300b4a104e4f70838690b525527e3fc26a664. One existing doctest remains ignored. Fresh SDK
+configuration used scripts/use-golem-sdk.py with the exact-revision check. Wasm clippy passed with
+warnings denied against the configured development SDK. The live run used that development CLI;
+upstream executor integration tests and GitHub's Linux CI jobs were not rerun.
+Native core/adapter clippy also passed with all targets and warnings denied, including the new
+integration-test helpers. Two state accessor attributes and helper lint scopes were corrected.
+
+Evidence: target/tools-as-commands-follow-up-fresh-tests.log,
+target/tools-as-commands-follow-up-clippy.log, target/tools-as-commands-follow-up-live.log, and
+target/bash-split/bash-live-latency-follow-up.csv. The disposable live server was stopped.
+
+The CI setup action now checks out the pinned upstream SDK, configures its absolute workspace path,
+and builds its matching full Golem binary for live jobs. Per-push library tests include bash-golem;
+nightly/manual release acceptance runs bash-tool-live.sh and uploads logs. Workflow/action YAML
+parsed locally, but the matching CLI source build and Linux jobs await their actual CI execution.

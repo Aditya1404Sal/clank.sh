@@ -39,6 +39,7 @@ mod ctx;
 // the README default lives with the plug-in that supplies the second half — in another crate.
 pub mod env;
 mod prompt;
+mod stateless;
 mod streams;
 mod tool_commands;
 
@@ -190,6 +191,7 @@ impl LineResult {
 pub struct Session {
     shell: Shell,
     tools: Option<Arc<crate::agent_tools::ToolRuntime>>,
+    stateless: bool,
     /// The session transcript. Shared behind `Arc<Mutex>` (like `proc_table`) so each executed
     /// line can install it into the thread-local slot the Brush-registered `context` builtin
     /// reads — that's how `$(context show)` and `context show | head` reach it.
@@ -327,6 +329,7 @@ impl Session {
             let session = Self {
                 shell,
                 tools: None,
+                stateless: false,
                 transcript: Arc::new(Mutex::new(Transcript::with_cap(
                     crate::configured_context_cap(),
                 ))),
@@ -351,6 +354,7 @@ impl Session {
             let session = Self {
                 shell,
                 tools: None,
+                stateless: false,
                 transcript: Arc::new(Mutex::new(Transcript::with_cap(
                     crate::configured_context_cap(),
                 ))),
@@ -629,6 +633,15 @@ impl Session {
     // lines above the `match` are a hard floor.
     #[allow(clippy::too_many_lines)]
     async fn eval_line_inner(&mut self, plugin: Option<&mut dyn Plugin>, line: &str) -> LineResult {
+        if self.stateless {
+            if let Err(error) = stateless::validate(line) {
+                return LineResult::from_outcome(
+                    Vec::new(),
+                    format!("bash: {error}\n").into_bytes(),
+                    2,
+                );
+            }
+        }
         // A prompt is already outstanding: the caller must answer it (via `answer_prompt`), not run
         // a new command. The shell never blocks, so it's the caller's job to notice `pending_prompt`
         // and respond. Reject the command with a clear message rather than silently interleaving.
@@ -1028,6 +1041,16 @@ impl Session {
         pid: Option<u32>,
         blanket_authorized: bool,
     ) -> LineResult {
+        // Confirmed commands can arrive from caller-carried continuation state.
+        if self.stateless {
+            if let Err(error) = stateless::validate(line) {
+                return LineResult::from_outcome(
+                    Vec::new(),
+                    format!("bash: {error}\n").into_bytes(),
+                    2,
+                );
+            }
+        }
         let route = self.classify_command(plugin.as_deref(), line);
         let result = match route {
             // `kill` is Session-owned (it mutates the job table + proc table + pending state) and
@@ -1293,7 +1316,14 @@ impl Session {
                 if words.first().is_some_and(|s| s == "sudo") {
                     words.remove(0);
                 }
-                if let Some(policy) = tools.policy(name, words.get(1..).unwrap_or_default()) {
+                if let Some(policy) =
+                    tools.policy(name, words.get(1..).unwrap_or_default(), |key| {
+                        self.shell
+                            .env()
+                            .get(key)
+                            .map(|v| v.1.value().to_cow_str(&self.shell).to_string())
+                    })
+                {
                     return (policy, elevated, command);
                 }
             }
@@ -1479,10 +1509,14 @@ impl Session {
     #[cfg(not(target_arch = "wasm32"))]
     async fn execute_impl(&mut self, line: &str, stdin_bytes: Option<&[u8]>) -> LineResult {
         use std::io::{Read, Seek, SeekFrom, Write};
-        let _tools = self
-            .tools
-            .as_ref()
-            .map(|t| crate::agent_tools::install(t.clone(), line));
+        let _tools = self.tools.as_ref().map(|t| {
+            crate::agent_tools::install(t.clone(), line, |key| {
+                self.shell
+                    .env()
+                    .get(key)
+                    .map(|v| v.1.value().to_cow_str(&self.shell).to_string())
+            })
+        });
 
         let stdout_capture = match tempfile::tempfile() {
             Ok(f) => f,
@@ -1553,10 +1587,14 @@ impl Session {
     // this stays async for parity even though its wasm body doesn't `.await`.
     #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     async fn execute_impl(&mut self, line: &str, stdin_bytes: Option<&[u8]>) -> LineResult {
-        let _tools = self
-            .tools
-            .as_ref()
-            .map(|t| crate::agent_tools::install(t.clone(), line));
+        let _tools = self.tools.as_ref().map(|t| {
+            crate::agent_tools::install(t.clone(), line, |key| {
+                self.shell
+                    .env()
+                    .get(key)
+                    .map(|v| v.1.value().to_cow_str(&self.shell).to_string())
+            })
+        });
         let stdout_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
         let stderr_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
         let mut params = self.shell.default_exec_params();

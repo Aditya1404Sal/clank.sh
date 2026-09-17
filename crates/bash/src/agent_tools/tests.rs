@@ -2,6 +2,64 @@ use super::*;
 use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
 struct FakeInvoker(Arc<AtomicUsize>);
+
+struct RecordingInvoker(Arc<std::sync::Mutex<Vec<ToolRequest>>>);
+#[async_trait::async_trait(?Send)]
+impl ToolInvoker for RecordingInvoker {
+    async fn invoke(&self, request: ToolRequest) -> Result<ToolOutput, ToolFailure> {
+        self.invoke_blocking(request)
+    }
+    fn invoke_blocking(&self, request: ToolRequest) -> Result<ToolOutput, ToolFailure> {
+        self.0.lock().unwrap().push(request);
+        Ok(ToolOutput {
+            stdout: b"result\n".to_vec(),
+            stderr: b"diagnostic\n".to_vec(),
+            exit_code: 0,
+        })
+    }
+}
+
+#[test]
+fn stdin_positionals_reach_the_invoker_without_an_undeclared_attachment() {
+    crate::test_support::on_rt(async {
+        let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut tool = definition("remote");
+        let body = tool.nodes[1].command.as_mut().unwrap();
+        body.fields.push(Argument {
+            name: "text".into(),
+            aliases: vec![],
+            short: None,
+            kind: "positional".into(),
+            schema: json!({"kind":"string", "value":{}}),
+            spec: json!({"accepts_stdio":true}),
+            default: None,
+            env_var: None,
+            required: true,
+            doc: String::new(),
+        });
+        let mut session = crate::session::Session::new().await.unwrap();
+        session.set_tools(
+            ToolRuntime::new(vec![tool], Arc::new(RecordingInvoker(requests.clone()))).unwrap(),
+        );
+        let input = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(input.path(), "one\ntwo\n").unwrap();
+        let result = session
+            .eval_line(&format!("remote read - < '{}'", input.path().display()))
+            .await;
+        assert_eq!(
+            result.exit_code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(result.stdout, b"result\n");
+        assert_eq!(result.stderr, b"diagnostic\n");
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].input, json!({"text":"one\ntwo\n"}));
+        assert_eq!(requests[0].stdin, None);
+    });
+}
 #[async_trait::async_trait(?Send)]
 impl ToolInvoker for FakeInvoker {
     async fn invoke(&self, request: ToolRequest) -> Result<ToolOutput, ToolFailure> {

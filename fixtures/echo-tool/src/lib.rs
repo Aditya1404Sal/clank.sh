@@ -78,14 +78,20 @@ pub struct TreeSubtree;
 pub trait EchoTool {
     /// Greet someone by name.
     #[command(aliases = ["hi"], annotations(read_only = true, idempotent = true))]
-    #[arg(verbose = "global", short = 'v', kind = "count-flag", max = 3)]
+    #[arg(
+        verbose = "global",
+        short = 'v',
+        kind = "count-flag",
+        max = 3,
+        env = "ECHO_VERBOSE"
+    )]
     #[arg(color = "global", default = "auto")]
     #[arg(name = "positional")]
     // A numeric default is an unquoted literal; `default = "1"` is a type mismatch the descriptor
     // build rejects at component load (and a failed descriptor build panics a ctor, which fails
     // the whole deploy — see dev-docs/research/agent-tools-probes.md).
     #[arg(times = "option", short = 'n', default = 1)]
-    #[arg(shout = "flag", negatable = true, default = false)]
+    #[arg(shout = "flag", negatable = true, default = false, env = "ECHO_SHOUT")]
     #[result(formatters = ["plain", "loud"], default = "plain")]
     async fn greet(
         &self,
@@ -151,6 +157,11 @@ pub trait EchoTool {
     #[arg(verbose = "global", short = 'v', kind = "count-flag", max = 3)]
     #[arg(color = "global", default = "auto")]
     async fn destroy(&self, verbose: u32, color: String) -> Result<String, EchoError>;
+
+    /// Return a positional string, using stdin when the argument is absent or `-`.
+    #[command(annotations(read_only = true))]
+    #[arg(text = "positional", accepts_stdio = true)]
+    async fn stdin_arg(&self, text: String) -> Result<String, EchoError>;
 }
 
 #[tool_definition]
@@ -166,6 +177,7 @@ pub trait Tree {
     /// forwarded it to this subtree, and the guest replied
     /// `InvalidInput("shape mismatch in Option: expected option, got record")`. No caller can satisfy
     /// both sides; see `dev-docs/research/agent-tools-probes.md` (T2) and upstream-asks Issue 9.
+    #[command(annotations(read_only = true))]
     #[arg(entries = "option", short = 'c', repeatable = "repeated")]
     #[arg(meta = "option")]
     #[constraint(all_or_none = ["meta", "entries"])]
@@ -274,6 +286,11 @@ impl EchoTool for EchoToolImpl {
     #[allow(clippy::unused_async_trait_impl)]
     async fn destroy(&self, _verbose: u32, _color: String) -> Result<String, EchoError> {
         Ok("destroyed".to_string())
+    }
+
+    #[allow(clippy::unused_async_trait_impl)]
+    async fn stdin_arg(&self, text: String) -> Result<String, EchoError> {
+        Ok(text)
     }
 }
 

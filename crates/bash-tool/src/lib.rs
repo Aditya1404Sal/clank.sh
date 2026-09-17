@@ -147,17 +147,7 @@ async fn run_action(state: &str, script: Option<&str>, response: Option<String>)
     }
 
     let result = if let Some(script) = script {
-        // A stateless tool cannot retain parked futures or background jobs.
-        let background = brush_parser_background(script);
-        if background {
-            bash::session::LineResult::from_outcome(
-                Vec::new(),
-                b"bash: background work is unsupported in bash-tool\n".to_vec(),
-                2,
-            )
-        } else {
-            session.eval_line(script).await
-        }
+        session.eval_line(script).await
     } else {
         session.answer_prompt(response).await
     };
@@ -203,6 +193,7 @@ async fn run_action(state: &str, script: Option<&str>, response: Option<String>)
 /// installed the plug-in providers that used to be the only reason for the split.
 async fn new_session() -> Result<Session, String> {
     let mut session = Session::new().await.map_err(|e| e.to_string())?;
+    session.enable_stateless_mode();
     // `set_log_sink` takes `Arc`; the sink is `?Send`+`?Sync` and this tool is single-threaded.
     #[allow(clippy::arc_with_non_send_sync)]
     session.set_log_sink(std::sync::Arc::new(DurableLogSink::new()));
@@ -215,35 +206,6 @@ async fn new_session() -> Result<Session, String> {
 /// has nowhere else to put raw bytes.
 fn lossy_utf8(bytes: Vec<u8>) -> String {
     String::from_utf8(bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
-}
-
-fn brush_parser_background(script: &str) -> bool {
-    brush_parser::tokenize_str(script).is_ok_and(|tokens| {
-        tokens.iter().any(|token| match token {
-            brush_parser::Token::Operator(operator, _) => operator == "&",
-            brush_parser::Token::Word(word, _) => {
-                brush_parser::word::parse(word, &brush_parser::ParserOptions::default())
-                    .is_ok_and(|parts| parts.iter().any(background_word))
-            }
-        })
-    }) || bash::authz::split_segments(script).iter().any(|segment| {
-        matches!(
-            bash::authz::leading_command(segment).0.as_deref(),
-            Some("coproc" | "bg" | "fg" | "wait")
-        )
-    })
-}
-
-fn background_word(part: &brush_parser::word::WordPieceWithSource) -> bool {
-    use brush_parser::word::WordPiece;
-    match &part.piece {
-        WordPiece::CommandSubstitution(script)
-        | WordPiece::BackquotedCommandSubstitution(script) => brush_parser_background(script),
-        WordPiece::DoubleQuotedSequence(parts) | WordPiece::GettextDoubleQuotedSequence(parts) => {
-            parts.iter().any(background_word)
-        }
-        _ => false,
-    }
 }
 
 /// The session a caller carries between calls.
@@ -422,6 +384,62 @@ mod tests {
                 run_script("", "echo \"$(echo hidden &)\"").await.exit_code,
                 2
             );
+            for script in [
+                "eval 'echo hidden &'",
+                "builtin eval 'echo hidden &'",
+                "command eval 'echo hidden &'",
+                "action='echo hidden &'; eval \"$action\"",
+                "alias hidden='echo hidden &'",
+                "trap 'echo hidden &' EXIT",
+                "f() { echo hidden & }; f",
+                "if true; then coproc echo hidden; fi",
+                "for x in a; do echo hidden & done",
+                "echo \"${unset:-$(echo hidden &)}\"",
+                "echo $(( $(echo hidden &) + 1 ))",
+                "echo `echo hidden &`",
+                "bg",
+                "fg",
+                "wait",
+                "fc",
+                "x='$(echo hidden &)'; echo ${x@P}",
+                "source /dev/stdin",
+                "shopt -s promptvars",
+            ] {
+                let refused = run_script("", script).await;
+                assert_eq!(refused.exit_code, 2, "{script}: {}", refused.stderr);
+                assert!(refused.stdout.is_empty(), "{script}: {}", refused.stdout);
+            }
+            assert_eq!(
+                run_script("", "eval 'echo allowed'").await.stdout,
+                "allowed\n"
+            );
+            assert_eq!(
+                run_script("", "echo $((3 & 1)); echo '&'; echo coproc")
+                    .await
+                    .stdout,
+                "1\n&\ncoproc\n"
+            );
+            let trace = run_script("", "PS4='$(echo hidden &)'; set -x; echo trace-kept").await;
+            assert_eq!(trace.exit_code, 0);
+            assert_eq!(trace.stdout, "trace-kept\n");
+            let source_path =
+                std::env::temp_dir().join(format!("bash-tool-source-{}.sh", std::process::id()));
+            std::fs::write(&source_path, "echo hidden &").unwrap();
+            let source_command = format!("source '{}'", source_path.display());
+            assert_eq!(run_script("", &source_command).await.exit_code, 2);
+            std::fs::write(
+                &source_path,
+                "x=source-kept; echo \"$1\"; return 7; echo unreachable",
+            )
+            .unwrap();
+            let sourced = run_script("", &format!("{source_command} source-arg")).await;
+            assert_eq!(sourced.exit_code, 7, "{}", sourced.stderr);
+            assert_eq!(sourced.stdout, "source-arg\n");
+            assert_eq!(
+                run_script(&sourced.state, "echo $x").await.stdout,
+                "source-kept\n"
+            );
+            std::fs::remove_file(source_path).unwrap();
             let mut legacy = sample();
             legacy.cwd = "/tmp".into();
             let legacy_state = legacy
@@ -441,6 +459,10 @@ mod tests {
                 run_script(&forged.encode(MAX_STATE_BYTES).unwrap(), "echo intended").await;
             assert!(!refused.stdout.contains("injected"));
             assert!(refused.stderr.contains("state cannot execute"));
+            forged.shell_state = "f() { echo hidden & };".into();
+            let refused = run_script(&forged.encode(MAX_STATE_BYTES).unwrap(), "type f").await;
+            assert!(refused.stderr.contains("background"));
+            assert!(!refused.stdout.contains("function"));
         });
     }
 }

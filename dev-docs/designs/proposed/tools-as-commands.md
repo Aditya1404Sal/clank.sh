@@ -33,6 +33,22 @@ State restoration accepts literal declarations, shell options, and deferred func
 and rejects command execution or value expansion within declarations. The bash descriptor is 0.2.0;
 its pending prompt carries question and choices, so callers must rebuild with the component.
 The component refuses background work that cannot survive the invocation, including substitutions.
+Its finite-invocation profile validates command lists and nested expansions, wraps eval/source/trap/
+alias entry points to validate their expanded code, and checks restored function bodies. Job-control
+and history execution return exit 2. Source accepts bounded regular UTF-8 files; descriptor paths
+such as /dev/stdin are refused. Prompt expansion is disabled and cannot be enabled through shopt;
+this prevents PS4 trace strings from introducing unvalidated command substitutions.
+
+## CLI projection
+
+Environment flag values are coerced by their declared type, with explicit CLI flags taking
+precedence. Alias names in presence/value constraints resolve to canonical field names. Custom
+tail separators retain flag parsing unless the tail is verbatim; `--` always ends option parsing.
+For accepts_stdio positionals, an absent argument without a default or a literal dash consumes
+bounded stdin. Scalar strings retain UTF-8 bytes, typed scalars trim surrounding whitespace, and
+tails use one argument per line. Cardinality and constraints are checked after input is read.
+The parser exposes an explicit stdin-needed projection instead of advertising partial canonical
+input; dispatch checks authorization before reading and creates attachments only when declared.
 
 ## Upstream compatibility
 
@@ -49,3 +65,6 @@ projection/dispatch tests use a fake invoker. Native Brush pipeline worker threa
 the dispatch context, so arbitrary native transports require context propagation to support those
 paths. Live pipeline/substitution, owner filesystem, prompts, and recovery coverage runs through
 the actual bash component on Golem. Each attachment is bounded to 16 MiB; shell state to 256 KiB.
+CI runs the adapter's schema tests per push and release bash-tool acceptance nightly/on demand.
+A shared setup action checks out the pinned upstream SDK and builds its matching CLI for live jobs;
+the workspace path remains absolute but can be configured by scripts/use-golem-sdk.py in a fresh clone.

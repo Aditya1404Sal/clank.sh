@@ -26,7 +26,6 @@ bash-golem = { path = "../bash-golem" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 base64 = "0.22"
-brush-parser = "0.4"
 
 [dev-dependencies]
 # The session round-trip test drives the async Session natively, the way clank-core's own tests do.

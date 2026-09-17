@@ -276,7 +276,15 @@ fn normalize(
             serde_json::from_value(field.schema.clone()).map_err(|e| e.to_string())?;
         let value =
             serde_json::from_value(v["value"]["value"].clone()).map_err(|e| e.to_string())?;
+        v["value"]["name"] = field.name.clone().into();
         v["value"]["value"] = to_json_value(graph, &ty, &value).map_err(|e| format!("{e:?}"))?;
+    } else if v["kind"] == "present" {
+        let name = v["value"].as_str().ok_or("constraint name")?;
+        let field = fields
+            .iter()
+            .find(|f| f.name == name || f.aliases.iter().any(|a| a == name))
+            .ok_or("constraint field")?;
+        v["value"] = field.name.clone().into();
     } else if let Some(items) = v.as_array_mut() {
         for item in items {
             normalize(item, fields, graph)?;

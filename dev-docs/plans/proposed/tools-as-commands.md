@@ -22,6 +22,10 @@ research:
 - [x] Add a minimal caller and verify nested streams, shared files, and recovery live.
 - [x] Run native regression tests, wasm checks, formatting, and appropriate lint checks.
 - [x] Measure cold and steady-state release calls.
+- [x] Complete environment flags, stdin positionals/tails, separator semantics, and alias constraints.
+- [x] Refuse background work introduced through eval, source, traps, aliases, and restored definitions.
+- [x] Extend schema round-trip and live acceptance coverage for these paths.
+- [x] Add adapter tests to CI and provide a reproducible compatible SDK/CLI setup.
 - [ ] Enable independent tool stderr after upstream support lands (external dependency).
 
 ## Acceptance
@@ -71,3 +75,16 @@ on the upstream protocol addition; it must not be reported as complete with the 
   assumed to have landed.
 
 Release latency and reproducibility details: [validation](../../research/tools-as-commands-validation.md).
+
+## Follow-up verification
+
+- 505 native unit/integration tests and one compile doctest passed in a fresh clone configured
+  against upstream SDK commit 541300b4a104e4f70838690b525527e3fc26a664. One existing doctest is ignored.
+- Release acceptance passed 38 live checks using the configured development CLI/SDK. New checks
+  assert exact outputs for environment flags, positional stdin, pipelines, JSON lists/records, and
+  refusal of background work in eval, traps, aliases, and sourced files.
+- Wasm clippy and native adapter/core clippy (all targets) passed with warnings denied;
+  formatting, shell syntax, and whitespace checks passed.
+- CI includes adapter tests per push and release live acceptance nightly/on demand. The shared
+  setup configures a pinned compatible SDK/CLI; YAML parsed locally and fresh-clone SDK setup was
+  exercised. GitHub's Linux jobs and the source-built matching CLI have not been run locally.

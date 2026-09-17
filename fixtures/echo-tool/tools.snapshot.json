@@ -265,7 +265,8 @@
             4,
             5,
             7,
-            8
+            8,
+            9
           ],
           "body": null
         },
@@ -320,7 +321,7 @@
                   "kind": "count-flag",
                   "value": 3
                 },
-                "env_var": null
+                "env_var": "ECHO_VERBOSE"
               }
             ]
           },
@@ -390,7 +391,7 @@
                     "negatable": true
                   }
                 },
-                "env_var": null
+                "env_var": "ECHO_SHOUT"
               }
             ],
             "constraints": [],
@@ -1179,7 +1180,12 @@
                 "payload": null
               }
             ],
-            "annotations": null
+            "annotations": {
+              "read_only": true,
+              "destructive": true,
+              "idempotent": false,
+              "open_world": true
+            }
           }
         },
         {
@@ -1428,6 +1434,103 @@
               "open_world": true
             }
           }
+        },
+        {
+          "name": "stdin-arg",
+          "aliases": [],
+          "doc": {
+            "summary": "Return a positional string, using stdin when the argument is absent or `-`.",
+            "description": "",
+            "examples": []
+          },
+          "globals": {
+            "options": [],
+            "flags": []
+          },
+          "subcommands": [],
+          "body": {
+            "positionals": {
+              "fixed": [
+                {
+                  "name": "text",
+                  "doc": {
+                    "summary": "",
+                    "description": "",
+                    "examples": []
+                  },
+                  "value_name": null,
+                  "type_": {
+                    "kind": "string",
+                    "value": {}
+                  },
+                  "default": null,
+                  "required": true,
+                  "accepts_stdio": true
+                }
+              ],
+              "tail": null
+            },
+            "options": [],
+            "flags": [],
+            "constraints": [],
+            "stdin": null,
+            "stdout": null,
+            "result": {
+              "type_": {
+                "kind": "string",
+                "value": {}
+              },
+              "doc": {
+                "summary": "",
+                "description": "",
+                "examples": []
+              },
+              "formatters": [
+                {
+                  "name": "default",
+                  "doc": {
+                    "summary": "",
+                    "description": "",
+                    "examples": []
+                  }
+                }
+              ],
+              "default_formatter": "default"
+            },
+            "errors": [
+              {
+                "name": "bad-input",
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "kind": "usage-error",
+                "exit_code": 2,
+                "payload": {
+                  "kind": "string",
+                  "value": {}
+                }
+              },
+              {
+                "name": "boom",
+                "doc": {
+                  "summary": "",
+                  "description": "",
+                  "examples": []
+                },
+                "kind": "runtime-error",
+                "exit_code": 7,
+                "payload": null
+              }
+            ],
+            "annotations": {
+              "read_only": true,
+              "destructive": true,
+              "idempotent": false,
+              "open_world": true
+            }
+          }
         }
       ]
     },
@@ -1661,7 +1764,12 @@
                 "payload": null
               }
             ],
-            "annotations": null
+            "annotations": {
+              "read_only": true,
+              "destructive": true,
+              "idempotent": false,
+              "open_world": true
+            }
           }
         }
       ]

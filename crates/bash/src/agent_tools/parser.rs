@@ -7,21 +7,43 @@ use super::{Argument, ToolCommand, ToolDefinition};
 #[derive(Clone, Debug)]
 pub enum Projection {
     Help(String),
-    Call { command: ToolCommand, input: Value },
+    Call {
+        command: ToolCommand,
+        input: Value,
+    },
+    /// The selected command needs stdin before its canonical input can be constructed.
+    Stdin {
+        command: ToolCommand,
+    },
 }
 
 /// Parse already-expanded argv. Presence is retained separately from the total wire record.
 ///
 /// # Errors
 /// Rejects unknown switches, missing/invalid arguments, and violated constraints.
-#[allow(
-    clippy::too_many_lines,
-    reason = "one cursor implements the CLI grammar across command depths"
-)]
 pub fn parse(
     tool: &ToolDefinition,
     words: &[String],
     env: impl Fn(&str) -> Option<String>,
+) -> Result<Projection, String> {
+    parse_with_stdin(tool, words, env, None)
+}
+
+/// Resolve declared stdin-backed positionals into the canonical input.
+/// Scalar strings retain their bytes as UTF-8; other scalars trim surrounding whitespace.
+/// Tail inputs consume one argument per line. A literal `-` selects stdin explicitly.
+///
+/// # Errors
+/// Rejects invalid argv, UTF-8, coercion, cardinality, and constraints.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one cursor implements the metadata CLI grammar"
+)]
+pub fn parse_with_stdin(
+    tool: &ToolDefinition,
+    words: &[String],
+    env: impl Fn(&str) -> Option<String>,
+    stdin: Option<&[u8]>,
 ) -> Result<Projection, String> {
     let mut index = 0;
     let mut globals = tool.nodes[0].globals.clone();
@@ -51,7 +73,12 @@ pub fn parse(
             .and_then(|f| f.spec["separator"].as_str());
         if !after_separator && (word == "--" || separator == Some(word.as_str())) {
             separator_seen = true;
-            after_separator = true;
+            after_separator = word == "--"
+                || node
+                    .command
+                    .as_ref()
+                    .and_then(|c| c.fields.iter().find(|f| f.kind == "tail"))
+                    .is_some_and(|f| f.spec["verbatim"] == true);
             cursor += 1;
             continue;
         }
@@ -97,7 +124,7 @@ pub fn parse(
                     break;
                 }
             }
-        } else if !after_separator && positionals.is_empty() {
+        } else if !after_separator && !separator_seen && positionals.is_empty() {
             if let Some(child) = node.children.iter().find(|child| {
                 let child = &tool.nodes[**child];
                 child.name == *word || child.aliases.contains(word)
@@ -121,6 +148,7 @@ pub fn parse(
     let mut input = Map::new();
     let mut present = BTreeSet::new();
     let mut position = 0;
+    let mut needs_stdin = false;
     for field in &command.fields {
         let values = match field.kind.as_str() {
             "positional" => {
@@ -139,24 +167,56 @@ pub fn parse(
                         field.name, field.spec["separator"]
                     ));
                 }
-                let count = values.len() as u64;
-                if count < field.spec["min"].as_u64().unwrap_or(0)
-                    || field.spec["max"].as_u64().is_some_and(|max| count > max)
-                {
-                    return Err(format!("invalid number of {} arguments", field.name));
-                }
                 (!values.is_empty()).then_some(values)
             }
             _ => supplied.remove(&field.name),
         };
+        let from_stdio = matches!(field.kind.as_str(), "positional" | "tail")
+            && field.spec["accepts_stdio"] == true
+            && (values.as_ref().is_some_and(|v| v.iter().any(|s| s == "-"))
+                || (values.is_none() && field.default.is_none()));
+        let values = if from_stdio {
+            if let Some(bytes) = stdin {
+                Some(stdio_values(field, values, bytes, &command.schema)?)
+            } else {
+                needs_stdin = true;
+                // Do not publish a partial canonical record. Cardinality/coercion/constraints
+                // are completed by a second parse after the bounded reader is drained.
+                continue;
+            }
+        } else {
+            values
+        };
+        if field.kind == "tail" {
+            let count = values.as_ref().map_or(0, |v| v.len() as u64);
+            if count < field.spec["min"].as_u64().unwrap_or(0)
+                || field.spec["max"].as_u64().is_some_and(|max| count > max)
+            {
+                return Err(format!("invalid number of {} arguments", field.name));
+            }
+        }
         let from_env = values
             .is_none()
             .then(|| field.env_var.as_deref().and_then(&env))
             .flatten();
-        let values = values.or_else(|| from_env.map(|v| vec![v]));
         let value = if let Some(values) = values {
-            present.insert(field.name.clone());
+            if !values.is_empty() {
+                present.insert(field.name.clone());
+            }
             collect(field, &values, &command.schema)?
+        } else if let Some(text) = from_env {
+            present.insert(field.name.clone());
+            match field.kind.as_str() {
+                "count-flag" => {
+                    let count = text
+                        .parse::<u32>()
+                        .map_err(|_| format!("{}: expected an unsigned flag count", field.name))?;
+                    count_value(field, u64::from(count))?
+                }
+                "bool-flag" => coerce(&field.schema, &text, &command.schema, 0)
+                    .map_err(|e| format!("{}: {e}", field.name))?,
+                _ => collect(field, &[text], &command.schema)?,
+            }
         } else if let Some(default) = &field.default {
             default.clone()
         } else if field.required {
@@ -168,6 +228,11 @@ pub fn parse(
     }
     if position != positionals.len() {
         return Err(format!("unexpected argument {}", positionals[position]));
+    }
+    if needs_stdin {
+        return Ok(Projection::Stdin {
+            command: command.clone(),
+        });
     }
     check_constraints(&command.constraints, &present, &input)?;
     Ok(Projection::Call {
@@ -216,13 +281,7 @@ fn collect(field: &Argument, values: &[String], graph: &Value) -> Result<Value, 
     let error = |message: String| format!("{}: {message}", field.name);
     match field.kind.as_str() {
         "bool-flag" => Ok(json!(values.last().is_some_and(|v| v == "true"))),
-        "count-flag" => {
-            let count = values.len() as u64;
-            if field.spec["max"].as_u64().is_some_and(|max| count > max) {
-                return Err(error("flag count exceeds maximum".into()));
-            }
-            Ok(json!(count))
-        }
+        "count-flag" => count_value(field, values.len() as u64),
         "repeatable-list" | "repeatable-map" | "tail" => {
             let repetition = &field.spec["repetition"];
             if repetition["kind"] == "delimited" && values.len() > 1 {
@@ -457,4 +516,41 @@ fn check_constraints(
         }
     }
     Ok(())
+}
+
+fn count_value(field: &Argument, count: u64) -> Result<Value, String> {
+    if field.spec["max"].as_u64().is_some_and(|max| count > max) {
+        return Err(format!("{}: flag count exceeds maximum", field.name));
+    }
+    Ok(json!(count))
+}
+
+fn stdio_values(
+    field: &Argument,
+    supplied: Option<Vec<String>>,
+    bytes: &[u8],
+    graph: &Value,
+) -> Result<Vec<String>, String> {
+    let text =
+        std::str::from_utf8(bytes).map_err(|_| format!("{}: stdin must be UTF-8", field.name))?;
+    if field.kind == "tail" {
+        let lines: Vec<String> = text.lines().map(str::to_owned).collect();
+        Ok(supplied.map_or_else(
+            || lines.clone(),
+            |values| {
+                values
+                    .into_iter()
+                    .flat_map(|v| if v == "-" { lines.clone() } else { vec![v] })
+                    .collect()
+            },
+        ))
+    } else {
+        let schema = resolve(&field.schema, graph, 0)?;
+        Ok(vec![if schema["kind"] == "string" {
+            text
+        } else {
+            text.trim()
+        }
+        .to_owned()])
+    }
 }

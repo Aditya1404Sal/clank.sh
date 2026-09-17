@@ -1,0 +1,37 @@
+name: Compatible Golem SDK and CLI
+description: Pin the 1.6 development SDK, and optionally build its matching local-server binary.
+inputs:
+  build-cli:
+    description: Build the full golem binary for live acceptance
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v4
+      with:
+        repository: golemcloud/golem
+        ref: 541300b4a104e4f70838690b525527e3fc26a664
+        path: golem-stuff/golem
+    - name: Configure the workspace SDK
+      shell: bash
+      run: python3 scripts/use-golem-sdk.py golem-stuff/golem --expected-revision 541300b4a104e4f70838690b525527e3fc26a664
+    - uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: |
+          . -> target
+          golem-stuff/golem -> target
+    - uses: arduino/setup-protoc@v3
+      if: inputs.build-cli == 'true'
+      with:
+        repo-token: ${{ github.token }}
+    - name: Build the matching CLI and local server
+      if: inputs.build-cli == 'true'
+      shell: bash
+      env:
+        CARGO_BUILD_JOBS: '2'
+        CARGO_PROFILE_DEV_DEBUG: '0'
+      run: |
+        cargo build --manifest-path golem-stuff/golem/Cargo.toml --locked -p golem --bin golem
+        echo "$GITHUB_WORKSPACE/golem-stuff/golem/target/debug" >> "$GITHUB_PATH"
+        echo "GOLEM_BIN=$GITHUB_WORKSPACE/golem-stuff/golem/target/debug/golem" >> "$GITHUB_ENV"
+        golem-stuff/golem/target/debug/golem --version

@@ -20,6 +20,7 @@ pub struct ShellContinuation {
 
 impl Session {
     /// Export a pending core prompt for a stateless shell caller.
+    #[must_use]
     pub fn continuation(&self) -> Option<ShellContinuation> {
         let pending = self.pending.as_ref()?;
         let (command, sudo_grant, rerun_stdin) = match &pending.kind {
@@ -60,6 +61,7 @@ impl Session {
         });
     }
     /// Whether this session has the human's blanket confirmation grant.
+    #[must_use]
     pub fn confirmation_granted(&self) -> bool {
         self.authz.allow_all
     }
@@ -165,6 +167,9 @@ impl Session {
         status: u8,
     ) -> Result<(), String> {
         use brush_parser::ast::{Command, CommandPrefixOrSuffixItem, SeparatorOperator};
+        if self.stateless {
+            super::stateless::validate(script)?;
+        }
         let options = brush_parser::ParserOptions::default();
         let tokens = brush_parser::tokenize_str(script).map_err(|e| e.to_string())?;
         let program = brush_parser::parse_tokens(&tokens, &options).map_err(|e| e.to_string())?;
