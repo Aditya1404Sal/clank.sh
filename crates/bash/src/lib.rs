@@ -22,6 +22,7 @@
 //! evicted into a leading [`Entry::Elided`] marker, which the Session's async step then upgrades to
 //! a model-generated summary block. Brush runs on both targets through [`session::Session`].
 
+pub mod agent_tools;
 pub mod authz;
 pub mod builtins;
 pub mod config;

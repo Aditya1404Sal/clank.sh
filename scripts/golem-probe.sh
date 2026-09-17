@@ -62,12 +62,14 @@ AGENT_ID="${AGENT_TYPE}(\"${AGENT_NAME}\")"
 
 DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/clank-golem-probe.XXXXXX")"
 PORTS_FILE="$DATA_DIR/ports.json"
-SERVER_LOG="$DATA_DIR/server.log"
+SERVER_LOG="$DATA_DIR.server.log"
 SERVER_PID=""
 # The golem binary to drive — same `GOLEM_BIN` knob as the other harnesses. Every invocation below
 # must go through it: a half-parameterised script "works" only while the right binary happens to be
 # on PATH, and fails in a way that looks like a broken server rather than a missing binary.
 GOLEM="${GOLEM_BIN:-golem}"
+BUILD_ARGS=(-Y)
+[[ -z "${GOLEM_PROBE_PRESET:-}" ]] || BUILD_ARGS+=(-P "$GOLEM_PROBE_PRESET")
 # The shared invoke-JSON decoder + the artifact-freshness check.
 GOLEM_JSON_LOG="$SERVER_LOG"
 # shellcheck source=lib/golem-json.sh
@@ -78,7 +80,7 @@ note() { echo "${c_dim}··${c_rst} $*"; }
 step() { echo; echo "▸ $*"; }
 
 # Snapshot AGENTS.md so build/deploy churn doesn't leak into the tree (same as the e2e).
-AGENTS_BACKUP="$DATA_DIR/AGENTS.md.orig"
+AGENTS_BACKUP="$DATA_DIR.AGENTS.md.orig"
 [[ -f AGENTS.md ]] && cp AGENTS.md "$AGENTS_BACKUP"
 
 cleanup() {
@@ -98,6 +100,7 @@ cleanup() {
     note "server stopped"
   fi
   rm -rf "$DATA_DIR"
+  rm -f "$AGENTS_BACKUP" "$SERVER_LOG"
   # `exit` (not `return`) in an EXIT trap is what actually sets the final status.
   exit $ec
 }
@@ -126,7 +129,7 @@ step "Building the wasm component (golem build)"
 # See golem-json.sh: `golem build` misses path-dependency edits, so a probe can otherwise interrogate
 # a binary that predates the change you are probing for.
 golem_assert_fresh_artifact
-if ! "$GOLEM" -Y build 2>&1 | tail -4; then
+if ! "$GOLEM" "${BUILD_ARGS[@]}" build 2>&1 | tail -4; then
   echo "${c_red}golem build failed${c_rst}" >&2
   exit 1
 fi
@@ -149,7 +152,7 @@ for i in $(seq 1 60); do
 done
 
 step "Deploying clank:agent (golem deploy)"
-if ! "$GOLEM" -Y deploy 2>&1 | tail -5; then
+if ! "$GOLEM" "${BUILD_ARGS[@]}" deploy 2>&1 | tail -5; then
   echo "${c_red}golem deploy failed${c_rst}" >&2
   exit 1
 fi

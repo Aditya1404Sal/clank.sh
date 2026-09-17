@@ -188,6 +188,8 @@ dependencies = [
  "jaq-std",
  "libc",
  "regex",
+ "serde",
+ "serde_json",
  "similar",
  "tempfile",
  "thiserror 2.0.18",
@@ -217,11 +219,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "bash-golem"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "bash",
+ "futures",
+ "golem-rust",
+ "serde_json",
+ "wit-bindgen 0.59.0",
+]
+
+[[package]]
 name = "bash-tool"
 version = "0.0.0"
 dependencies = [
  "base64",
  "bash",
+ "bash-golem",
+ "brush-parser",
  "golem-rust",
  "serde",
  "serde_json",
@@ -632,14 +648,13 @@ version = "0.0.0"
 dependencies = [
  "async-trait",
  "bash",
+ "bash-golem",
  "clank-core",
- "futures",
  "golem-rust",
  "http",
  "serde",
  "tokio",
  "whttp",
- "wit-bindgen 0.59.0",
 ]
 
 [[package]]
@@ -1708,8 +1723,11 @@ dependencies = [
 name = "greeter-agent"
 version = "0.0.0"
 dependencies = [
+ "bash",
+ "bash-golem",
  "clank-embed",
  "golem-rust",
+ "serde_json",
 ]
 
 [[package]]

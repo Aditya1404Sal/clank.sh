@@ -1,0 +1,21 @@
+[package]
+name = "bash-golem"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+bash = { path = "../bash" }
+golem-rust = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+futures = { workspace = true }
+# The runtime that generated Golem's async imports. Replace with the supported SDK adapter
+# when upstream #3874 exposes one to libraries without enabling guest exports.
+wit-bindgen = { git = "https://github.com/golemcloud/wit-bindgen", branch = "golem-outline-lift-v0.58.0", version = "=0.59.0", default-features = false, features = ["async"] }

@@ -1046,11 +1046,6 @@ pub(crate) fn builtins<SE: ShellExtensions>() -> Vec<(String, Registration<SE>)>
         ("touch".into(), simple_builtin::<Touch, SE>()),
         ("sleep".into(), simple_builtin::<Sleep, SE>()),
         ("printf".into(), simple_builtin::<Printf, SE>()),
-        // T1 PROBE — THROWAWAY (see builtins/probe.rs).
-        (
-            "probe-tool".into(),
-            simple_builtin::<crate::builtins::probe::ProbeTool, SE>(),
-        ),
     ]
 }
 
@@ -1096,12 +1091,6 @@ pub(crate) fn manifests() -> Vec<crate::manifest::Manifest> {
             "printf FORMAT [ARG...] — format and print data (uutils printf). Supports %s %d %x \
              %f etc. and \\n escapes. bash's `printf -v VAR` (assign to a shell variable) is not \
              supported.",
-        ),
-        // T1 PROBE — THROWAWAY (see builtins/probe.rs). Present only so the registry drift-guard
-        // (every registered builtin has exactly one manifest) holds while the probe exists.
-        Manifest::builtin(
-            "probe-tool",
-            "throwaway T1 probe: invoke a bound Golem tool over tool-rpc",
         ),
     ]
 }

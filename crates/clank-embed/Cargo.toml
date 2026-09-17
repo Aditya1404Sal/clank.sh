@@ -34,8 +34,6 @@ providers = [
     "dep:whttp",
     "dep:http",
     "dep:async-trait",
-    "dep:wit-bindgen",
-    "dep:futures",
 ]
 
 [dependencies]
@@ -44,6 +42,7 @@ providers = [
 # everything under it — ai/mcp/grease/golem) entirely absent, which is the point of making it
 # optional below.
 bash = { path = "../bash" }
+bash-golem = { path = "../bash-golem" }
 # The `Clank` plug-in and clank's command families, needed only once a plug-in is installed —
 # i.e. only by `with_default_golem_providers` (and an embedder's own `install_clank()` call inside
 # `with_setup`, which is out of this crate's control either way). Optional so a bare, default-features
@@ -79,14 +78,6 @@ async-trait = { workspace = true, optional = true }
 # crate only ever needs whttp's wasm arm (clank-native owns the native-arm call sites).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 whttp = { path = "../../utilities/whttp", optional = true }
-
-# T1 PROBE — THROWAWAY (with `futures`, used only for the join in `tool_probe.rs`).
-# The SDK's OWN wit-bindgen: same git, branch and exact version golem-rust pins, so cargo unifies
-# to the one 0.59 package that generated the tool bindings. That matters — `block_on` must be the
-# runtime that produced the future it drives. NOT the `wasip3` re-export (0.57.1) the earlier spike
-# used. Ticket 9 asks golem-rust to re-export `block_on` so this direct dependency can go away.
-wit-bindgen = { git = "https://github.com/golemcloud/wit-bindgen", branch = "golem-outline-lift-v0.58.0", version = "=0.59.0", default-features = false, features = ["async"], optional = true }
-futures = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Native test harness: a current-thread runtime to drive the async Session, mirroring how the

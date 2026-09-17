@@ -70,6 +70,8 @@ uu_printf = "0.9"
 # per invocation — upstream resets it by process exit, which never happens in-process here.
 uucore = "0.9"
 async-trait = "0.1"
+serde = { workspace = true }
+serde_json = { workspace = true }
 # `ShellError` (`error.rs`): the catch-all failure for a shell builtin that belongs to no subsystem
 # (a mistyped `kill`, an unsupported `find` predicate, a `stat` of a missing path). Derive-only, no
 # runtime and no OS deps, so it compiles unchanged for wasm32-wasip2.

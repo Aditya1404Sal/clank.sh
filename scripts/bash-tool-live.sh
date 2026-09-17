@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# SPIKE — the `bash` tool walking skeleton on a live Golem server.
-# Deploys the clank-spike app (ClankAgent + echo-tool + clank:bash) with golem-probe.sh --keep, then
-# drives ClankAgent, whose `probe-tool bash …` builtin invokes the bound `bash` tool over tool-rpc and
-# carries the returned state between calls. Tears the server down at the end.
+# Acceptance: tools as commands through a disposable local Golem server.
+# A minimal BashHost agent invokes bash-tool and carries its returned state.
+# Tears down the disposable server at the end.
 set -uo pipefail
 
 C="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -12,7 +11,7 @@ LIB="$C/scripts/lib/golem-json.sh"
 export GOLEM_BIN="${GOLEM_BIN:-$HOME/Desktop/clank.sh/golem-stuff/golem/target/debug/golem}"
 export GOLEM_JSON_LOG="$S/bash-live-cli-stderr.log"
 : > "$GOLEM_JSON_LOG"
-PHASE="${1:-unset}"
+PHASE="${1:-tools-as-commands}"
 
 if [ -n "$(lsof -tiTCP:9881 -sTCP:LISTEN 2>/dev/null)" ]; then
   echo "port 9881 is busy (another golem server); refusing to start" >&2
@@ -35,65 +34,53 @@ fi
 echo "agent $AGENT, server pid $SERVER_PID, log ${SERVER_LOG:-?}"
 trap 'kill "$SERVER_PID" 2>/dev/null; sleep 1; kill -9 "$SERVER_PID" 2>/dev/null' EXIT
 
-find "$C" -path '*golem-temp*' -name '*bash*.wasm' -newer "$C/crates/bash-tool/src/lib.rs" 2>/dev/null \
-  | xargs ls -la 2>/dev/null | awk '{printf "component %s %.1f MiB\n", $9, $5/1048576}'
-
-run_line() {
-  AGENT_ID="$AGENT" perl -e 'alarm shift; exec @ARGV' "${2:-240}" \
-    bash -c '. "$0"; golem_run_line "$1"' "$LIB" "$1"
+AGENT_ID='BashHost("tools-acceptance")'
+. "$LIB"
+run_json() {
+  local cmd=$1 method=${2:-eval}
+  local arg
+  arg=$(jq -Rn --arg cmd "$cmd" '$cmd')
+  golem_eval_json "$method" "$arg"
 }
-
 pass=0; fail=0
-# t <label> <contains|absent> <want> <line>
-t() {
-  local label=$1 mode=$2 want=$3 line=$4 got dt ok=0 start
-  start=$(date +%s)
-  got=$(run_line "$line")
-  dt=$(( $(date +%s) - start ))
-  case "$mode" in
-    contains) case "$got" in *"$want"*) ok=1 ;; esac ;;
-    absent) case "$got" in *"$want"*) ;; *) ok=1 ;; esac ;;
-  esac
-  if [ $ok = 1 ]; then pass=$((pass+1)); v=PASS; else fail=$((fail+1)); v=FAIL; fi
-  printf '%-4s %-46s %3ss %s\n' "$v" "$label" "$dt" "$(printf '%s' "$got" | tr '\n' '|' | cut -c1-160)"
-  [ $v = FAIL ] && printf '       want(%s)=[%s]\n' "$mode" "$want"
+printf 'check,cli_wall_clock_ms\n' > "$S/bash-live-latency-$PHASE.csv"
+check() {
+  local label=$1 line=$2 predicate=$3 method=${4:-eval} got started elapsed
+  started=$(python3 -c 'import time; print(time.time_ns())')
+  got=$(run_json "$line" "$method")
+  elapsed=$(python3 -c 'import sys,time; print(round((time.time_ns()-int(sys.argv[1]))/1e6))' "$started")
+  printf '%s,%s\n' "$label" "$elapsed" >> "$S/bash-live-latency-$PHASE.csv"
+  if printf '%s' "$got" | jq -e "$predicate" >/dev/null 2>&1; then
+    pass=$((pass+1)); printf 'PASS %-48s %sms\n' "$label" "$elapsed"
+  else
+    fail=$((fail+1)); printf 'FAIL %s: %s\n' "$label" "$got"
+  fi
 }
-
-echo "=== discovery and a first call"
-t 'bash is bound to ClankAgent'          contains 'bash v0.1.0'   'probe-tool tools'
-t 'first call runs a script'             contains 'hello-from-bash' "probe-tool bash 'echo hello-from-bash'"
-t 'first call returns exit 0 + state'    contains '[bash exit=0'  "probe-tool bash 'true'"
-
-echo "=== state carried by the caller"
-t 'reset'                                contains ''              'probe-tool bash-reset'
-t 'call 1: cd, var, fn, alias, exit 4'   contains 'exit=4'        "probe-tool bash 'cd /tmp; x=kept; f() { echo fn-kept; }; alias ll=\"echo alias-kept\"; (exit 4)'"
-t 'call 2: $? from call 1'               contains 'status=4'      "probe-tool bash 'echo status=\$?'"
-t 'call 3: cwd carried'                  contains 'cwd=/tmp'      "probe-tool bash 'pwd'"
-t 'call 4: var, fn, alias carried'       contains 'fn-kept'       "probe-tool bash 'echo var=\$x; f; alias ll'"
-t 'reset, then a fresh shell'            contains '[]'            "probe-tool bash-reset; probe-tool bash 'echo [\$x]'"
-
-echo "=== filesystem ($PHASE)"
-t 'bash writes a file'                   contains 'exit='         "probe-tool bash 'echo from-bash > /bash-wrote.txt; cat /bash-wrote.txt; ls /'"
-t 'owner sees the file bash wrote'       contains 'from-bash'     'cat /bash-wrote.txt'
-t 'owner writes, bash reads'             contains 'from-owner'    "echo from-owner > /owner-wrote.txt; probe-tool bash 'cat /owner-wrote.txt'"
-
-echo "=== tools from inside bash (tool-to-tool from a sidecar)"
-t 'echo-tool greet from inside bash'     contains 'hello Ada'     "probe-tool bash 'probe-tool greet Ada'"
-t 'fs-capable tool from inside bash'     contains 'nested-hi'     "probe-tool bash 'probe-tool cwrite /nested.txt nested-hi; probe-tool cread /nested.txt'"
-t 'owner sees the nested tool write'     contains 'nested-hi'     'cat /nested.txt'
-
-echo "=== per-call cost (CLI wall clock; plain eval vs a bash tool call)"
-for i in 1 2 3; do t "plain eval #$i" contains 'p' 'echo p'; done
-for i in 1 2 3; do t "bash tool call #$i" contains 'q' "probe-tool bash 'echo q'"; done
-
-echo "=== crash and replay"
-t 'state before crash'                   contains 'exit=0'        "probe-tool bash-reset; probe-tool bash 'y=survives; cd /tmp'"
-"$GOLEM_BIN" agent simulate-crash "$AGENT" >> "$GOLEM_JSON_LOG" 2>&1
-echo "simulate-crash exit $?"
-t 'state after replay'                   contains 'y=survives'    "probe-tool bash 'echo y=\$y; pwd'"
-
-echo "=== server log: replay / divergence / panic / trap lines"
-if [ -n "${SERVER_LOG:-}" ] && [ -f "$SERVER_LOG" ]; then
-  grep -i -E 'diverge|mismatch|panic|trap|unexpected oplog' "$SERVER_LOG" | tail -15
-fi
-echo "=== $pass passed, $fail failed"
+check 'discovery/help' 'echo-tool --help' '.exit_code == 0 and (.stdout | contains("greet"))'
+check 'canonical scalar/default/global arguments' 'echo-tool greet -vv Ada -n2 --shout' '.exit_code == 0 and (.stdout | contains("ADA"))'
+check 'stdin and stdout pipe' 'printf "hello\\n" | echo-tool upper | tr A-Z a-z' '.exit_code == 0 and (.stdout | contains("hello"))'
+check 'command substitution' 'printf "[%s]" "$(echo-tool greet Ada)"' '.exit_code == 0 and (.stdout | contains("Ada"))'
+check 'named usage error exit 2' 'echo-tool fail --usage' '.exit_code == 2 and (.stderr | contains("bad-input"))'
+check 'named runtime error exit 7' 'echo-tool fail' '.exit_code == 7 and (.stderr | contains("boom"))'
+check 'usage errors stay on stderr' 'echo-tool greet Ada --unknown 2>/usage.txt; cat /usage.txt' '.exit_code == 0 and (.stdout | contains("unknown option"))'
+check 'mutating command requests confirmation' 'capable-echo write /nested.txt nested-hi' '.pending_prompt != null'
+check 'answer authorizes nested filesystem write' 'yes' '.exit_code == 0 and .pending_prompt == null' answer_prompt
+check 'nested filesystem read' 'capable-echo read /nested.txt' '.exit_code == 0 and (.stdout | contains("nested-hi"))'
+check 'owner sees the same shared filesystem' 'cat /nested.txt' '.exit_code == 0 and (.stdout | contains("nested-hi"))' owner_eval
+check 'owner writes file' 'echo owner-hi > /owner.txt' '.exit_code == 0' owner_eval
+check 'shell reads owner file' 'cat /owner.txt' '.exit_code == 0 and (.stdout | contains("owner-hi"))'
+check 'hidden mutating command is refused' 'f() { echo-tool destroy; }; f' '.exit_code == 3 and (.stderr | contains("confirmation"))'
+check 'background jobs are refused' 'echo unsafe &' '.exit_code == 2 and (.stderr | contains("background"))'
+check 'state variables/functions/options' 'x=kept; f() { echo fn-kept; }; set -o pipefail; (exit 4)' '.exit_code == 4'
+check 'restored status and variables' 'echo status=$?; echo $x; f; set -o | grep pipefail' '.exit_code == 0 and (.stdout | contains("status=4")) and (.stdout | contains("fn-kept"))'
+check 'prompt is carried across fresh stores' 'prompt-user "choose" --choices yes,no' '.pending_prompt.choices == ["yes","no"]'
+check 'invalid answer retains prompt' 'invalid' '.pending_prompt != null and .exit_code != 0' answer_prompt
+check 'valid answer clears prompt' 'yes' '.exit_code == 0 and .pending_prompt == null and (.stdout | contains("yes"))' answer_prompt
+check 'denial does not run a mutating tool' 'echo-tool destroy' '.pending_prompt != null'
+check 'deny pending confirmation' 'no' '.exit_code == 5 and .pending_prompt == null' answer_prompt
+check 'state before recovery' 'y=survives; echo-tool greet replay > /replayed.txt' '.exit_code == 0'
+"$GOLEM_BIN" agent simulate-crash "$AGENT_ID" >>"$GOLEM_JSON_LOG" 2>&1 || exit 1
+check 'state and regenerated stdout after recovery' 'echo $y; cat /replayed.txt; capable-echo read /nested.txt' '.exit_code == 0 and (.stdout | contains("survives")) and (.stdout | contains("replay")) and (.stdout | contains("nested-hi"))'
+for i in 1 2 3; do check "steady shell call #$i (CLI wall clock)" 'echo steady' '.exit_code == 0'; done
+printf '%s passed, %s failed\n' "$pass" "$fail"
+[ "$fail" -eq 0 ]

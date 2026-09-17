@@ -38,6 +38,8 @@
 // generated `Result`-returning wrappers carry no `# Errors` section. Neither is reachable from
 // hand-written code here.
 #![allow(missing_docs, clippy::too_many_arguments, clippy::missing_errors_doc)]
+// The SDK subtree client macro returns ToolError by value; its error size is SDK-owned.
+#![allow(clippy::result_large_err)]
 
 use std::collections::BTreeMap;
 
@@ -114,6 +116,7 @@ pub trait EchoTool {
     ) -> Result<Vec<String>, EchoError>;
 
     /// Uppercase stdin onto stdout: the stream-in, stream-out shape.
+    #[command(annotations(read_only = true))]
     #[arg(verbose = "global", short = 'v', kind = "count-flag", max = 3)]
     #[arg(color = "global", default = "auto")]
     async fn upper(
@@ -125,6 +128,7 @@ pub trait EchoTool {
     ) -> Result<Summary, EchoError>;
 
     /// Fail on purpose. `--usage` selects the usage-kind case (exit 2), otherwise runtime (exit 7).
+    #[command(annotations(read_only = true))]
     #[arg(verbose = "global", short = 'v', kind = "count-flag", max = 3)]
     #[arg(color = "global", default = "auto")]
     #[arg(usage = "flag")]

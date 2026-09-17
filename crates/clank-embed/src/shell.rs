@@ -128,8 +128,6 @@ impl EmbeddedShell {
             // `set_log_sink` takes `Arc`; the sink is `?Send`+`?Sync` and the agent is single-threaded.
             #[allow(clippy::arc_with_non_send_sync)]
             s.set_log_sink(std::sync::Arc::new(crate::log_sink::DurableLogSink::new()));
-            // T1 PROBE — THROWAWAY: lets the `probe-tool` builtin reach a real tool over tool-rpc.
-            clank_core::builtins::probe::install(Box::new(crate::tool_probe::run));
         })
     }
 
@@ -166,6 +164,15 @@ impl EmbeddedShell {
         if self.session.is_none() {
             match Session::new().await {
                 Ok(mut s) => {
+                    if let Err(error) = bash_golem::install(&mut s) {
+                        return Err(Box::new(EvalResult {
+                            stdout: String::new(),
+                            stderr: format!("bash: tool discovery failed: {error}\n"),
+                            exit_code: 1,
+                            pending_prompt: None,
+                            cwd: String::new(),
+                        }));
+                    }
                     if let Some(setup) = self.setup.take() {
                         setup(&mut s);
                     }

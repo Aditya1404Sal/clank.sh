@@ -103,7 +103,7 @@ golem_assert_fresh_artifact() {
     # are pruned: the fork is its own cargo workspace, and building ITS tests writes generated
     # sources under fork/coreutils/target/ that postdate any agent wasm — which would condemn a
     # perfectly fresh artifact every time someone ran them.
-    newer="$(find crates utilities fork -path '*/target' -prune -o \
+    newer="$(find crates utilities fixtures fork -path '*/target' -prune -o \
                \( -name '*.rs' -o -name '*.toml' \) -newer "$wasm" -print -quit 2>/dev/null)"
     [[ -n "$newer" ]] || continue
     stale+=("$wasm")

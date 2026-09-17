@@ -36,33 +36,20 @@ components:
   greeter:agent:
     dir: fixtures/greeter-agent
     templates: rust
-  # T1 PROBE — THROWAWAY. A minimal tool provider (fixtures/probe-tool) so the probe has a real
-  # Golem tool to invoke over tool-rpc. Remove with the probe.
-  probe:tool:
-    dir: fixtures/probe-tool
-    templates: rust
   # T2 FIXTURE (fixtures/echo-tool): the tool the agent-tools tickets are tested against. Its
   # commands between them declare every construct the CLI projection has to parse.
   echo:tool:
     dir: fixtures/echo-tool
     templates: rust
-  # SPIKE — the `bash` tool walking skeleton (crates/bash-tool): clank's shell core as a Golem tool,
-  # bound to ClankAgent below so the probe builtin can call it over tool-rpc.
+  # Reusable shell component, independently bindable and tested through BashHost.
   clank:bash:
     dir: crates/bash-tool
     templates: rust
 
-# T1 PROBE — THROWAWAY. Tool declarations. `capable-probe` declares a provisioned file, which is
-# what implies the filesystem grant today (gol-33 §Filesystem capability classification); the
-# binding-level `filesystemAccess` key arrives with upstream PR #3842.
+# Published tools. Filesystem grants are controlled by the consuming binding.
 tools:
-  probe: {}
-  capable-probe:
-    files:
-      - sourcePath: fixtures/probe-tool/marker
-        targetPath: /.probe/MARKER
   echo-tool: {}
-  # The fixture's filesystem-capable tool: the provisioned marker is what implies the grant today.
+  # Fixture initial file; effective filesystem access is explicitly granted on each binding.
   capable-echo:
     files:
       - sourcePath: fixtures/echo-tool/marker
@@ -76,20 +63,20 @@ tools:
   # ClankAgent: the parent reaches it directly, and binding it would let a caller bypass
   # `echo-tool` and invoke the subtree on its own.
   tree: {}
-  # SPIKE — a provisioned file is what makes a tool filesystem-capable on golem main today (a
-  # binding with nothing set and no files leaves it with no filesystem at all — measured live).
-  bash:
-    files:
-      - sourcePath: crates/bash-tool/marker
-        targetPath: /.bash/MARKER
+  bash: {}
 
-# T1 PROBE — THROWAWAY. The bindings: which tools ClankAgent may invoke. A binding is compiled per
-# agent type at deploy time, so nothing inside a running agent can create one.
 agents:
   ClankAgent:
     tools:
-      probe: {}
-      capable-probe: {}
       echo-tool: {}
-      capable-echo: {}
-      bash: {}
+      capable-echo:
+        filesystemAccess: allowed
+      bash:
+        filesystemAccess: allowed
+  BashHost:
+    tools:
+      echo-tool: {}
+      capable-echo:
+        filesystemAccess: allowed
+      bash:
+        filesystemAccess: allowed

@@ -823,7 +823,12 @@
                 "payload": null
               }
             ],
-            "annotations": null
+            "annotations": {
+              "read_only": true,
+              "destructive": true,
+              "idempotent": false,
+              "open_world": true
+            }
           }
         },
         {
@@ -958,7 +963,12 @@
                 "payload": null
               }
             ],
-            "annotations": null
+            "annotations": {
+              "read_only": true,
+              "destructive": true,
+              "idempotent": false,
+              "open_world": true
+            }
           }
         },
         {

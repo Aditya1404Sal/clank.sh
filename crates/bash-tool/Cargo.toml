@@ -10,7 +10,7 @@ publish = false
 workspace = true
 
 [lib]
-# SPIKE — the `bash` tool walking skeleton: clank's shell core exported as a Golem agent tool
+# Reusable shell core plus Golem command projection, exported as an agent tool
 # (component `clank:bash`). A leaf component, so cdylib, and wasm-only like the fixtures.
 crate-type = ["cdylib"]
 # `golem build` looks for the artifact under the component name (`clank:bash` → clank_bash.wasm).
@@ -20,15 +20,13 @@ name = "clank_bash"
 # `export_golem_agentic` emits the golem:tool guest exports; a leaf component is the one place that
 # feature may be enabled.
 golem-rust = { workspace = true, features = ["export_golem_agentic"] }
-# The shell engine, and ONLY the shell engine: no `clank-embed`, so none of clank's ai/mcp/grease/
-# golem plug-in code (nor the `Clank` plug-in itself) is linked into the shipped `clank:bash`
-# component. curl/wget already work without it (`bash` carries `wcurl`/`waget` directly); the one
-# capability this drops is the throwaway T1 tool-probe hook `clank-embed`'s `providers` feature
-# installs, which only 3 of `bash-tool-live.sh`'s 23 probes exercise (see the design's Verification).
+# The reusable shell and shared adapter do not depend on the Clank embedding plug-in.
 bash = { path = "../bash" }
+bash-golem = { path = "../bash-golem" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 base64 = "0.22"
+brush-parser = "0.4"
 
 [dev-dependencies]
 # The session round-trip test drives the async Session natively, the way clank-core's own tests do.

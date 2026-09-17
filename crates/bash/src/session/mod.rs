@@ -40,8 +40,10 @@ mod ctx;
 pub mod env;
 mod prompt;
 mod streams;
+mod tool_commands;
 
 pub use ctx::SessionCtx;
+pub use tool_commands::ShellContinuation;
 
 use crate::plugin::Plugin;
 
@@ -187,6 +189,7 @@ impl LineResult {
 /// registry.
 pub struct Session {
     shell: Shell,
+    tools: Option<Arc<crate::agent_tools::ToolRuntime>>,
     /// The session transcript. Shared behind `Arc<Mutex>` (like `proc_table`) so each executed
     /// line can install it into the thread-local slot the Brush-registered `context` builtin
     /// reads — that's how `$(context show)` and `context show | head` reach it.
@@ -323,6 +326,7 @@ impl Session {
             let shell = rt.block_on(build_shell())?;
             let session = Self {
                 shell,
+                tools: None,
                 transcript: Arc::new(Mutex::new(Transcript::with_cap(
                     crate::configured_context_cap(),
                 ))),
@@ -346,6 +350,7 @@ impl Session {
             let shell = build_shell().await?;
             let session = Self {
                 shell,
+                tools: None,
                 transcript: Arc::new(Mutex::new(Transcript::with_cap(
                     crate::configured_context_cap(),
                 ))),
@@ -427,6 +432,7 @@ impl Session {
         plugin.on_start();
         self.capabilities = None;
         self.plugin = Some(plugin);
+        self.refresh_tools();
     }
 
     /// Disable `plugin`'s builtins on the shell (Brush has no unregister; a disabled registration
@@ -968,6 +974,27 @@ impl Session {
         // query ONLY intercepted names, matching Brush's wording. Any other `type` line (a
         // Brush-known name, a mix, an unrecognized flag) returns `None` here and falls through to
         // Brush's `type` unchanged. Read-only meta command — resolved before the authz gate.
+        if let Some(tools) = &self.tools {
+            let words = crate::agent_tools::words(line);
+            if words.first().is_some_and(|s| s == "type")
+                && words.len() > 1
+                && words[1..]
+                    .iter()
+                    .all(|name| tools.definitions.contains_key(name))
+            {
+                let stdout = words[1..]
+                    .iter()
+                    .map(|name| {
+                        if tools.shadowed.contains(name) {
+                            format!("{name} is a compiled command; its bound tool is shadowed\n")
+                        } else {
+                            format!("{name} is a bound agent tool (shell builtin)\n")
+                        }
+                    })
+                    .collect::<String>();
+                return LineRoute::TypeDispatch(stdout, 0);
+            }
+        }
         if let Some((stdout, exit_code)) =
             typecmd::dispatch(line, &self.registry, plugin_intercepted(plugin))
         {
@@ -1261,6 +1288,15 @@ impl Session {
     ) -> (crate::manifest::AuthorizationPolicy, bool, Option<String>) {
         let (command, elevated) = authz::leading_command(line);
         if let Some(name) = command.as_deref() {
+            if let Some(tools) = &self.tools {
+                let mut words = crate::agent_tools::words(line);
+                if words.first().is_some_and(|s| s == "sudo") {
+                    words.remove(0);
+                }
+                if let Some(policy) = tools.policy(name, words.get(1..).unwrap_or_default()) {
+                    return (policy, elevated, command);
+                }
+            }
             if self.registry.get(name).is_none() {
                 // Not a core command: defer to whatever manifest the installed plug-in supplies for
                 // it (e.g. a command whose invocation is an outbound network/LLM call still needs to
@@ -1443,6 +1479,10 @@ impl Session {
     #[cfg(not(target_arch = "wasm32"))]
     async fn execute_impl(&mut self, line: &str, stdin_bytes: Option<&[u8]>) -> LineResult {
         use std::io::{Read, Seek, SeekFrom, Write};
+        let _tools = self
+            .tools
+            .as_ref()
+            .map(|t| crate::agent_tools::install(t.clone(), line));
 
         let stdout_capture = match tempfile::tempfile() {
             Ok(f) => f,
@@ -1513,6 +1553,10 @@ impl Session {
     // this stays async for parity even though its wasm body doesn't `.await`.
     #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
     async fn execute_impl(&mut self, line: &str, stdin_bytes: Option<&[u8]>) -> LineResult {
+        let _tools = self
+            .tools
+            .as_ref()
+            .map(|t| crate::agent_tools::install(t.clone(), line));
         let stdout_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
         let stderr_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
         let mut params = self.shell.default_exec_params();

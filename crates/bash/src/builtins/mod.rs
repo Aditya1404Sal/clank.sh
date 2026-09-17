@@ -13,7 +13,6 @@ pub(crate) mod http;
 // for its own session-layer commands, and it now lives on the other side of a crate boundary.
 pub mod interceptstub;
 pub(crate) mod kill;
-pub mod probe;
 pub mod promptuser;
 pub mod secretenv;
 pub mod typecmd;

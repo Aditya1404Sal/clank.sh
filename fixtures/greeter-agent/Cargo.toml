@@ -26,3 +26,6 @@ golem-rust = { workspace = true, features = ["export_golem_agentic"] }
 # implementer of the contract `golem agent shell` drives. Deliberately WITHOUT the `providers`
 # feature: the log-sink-only tier proves the minimal correct embed (no HTTP client, no env vars).
 clank-embed = { path = "../../crates/clank-embed" }
+bash-golem = { path = "../../crates/bash-golem" }
+bash = { path = "../../crates/bash" }
+serde_json = { workspace = true }

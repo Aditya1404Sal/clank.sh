@@ -26,6 +26,9 @@
 use clank_embed::{EmbeddedShell, EvalResult};
 use golem_rust::{agent_definition, agent_implementation};
 
+mod bash_host;
+pub use bash_host::*;
+
 /// A durable greeter. The constructor `name` is the agent identity (distinct names = distinct
 /// instances), echoed back in the greeting so the round-trip carries both the constructor arg and
 /// the method arg — an unambiguous proof the wRPC call reached this agent with both.
