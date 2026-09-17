@@ -40,7 +40,7 @@ jobs:
       - name: Unit tests (library crates)
         run: >-
           cargo test
-          -p clank-core -p clank-cli -p whttp -p wcurl -p waget -p grease-tool
+          -p bash -p clank-core -p clank-cli -p whttp -p wcurl -p waget -p grease-tool
           -- --test-threads=1
       # clank-embed needs its own step: 8 of its 13 tests live behind the non-default `providers`
       # feature (the wRPC argument encoding, result rendering, phantom-UUID parsing). Neither a
@@ -48,6 +48,17 @@ jobs:
       # those 8 ran nowhere at all until this step existed.
       - name: Unit tests (clank-embed, incl. the provider seams)
         run: cargo test -p clank-embed --features providers -- --test-threads=1
+      # The echo-tool fixture's snapshot test builds every tool descriptor NATIVELY and diffs it
+      # against fixtures/echo-tool/tools.snapshot.json. This is the only guard against SDK metadata
+      # drift, and against a descriptor error that would otherwise panic in a ctor at component load
+      # and fail the whole `golem deploy`. The crate is a wasm cdylib outside default-members, so no
+      # other step reaches it.
+      - name: Unit tests (echo-tool descriptor snapshot)
+        run: cargo test -p echo-tool
+      # The bash tool component's own unit tests (state codec, the two-call session round trip).
+      # A wasm cdylib outside default-members, like echo-tool, so no other step reaches it.
+      - name: Unit tests (bash-tool)
+        run: cargo test -p bash-tool
       - name: Unit tests (parser, matcher, wire contracts)
         run: cargo test -p clank-conformance --lib -- --test-threads=1
       - name: Native conformance tier
@@ -78,7 +89,9 @@ jobs:
           -p clank-conformance -p grease-tool -p fork-inventory
           --all-targets -- -D warnings
       - name: Clippy — wasm guest crates (warnings are errors)
-        run: cargo clippy --target wasm32-wasip2 -p clank-agent -p greeter-agent -- -D warnings
+        # echo-tool is the agent-tools fixture component; probe-tool is throwaway and deliberately
+        # not listed (it goes with agent-tools ticket T2).
+        run: cargo clippy --target wasm32-wasip2 -p clank-agent -p greeter-agent -p echo-tool -p bash-tool -- -D warnings
       - name: Fork inventory is up to date (check-forks)
         # docs/FORKS.md is generated (dev-tools/fork-inventory) from Cargo.toml/Cargo.lock, never
         # hand-edited. Regenerate and diff: a pin change (or a drifted rev) that lands without a
