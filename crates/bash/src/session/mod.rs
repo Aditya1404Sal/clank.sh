@@ -385,42 +385,60 @@ impl Session {
     }
 
     /// Install `plugin`: its layout dirs are created, its builtins join the shell, its manifests
-    /// join the registry, its `path_dirs` are appended to `$PATH`, and its `on_start` runs.
-    /// Replaces any previous plug-in.
+    /// join the registry, its `path_dirs` become `$PATH`'s second half, and its `on_start` runs.
+    /// Genuinely replaces any previous plug-in: the old one's builtins are disabled and its
+    /// manifests and `$PATH` entries are dropped before the new plug-in's are installed, so calling
+    /// `set_plugin` a second time (an embedder swapping configurations) does not hit
+    /// [`CommandRegistry::insert`]'s duplicate-name assert and does not leave `$PATH` carrying a mix
+    /// of the old and new plug-ins' directories.
     ///
     /// The filesystem layout comes first: the plug-in's `on_start` may materialize files into its
     /// own dirs, and the `$PATH` it extends has to resolve them.
     pub fn set_plugin(&mut self, mut plugin: Box<dyn crate::plugin::Plugin>) {
+        // Undo the previous plug-in's effect on the shell first, so installing this one is a
+        // genuine replace rather than an accumulation.
+        if let Some(old) = self.plugin.take() {
+            self.disable_plugin_builtins(old.as_ref());
+        }
+
         ensure_fs_layout(&plugin.layout_dirs());
         for (name, registration) in plugin.builtins() {
             self.shell.register_builtin(name, registration);
         }
-        let registry = Arc::make_mut(&mut self.registry);
+        // Rebuilt from the core surface rather than mutated in place: a previous plug-in's
+        // manifests must not survive into this registry (see the doc above).
+        let mut registry = crate::registry::build();
         for manifest in plugin.manifests() {
             registry.insert(manifest);
         }
-        // Extend, rather than rebuild, `$PATH`: the core half is already installed, so appending
-        // keeps the README order byte for byte.
-        let path_dirs = plugin.path_dirs();
-        if !path_dirs.is_empty() {
-            let base = self
-                .shell
-                .env()
-                .get_str("PATH", &self.shell)
-                .map_or_else(|| env::effective_path(&[]), std::borrow::Cow::into_owned);
-            let mut path = base;
-            for dir in &path_dirs {
-                path.push(':');
-                path.push_str(&dir.display().to_string());
-            }
-            let _ = self
-                .shell
-                .env_mut()
-                .set_global("PATH", brush_core::variables::ShellVariable::new(path));
-        }
+        self.registry = Arc::new(registry);
+
+        // Rebuild, rather than extend, `$PATH`: recomputed from the core half plus THIS plug-in's
+        // own `path_dirs` every time (not read back from whatever the live `$PATH` currently holds),
+        // so a replaced plug-in's directories never linger and re-installing the same plug-in never
+        // appends them a second time. Unconditional — even an empty `path_dirs` must still clear a
+        // predecessor's.
+        let path = env::effective_path(&plugin.path_dirs());
+        let _ = self
+            .shell
+            .env_mut()
+            .set_global("PATH", brush_core::variables::ShellVariable::new(path));
+
         plugin.on_start();
         self.capabilities = None;
         self.plugin = Some(plugin);
+    }
+
+    /// Disable `plugin`'s builtins on the shell (Brush has no unregister; a disabled registration
+    /// falls through to ordinary command resolution — exactly what "not installed" means). Shared by
+    /// [`set_plugin`](Self::set_plugin) (replacing a previous plug-in) and
+    /// [`clear_plugin_for_test`](Self::clear_plugin_for_test) (removing one outright).
+    fn disable_plugin_builtins(&mut self, plugin: &dyn crate::plugin::Plugin) {
+        for (name, _registration) in plugin.builtins() {
+            if let Some(registration) = self.shell.builtin_mut(&name) {
+                registration.disabled = true;
+            }
+        }
     }
 
     /// The installed plug-in as `T`, if it is one.
@@ -479,11 +497,7 @@ impl Session {
     #[cfg(test)]
     pub(crate) fn clear_plugin_for_test(&mut self) {
         if let Some(plugin) = self.plugin.take() {
-            for (name, _registration) in plugin.builtins() {
-                if let Some(registration) = self.shell.builtin_mut(&name) {
-                    registration.disabled = true;
-                }
-            }
+            self.disable_plugin_builtins(plugin.as_ref());
         }
         self.registry = Arc::new(crate::registry::build());
         self.capabilities = None;
@@ -1234,10 +1248,12 @@ impl Session {
         LineResult::from_outcome(stdout, stderr, u8::from(any_missed))
     }
 
-    /// Resolve a line's authorization policy, consulting the static registry AND the plug-in's
-    /// run-time manifests. Mirrors [`authz::resolve`] but adds the plug-in layer: an installed MCP
-    /// server name (leading command) resolves to its `Confirm` manifest. Returns
-    /// `(policy, elevated, command)`.
+    /// Resolve a line's authorization policy, consulting the static registry AND — for a leading
+    /// command the registry doesn't recognize — the installed plug-in's own run-time manifest for
+    /// that name, if it supplies one. Mirrors [`authz::resolve`] but adds that plug-in layer: the
+    /// shell core has no notion of which family (if any) installed a given command, only that a
+    /// non-core command's line still needs the right policy, and the plug-in is the one place that
+    /// can supply it. Returns `(policy, elevated, command)`.
     fn resolve_authz(
         &self,
         plugin: Option<&dyn Plugin>,
@@ -1246,7 +1262,9 @@ impl Session {
         let (command, elevated) = authz::leading_command(line);
         if let Some(name) = command.as_deref() {
             if self.registry.get(name).is_none() {
-                // An installed grease prompt: running it is an outbound LLM call ⇒ Confirm.
+                // Not a core command: defer to whatever manifest the installed plug-in supplies for
+                // it (e.g. a command whose invocation is an outbound network/LLM call still needs to
+                // confirm, even though the shell core can't see why).
                 if let Some(m) = plugin.and_then(|p| p.authz_manifest(name)) {
                     return (m.authorization_policy, elevated, command);
                 }

@@ -9,8 +9,8 @@
 //! response headers — the `Mcp-Session-Id` for session continuity and `Content-Type` for SSE-body
 //! detection — so this impl collects them into [`HttpResponse::headers`] with lowercased names, the
 //! documented convention. The transport is wrapped in `LoggingMcpHttp` automatically by
-//! [`Session::set_mcp_http`](clank_core::session::Session::set_mcp_http), so `http.log` covers it for
-//! free.
+//! [`ClankSessionExt::set_mcp_http`](clank_core::ClankSessionExt::set_mcp_http), so `http.log` covers
+//! it for free.
 
 use clank_core::mcp::client::{HttpResponse, McpHttp};
 

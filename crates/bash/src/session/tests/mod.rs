@@ -24,25 +24,21 @@
 //!
 //! - the process working directory, which `tools::coreutils::ShellCwd` moves for the duration of a
 //!   builtin call (brush keeps `cd` in its own state and never touches the process cwd);
-//! - `$CLANK_GREASE_*`, `$CLANK_MCP_*` and `$CLANK_LOG_DIR`, which the hermetic-dir guards set and
-//!   restore;
+//! - `$CLANK_LOG_DIR`, which the hermetic log-dir guard sets and restores;
 //! - the `export --secret` table the synchronous render paths read;
-//! - uucore's exit code, an `AtomicI32` upstream only ever resets at process exit;
-//! - the `SIGPIPE` disposition that `run_uu` flips around a `uumain` call.
+//! - uucore's exit code (an `AtomicI32` upstream only ever resets at process exit) and the
+//!   `SIGPIPE` disposition — both flipped around a `uumain` call, inside the same native fd-1/2
+//!   swap critical section.
 //!
-//! The locks that serialize all of that — [`CWD_TEST_LOCK`], `runtime::secretenv::TEST_LOCK`,
-//! `grease::config::TEST_ENV_LOCK`, `mcp::config::TEST_ENV_LOCK`, `logging::test_env_lock` — are
-//! `static`s, so they serialize **within one process and not across processes**. Splitting into
-//! separate binaries silently removes every one of those guarantees while leaving the code that
-//! assumes them untouched, which is exactly the shape that produces intermittent, load-dependent
-//! failures.
+//! The locks that serialize all of that — [`CWD_TEST_LOCK`], `logging::test_env_lock`,
+//! `runtime::secretenv::TEST_LOCK`, `tools::coreutils::FD_SWAP_LOCK` — are `static`s, so they
+//! serialize **within one process and not across processes**. Splitting into separate binaries
+//! silently removes every one of those guarantees while leaving the code that assumes them
+//! untouched, which is exactly the shape that produces intermittent, load-dependent failures.
 //!
 //! Submodules keep one binary, one process, one set of locks. The tests are unchanged and so are
 //! their guarantees — verified by the test-name list being identical across the split and by 12
 //! consecutive clean runs.
-//!
-//! Note the lock ORDER convention, which the split preserves: **grease, then mcp**. Taking them in
-//! the other order deadlocks against a test that takes them in this one.
 
 use super::*;
 use crate::test_support::{http_mock, on_rt, LogCapture, CWD_TEST_LOCK};

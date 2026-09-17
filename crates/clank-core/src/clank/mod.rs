@@ -9,11 +9,11 @@
 //!
 //! [`Session`]: crate::session::Session
 
-pub mod agent;
-pub mod ask;
+pub(crate) mod agent;
+pub(crate) mod ask;
 pub mod ext;
-pub mod grease;
-pub mod mcp;
+pub(crate) mod grease;
+pub(crate) mod mcp;
 
 #[cfg(test)]
 mod tests;
