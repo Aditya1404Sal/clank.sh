@@ -83,3 +83,21 @@ The CI setup action now checks out the pinned upstream SDK, configures its absol
 and builds its matching full Golem binary for live jobs. Per-push library tests include bash-golem;
 nightly/manual release acceptance runs bash-tool-live.sh and uploads logs. Workflow/action YAML
 parsed locally, but the matching CLI source build and Linux jobs await their actual CI execution.
+
+## CI audit remediation
+
+[GitHub run 35229474036](https://github.com/Aditya1404Sal/clank.sh/actions/runs/35229474036)
+passed Linux native tests/conformance, formatting, native/wasm clippy, and fork inventory checks.
+Its hygiene job failed on [RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285.html)
+in rustls 0.23.41; cargo-deny was skipped after that failure. Main had the same vulnerable lockfile
+version. The fix updates only rustls to 0.23.45 and rustls-webpki to a compatible patch, 0.103.15.
+
+- `cargo audit` passed with the existing fxhash unmaintained and chacha20 yanked warnings.
+- `cargo deny check` passed advisories, bans, licenses, and sources; no exceptions were added.
+- `cargo test --locked -p clank-native -p whttp -p wcurl -p waget -- --test-threads=1`
+  passed all 86 tests.
+- The rebuilt native wcurl client fetched RustSec's advisory headers over HTTPS and received 200.
+
+Evidence: target/tools-as-commands-rustls-audit.log, target/tools-as-commands-rustls-deny.log,
+target/tools-as-commands-rustls-tests.log, and target/tools-as-commands-rustls-https.log.
+The TLS dependency is native-only; prior Golem release acceptance is recorded above.

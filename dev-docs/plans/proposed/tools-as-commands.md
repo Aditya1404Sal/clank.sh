@@ -26,6 +26,7 @@ research:
 - [x] Refuse background work introduced through eval, source, traps, aliases, and restored definitions.
 - [x] Extend schema round-trip and live acceptance coverage for these paths.
 - [x] Add adapter tests to CI and provide a reproducible compatible SDK/CLI setup.
+- [x] Patch the rustls advisory blocking CI and verify the native HTTP consumers.
 - [ ] Enable independent tool stderr after upstream support lands (external dependency).
 
 ## Acceptance
@@ -88,3 +89,11 @@ Release latency and reproducibility details: [validation](../../research/tools-a
 - CI includes adapter tests per push and release live acceptance nightly/on demand. The shared
   setup configures a pinned compatible SDK/CLI; YAML parsed locally and fresh-clone SDK setup was
   exercised. GitHub's Linux jobs and the source-built matching CLI have not been run locally.
+
+## CI audit remediation
+
+GitHub run 35229474036 passed native tests/conformance and both clippy targets, but cargo-audit
+blocked the hygiene job on RUSTSEC-2026-0285. The lockfile now selects rustls 0.23.45 and its
+compatible rustls-webpki 0.103.15 patch. No advisory exceptions or dependency constraints changed.
+Local cargo-audit and cargo-deny passed; all 86 tests for clank-native, whttp, wcurl, and waget
+passed, and the rebuilt wcurl client completed an HTTPS request to RustSec with status 200.
