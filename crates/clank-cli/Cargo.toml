@@ -17,10 +17,6 @@ name = "clank"
 path = "src/main.rs"
 
 [dependencies]
-# The engine. default-features = false drops `repl-driver` (the wasm `wasi:cli/run` driver) the
-# same way every other native consumer does — it enables nothing on native targets.
-clank-core = { path = "../clank-core", default-features = false }
-
 # `main` builds the multi-thread runtime itself (Runtime::new — I/O + time drivers, which Brush
 # needs to spawn external processes) and block_on's the async shell loop. The native platform layer
 # (the REPL loop + provider wiring) is native-only — it carries `reqwest`/`reedline`/`crossterm`,

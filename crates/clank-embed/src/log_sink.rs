@@ -1,7 +1,7 @@
 //! The replay-safe `/var/log` sink for the Golem agent.
 //!
-//! `clank-core` defines the [`LogSink`](clank_core::logging::LogSink) seam and a default sink that
-//! **appends** directly to the log file. Appends are correct on native but NOT on the Golem agent,
+//! `bash` (the shell core) defines the [`LogSink`](bash::logging::LogSink) seam and a default sink
+//! that **appends** directly to the log file. Appends are correct on native but NOT on the Golem agent,
 //! where replay re-runs the guest code and so re-runs the append, duplicating the line. See
 //! `docs/architecture/replay-safety.md` for why the filesystem behaves that way.
 //!
@@ -29,7 +29,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use clank_core::logging::{LogFile, LogSink, bound_tail, log_dir};
+use bash::logging::{LogFile, LogSink, bound_tail, log_dir};
 
 /// Per-log in-memory buffer cap. The whole-file-rewrite approach costs one full write per line, so an
 /// unbounded buffer would grow without limit and make each write O(total-log-size). Keeping only a
@@ -39,7 +39,7 @@ use clank_core::logging::{LogFile, LogSink, bound_tail, log_dir};
 ///
 /// Shared with the native append path's rotation, so both targets bound the same way by construction
 /// rather than by two constants that happen to match.
-use clank_core::config::limits::MAX_LOG_BYTES;
+use bash::config::limits::MAX_LOG_BYTES;
 
 /// A replay-safe log sink: buffers each log file's recent lines in memory (bounded, rolling) and rewrites
 /// the whole file on every append via idempotent `std::fs::write`.

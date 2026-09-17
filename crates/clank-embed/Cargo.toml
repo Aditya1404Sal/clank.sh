@@ -26,14 +26,29 @@ default = []
 # use only ungated golem-rust surface, but ship under the same umbrella so an embedder makes ONE
 # decision: bare exploration shell vs the full clank command surface.
 # The replay-safe log sink is NOT gated: it is std-only and every Golem embed needs it (the default
-# append sink duplicates /var/log lines under oplog replay).
-providers = ["dep:whttp", "dep:http", "dep:async-trait", "dep:wit-bindgen", "dep:futures"]
+# append sink duplicates /var/log lines under oplog replay). `clank-core` is gated here too, now that
+# it is optional (see the dependency below): the bare `EmbeddedShell` (no plug-in) needs only `bash`,
+# and only `with_default_golem_providers` reaches into `Clank`/`ClankSessionExt`.
+providers = [
+    "dep:clank-core",
+    "dep:whttp",
+    "dep:http",
+    "dep:async-trait",
+    "dep:wit-bindgen",
+    "dep:futures",
+]
 
 [dependencies]
-# The shell core. default-features=false drops `repl-driver`, so this links as a plain rlib WITHOUT
-# the `wasi:cli/run` export that would clash with an embedding agent's golem:agent world (the same
-# pattern clank-agent has always used).
-clank-core = { path = "../clank-core", default-features = false }
+# The shell core, unconditionally. The bare `EmbeddedShell` (no plug-in — `new`/`with_setup`) is
+# built directly on `bash::session::Session`; that path must keep compiling with `clank-core` (and
+# everything under it — ai/mcp/grease/golem) entirely absent, which is the point of making it
+# optional below.
+bash = { path = "../bash" }
+# The `Clank` plug-in and clank's command families, needed only once a plug-in is installed —
+# i.e. only by `with_default_golem_providers` (and an embedder's own `install_clank()` call inside
+# `with_setup`, which is out of this crate's control either way). Optional so a bare, default-features
+# embed (`greeter-agent`, and formerly `bash-tool`) does not link `clank-core` at all.
+clank-core = { path = "../clank-core", default-features = false, optional = true }
 # Default features only: `macro` is the load-bearing one (it makes `derive(Schema)` on the wire
 # types resolve through golem-rust's re-export). Deliberately NOT `export_golem_agentic` — that
 # feature compiles the SDK's own `Component` export into the build; the EMBEDDING agent crate is

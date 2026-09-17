@@ -35,7 +35,7 @@ fi
 echo "agent $AGENT, server pid $SERVER_PID, log ${SERVER_LOG:-?}"
 trap 'kill "$SERVER_PID" 2>/dev/null; sleep 1; kill -9 "$SERVER_PID" 2>/dev/null' EXIT
 
-find "$C" -path '*golem-temp*' -name '*bash*.wasm' -newer "$C/crates/bash/src/lib.rs" 2>/dev/null \
+find "$C" -path '*golem-temp*' -name '*bash*.wasm' -newer "$C/crates/bash-tool/src/lib.rs" 2>/dev/null \
   | xargs ls -la 2>/dev/null | awk '{printf "component %s %.1f MiB\n", $9, $5/1048576}'
 
 run_line() {

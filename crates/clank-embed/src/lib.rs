@@ -10,7 +10,7 @@
 //!
 //! This crate provides everything behind that surface so an agent adopts it with ~12 lines of glue:
 //! the [`EvalResult`]/[`PendingPromptView`] wire types, and [`EmbeddedShell`] — a lazily-initialized
-//! shell [`Session`](clank_core::session::Session) scoped to *your agent's own instance* (its own
+//! shell [`Session`](bash::session::Session) scoped to *your agent's own instance* (its own
 //! durable filesystem, transcript, and process table; one agent instance = one Golem worker = one
 //! isolated VFS, so the shell explores exactly your agent's sandbox and nothing else's).
 //!
@@ -43,11 +43,11 @@
 //! be reflected yet fail every invocation. That per-agent glue is therefore irreducible today; this
 //! crate single-sources everything else.
 //!
-//! **Tiers.** A default-features embed is the *exploration shell*: the full command surface over the
-//! agent's own filesystem (`ls`/`cat`/`grep`/pipelines/redirects/`cd`…), with the model/MCP/cluster
-//! commands (`ask`, `mcp`, `golem`, installed-agent invocation) degrading to honest errors. The
-//! `providers` feature adds clank's durable Golem provider set and
-//! [`EmbeddedShell::with_default_golem_providers`] to enable them all.
+//! **Tiers.** A default-features embed is the *exploration shell*: the shell core over the agent's
+//! own filesystem (`ls`/`cat`/`grep`/pipelines/redirects/`cd`…), with none of clank's command
+//! families installed — `ask`, `mcp`, `grease` and `golem` are simply not commands there. The
+//! `providers` feature installs the clank plug-in with clank's durable Golem provider set, via
+//! [`EmbeddedShell::with_default_golem_providers`].
 
 mod shell;
 mod wire;
@@ -89,6 +89,13 @@ pub use wire::{EvalResult, PendingPromptView};
 // example demonstrating exactly that could not compile for any external caller.
 pub use log_sink::DurableLogSink;
 
-// Re-exported so an embedder can name `Session` in a `with_setup` closure (or implement the
-// provider seam traits) without adding its own clank-core dependency line.
+// Re-exported unconditionally so an embedder can name `Session` in a `with_setup` closure without
+// adding its own `bash` dependency line — every tier needs this, since the bare `EmbeddedShell`
+// (no plug-in) is built directly on `bash::session::Session`.
+pub use bash;
+
+// Re-exported behind `providers` so an embedder that hand-picks its own provider mix (implementing
+// the seam traits, or naming `ClankSessionExt`/`Clank`) doesn't need its own `clank-core` dependency
+// line either. `clank-core` itself is optional now (see Cargo.toml), pulled in only by this feature.
+#[cfg(feature = "providers")]
 pub use clank_core;
